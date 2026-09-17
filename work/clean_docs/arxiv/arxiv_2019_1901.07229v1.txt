@@ -1,0 +1,913 @@
+Fast and Robust Shortest Paths on Manifolds
+Learned from Data
+Georgios Arvanitidis†, Søren Hauberg†, Philipp Hennig‡, and
+Michael Schober⋆
+†Technical University of Denmark, Lyngby, Denmark
+‡University of Tübingen, Tübingen, Germany
+‡Max Planck Institute for Intelligent Systems, Tübingen, Germany
+⋆Bosch Center for Artiﬁcial Intelligence, Renningen, Germany
+January 23, 2019
+Abstract
+We propose a fast, simple and robust algorithm for computing shortest
+paths and distances on Riemannian manifolds learned from data. This
+amounts to solving a system of ordinary diﬀerential equations (ODEs)
+subject to boundary conditions. Here standard solvers perform poorly
+because they require well-behaved Jacobians of the ODE, and usually,
+manifolds learned from data imply unstable and ill-conditioned Jacobians.
+Instead, we propose a ﬁxed-point iteration scheme for solving the ODE
+that avoids Jacobians. This enhances the stability of the solver, while
+reduces the computational cost. In experiments involving both Riemannian
+metric learning and deep generative models we demonstrate signiﬁcant
+improvements in speed and stability over both general-purpose state-of-
+the-art solvers as well as over specialized solvers.
+1
+Introduction
+A long-standing goal in machine learning is to build models that are invariant
+to irrelevant transformations of the data, as this can remove factors that are
+otherwise arbitrarily determined. For instance, in nonlinear latent variable
+models, the latent variables are generally unidentiﬁable as the latent space is by
+design not invariant to reparametrizations. Enforcing a Riemannian metric in
+the latent space that is invariant to reparametrizations alleviate this identiﬁa-
+bility issue, which signiﬁcantly boosts model performance and interpretability
+[Arvanitidis et al., 2018, Tosi et al., 2014]. Irrelevant transformations of the
+data can alternatively be factored out by only modeling local behavior of the
+data; geometrically this can be viewed as having a locally adaptive inner product
+1
+arXiv:1901.07229v1  [stat.ML]  22 Jan 2019
+
+-1.5
+-1
+-0.5
+0
+0.5
+1
+1.5
+-0.2
+0
+0.2
+0.4
+0.6
+0.8
+1
+1.2
+1.4
+2
+4
+6
+8
+10
+12
+14
+16
+Figure 1: A data manifold and the log-condition number of the Jacobian with
+ﬁxed velocity (background).
+High condition numbers can cause failures to
+converge for oﬀ-the-shelf solvers.
+structure, which can be learned from data [Hauberg et al., 2012].
+In both
+examples, the data is studied under a Riemannian metric, so that can be seen
+as living on a Riemannian manifold.
+While this geometric view comes with strong mathematical support, it is not
+commonly adopted. The primary concern is that the computational overhead of
+Riemannian models often outweigh the induced beneﬁts. The main bottleneck
+herein are distance computations, which are often at the core of machine learning
+algorithms. In Euclidean space, distance evaluations require the computation
+of a norm. In kernel methods, distances are evaluated via the kernel trick, but
+many interesting geometries cannot be captured with a positive deﬁnite kernel
+[Feragen et al., 2015]. In both cases, distances can be computed with negligible
+eﬀort.
+The distance between two points x, y on a Riemannian manifold is deﬁned as
+the length of the shortest path between x and y known as the geodesic. Computing
+the geodesic requires the solution of a boundary value problem (BVP). These
+types of ordinary diﬀerential equations (ODEs) require specialized numerical
+methods for their solution, as—unlike initial value problems (IVPs)—they cannot
+be solved via step-by-step algorithms like Runge–Kutta methods, and thus their
+solution is computationally taxing [Ascher et al., 1994].
+Moreover, Riemannian manifolds learned from data usually imply high cur-
+vature and an unstable Riemannian metric. The reason is that the metric is
+estimated only from ﬁnite data, so it changes irregularly fast. As a consequence,
+the Jacobians of the ODE, which are required in many oﬀ-the-shelf solvers,
+are often ill-conditioned which causes additional problems and eﬀort [Ascher
+et al., 1994, §8.1.2]. The example in Fig. 1 shows that the Jacobian associated
+with a data driven manifold is highly oscillatory. This implies that standard
+ODE solvers easily break down. Thus, specialized BVP solvers for shortest path
+computations are required to make distance evaluations on manifolds learned
+from data as fast and robust as in other models.
+In this paper, we propose a novel method for computing shortest paths on
+2
+
+Riemannian manifolds learned from data. Combining the theory of smoothing
+splines/Gaussian process regression [Wahba, 1990, Rasmussen and Williams,
+2006] with ﬁxed-point iterations [Mann, 1953, Johnson, 1972], we arrive at an
+algorithm which is simple, fast and more reliable on challenging geometries. This
+is achieved by not utilizing the Jacobian which is computationally costly and
+ill-behaved.
+Our work is a signiﬁcant improvement of an earlier algorithm by Hennig and
+Hauberg [2014]. Their algorithm is an early proof of concept for probabilistic
+numerics [Hennig et al., 2015]. We show below that in the original form, it
+provably does not converge to the true solution. However, their algorithmic
+structure is capable of converging to the true solution. We demonstrate how
+their algorithm needs to be adopted to improve solution quality and convergence
+speed, so that the ﬁxed-point algorithm can eﬃciently compute the shortest path
+on Riemannian manifolds.
+2
+A Brief Recap of Riemannian Geometry
+We start by deﬁning Riemannian manifolds [do Carmo, 1992]. These are well-
+studied metric spaces, where the inner product is only locally deﬁned and changes
+smoothly throughout space.
+Deﬁnition 1 A Riemannian manifold is a smooth manifold M where each
+tangent space TxM is equipped with an inner product (Riemannian metric)
+⟨a, b⟩x = a
+⊺M(x)b that changes smoothly across the manifold.
+This inner product structure is suﬃcient for deﬁning the length of a smooth
+curve c : [0, 1] →M in the usual way as
+Length(c) =
+Z 1
+0
+p
+˙c(t)
+⊺M(c(t))˙c(t)dt,
+(1)
+where ˙c = ∂tc denotes the curve velocity. The length of the shortest path
+connecting two points then constitutes the natural distance measure on M.
+The shortest curve is known as the geodesic, and can be found through the
+Euler-Lagrange equations to satisfy a system of 2nd order ODEs [Arvanitidis
+et al., 2018],
+¨c(t) = −M(c(t))−1
+2
+
+2(ID ⊗˙c(t)
+⊺)∂vec[M(c(t))]
+∂c(t)
+˙c(t)
+−∂vec[M(c(t))]
+∂c(t)
+⊺
+(˙c(t) ⊗˙c(t))
+
+,
+(2)
+where vec[·] stacks the columns of a matrix into a vector and ⊗is the Kronecker
+product.
+Most numerical calculations on Riemannian manifolds are performed in local
+tangent spaces as these are Euclidean. Key operations are therefore mappings
+3
+
+Figure 2: A data manifold with a geodesic and its tangent vector.
+back and forth between the manifold and its tangent spaces. A point y ∈M can
+be mapped to the tangent space at x ∈M by computing the shortest connecting
+curve and evaluating its velocity v at x. This is a tangent vector at x with
+the property that its length equals the length of the shortest path. By the
+Picard-Lindelöf theorem [Picard, 1890], this process can be reversed by solving
+Eq. 2 with initial conditions c(0) = x and ˙c(0) = v. Mapping from the manifold
+to a tangent space, thus, requires solving a boundary value problem, while the
+inverse mapping is an initial value problem. Practically, the BVPs dominate the
+computational budget of numerical calculations on manifolds.
+In the context of this paper we will focus upon Riemannian manifolds which
+are learned from the data, and capture its underlying geometric structure. Thus,
+we will consider for the smooth manifold the Euclidean space as M = RD, and
+learn a Riemannian metric M : RD →RD×D. To be clear, this simply changes
+the way we measure distances, while respecting the structure of the data. An
+illustrative example can be seen in Fig. 2.
+3
+A Fast Fixed-Point Method for Shortest Paths
+In order to apply Riemannian models to interesting data sets, we require a fast
+and robust method to solve the boundary value problem
+¨c(t) = f(c(t), ˙c(t)),
+c(0) = x, c(1) = y
+(3)
+where f(c(t), ˙c(t)) is the right-hand side of Eq. (2) and x, y ∈M. Numerical
+BVP solvers typically replace the analytic solution c(t) by an approximant
+c(t) which is required to fulﬁll the ODE ¨c(tn) = f(c(tn), ˙c(tn)) on a discrete
+mesh ∆= {t0 = 0, t1, . . . , tN−1 = 1} ⊂[0, 1] of evaluation knots tn. Together
+with the boundary conditions (BC) c(0) = x, c(1) = y, this results in a
+D(N + 2)-dimensional nonlinear equation which can be solved for rich enough
+D(N + 2)-dimensional parametric models. If the approximant is represented by
+the posterior mean µ(t) of a GP regressor GP(˜c(t); µ(t), k(t, s)), then it can be
+proven that a solution with small approximation error exists [Wendland, 2004,
+§11] under suitable conditions on the kernel [Micchelli et al., 2006, Rasmussen
+and Williams, 2006]. This means we have to ﬁnd a (artiﬁcial) data set D with
+4
+
+(N + 2) D-dimensional data points such that the posterior mean fulﬁlls the BVP
+on the discretization mesh ∆and the BC on the curve boundary B = {0, 1}. The
+data set D should be thought of as a parametrization for the solution curve.
+One way to generate a solution is to deﬁne the auxiliary function F(c) =
+¨c−f(c, ˙c) and apply a variant of the Newton-Raphson method [Deuﬂhard, 2011]
+to ﬁnd a root of F. For example, this type of algorithm is also at the core
+of Matlab’s bvp5c, a state-of-the-art BVP solver. The convergence of these
+algorithms depends on the Jacobians ∇cf, ∇˙cf of f at the evaluation knots tn.
+In particular, Jacobians with big condition number may cause Newton’s method
+to fail to converge if no precautions are taken [Ascher et al., 1994, §8.1.2]. On
+manifolds learned from data, this is a common problem. Furthermore, in practice
+these Jacobians are computed with a computationally taxing ﬁnite diﬀerence
+scheme. Thus, a method not based on Newton’s method should be more suitable
+for the computation of shortest paths.
+3.1
+Method Description
+As mentioned above, we model the approximate solution c(t) with the posterior
+mean µ(t) of a (multi-output) Gaussian process
+GP(˜c(t); µ(t), V ⊗k(t, s))
+(4)
+with (spatial) kernel k and inter-dimensional covariance matrix V ∈RD×D.
+If the kernel k is suﬃciently partially diﬀerentiable, this implies a covariance
+between derivatives of ˜c as well [Rasmussen and Williams, 2006, § 4.1.1], in
+particular
+cov
+ dm
+dtm ˜ci(t), dn
+dsn ˜cj(s)
+
+= Vij
+∂m+n
+∂tm∂sn k(t, s)
+(5)
+for the covariance between output dimensions i and j, derivatives m and n and
+spatial inputs t and s. This (prior) model class is the same as in Hennig and
+Hauberg [2014].
+The boundary equations ﬁx two parameters (0, x), (1, y) of the parametriza-
+tion. The remaining N parameters (tn, ¨zn) approximate the accelerations ¨c(tn)
+of the true solution c(tn) at knot tn, i.e., ¨zn ≈¨c(tn). The ¨zn are updated
+iteratively and we denote values at the i-th iteration with the superscript (i),
+e.g., c(i)(t) for the i-th approximation, ¨z(i)
+n for the i-th value of the parameter
+¨zn and so forth.
+5
+
+At iteration i, the approximation c(i)(t) is the predictive posterior GP
+P(˜c(i)(t)) = GP(˜c(i)(t); µ(i)(t), k(i)(t, s))
+G = V ⊗
+ "
+k(B, B)
+∂2
+∂s2 k(B, ∆)
+∂2
+∂t2 k(∆, B)
+∂4
+∂t2∂s2 k(∆, ∆)
+#
++ diag(0, 0, Σ, . . . , Σ)
+
+ω⊺=
+
+V ⊗
+h
+k(t, B)
+∂2
+∂s2 k(t, ∆)
+i
+G−1
+µ(i)(t) = m(t) + ω⊺vec
+
+
+
+
+x −m(0)
+y −m(1)
+¨z(i)
+∆−¨m(∆)
+
+
+⊺
+
+k(i)(t, s) = V ⊗k(t, s) −ω⊺
+
+V ⊗
+ k(B, s)
+∂2
+∂t2 (∆, s)
+
+,
+(6)
+and similarly for the velocity ˙c(t) by forming the G and ω accordingly. In
+Eq. (6), ¨z∆∈RN×D represents the accelerations, and k(B, ∆) ∈R2×N is the
+matrix of kernel evaluations at boundary points and evaluation knots and similar
+for k(B, B), k(∆, ∆) and k(∆, B). Finally, Σ = εID is the identity matrix times
+a small regularization parameter ε ≈10−10, so ¨µ(i)(tn) →¨z(i)
+n . The rationale
+for its inclusion will be postponed to the end of Sect. 3.2 as it will become more
+apparent in contrast to the model of Hennig and Hauberg [2014]. Details for the
+components k(·, ·), m, ∆in Appendix A. Now, we proceed with the description
+of the algorithm.
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+-20
+-15
+-10
+-5
+0
+5
+10
+15
+time
+acceleration
+-1
+-0.8
+-0.6
+-0.4
+-0.2
+0
+0.2
+0.4
+0.6
+0.8
+1
+-0.2
+0
+0.2
+0.4
+0.6
+0.8
+1
+1.2
+1.4
+c1
+c2
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+-4
+-3
+-2
+-1
+0
+1
+2
+3
+time
+velocity
+Step 1
+Step 2
+Figure 3: Step 1: With the current estimates of ¨z(i)
+∆(
+) we generate using the
+GP model Eq. 6, the current posterior curve µ(i) (
+) and velocities ˙µ(i) (
+).
+Step 2: Then, using the proposed ﬁxed-point update scheme Eq. 7, we get the
+updated parameters ¨z(i+1)
+∆
+(
+) . The algorithm iterates until ∥
+−f(
+,
+)∥
+small enough.
+Just like a root of the function F(c) = ¨c −f(c, ˙c) solves the ODE, so does a
+ﬁxed point of the mapping ¨µ(i+1)(t) = f(µ(i)(t), ˙µ(i)(t)). In particular, we can
+6
+
+evaluate this mapping on the discretization mesh ∆to map ¨z(i)
+∆to ¨z(i+1)
+∆
+. The
+big advantage of this combination of parametrization and update scheme is the
+simplicity of obtaining closed-form iteration updates [Rasmussen and Williams,
+2006, § 9.4]. The vector ﬁeld f is evaluated using the current iteration (µ(i), ˙µ(i))
+to yield ¨z(i+1)
+n
+= f(µ(i)(tn), ˙µ(i)(tn)), and ¨z(i+1)
+n
+≈¨µ(i+1)(tn) because ε →0.
+Forming µ(i+1), ˙µ(i+1) from ¨z(i+1)
+n
+only requires two matrix-vector products (see
+Eq. (6)). The process is depicted in Fig. 3.
+Algorithm 1 The proposed ﬁxed-point method.
+Require: BVP f(c(t), ˙c(t)), hyper-parameters ∆, ε, tolerance τ
+1: # Compute µ(i)(t), ˙µ(i)(t) using Eq. 6 and ¨z(i)
+∆.
+2: Deﬁne: e(i)
+n ≜
+
+¨z(i)
+n −f(µ(i)(tn), ˙µ(i)(tn))
+
+2
+3: ¨z(0)
+n
+←0, n = 0, . . . , N −1
+4: i ←0
+5: while ∃n : e(i)
+n > τ do
+6:
+¨z∗
+n ←f(µ(i)(tn), ˙µ(i)(tn)), n = 0, . . . , N −1
+7:
+for j = 0, . . . , 3 do
+8:
+αj = 3−j
+9:
+¨z(∗,j)
+∆
+←αj¨z∗
+∆+ (1 −αj)¨z(i)
+∆
+10:
+if P
+n e(∗,j)
+n
+≤P
+n e(i)
+n
+then
+11:
+break
+12:
+end if
+13:
+end for
+14:
+¨z(i+1)
+∆
+←¨z(∗,j)
+∆
+15:
+i ←i + 1
+16: end while
+17: return GP(˜c(t); µ(i), k(i))
+Variants of this scheme have been repeatedly applied for the creation of
+probabilistic diﬀerential equation solvers [Hennig and Hauberg, 2014, Chkrebtii
+et al., 2016, Schober et al., 2014, Cockayne et al., 2016, Kersting and Hennig,
+2016, Teymur et al., 2016, Schober et al., 2018, Kersting et al., 2018]. Of these
+papers, only Hennig and Hauberg [2014] points out that this can be updated
+multiple times, but even there the connection between a ﬁxed point of the
+mapping and an approximate solution is not stated. Interpreting the iteration
+as a ﬁxed point search is the key insight of this paper.
+We suggest to apply a Mann iteration [Mann, 1953, Johnson, 1972] process
+for the solution of (2) given by
+¨z∗
+n = f(µ(i)(tn), ˙µ(i)(tn))
+¨z(i+1)
+n
+= αi¨z∗
+n + (1 −αi)¨z(i)
+n
+(7)
+with “step sizes” αi ∈[0, 1]. The results of Mann [1953], Johnson [1972] only
+7
+
+apply if αi = (i + 1)−1, however we found a backtracking scheme to be eﬀective
+in practice.
+Algorithm 1 presents our method in pseudo-code where ¨z(∗,j)
+∆
+denotes the
+tentative parametrization. Note how the backtracking line search for αi (Lines
+7-13) requires half of the description.
+Our method is similar to a recently proposed method by Bello et al. [2017]
+that is based on the variational iterative method1 by He [2000]. Bello et al. [2017]
+proposed to use this scheme symbolically requiring a computer-algebra system
+for its execution, which makes it inapplicable to practical tasks. More details to
+these related works can be found in Jafari [2014], Khuri and Sayfy [2014].
+3.2
+Comparison with Hennig and Hauberg [2014]
+The proposed method is inspired by the previous work of Hennig and Hauberg
+[2014] and we make a direct comparison here.
+The algorithm of Hennig and Hauberg [2014] is a proof-of-concept probabilistic
+numerical method [Hennig et al., 2015] for solving boundary value problems.
+It is structurally similar to other early probabilistic IVP solvers of Chkrebtii
+et al. [2016] and Skilling [1991]. Since the publication of these early works, the
+ﬁeld has matured signiﬁcantly, providing algorithms with novel functionality
+[Hauberg et al., 2015, Mahsereci and Hennig, 2015, Oates et al., 2017, Xi et al.,
+2018] and rigorous analysis [Briol et al., 2015, Chkrebtii et al., 2016, Schober
+et al., 2018, Kersting et al., 2018].
+Their main idea is to treat the vector-ﬁeld evaluations ¨zn as noisy observations
+of the true, but unknown, second derivative ¨c(tn). For a concrete suggestion,
+they propose a Gaussian likelihood P(¨zn) = N(¨zn; ¨c(tn), Λn). Together with
+a GP prior on c(tn), they arrive at an inference algorithm. Heuristically, they
+propose to add mesh observations sequentially, reﬁne them iteratively for a ﬁxed
+number of steps, and they repeat the overall process until they ﬁnd a set of
+hyper-parameters of the GP which maximizes the data likelihood of the ﬁnal
+approximation.
+However, the algorithm of Hennig and Hauberg [2014] cannot converge
+to the true solution in general. A convergent method is required to satisfy
+f(µ(i)(tn), ˙µ(i)(tn)) →¨µ(i)(tn) as i →∞. However, as Σn ̸= 0 in Hennig and
+Hauberg [2014], ¨µ(i)(tn) is not an interpolant of ¨z(i)
+n (Kimeldorf and Wahba, 1970,
+Thm. 3.2; Kanagawa et al., 2018, Prop. 3.6) implying that the true accelerations
+¨c(tn) cannot be a parameterization in the model of Hennig and Hauberg [2014]
+contradicting the ﬁxed point requirement.
+The same criticism could be applied to our model, as we propose Σn = Σ =
+εID ̸= 0. We have experimented with annealing schemes for this hyper-parameter
+Σ(i) = i−1Σ, but the beneﬁt of ε > 0 for the stability of the Gram matrix G is
+bigger than induced numerical inprecision, in particular when the tolerance τ is
+considerably larger than ε.
+1calculus of variations not variational inference.
+8
+
+Although the algorithm of Hennig and Hauberg [2014] cannot converge, three
+insights and resulting modiﬁcations lead to our proposed method:
+1. Hennig and Hauberg [2014] did not propose a principled scheme to deter-
+mine the number of reﬁnements S, but treated it as a hyper-parameter
+that must be provided by the user. However, it can be easily checked
+whether the posterior mean µ(i)(t) fulﬁlls the diﬀerential equation at
+any point t.
+This not only removes a hyper-parameter, but can also
+gives more conﬁdence in the returned solution. In principle, the error
+e(i)
+n
+=
+
+¨µ(i)(tn) −f(µ(i)(tn), ˙µ(i)(tn))
+
+ could even be used to construct
+adaptive meshes ∆(i) [Mazzia and Trigiante, 2004].
+2. Using an universal kernel [Micchelli et al., 2006] and a ﬁne enough mesh
+∆∗, it is known that any curve can be ﬁtted. While sub-optimal kernel
+parameters θ might require an exponential bigger mesh [Vaart and Zanten,
+2011, Thm. 10], the property of universality holds regardless of the hyper-
+parameter θ used to ﬁnd the approximation. As a consequence, tuning
+hyper-parameters is purely optional and certainly does not require restarts.
+This also improves runtime signiﬁcantly as the Gram matrix needs only
+be to inverted once. In practice, we have observed negligible solution
+improvements after type-II maximum likelihood optimization after the end
+of the algorithm.
+3. Currently, there is no analysis when or if coordinate-wise updates oﬀer
+improvements over simultaneous updates for all parameters ¨z(i)
+∆. There
+is, however, a strong argument for updating simultaneously: runtime.
+All predictive posterior parameters can be pre-computed and kept ﬁxed
+throughout the runtime of the algorithm, if the mesh is not adapted
+throughout. In particular, the regression weights ω⊺can be kept ﬁxed, so
+each update requires only two vector-vector products.
+Finally, while our derivation does not make use of its probabilistic interpreta-
+tion, further steps in this direction could potentially unlock novel functionality
+which has repeatedly been the case with other probabilistic numerical methods
+[Xi et al., 2018, Oates et al., 2017, Hauberg et al., 2015].
+4
+Experiments
+In this section we demonstrate the advantages of our method compared to
+Matlab’s bvp5c, and the algorithm in Hennig and Hauberg [2014] denoted in
+the experiments as H&H. Since all the methods depend on a set of parameters, we
+will come up with a default setting. For the proposed method, we will use for the
+∆a uniform grid of N = 10 points including the boundaries. The corresponding
+noise term of the points ¨z will be kept ﬁxed to Σ = 10−7ID. For the GP we
+will use the Squared Exponential kernel k(t, t′) = exp(−(2λ2)−1 |t −t′|2). We
+ﬁx the amplitude V in a Bayesian fashion as Hennig and Hauberg [2014], and
+9
+
+-1
+-0.5
+0
+0.5
+1
+0
+0.5
+1
+1.5
+(a) Data
+0
+0.5
+1
+1.5
+Curve lengths (ours)
+0
+0.5
+1
+1.5
+2
+2.5
+Curve Length
+Ours Vs H&H
+Ours Vs bvp5c
+(b) Curve Lengths
+0
+50
+100
+150
+200
+Point index
+10-3
+10-2
+10-1
+100
+101
+Elapsed time (sec)
+(c) Runtimes
+Figure 4: Left: Generated data on a semi-circle, together with some challenging
+geodesics computed by our method, and a point y. Middle: The curve lengths of
+the geodesics between the given data and the point y, on the horizontal axis we
+have the point index, and the vertical lines represent the failures of the bvp5c
+to converge. Right: The runtime for the corresponding geodesic problems.
+the length-scale λ2 ≈2−1 |tn+1 −tn| which provides enough degrees-of-freedom
+while covering the entire interval at the same time. The prior mean is set to
+the straight line m(t) = c(0) + t · (c(1) −c(0)), and the derivative accordingly.
+For the method of Hennig and Hauberg [2014], we use the same parameters as
+for our method. We set the bounds on the Jacobian to U = ˙U = 10 and run
+the method with one reﬁnement iteration. We set the maximum mesh size for
+the bvp5c to 1000, and use for the starting mesh uniformly 10 points on the
+straight line connecting the boundary points. For all the methods we consider
+the resulting curve as correct if ∥¨c(tn) −f(c(tn), ˙c(tn))∥2
+2 ≤0.1, ∀n.
+4.1
+Experiments with a Non-parametric Riemannian Met-
+ric
+We ﬁrst consider the case of Riemannian metric learning as proposed by Arvani-
+tidis et al. [2016]. This can be seen as a way to capture the local density of the
+data, and thus to uncover the underlying geometric structure. The metric at a
+given point is computed in three steps: 1) use a kernel to assign weight to given
+data, 2) compute the local diagonal covariance matrix, and 3) use its inverse as
+the metric tensor. More formally, the metric is
+Mdd(x) =
+ N
+X
+n=1
+wn(x)(xnd −xd)2 + ρ
+!−1
+,
+(8)
+where
+wn(x) = exp
+ 
+−∥xn −x∥2
+2
+2σ2
+M
+!
+.
+The parameter σM ∈R controls the curvature of the manifold, since it regulates
+the rate of the metric change i.e. when the σM is small then the metric changes
+fast so the curvature increases. The parameter ρ ∈R>0 is ﬁxed such that to
+prevent zero diagonal elements.
+10
+
+We generated 200 data points along the upper semi-circle and added Gaussian
+noise N(0, 0.01) as it is shown in Fig. 4a. The ρ = 0.01 is kept ﬁxed in all
+the experiments. We set the parameter σM = 0.15, and after ﬁxing the point
+c(0) = y we compute the geodesics to the given data. From the results (Fig. 4b)
+we see that all three methods perform well when the distance from the starting
+point is small. However, when distances increase, we see that only our method
+manages to ﬁnd the correct curve, while bvp5c is not able to solve the problem,
+and H&H ﬁnds too long curves. Also, we see that the runtime of our method
+(Fig. 4c) is increased only slightly for the diﬃcult problems, while bvp5c is
+always slower and especially for the diﬃcult problems increases the mesh size
+to the maximum and fails to converge. The performance of the H&H remains
+almost constant, since it is essentially based on the converge of the model’s
+parameters and not the diﬃculty of the problem.
+Curly
+Two-moons
+Sphere-3D
+0
+0.2
+0.4
+0.6
+0.8
+1
+Fraction of failed geodesics
+Ours
+H&H
+bvp5c
+Curly
+Two-moons
+Sphere
+Figure 5: Failed geodesics.
+Next, we generated three challenging datasets consisting of 400 points each.
+For the ﬁrst one we generate a circle and we ﬂip the lower half along the y axis,
+we refer to it as Curly in the results. For the second we move the lower half of the
+circle such that to get the two moons. The third one is a 2-dimensional sphere
+in R3. Finally, we add Gaussian noise N(0, 0.01), and we standardize to zero
+mean and unit variance each dimension. We keep the same parameters for the
+metric. Note that the resulting manifold implies high curvature, so we increased
+the ﬂexibility of the methods. For the proposed model and H&H we used a grid
+of 50 points, and the maximum mesh size of bvp5c was set to 5000. We pick
+randomly 40 points for each dataset, and compute the pairwise distances. In
+Fig. 5 we see that our method manages to solve almost all of the shortest path
+problems, while bvp5c fails in almost half of them. H&H is expected to fail in
+many cases, since it is not designed to converge to the correct solution.
+Furthermore, we tested the scalability of the methods with respect to di-
+mensionality. We generate 1000 points on a semi-circle in 2 dimensions, and
+11
+
+2
+5
+10
+20
+Dimensions
+0
+10
+20
+30
+40
+Mean elapsed time (sec)
+Ours
+bvp5c
+H&H
+D
+2
+5
+10
+20
+Ours
+0%
+0%
+0%
+9%
+bvp5c
+9%
+24%
+42%
+50%
+H&H
+69%
+95%
+100%
+100%
+Figure 6: Scalability in higher dimensions and failures.
+standardized to zero mean and unit variance. We ﬁx a point y and a subset
+S of 100 points. Then, for every D = [2, 5, 10, 20] we construct an orthogonal
+basis to project the data in RD, where we standardize the data again and add
+Gaussian noise N(0, 0.01). Then, for each dimension D we compute the geodesics
+between the y and the subset S of the points. Keep in mind that the parameter
+σM = 0.25 is kept ﬁxed, so as the dimensions increase the sparsity of the data
+increase, and so does the curvature of the manifold. In Fig. 6 we show the
+average runtime for every dimensionality and the percentage of failures for each
+method. Our method remains fast in higher dimensions, even if the curvature of
+the manifold is increased. On the other hand, we observe that bvp5c fails more
+often, which causes the overhead in the runtime. H&H remains fast, but, the
+resulting curves cannot be trusted as the criterion of correct solution is almost
+never met.
+0
+1
+2
+3
+4
+5
+Elapsed time (hours)
+-5
+-4.5
+-4
+-3.5
+-3
+Mean data log-likelihood
+Ours
+H&H
+bvp5c
+Figure 7: LAND experiment.
+12
+
+Also, we ﬁtted a mixture of LANDs [Arvanitidis et al., 2016] using the three
+models, on the two moons dataset generated by ﬂipping and translating the
+data in Fig. 4a. Note that we ﬁx σM = 0.1 since we want our metric to capture
+precisely the underlying structure of the data, which implies that the curvature
+is increased. From the results in Fig. 7 we see that the proposed solver faster
+achieves higher log-likelihood. Additionally, in the same time interval, it manages
+to run more iterations (dots in the ﬁgure).
+4.2
+Experiments with a Riemannian Metric of Deep Gen-
+erative Models
+Latent codes
+Ours
+bvp5c
+H&H
+(a) Latent space
+0
+1
+2
+3
+Curve lengths (ours)
+0
+0.5
+1
+1.5
+2
+2.5
+3
+3.5
+Curve Length
+Ours Vs H&H
+Ours Vs bvp5c
+(b) Curve Lengths
+0
+200
+400
+600
+800
+1000
+1200
+Point index
+10-2
+10-1
+100
+101
+102
+Elapsed time (sec)
+Ours
+bvp5c
+H&H
+(c) Runtimes
+Figure 8: Left: The latent space together with the computed geodesics between
+two points. Middle: The curve lengths, on the x axis we show the curve length
+of the proposed model. The results are sorted with respect to our model. Right:
+The corresponding runtimes.
+The Variational Auto-Encoder (VAE) [Kingma and Welling, 2014, Rezende
+et al., 2014], provides a systematic way to learn a low dimensional latent represen-
+tation of the data, together with a generator that learns to interpolate the data
+manifold in the input space. Usually, deep neural networks are used to model the
+generator. These ﬂexible models are able to compensate for any reparametriza-
+tion of the latent space, which renders the latent space unidendiﬁable. Recently,
+Arvanitidis et al. [2018] deﬁned a Riemannian metric in the latent space, which
+is induced by the generator and is invariant to the parametrization of the latent
+space. This resolves the identiﬁability issue and makes computations in the latent
+space parametrization invariant. More speciﬁcally, the VAEs utilizes a stochastic
+generator that maps a point x from the latent space X to a point y in the
+input space Y, and it consists of two parts: the mean and the variance function
+as y(x) = µ(x) + σ(x) ⊙ϵ, where ϵ ∼N(0, Idim(Y)) and ⊙is the pointwise
+multiplication. This stochastic mapping introduces a random Riemannian metric
+in the latent space. However, as it is shown [Tosi et al., 2014] we are able to use
+the expectation of the metric which has the appealing form
+M(x) = Jµ(x)
+⊺Jµ(x) + Jσ(x)
+⊺Jσ(x),
+(9)
+where J stands for the Jacobian of the corresponding functions. The interpreta-
+tion of the metric is relatively simple. It represents the distortions due to the
+13
+
+mean function and the uncertainty of the generator.
+In this context, for the data in the input space we generated the upper half of
+a 2-dim sphere in R3, added Gaussian noise N(0, 0.01) and scaled the data in the
+interval [−1, 1]3. Then, we trained a VAE, using for the generator a simple deep
+network consisted of two hidden layers with 16 units per layer, the softplus as
+activation functions, and tanh for the output layer. We used a 2-dimensional
+latent space, and the encoded data can be seen in Fig. 8a. There, we show the
+computed geodesic for the 3 methods. Interestingly, we see that the 3 resulting
+curves diﬀer, and the estimated curve lengths are: proposed (2.52), bvp5c (3.65)
+and H&H (3.30). Our model, manages to ﬁnd the shortest path, which is a
+particularly curved path but the second derivative remains relatively smooth,
+while bvp5c ﬁnds a simpler curve with larger length. This is not surprising since
+bvp5c prefers solutions where the curve is smoother, while our method prefers
+curves where the second derivative is smoother. In order to further analyse this
+behavior, we randomly pick 50 points and compute all pairwise distances. The
+results in Fig. 8b shows that the proposed method manages to ﬁnd always the
+shortest path, while the other methods when the distances increase, provide a
+suboptimal solution. Comparing the runtimes (Fig. 8c) we see that our method
+is faster in the simple problems, and has only a small overhead in the diﬃcult
+problems, however, it manages always to ﬁnd the shortest path.
+0
+20
+40
+60
+80
+100
+Point index
+10-2
+10-1
+100
+101
+102
+Elapsed time (sec)
+Ours
+bvp5c
+H&H
+Figure 9: Runtime comparison
+As a last experiment, we generated a 2-dimensional sphere in R3 and moved
+the upper half by 1, and again added Gaussian noise and scaled the data to
+[−1, 1]3. Instead of softplus in the hidden layers, we used the tanh activation
+functions which increases the curvature. Here the latent space is 2-dimensional.
+We ﬁx randomly a point in the latent space and compute the geodesic to 100
+randomly chosen points. As we observe from the results in Fig. 9, as long as
+we compute the distance between points of the same semi-sphere the runtimes
+of our method and bvp5c are comparable. However, when the points belong
+in diﬀerent semi-spheres the runtimes increase signiﬁcantly. The reason is that
+curvature increases dramatically when we cross parts of the latent space where
+the generator is uncertain. That is also the reason why many problems are not
+14
+
+solved (dots in the ﬁgure), but even in this challenging setting our model is more
+robust.
+5
+Conclusions
+We proposed a simple, fast and robust algorithm to compute shortest paths
+on Riemannian manifolds learned from data. Here, standard solvers often fail
+due to ill-conditioned Jacobians of the associated BVP. Instead, our method
+applies a Jacobian-free ﬁxed-point iterative scheme. The assumption is that the
+true path can be approximated smoothly by the predictive GP posterior. This
+solver makes the Riemannian methods more feasible since robustly in reasonable
+time, complex statistical models [Arvanitidis et al., 2016] can be ﬁtted, as well
+as distances can be computed in challenging deep metric scenarios [Arvanitidis
+et al., 2018].
+This has been achieved by analyzing and extending an existing probabilistic
+numerical solver [Hennig and Hauberg, 2014], turning it from a proof-of-concept
+into a principled algorithm. The presented method thus contributes both to
+Riemannian methods and to probabilistic numerics. Further improvements might
+be achieved with more complex ﬁxed-point iterations [Ishikawa, 1974], advanced
+line searches [Mahsereci and Hennig, 2015], adaptive mesh selection [Mazzia and
+Trigiante, 2004], and improved model selection [Vaart and Zanten, 2011].
+15

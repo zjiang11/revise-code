@@ -1,0 +1,332 @@
+Transformer Based Geocoding
+Yuval Solaz∗
+
+Vitaly Shalumov∗
+
+January 4, 2023
+Abstract
+In this paper, we formulate the problem of predicting a geolocation from free text as
+a sequence-to-sequence problem. Using this formulation, we obtain a geocoding model
+by training a T5 encoder-decoder transformer model using free text as an input and
+geolocation as an output. The geocoding model was trained on geo-tagged wikidump
+data with adaptive cell partitioning for the geolocation representation. All of the code
+including Rest-based application, dataset and model checkpoints used in this work are
+publicly available.
+1
+Introduction
+Social media such as Twitter and Wikipedia contains considerable amount of location-related
+text data. In this paper, we develop a model that learns to predict spatial probabilities from
+free text. Given a query sentence, the model outputs a discrete probability distribution over
+the surface earth, by assigning each geographical cell a likelihood that the input text relates
+to the location inside said cell. The resulting model is capable of localizing a large variety
+of sentences. Viewing the task as a hierarchical classiﬁcation problem allows the model to
+express its uncertainty in the location associated with the text. The resulting model can be
+used for resolving ambiguity of the location references in the text. This capability is central
+to the success of ﬁnding exact location from free text. For example, Paris can refer to more
+than one possible location. In a context such as: The International Olympic Committee
+conﬁrmed the city chosen to host the Olympic Games in 2024. The Games will be held in
+Paris, geocoding models like the one proposed in this paper can help in the resolution of
+the correct location.
+This work introduces the following contributions:
+• Synthesizing a dataset for supervised learning, including adaptive cell partitioning.
+• Formulating the geocoding problem as a sequence-to-sequence problem.
+• Training an end-to-end geocoding model using said formulation.
+• Publicly releasing the curated dataset, a Rest-based application and the T5 geocoding
+model.
+∗Equal Contribution
+1
+arXiv:2301.01170v1  [cs.CL]  2 Jan 2023
+
+2
+Related works
+The geolocation prediction from free text was extensively addressed in the literature. The
+authors of [1] presented a multi-level geocoding model that learns to associate texts to
+geographic locations. The downstream task was formulated as a multi-level classiﬁcation
+problem based on multi-level S2 [2] cells as the output space from a multi-headed model.
+In [3], the surface of the earth was subdivided into thousands of multi-scale geographic
+cells. The authors trained a deep neural network using millions of geo-tagged images. We
+adopt the adaptive partition approach introduced in this paper. The authors of [4] created
+language models of locations using coordinates extracted from geo-tagged Twitter data.
+The locations were modeled at varying levels of granularity, from zip code to the country
+level. In [5], an end-to-end probabilistic model for geocoding text data was presented. In
+addition, the authors collected a novel data set for evaluating the performance of geocoding
+systems. The model-based solution, called ELECTRo-map was compared to the open source
+system available at the time of publication for geocoding texts for event data. An algorithm
+for estimating a distribution over geographic locations from a single image using a purely
+data-driven scene matching approach was provided in [6].
+The aforementioned approaches to geocoding can be viewed as sequential tasks of token
+classiﬁcation (which is assumed to be solved perfectly) and geocoding. Unfortunately, this
+approach suﬀers from several drawbacks.
+First, it cannot handle correctly inputs that
+contain several descriptions of locations (for example: ”We live in country X city Y”).
+Second, it lacks the context of free text (for example: ”Country south of France”).
+3
+Text Geolocation with Transformer
+We pose the task of text geolocation as a sequence-to-sequence problem. The model trans-
+lates input text into hierarchy set of geographic cells which represent probability distribution
+over the surface of the earth. The model output is a sequence encoding of hierarchical cell
+representation of the surface of the earth.
+3.1
+Adaptive Cell Partitioning
+We use Google’s open source S2 Geometry library [2] to partition the surface of the earth into
+non-overlapping cells that deﬁne the target of our model. The S2 library deﬁnes hierarchical
+partitioning of the surface of a sphere by projecting the surfaces of an enclosing cube on
+it. The six sides of the cube are subdivided hierarchically by six quad-trees. A node in a
+quad-tree deﬁnes a region on the sphere called an S2 cell. Fig. 1 illustrates the S2 cells in
+several resolutions. Tab. 1 shows the resolution and number of cells for each S2 Geometry
+level.
+There are several reasons for choosing this subdivision scheme over a simple subdivision
+of latitude/longitude coordinates. Firstly, the latitude/longitude regions get elongated near
+the poles while S2 cells keep a close-to-quadratic shape, and secondly, S2 cells are mostly
+uniform in size (the ratio between the largest and smallest S2 cell is 2.08). A naive approach
+to deﬁne a tiling of the earth would be to use all S2 cells at a certain ﬁxed depth in the
+hierarchy, resulting in a set of roughly equally sized cells. However, this would produce a
+very imbalanced class distribution since the geographical distribution of wikidata items [7]
+which was adopted in this paper, has strong peaks in densely populated areas see Fig. 2.
+2
+
+Figure 1: S2 Geometry hierarchical partitioning of the earth.
+Table 1: S2 Geometry levels.
+Level
+Average area
+Number of cells
+00
+85M km2
+6
+01
+21M km2
+24
+02
+5M km2
+96
+03
+1.3M km2
+384
+04
+330K km2
+1536
+05
+83K km2
+6K
+06
+20K km2
+24K
+07
+5K km2
+98K
+08
+1297 km2
+393K
+09
+324 km2
+1573
+10
+81 km2
+6M
+..
+..
+..
+29
+2.95 cm2
+1729 ∗1015
+30
+0.74 cm2
+7 ∗1018
+We therefore perform adaptive subdivision, based on the dataset item location: starting
+at the roots, we recursively descend each quad-tree and subdivide cells until no cell contains
+more than a certain ﬁxed number (max cell samples parameter) of data points. By using
+this approach, sparsely populated areas are covered by larger cells and densely populated
+areas are covered by ﬁner cells. This adaptive tiling has several advantages over a uniform
+one: (i) training classes are more balanced and (ii) it makes eﬀective use of the parameter
+space because more model capacity is spent on densely populated areas. Fig. 3 demonstrates
+the S2 partitioning for our dataset.
+3
+
+Figure 2: Data points distribution.
+Figure 3: S2 Geometry adaptive partitioning of our dataset.
+3.2
+Dataset
+This section describes the dataset used for training the model and for the evaluation ex-
+periments. The dataset was constructed from the wikidata archive [8]. The archive was
+ﬁltered as to select all records with location label (approximately 8M records). See Tab. 2
+4
+
+for samples of wikidata records.
+Table 2: Wikipedia Geo Data samples.
+Id
+Latitude
+Longitude
+Text
+01
+53.96
+-1.08
+historic county of England
+02
+51.0
+10.0
+country in Central Europe
+03
+35.88
+14.5
+sovereign state in Southern Europe
+04
+57.30
+-6.36
+whisky distillery in Highland, Scotland, UK
+05
+47.39
+0.69
+city and commune in Indre-et-Loire, Centre-Val de Loire, France
+06
+-33.0
+-71.0
+sovereign state in South America
+3.3
+Data Labeling
+Using the adaptive cells, we label each data sample with the cell id containing the sample
+location. In order to keep the hierarchical nature of the cells in the label we use the following
+cell id encoding: the ﬁrst digit represents the cell cube face with a digit between 0 to 5.
+The next digits represent for each level the corresponding node in the quad tree with a digit
+between 0 to 3. See Tab. 3 for a cell encoding example. Note that the label is a sequence
+of digits with a variant length between 1 and 1+max level.
+Table 3: Cell encoding.
+Cell description
+Cell representation
+Face cell 2
+2
+Subcell 2 of face cell 1
+12
+Subcell 1 of subcell 3 of face 4
+431
+4
+Model
+4.1
+Train
+The model presented in this paper is based on the T5-base (220M) pre-trained sequence-
+to-sequence model [9]. The model was ﬁne-tuned on the wikidata dataset with the text
+records as input and the location cell encoding as the output target sequence. We chose to
+utilize the standard cross-entropy loss in the ﬁne-tuning process. Evaluation of level-based
+weighting in the loss function is left for future work. We trained for 2M steps over 5 epochs
+with batch size of 12. We used the AdamW optimizer with learning rate 1.5e-5 and linear
+decay. We train the model on 80% of the wiki-data dataset and use the other 20% for in-
+domain evaluation. A diagram of our text-to-location framework with a few input/output
+examples is shown in Fig. 4.
+5
+
+Figure 4: A diagram of our text-to-location framework.
+Figure 5: Prediction results for the text ”Haifa”. The predicted S2 cell in blue and its
+ancestor cells in white.
+4.2
+Evaluation
+4.2.1
+Inference
+The inference of our resulting model is as follows: given a sentence we predict the output
+sequence. Naturally it wold be 1 digit between 0 to 5 representing the predicted cube face,
+followed by up to 9 digits between 0-3 representing the predicted s2cell on each level. This
+sequence can easily converted to a s2 cell, which represents the probability distribution over
+the earth for the input text location. We used a beam search with size of 10. See Fig. 5 for
+inference example.
+4.2.2
+Evaluation Metric
+The most straightforward classiﬁcation metric is the ”accuracy measure” where only predic-
+tions with a full match between the model’s output and the true label counts as a successful
+prediction. We call this metric ”Flat Accuracy” (as oppose to ”Hierarchical Accuracy”).
+6
+
+This metric fails to capture the inherent hierarchical nature of the label. Another measure
+is the ”Mean distance error”. Mean distance error averages the distances between the pre-
+dicted location (center of the predicted S2 cell in our case) and true location of the target
+text. It too fails to capture the hierarchical nature of the label.
+For this reason we prefer a hierarchical classiﬁcation metric described in Hierarchy-
+Speciﬁc Variations on the Regular Classiﬁcation Metrics [10]. Those are variations of the
+well-known precision, recall and f-score metrics, speciﬁcally adapted to ﬁt hierarchical clas-
+siﬁcation:
+hierarchical precision (hP):
+hP =
+P
+i |Pi ∩Ti|
+P
+i |Pi|
+,
+(1)
+hierarchical recall (hR):
+hR =
+P
+i |Pi ∩Ti|
+P
+i |Ti|
+,
+(2)
+and hierarchical f-measure (hF):
+hF = 2 ∗hP ∗hR
+hP + hR
+(3)
+where Pi is the set consisting of the most speciﬁc class predicted for each test example i, and
+all of its ancestor classes. Ti is the set consisting of the true most speciﬁc class of test example
+i, and all its ancestor classes. Each summation is computed over all of the test set examples.
+5
+Results
+In this section, the performance of the developed geocoding model is presented and analyzed.
+To demonstrate the performance of the model, let us ﬁrst present several inference examples
+of the model. The examples of the predicted samples are given in Tab. 4.
+Table 4: Inference examples - true and predicted labels.
+Text
+Predicted Label
+True Label
+townland in Drummaan, County Clare, Ireland
+21002321
+21002321
+lake in Eksj¨o Municipality, Sweden
+20302303
+20302303
+ancient monument in Denmark (2976)
+20331122
+20331122
+school in Cheshire West and Chester, UK
+210033112
+210033113
+mountain in Iran
+1333313
+133302
+railway stop in Harburg, Germany
+20331203
+20331022
+It is diﬃcult to compare two sequences due to the fact that two adjacent cells can have
+very diﬀerent sequences in terms of string comparison.
+This results from the fact that
+two adjacent cells can originate from diﬀerent parent cells. To visualize the results, a web
+demo application powered by the fune-tuned model was constructed. This demo application
+can facilitate an intuitive comparison between the predicted and the true label. Inference
+examples using this application are given in Fig. 6, Fig. 7, and Fig. 8.
+7
+
+Figure 6: Prediction results for the text ”Paciﬁc ocean”.
+Figure 7: Prediction results for the text ”South”. We can assume large amount of South
+African samples biased the prediction.
+Evaluation results on the wikidata test split using the metrics described in section 4.2.2
+are given in Tab. 5.
+Table 5: Evaluation results.
+Evaluation metric
+Results
+Flat accuracy
+0.51547
+Hierarchy accuracy
+0.791
+8
+
+Figure 8: Prediction results for the text ”Paris”.
+6
+Conclusions
+In this paper we formulated the problem of geocoding as a sequence-to-sequence problem
+and trained a transformer model for geocoding. To leverage the capabilities of a language
+model, a pre-trained T5 model was used for ﬁne-tuning. For the sequence representation
+of the geolocation label, an adaptive cell partitioning was used.
+The free text and its
+corresponding geolocation were obtained from wikidata. The evaluation of the model on
+both hierarchical and non-hierarchical metrics demonstrated the validity of the proposed
+approach for geolocation prediction.
+The free text at inference time sometimes only hints at a location. It is our intuition
+that by combining a huge decoder such as GPT3 [11] to produce more location-coherent
+text from an obscure location reference and then feeding it to T5 could improve the model’s
+performance. This evaluation is left for future work. In addition, we leave for future work
+the evaluation of our approach on a benchmark such as Wikipedia Toponym Retrieval [12].

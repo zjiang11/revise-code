@@ -1,0 +1,1125 @@
+Semi-Structured Object Sequence Encoders
+Rudra Murthy V1, Riyaz Bhat1, Chulaka Gunasekara1, Siva Sankalp Patel1
+Hui Wan1, Tejas Indulal Dhamecha2, Danish Contractor1, Marina Danilevsky1
+1IBM Research AI
+2Microsoft India Development Center
+
+Abstract
+In this paper we explore the task of modeling
+semi-structured object sequences; in particular,
+we focus our attention on the problem of devel-
+oping a structure-aware input representation for
+such sequences. Examples of such data include
+user activity on websites, machine logs, and
+many others. This type of data is often repre-
+sented as a sequence of sets of key-value pairs
+over time and can present modeling challenges
+due to an ever-increasing sequence length. We
+propose a two-part approach, which first con-
+siders each key independently and encodes a
+representation of its values over time; we then
+self-attend over these value-aware key represen-
+tations to accomplish a downstream task. This
+allows us to operate on longer object sequences
+than existing methods. We introduce a novel
+shared-attention-head architecture between the
+two modules and present an innovative training
+schedule that interleaves the training of both
+modules with shared weights for some attention
+heads. Our experiments on multiple prediction
+tasks using real-world data demonstrate that our
+approach outperforms a unified network with
+hierarchical encoding, as well as other methods
+including a record-centric representation and a
+flattened representation of the sequence.
+1
+Introduction
+Semi-structured object sequences comprise a sig-
+nificant portion of the myriad of data created daily.
+This data usually has a temporal aspect, with the
+data created sequentially and representing events
+happening in some order. More generally, the data
+is a sequence of structured objects, each repre-
+sented by a set of key-value pairs that encode the
+attributes of the object (Figure 1(a)). Examples in-
+clude recordings of user interactions with websites,
+logs of machine activity, shopping decisions made
+by consumers, and many more (Figure 1(b)). The
+data is usually stored in semi-structured formats
+such as JSONs, or tabular forms.
+In this paper, we explore the task of modeling
+semi-structured object sequences; in particular, we
+focus our attention on the problem of developing
+a structure-aware input representation for such se-
+quences. If we think of the parallel to natural lan-
+guage data, we would treat each sentence of a text
+(Figure 1(c)) akin to the set of key-value pairs at a
+particular time step.
+The challenge of sequence length:
+A trivial
+method of representing such sequences would be
+to flatten each structured object and view its con-
+stituents as individual words for tokenization in
+natural language (Figure 1 (d)) 1. However, this
+causes the sequence length to become extremely
+large (thousands of tokens) when operating on real-
+word semi-structured sequences. For instance, in
+our study of semi-structured objects from user-
+interaction sessions on software from a large cloud-
+based service provider, we found these objects
+could contain 11 fields in average. The values
+of these fields include timestamps, identifiers, log
+messages, etc., with an average of 5 words each.
+A session length of 15 minutes results in 105 such
+session objects, amounting to nearly 5, 775 words
+which would further increase the sequence length
+after sub-words are created. Thus, it quickly be-
+comes clear that one of the main challenges of
+modeling the data is the sequence length; each
+semi-structured object in a sequence contains many
+keys and values, and each sequence contains many
+such objects.
+Key-centric representation:
+To address these
+challenges we use a modular, two-part hierarchical
+encoding strategy. First, we decompose the se-
+quence of semi-structured objects into independent
+sets of sequences based on keys. This allows us
+to consider each key separately (Figure 1(e)), and
+encode a representation of how the values of that
+1with markers to indicate boundaries for each structured
+object
+1
+arXiv:2301.01015v4  [cs.CV]  23 May 2023
+
+!!
+! , !"
+! , !#
+! , … !$
+%
+event:delete_node
+color: null
+text: null
+node_id: 2301
+time_stamp: …
+…
+event:add_node
+color: blue
+text: null
+node_id: 2301
+time_stamp: …
+…
+k1:!!
+!, k2:!!
+", k3:!!
+#, … kK:!!
+%
+(e)
+k1:
+…
+(f)
+…
+k1:!"
+!, k2:!"
+", k3:!"
+#, … kK:!"
+%
+k1:!$
+!, k2:!$
+", k3:!$
+#, … kK:!$
+%
+(d)
+t1-tN:
+“t1: k1:!!
+!, k2:!!
+", k3:!!
+#, …
+kK:!!
+%. t2: k1:!"
+!, k2:!"
+", k3:!"
+#, 
+… kK:!"
+%. …… tN: k1:!$
+!, k2:!$
+", 
+k3:!$
+#, … kK:!$
+%.” 
+(a)
+k1:!!
+!
+k2:!!
+"
+k3:!!
+#
+…
+kK:!!
+%
+t1
+t2
+t3
+tN
+(b)
+t1
+t2
+t3
+event:add_text
+color: white
+text: “Node 1”
+node_id: 2301
+time_stamp: …
+…
+…
+text:”The
+river Yamuna 
+flows through 
+the city.”
+text:”New Delhi 
+is the capital 
+of India.”
+(c)
+t1
+t2
+t3
+text:”As of 
+2022, it has a 
+population of 
+21 million.”
+…
+k2:
+kK:
+t1:
+…
+t2:
+tN:
+!!
+" , !"
+" , !#
+" , … !$
+"
+!!
+% , !"
+% , !#
+% , … !$
+%
+k1:!"
+!
+k2:!"
+"
+k3:!"
+#
+…
+kK:!"
+%
+k1:!#
+!
+k2:!#
+"
+k3:!#
+#
+…
+kK:!#
+%
+k1:!$
+!
+k2:!$
+"
+k3:!$
+#
+…
+kK:!$
+%
+Figure 1: Semi-Structured Object Sequences: (a) Generic representation of a sequence of semi-structured objects,
+consisting of multiple key-value pairs at time steps t1 . . . tN. (b) Example object: a sequence of events triggered by
+the use of a graphical user interface. (c) Viewing a text paragraph as a sequence of sentences. (d) Encoding the
+example object in (a) by flattening. (e) Encoding (a) by encoding a representation of the values for each key (to be
+followed by a key aggregation step, not shown). (f) Encoding (a) using a record-centric representation for each time
+step.
+key evolve over time (we refer to this as Temporal
+Value Modeling – TVM). This may be achieved
+using any encoder.2 We then self-attend over the
+set of the key encodings to create a representation
+of the entire structured object sequence (referred to
+as Key Aggregation – KA).
+Advantages:
+This key-centric perspective of en-
+coding semi-structured sequences has many advan-
+tages as compared to flattening and record-centric
+representations (Figure 1(f)). Decoupling the keys
+allows us to support an arbitrary number of keys3
+since each key-sequence is encoded independently.
+So, the key-representations created during Tempo-
+ral Value Modeling can support longer sequences
+than what would have been impossible with flat-
+tening (due to memory constraints). Moreover,
+this encoding strategy also accommodates input
+sequences that may be considered non-structured –
+e.g, natural language text as sequences of words in
+sentences (Figure 1(c)). Specifically, if we consider
+a sequence of structured objects where each struc-
+tured object consists of only one key, whose values
+contain a sentence, then our TVM effectively en-
+codes the text sequence using whatever encoder
+has been employed.4
+The decoupling of keys and the use of two
+independent encoders - TVM for value-aware
+2We use BERT and Longformer in our experiments
+3Real-world data can have hundreds of keys in each object.
+4The key aggregation step, in this case, is redundant.
+key representations, and KA for aggregating key-
+representations for a downstream task - requires
+that information be shared between the two net-
+works. So that the key-representations generated
+by TVM can be optimized for downstream tasks via
+the KA. To facilitate this, we share a few sets of at-
+tention heads between the two networks. First, we
+pre-train the TVM network with shared attention
+heads in place. We then use the frozen represen-
+tations from this network to initialize the KA net-
+work, which has its own untrained attention heads,
+and the shared attention heads from the TVM net-
+work as part of its trainable parameters. We utilize
+a training schedule that interleaves the training of
+both modules to iteratively train them. Doing so
+allows the TVM and KA modules to create richer
+representations of keys, informed by their impor-
+tance, for the downstream task. We find that this
+novel iterative two part-training results in better
+performance compared to a unified network with
+hierarchical encoding (with no attention-head shar-
+ing) as well as other methods, that either use a
+flattened representation or a record-centric repre-
+sentation of the sequence (Veliˇckovi´c et al., 2018;
+Mizrachi and Levin, 2019; de Souza Pereira Mor-
+eira et al., 2021).
+Contributions: Our work addresses the challenges
+of encoding semi-structured object sequences: (i)
+we propose a two-part approach that separately
+encodes the evolution of the values for each key,
+2
+
+followed by aggregation over key-representations
+to accomplish downstream tasks; (ii) we present a
+novel approach for sharing attention heads between
+the components; (iii) we compare our approach
+against baselines such as sequence flattening, joint
+encoding, and record-centric sequence representa-
+tions; and (iv) we present detailed experiments on
+several datasets and tasks to demonstrate the advan-
+tages of our approach. To the best of our knowledge
+this is the first work that develops a framework that
+allows training models for tasks using long and
+large semi-structured object sequences.
+2
+Modeling
+We now describe our approach for modeling key-
+value semi-structured object sequences.
+Let a sequence of semi-structured objects be
+denoted as J
+=
+[J1, J2, J3, . . . , JN] corre-
+sponding to N time steps.
+Further, let Ji =
+{k1 : v1
+i , k2 : v2
+i , . . . , kj : vj
+i , . . . , kK : vK
+i } denote
+a structured object Ji, containing K key-value pairs
+< kj : vj
+i >, j = 1 . . . K. The goal of our mod-
+eling is to learn a representation of a sequence
+of structured objects J ; and subsequently, learn
+f : Embd(J ) →{1, 2, . . . , C} for an end task,
+such as a C-way classification task.
+We develop a modular two-part modeling strat-
+egy to represent a sequence of structured objects.
+1. The first module, called the Temporal Value
+Modeler (TVM), is used to learn a com-
+bined representation (referred to as the key-
+representations) for the different values that
+each key takes in the sequence.
+2. The
+second
+module,
+called
+the
+Key-
+Aggregator (KA), uses the key-representations
+corresponding to each key, to create an overall
+representation for J .
+Temporal Value Modeling: Let k be a key from
+the universe of all the keys K in the sequence. Then,
+for each key k we encode the value-aware key-
+representation Vk, by considering the value of the
+key k at each timestamp, as a sequence. Formally,
+Vk is given by:
+Vk = [CLS] k[VAL_SEP]vk
+1 [VAL_SEP] vk
+2 [VAL_SEP] . . . vk
+N
+(1)
+where [VAL_SEP] and [CLS] are special tokens.
+Note that each value vk
+j for a key k at time step j
+can itself consist of many tokens and those have
+not been shown for ease of presentation. With
+any choice of a transformer-based (Vaswani et al.,
+2017) language encoder (TextEncoder – TE), an
+embedding for Vk, termed the key-representation
+(KR), can be obtained as:
+KRk = TextEncoder(Vk)[0]
+(2)
+A TextEncoder gives us a dim x L dimension
+tensor where dim is the output embedding size
+and L corresponds to the length of the tokenized
+sequence Vk. We use the output embedding rep-
+resentation at the first position (indicated as [0] in
+Eq. 2) as the key-representation. It is easy to see
+that this formulation allows us to accommodate the
+modeling of natural language text as in Figure 1 (c).
+For illustration, if the TextEncoder is based on
+BERT (Devlin et al., 2019), Eq. 2 reduces to the
+encoding scheme typically employed in BERT for
+text paragraphs, where the [VAL_SEP] corresponds
+to the [SEP] token.
+Key-Aggregation:
+Once
+we
+create
+key-
+representations we utilize them for an end-task.
+We encode the key-representations using the same
+model architecture as the TVM TextEncoder but
+do not use positional embeddings since we encode
+a set of position-invariant key representations.
+Note that the weights of the KA are randomly
+initialized. This network is directly optimized for
+an end-task.
+Embd(J ) = KeyAggregator ({KR(k) | k ∈K}) (3)
+Key-centric vs. Record-centric Representation:
+As an alternative to the key-centric representation
+used by the TVM, one could construct a record-
+centric view to model the sequence (de Souza
+Pereira Moreira et al., 2021). Instead of modeling
+the evolution of keys in a semi-structured object
+sequence using Vk for each key, one could treat the
+sequence as a series of Ji (Figure 1(f)). However,
+the record-centric representation requires the net-
+work to compress information present in multiple
+keys and values of a record (Ji) which can cre-
+ate an information bottleneck for the downstream
+task. We compare and contrast the benefit of these
+alternative views in Section 3 and Section 5.
+Challenges of Scalable Training:
+The training
+of the hierarchical two-part network, which first
+obtains the key-representations (Eq. 2) and then
+the structured object sequence representation (Eq.
+3), could be done end-to-end where the network
+parameters are directly trained for the downstream
+3
+
+encode independently 
+!!
+!"
+!$
+Key representations
+Temporal Value Modeling
+Key Aggregator
+Layer 12
+…
+Text Encoder
+Layer 11
+Layer i
+Layer 1
+…
+Layer 12
+…
+Layer 11
+Layer i
+Layer 1
+…
+…
+Text Encoder
+Shared Attention Heads
+k1:!!
+"
+k2:!!
+#
+kK:!!
+$
+…
+k1:!"
+"
+k2:!"
+#
+kK:!"
+$
+…
+k1:!%
+"
+k2:!%
+#
+kK:!%
+$
+…
+…
+…
+End-Task Training 
+Objective
+MLM Objective
+interleaved 
+training
+Figure 2: The TVM-KA network architecture consisting of a set of shared attention heads (weights) between the
+Temporal Value Modeler and the Key Aggregator. Each key is encoded independently to create a corresponding key
+representation.
+task. However, end-to-end training of the hierar-
+chical two-part network is often difficult due to the
+constraints imposed by the limited GPU memory.
+The GPU memory usage is affected by two fac-
+tors: (1) the length of the semi-structured object
+sequence; and (2) the number of keys in an object.
+The end-to-end model architecture operating over
+a batch of J sequences would exceed the memory
+of most commodity GPUs. By a conservative es-
+timate, even for n = 11 and N = 512, a typical
+120M parameter model would exceed 40GB RAM
+limit with a batch-size of 2. To address this, we
+use an iterative training paradigm, described below,
+which interleaves the training of the TVM and KA
+components by relying on attention heads that are
+shared between the two components.
+Sharing Attention Heads:
+Recall that the TVM
+network first creates a representation for each key
+by attending on the values that occur in the se-
+quence for each of them. The KA network then
+uses these representations to learn the end task.
+However, if the KA network could influence how
+these representations are created for each key, it
+could perhaps help improve the performance of
+the KA on the downstream-task. We, therefore, in-
+troduce hard-parameter sharing between the TVM
+and KA components. We hypothesize that by shar-
+ing a few attention heads (weights) between the
+two networks, the KA will be able to utilize the
+shared attention heads. Specifically, as training pro-
+gresses and updates the parameters used in these
+heads, it will have an effect of adjusting the key-
+representations from the TVM in a way that could
+help improve overall end-task performance.
+Formally, let the TVM and KA networks use h
+heads in multi-head attention of the transformer-
+based network. Let p be the number of shared
+heads, then at any given layer in the network, the
+multi-head attention layers of TVM and KA are
+defined as:
+TE_MultiHead(Q, K, V ) = Concat(heade1, . . . , headep,
+headep+1, . . . , headeh)W O
+e
+KA_MultiHead(Q, K, V ) = Concat(heada1, . . . , headap,
+headap+1, . . . , headah)W O
+a
+where,
+headi = softmax
+ 
+QW Q
+i
+ KW K
+i
+T
+√
+d
+!
+V W V
+i
+and W Q
+em = W Q
+am, W K
+em = W K
+am, W V
+em = W V
+am, 1 ≤m ≤p
+Here, W Q
+i , W K
+i , W V
+i
+are projection matrices
+for query, key, and value for the ith attention head,
+and d denotes the dimension of the query and key
+4
+
+vectors. e1, . . . , ep and a1, . . . , ap denote the p
+pairs of attention heads that are sharing weights
+between the TVM and KA networks. ep+1, . . . , eh
+denote TextEncoder specific attention heads in
+the TVM, and ap+1, . . . , ah denote KA specific at-
+tention heads. W O
+e and W O
+a are the output projec-
+tion matrices for a layer of TextEncoder and the
+KA. Figure 2 summarizes our parameter-sharing
+approach.
+Interleaved
+Task
+Training:
+As
+mentioned
+above, we use an iterative task training paradigm
+where we interleave the training of the TVM and
+KA components. Note that our training paradigm
+is different from traditional training schedules for
+sequential task training where one network is fully
+trained before the next module, or from fine-tuning
+approaches where a part of the network may be
+initialized with a pre-trained model and additional
+layers of the network are initialized randomly and
+then updated for an end-task. We use the Masked
+language modeling (MLM) objective (Devlin et al.,
+2019) to train the TVM component and an end-
+task-specific objective for training the KA. The use
+of interleaved training, as outlined in Algorithm
+1, prevents the problem of catastrophic forgetting
+(French, 1999; McCloskey and Cohen, 1989; Mc-
+Clelland et al., 1995; Kumaran et al., 2016; Ratcliff,
+1990) when the KA is trained. Further, it is possi-
+ble that when the TVM is trained for the first time
+it may rely heavily on the heads that are shared.
+Thus, any change to the representation from these
+heads could lead to poorer key-representations and
+attention sharing, and would therefore would be
+counter-productive. To address this problem, we
+apply DropHead (Zhou et al., 2020) on the shared
+attention heads in TVM and pre-train the model
+before beginning the interleaving schedule.
+Algorithm 1 Interleaved training
+1: Initialize Temporal Value Modeler Mv, Key Aggregator
+Mk parameters randomly.
+2: Prepare the dataset Dv consisting of value sequences
+3: for i = 1,2,. ..,p do
+4:
+▷TVM training
+5:
+Update TVM Mv model parameters with MLM ob-
+jective on Dv.
+6:
+Prepare
+the
+dataset
+Dk
+consisting
+of
+key-
+representations KRk as per Eq. 2
+7:
+▷KA training
+8:
+Update Key Aggregator Mk model parameters with
+cross-entropy loss for downstream task.
+9: end for
+3
+Experiments
+Our experiments are designed to answer the fol-
+lowing questions: (i) How helpful is the TVM-KA
+architecture over the baseline that involves flatten-
+ing semi-structured object sequences? (ii) How
+does the model compare to existing approaches
+based on record-centric representations? (iii) How
+important is the use of shared attention heads for
+fine-tuning of the Key Aggregator? (iv) Does the in-
+terleaved training procedure help train the network
+effectively?
+3.1
+Data
+We experiment using two application/cloud logs
+datasets and one e-commerce purchase history
+dataset. The first application logs dataset, referred
+to as the ‘Cloud Service Logs,’ is an internal dataset
+consisting of interaction traces typically used for
+product usage analysis. We also use the publicly
+available LogHub (He et al., 2020) dataset, com-
+prising system log messages from the Hadoop dis-
+tributed file system, and a publicly available e-
+commerce dataset, which consists of product pur-
+chase information (Stanley et al., 2017).
+Cloud Service Logs Data – Application event
+traces from a large cloud provider:
+In the
+Cloud Service Logs dataset, application event
+traces are logged by the cloud provider website.
+Event types include login, browsing, account cre-
+ation/maintenance/update, UI navigation, search,
+service creation/deletion, app interactions, and oth-
+ers. Each event has an associated payload that
+provides context around the event. Our raw data is
+a snapshot of application event traces spanning 3
+months and comprising about 450M events, from
+which we build our user sessions.
+A user ses-
+sion is essentially a temporal sequence of event
+traces for that user. While the raw data has over 60
+keys in each event, we use a smaller set of manu-
+ally selected 11 keys, so that existing approaches
+and baselines can be meaningfully used for com-
+parison. We constructed user sessions for 100k
+users. The application events corresponding to
+1) plan upgrade, and 2) opening chatbot (to seek
+help) are considered as milestone events. These
+milestone events are chosen to represent revenue
+generation and user experience, respectively. The
+case of no milestone event occurring is treated as
+third class. From the traces, temporal sequences of
+300 events are extracted to predict if a milestone
+(or no-milestone) event will occur in next 50 time
+5
+
+Dataset
+Train
+Dev
+Test
+# Classes
+Task
+# Keys
+# Time Steps
+Median
+Maximum
+Cloud Service Logs
+12,833
+1,605
+1,604
+3
+Milestone Prediction
+11
+112 (17061)
+300 (177340)
+LogHub
+402,542
+57,506
+115,012
+2
+Anomaly Detection
+46
+19 (1176)
+298 (18530)
+Instacart
+780,003
+97,501
+97,500
+3,212
+Next Product Prediction
+10
+134 (9842)
+3598 (267025)
+Table 1: Dataset Statistics including the median and maximum length of sequences reported in number of time-steps.
+Values in parentheses report the sequence length after sub-word tokenization using the BERT tokenizer.
+steps. We report Macro F1-Score, as the dataset
+exhibits class imbalance. We include additional
+details about the dataset in the appendix.
+Instacart eCommerce Data:
+The publicly avail-
+able Instacart dataset5 contains 3 million grocery
+purchase orders of nearly 200, 000 users of the ap-
+plication. Each order consists of multiple products
+and each structured object associated with a prod-
+uct contains meta-data such as day of the week,
+product category, department, aisle, etc. We re-
+process this dataset to create sequences of product
+purchases and evaluate models on the task of the
+next product prediction. We predict the product
+name given the sequence of product orders,6 which
+is effectively a classification task over a universe of
+3212 products. Existing work on this dataset has
+focused on a simpler binary prediction task where
+models are asked to predict if a particular item is
+likely to be purchased again.7
+LogHub Data:
+We use the HDFS-1 from
+LogHub (He et al., 2020) for the log anomaly de-
+tection task. As the dataset originally consisted of
+lines of log messages, we use the Drain log parser
+(He et al., 2017) to identify 48 log templates. Using
+a semi-automated approach, we assign key names
+to the value slots of the templates. Thus, each log
+line is converted to a structured object with 46 key-
+value pairs. The original dataset splits the log lines
+into blocks, and the binary prediction task is to pre-
+dict whether a particular block is anomalous. The
+dataset is highly imbalanced, with around 3% of
+the instances belonging to the anomalous class. So,
+we report F1-Score for the anomalous class.
+3.2
+Encoders
+Baselines: We flatten each key-value pair in a struc-
+tured object and encode them with special markers
+5https://tech.instacart.com/3-million-instacart-orders-
+open-sourced-d40d29ead6f2
+6We use the complete structured object.
+7https://www.kaggle.com/competitions/instacart-market-
+basket-analysis/leaderboard
+indicating boundaries for objects and timesteps.
+We fine-tune the pre-trained encoders for each
+downstream task and report their performance. We
+experiment with BERT (Devlin et al., 2019) and
+Longformer (Beltagy et al., 2020) as the pre-trained
+encoders.
+We also compare our model with popular ap-
+proaches for creating record-centric representa-
+tions. These approaches first obtain the representa-
+tions for each object Ji, and then feed them to an
+inter-object transformer to create the representation
+of the whole sequence of objects. We experiment
+with three popular methods, where each object rep-
+resentation is obtained from the key-value pair rep-
+resentations by 1) point-wise summation, 2) con-
+catenation then project-down (Mizrachi and Levin,
+2019; de Souza Pereira Moreira et al., 2021), and
+3) self-attention then averaging (Zhang et al., 2019;
+Gu et al., 2021).
+Encoders for TVM-KA:
+One of the advantages
+of the TVM-KA architecture is that it is agnostic to
+the choice of the encoder. We employ the same en-
+coder architectures used in our baselines to enable
+a direct performance comparison. Recall that the
+TVM module and KA module share attention heads
+to facilitate sharing of information between them.
+To pre-train the TVM, we mask 15% of the tokens
+in every Value Sequence, and the objective is to
+predict the masked tokens. We do not mask value-
+separator and key aggregator tokens; we only mask
+the values. Details on hyper-parameter tuning and
+the iterative training schedule are available in the
+appendix.
+3.3
+Results
+Table 2 reports the primary results from our experi-
+ments. We include the results on three datasets and
+for each dataset, we report the overall performance
+along with the performance of the models on slices
+of the dataset where the length of the sequence is
+greater than the median length for that dataset.
+6
+
+Configuration
+Cloud Service Logs (Macro F1)
+
+Loghub (Binary F1-Score)
+L >Median
+(50%)
+Overall
+L >Median
+(50%)
+Overall
+L >Median
+(51.37%)
+Overall
+Flattened Encoding
+(BERT)
+(Devlin et al., 2019)
+Random
+(bert-base-uncased)
+49.55
+50.22
+9.6
+9.4
+0.00
+53.62
+Pre-Trained
+(bert-base-uncased)
+77.30
+74.77
+20.10
+18.70
+23.32
+61.63
+Pre-Trained
+(bert-large-uncased)
+80.06
+76.59
+21.07
+19.11
+58.30
+75.86
+Flattened Encoding
+(Longformer)
+(Beltagy et al., 2020)
+Pre-Trained
+75.83
+73.71
+16.94
+16.08
+97.71
+98.54
+Flattened Encoding
+(GPT-2)
+Pre-Trained
+-
+64.92
+-
+-
+-
+-
+Record-centric
+Representation
+(de Souza Pereira Moreira et al., 2021)
+(Gu et al., 2021)
+Summation
+78.97
+77.33
+7.11
+5.10
+99.22
+99.51
+Concat
+77.76
+75.99
+7.18
+5.11
+99.29
+99.57
+Self-Attention
+79.18
+77.73
+7.98
+6.34
+99.08
+99.42
+TVM-KA
+Joint Modeling
+80.15
+77.68
+17.04
+16.0
+46.78
+70.72
+No Interleaving
+73.19
+73.22
+18.32
+17.5
+99.05
+98.64
+Interleaving
+81.26
+79.60
+23.44
+22.54
+98.79
+99.32
+Table 2: Comparison of TVM-KA model with the baseline approaches on various datasets. In our proposed approach,
+both TVM and KA components have the same architecture and the number of parameters as bert-base-uncased. We
+additionally report results on a subset of the test set whose sequence length (L) (post-tokenization) is greater than
+the median length for each dataset. The values in parenthesis indicate the percentage number of instances where the
+length of a sequence is greater than the median sequence length. The results from our approach are statistically
+significant with respect to all other approaches on both cloud service logs and instacart datasets (p-value < 0.03).
+Comparison with Flattened encoding:
+As seen
+in the ‘overall’ scores for each dataset in Table
+2, flattening (first four rows) yields a significantly
+lower performance compared to our approach in-
+volving the use of interleaved training for TVM-
+KA (last row). For instance, on the cloud service
+logs, there’s an increase of 3.9%-58.5% compared
+to flattened encodings in macro F1 scores. Similar
+trends are reported on the Instacart dataset.
+Interestingly, we find that on the LogHub dataset,
+the Longformer model (Beltagy et al., 2020) is
+able to obtain a comparable performance (98.54
+vs 99.32). A deeper investigation reveals that the
+Loghub dataset, unlike our other datasets, has a me-
+dian maximum sequence length (post sub-word to-
+kenization) of 1176 tokens. Since the Longformer
+model can handle sequences of up to 4096 tokens,
+it is capable to perform on par with our TVM-KA
+approach.
+Comparison with Record-centric representa-
+tions:
+Unlike flattened encoding, the record-
+centric representation does not suffer from the mod-
+eling limitations associated with the maximum se-
+quence length limit. These representations can en-
+code sequences in their entirety, since most datasets
+have fewer than 300 objects (time-steps), and the
+sequence length is equal to the number of time
+steps. However, the record-centric view may not
+adequately model the dependencies between val-
+ues of the same key across different time steps.
+We find that our approach outperforms all record-
+centric representation baselines on the Cloud Ser-
+vice Logs dataset as well as the Instacart dataset.
+Interestingly, the performance of TVM-KA on the
+LogHub data is similar to that of different record-
+centric baselines (99.32 vs 99.57) which may be
+due to the relative simplicity of the prediction task.
+Figure 3: TVM-KA model performance for each in-
+terleaving stage. The red, green, and blue lines, along
+with their respective colored y-axes, indicate the per-
+formance of the Loghub, Instacart, and Cloud Service
+Logs datasets, respectively.
+7
+
+Importance of interleaved training:
+As seen in
+Table 2, using our interleaving training method out-
+performs training the model with no interleaving.
+This supports our hypothesis that sharing a few at-
+tention heads helps the TVM-KA model uncover
+better key-representations for the downstream task
+as training progresses. Figure 3 illustrates the in-
+crease in performance with each stage of interleav-
+ing on all three datasets.
+Joint Modeling vs Interleaved Training of TVM-
+KA:
+We observe that joint modeling performs
+poorly compared to our interleaving approach. We
+found this surprising as we had expected it to be
+at par with our approach when the joint models
+fit in memory.8
+We hypothesize that by inter-
+leaving and sharing attention heads between TVM
+and KA, the fine-tuning of the KA on the down-
+stream task introduces a task-specific bias to help
+improve the key-representations. This in-turn, ben-
+efits the pre-trained representations of the TVM
+via shared-attention weights and further improves
+performance in the next round of training. In the
+absence of this bias, the joint model perhaps con-
+verges at an alternative minima that is not as good.
+Effect of varying the number of shared attention
+heads:
+In general, we observe that sharing of 4
+and 6 attention heads helps the most. Sharing too
+few or too many attention heads results in an aver-
+age drop of 2%-43% in performance. We include
+further details in the appendix.
+Effect of parameter size/model capacity:
+To
+investigate if the model capacity could be a bottle-
+neck for the approaches based on flattened repre-
+sentations. We fine-tune bert-large-uncased model
+which has 3x the parameter of bert-base-uncased
+model and approximately 1.5x the parameters of
+the TVM-KA network. We find that our model
+performs better and hypothesize that the improved
+performance is primarily due to the value-aware
+key representations and the model’s resultant abil-
+ity to accommodate longer sequences due to the
+decoupling of keys.
+4
+Related Work
+Our work is related to several areas of research.
+First, modeling multiple sets of key-value entries
+has similarities to modeling the rows and columns
+in a table. Second, the predictive tasks we apply
+8We trained our joint models on 80GB A100 GPUs.
+our models to are related to multi-variate regression
+and spatio-temporal modeling tasks. Finally, our
+two-stage TVM-KA architecture is a type of hier-
+archical encoder, forms of which have been used
+for multiple tasks, from modeling tabular data to
+encoding text.
+Modeling Tabular and Timeseries Data:
+As
+we explicitly model the value sequence for each
+key, the data object we work with is reminiscent
+of tabular data where each row is a time-step and
+each column comprises the values for a particular
+field. On the surface, the modeling of data may
+appear related, but the actual tasks and models de-
+veloped for tasks on tabular data cannot be applied
+to semi-structured object sequences. This is be-
+cause the work on modeling textual tabular data
+often involves developing specialized models fo-
+cused on retrieving information from cells (Zayats
+et al., 2021; Wang et al., 2021; Iida et al., 2021;
+Yang et al., 2022), multi-hop reasoning across in-
+formation in different cells across parts of the table
+(Chen et al., 2021; Zhao et al., 2022a), combining
+information present in tables and unstructured text
+for information seeking tasks (Li et al., 2021; Zhu
+et al., 2021; Zayats et al., 2021; Luetto et al., 2023;
+Cholakov and Kolev, 2022), etc. In addition, work
+on modeling time-series tabular data has focused
+on numerical data (Zhou et al., 2021; Zerveas et al.,
+2021; Zhao et al., 2022b) with purpose-built task-
+specific architectures that cannot be easily adapted
+to other tasks (Wu et al., 2021; Padhi et al., 2021).
+Modeling Temporal Graph Sequences and Rec-
+ommender Systems:
+Our approach is also re-
+lated to a rich body of work on modeling temporal
+graphs and recommendation systems (Xu et al.,
+2021b; Grigsby et al., 2021; de Souza Pereira Mor-
+eira et al., 2021). Temporal graph evolution prob-
+lems involve constructing representations to enable
+tasks such as link prediction (Sankar et al., 2020;
+Xu et al., 2021a), item recommendation in user ses-
+sions (Hsu and te Li, 2021), answering queries on
+graphs and sequences (Saxena et al., 2022), clas-
+sifying graph instances in a sequence,(Xu et al.,
+2021a,b) etc. Our findings suggest that such ap-
+proaches do not scale for long sequences for the
+tasks we experimented with. However, our record-
+centric model baselines (de Souza Pereira Moreira
+et al., 2021; Mizrachi and Levin, 2019) are similar
+in approach to these methods.
+8
+
+Parameter sharing in neural network models:
+Deep neural networks are usually trained to tackle
+different tasks in isolation. Networks that cater to
+multiple related tasks (multi-task neural networks)
+seek to improve generalization and process data ef-
+ficiently through parameter sharing and joint learn-
+ing. Traditional hard-parameter sharing uses the
+same initial layers and splits the network into task-
+specific branches at an ad hoc point (Guo et al.,
+2018; Lu et al., 2017). On the other hand, soft-
+parameter sharing shares features via a set of task-
+specific networks (Liu et al., 2019; Maninis et al.,
+2019). More recently adaptive sharing approaches
+have been proposed that decide what parameters
+to share across tasks to achieve the best perfor-
+mance (Vandenhende et al., 2019; Sun et al., 2020).
+The parameter sharing utilized in this work is dif-
+ferent from the aforementioned approaches, as we
+share some attention head weights between the two
+networks (as compared to shared layers), in a way
+that could help to improve overall end-task perfor-
+mance.
+5
+Discussion and Conclusion
+In this paper, we have presented a two-part encoder
+to model structured object sequences. The choice
+of a key-centric representation enables us to encode
+larger objects as well as long sequences. Our exper-
+iments show that by using the two-part TVM-KA
+architecture, we are able to inject downstream task
+information into the temporal value modeler net-
+work to generate key representations that are more
+relevant. However, the key-centric representation
+does not allow the model to support tasks such as
+sequence tagging of the structured objects. Nor
+does it allow to model graph sequences effectively,
+as it does not use a global view of the structured ob-
+jects. Thus, it may not be able learn patterns across
+fields at different time steps. For such tasks, a
+record-centric representation is perhaps more help-
+ful. Both key-centric and record-centric representa-
+tions have their strengths and weaknesses, and the
+choice should be made with the downstream task
+in mind.
+We additionally present a novel interleaving
+scheme to train our two-part encoder. We induce
+task bias into the model by sharing attention heads
+between Temporal Value Modeler and Key Aggre-
+gator components. Our proposed approach out-
+performs the baseline approaches which flatten
+structured object sequences and those based on
+record-centric representations. To the best of our
+knowledge, we are the first to demonstrate the use
+of a key-centric representation for structured object
+sequence encoding at scale.

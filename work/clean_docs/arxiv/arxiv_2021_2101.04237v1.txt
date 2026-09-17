@@ -1,0 +1,834 @@
+Solving Common-Payoff Games with Approximate Policy Iteration
+Samuel Sokota,1∗Edward Lockhart, 2∗
+Finbarr Timbers,2 Elnaz Davoodi,2 Ryan D’Orazio,3
+Neil Burch,2 Martin Schmid,2 Michael Bowling,1, 2 Marc Lanctot 2
+1Universtiy of Alberta
+2DeepMind
+3Mila, Universit´e de Montr´eal
+
+Abstract
+For
+artiﬁcially
+intelligent
+learning
+systems
+to
+have
+widespread
+applicability
+in
+real-world
+settings,
+it
+is
+important that they be able to operate decentrally. Unfortu-
+nately, decentralized control is difﬁcult—computing even an
+epsilon-optimal joint policy is a NEXP complete problem.
+Nevertheless, a recently rediscovered insight—that a team of
+agents can coordinate via common knowledge—has given
+rise to algorithms capable of ﬁnding optimal joint policies in
+small common-payoff games. The Bayesian action decoder
+(BAD) leverages this insight and deep reinforcement learning
+to scale to games as large as two-player Hanabi. However, the
+approximations it uses to do so prevent it from discovering
+optimal joint policies even in games small enough to brute
+force optimal solutions. This work proposes CAPI, a novel
+algorithm which, like BAD, combines common knowledge
+with deep reinforcement learning. However, unlike BAD,
+CAPI prioritizes the propensity to discover optimal joint
+policies over scalability. While this choice precludes CAPI
+from scaling to games as large as Hanabi, empirical results
+demonstrate that, on the games to which CAPI does scale,
+it is capable of discovering optimal joint policies even when
+other modern multi-agent reinforcement learning algorithms
+are unable to do so.
+Introduction
+In reinforcement learning (Sutton and Barto 2018), an agent
+seeks to learn a policy that extracts a large return from an
+environment, making it an algorithmic formulation of choice
+for many control problems. However, the standard reinforce-
+ment learning framework assumes that decision making is
+centralized. In general, a control problem may require mul-
+tiple decision makers to act in a setting that bars complete in-
+formation sharing, often in practice because decision makers
+are spatially separated. This problem is known as decentral-
+ized control and has been studied by a number of different
+communities using varying formalisms (Yu-Chi Ho 1980;
+Oliehoek and Amato 2016; Littman 1994), which we col-
+lectively refer to as common-payoff games (Leyton-Brown
+Copyright © 2021, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+and Shoham 2008).1
+Despite involving multiple agents, the decentralized con-
+trol problem bears relatively little similarity to general
+game-theoretic settings (Powers and Shoham 2004), in
+which agents possess adversarial incentives and there is not
+a generally agreed upon notion of optimality. It is also dis-
+tinct from other problem settings operating under common-
+payoff game formalisms, such as ad-hoc coordination (Stone
+et al. 2010), in which some of the agents are externally speci-
+ﬁed, or emergent communication (Lazaridou, Peysakhovich,
+and Baroni 2017), in which coordination must arise natu-
+rally (not from precoordinated learning procedures). Instead,
+in the decentralized control problem, the entity seeking to
+maximize return speciﬁes all agents, including possibly pre-
+coordinated learning procedures.
+While the decentralized control problem bears resem-
+blance to the classical reinforcement problem in that both
+involve maximizing expected return, decentralized control
+presents challenges that do not arise in classical reinforce-
+ment learning. Most notably, dynamic programming is not
+directly applicable to agents in decentralized control prob-
+lems because the value of an agent’s information state de-
+pends on the policies of its teammates. One way to circum-
+vent this issue is by alternating maximization (Nair et al.
+2003). Each agent maximizes its policy in turn, holding
+the policies of its teammates ﬁxed. This procedure guaran-
+tees convergence to a Nash equilibrium, but can be arbitrar-
+ily far away from an optimal joint policy, as measured by
+expected return. Independent reinforcement learning (IRL)
+(Tan 1997), a paradigm in which all agents concurrently exe-
+cute reinforcement learning algorithms, is another approach
+to dealing with decentralized control problems that has been
+the subject of attention in the deep multi-agent reinforce-
+ment learning community. However, the convergence guar-
+antees of IRL are less well-understood than those of alternat-
+ing maximization and those that do exist show convergence
+∗These authors contributed equally to this work.
+1Cooperative game is sometimes used as an umbrella term for
+the same purpose. This work uses common-payoff game to avoid
+conﬂation with cooperative game theory, in which cooperative
+game carries a distinct meaning.
+arXiv:2101.04237v1  [cs.AI]  11 Jan 2021
+
+only to local optima (Bono et al. 2018; Claus and Boutilier
+1998).
+Arguably the most exciting line of research over the last
+decade in the pursuit of optimal joint policies for common-
+payoff games stems from the seminal insight of Nayyar,
+Mahajan, and Teneketzis (Nayyar, Mahajan, and Teneket-
+zis 2013). In their work, they show that, by conditioning on
+common knowledge, a team of decentralized agents can ef-
+fectively act as a single agent, allowing for the direct appli-
+cation dynamic programming and resolving the difﬁculty of
+joint exploration. But conditioning on common knowledge
+is not a panacea. Finding an optimal, or even ϵ-optimal, joint
+policy for a Dec-POMDP (Oliehoek and Amato 2016), the
+standard formalism for common-payoff games, is a NEXP-
+complete problem (Bernstein et al. 2000; Rabinovich, Gold-
+man, and Rosenschein 2003). While Nayyar, Mahajan, and
+Teneketzis’s insights lead to solution methods for toy games,
+they are not immediately applicable to larger games, as con-
+ditioning on common knowledge is an exponential reduc-
+tion. And while there has signiﬁcant progress in scaling
+similar ideas in the Dec-POMDP community (Dibangoye
+et al. 2016; Dibangoye and Buffet 2018), resulting algo-
+rithms have largely been restricted to games having hun-
+dreds of states and fewer than ten actions.
+At the time of writing, the Bayesian action decoder
+(BAD) (Foerster et al. 2019) is the only attempt that has been
+made to scale Nayyar, Mahajan, and Teneketzis’s common
+knowledge approach to very large settings. BAD is a policy-
+based approach relying on deep learning and independence
+assumptions. When combined with population based train-
+ing, BAD achieves good performance in two-player Han-
+abi. However, while BAD achieves its intent of scalability,
+the approximations it requires to do so are so compromising
+that it struggles to solve games small enough to brute force
+an optimal solution.
+Ideally there would an exist a common-knowledge ap-
+proach matching or exceeding BAD’s performance on large
+games that was also capable of solving small and medium-
+sized games. This work takes a ﬁrst step toward this goal
+by introducing cooperative approximate policy iteration
+(CAPI), a novel deep approximate policy iteration algo-
+rithm for common-payoff imperfect information games.
+Like BAD, CAPI seeks to scale Nayyar, Mahajan, and
+Teneketzis’s insights. But unlike BAD, CAPI prioritizes re-
+covering the optimal joint policy over scalability. To demon-
+strate the efﬁcacy of CAPI, we consider two common-payoff
+games from OpenSpiel. Having as many as tens of thousands
+of states and as many as hundreds of actions, these games are
+two orders of magnitudes larger than the common-payoff
+games that are often considered in Dec-POMDP literature
+(Dibangoye et al. 2016). We show that CAPI is able to
+achieve strong performance, solving (discovering an optimal
+policy of) both games a majority of the time.
+Background
+Public and Common Knowledge
+Common knowledge has long been a subject of investigation
+in philosophy (Vanderschraaf and Sillari 2013; Lewis 1969),
+multi-agent systems (Halpern and Moses 2000), and (epis-
+temic) game theory (Aumann 1976; Pacuit and Roy 2015;
+Perea 2012). Let KG
+1 be the set of information known to all
+agents in group G. Let KG
+i+1 be the subset of KG
+i
+that is
+known by all agents to be in KG
+i . Then
+KG
+common := ∩∞
+i=1KG
+i
+is common knowledge among G. The signiﬁcance of com-
+mon knowledge is that the inclusion status of any proposi-
+tion is known by every member of the group. In general, the
+same cannot be said for the set KG
+i for any i ∈N. This dis-
+tinction has important implications regarding the abilities of
+groups of agents to coordinate their actions.
+Unfortunately, while common knowledge appears to be
+essential for coordination in many settings, the inﬁnite
+regress that deﬁnes it can make it expensive to compute
+(Schroeder de Witt, Foerster et al. 2019; Kovar´ık et al. 2019;
+ˇSustr, Kovaˇr´ık, and Lis´y 2019; Clark and Marshall 1981;
+Halpern and Moses 2000). In imperfect information games,
+a recent effort to circumvent this issue focuses attention on
+public knowledge, a special subset of common knowledge
+that is easily computable (Kovar´ık et al. 2019). Speciﬁcally,
+public knowledge is the subset KG
+public ⊂KG
+common of com-
+mon knowledge that is publicly announced as such.
+Factored Observation Stochastic Games
+This
+work
+adopts
+ﬁnite
+common-payoff
+factored-
+observation stochastic game (FOSG) formalism (Kovar´ık
+et al. 2019). Finite common-payoff FOSGs have sufﬁcient
+expressive power to represent ﬁnite Dec-POMDPs, the
+standard formalism for common-payoff games, and handle
+public knowledge in a principled manner. A common-payoff
+FOSG is a tuple G = ⟨N, W, w0, A, T , R, O⟩where
+• N = {1, . . . , N} is the player set.
+• W is the set of world states and w0 is a designated initial
+state.
+• A = A1 × · · · × AN is the space of joint actions.
+• T is the transition function mapping W × A →∆(W).
+• R=(R1, . . . , RN) and R1= · · · =RN : W × A →R is
+the reward function.
+• O
+=
+(Opriv(1), . . . , Opriv(N), Opub) is the observation
+function where
+– Opriv(i) : W × A × W →Opriv(i) speciﬁes the private
+observation that player i receives.
+– Opub : W × A × W →Opub speciﬁes the public obser-
+vation that all players receive.
+– Oi=Oi(w, a, w′)=(Opriv(i)(w, a, w′), Opub(w, a, w′))
+is player i’s observation.
+Note that actions need not be observable in FOSGs.
+There are also a number of important derived objects in
+FOSGs.
+• A history is a ﬁnite sequence h = (w0, a0, . . . , wt). We
+write g ⊑h when g is a preﬁx of h.
+• The set of histories is denoted by H.
+
+• The
+information
+state
+for
+player
+i
+at
+h
+=
+(w0, a0, . . . , wt) is si(h) := (O0
+i , a0
+i , . . . , Ot
+i).
+• The information state space for player i is
+Si := {si(h) | h ∈H}.
+• The legal actions for player i at si is denoted Ai(si).
+• A joint policy is a tuple π = (π1, . . . , πN), where policy
+πi maps Si →∆(Ai).
+• The public state at h is the sequence
+spub(h) := spub(si(h)) := (O0
+pub, . . . , Ot
+pub).
+• The public tree Spub is the space of public states.
+• The public set for s ∈Spub is Ipub(s):={h | spub(h) = s}.
+• The information state set for player i at s ∈Spub is
+Si(s) := {si ∈Si | spub(si) = s}.
+• The reach probability of h under π is
+P π(h) = PT (h) Q
+i∈N P π
+i (h) where
+– Chance’s contribution is
+PT (h) := Q
+h′aw⊑h T (h′, a, w).
+– Player i’s contribution is
+P π
+i (h) := P π
+i (si(h)) := Q
+s′
+ia⊑si(h) πi(s′
+i, a).
+Public Knowledge in Common-Payoff Games
+Nayyar, Mahajan, and Teneketzis (Nayyar, Mahajan, and
+Teneketzis 2013) were the ﬁrst to formalize the general
+importance of public knowledge for coordinating teams of
+agents in common-payoff games. They introduce the par-
+tial history sharing information structure, a model for de-
+centralized stochastic control resembling common-payoff
+FOSGs in that it explicitly acknowledges public obser-
+vations. Nayyar, Mahajan, and Teneketzis show that this
+structure can be converted into a POMDP, which we re-
+fer to as the public POMDP.2 Given a common-payoff
+FOSG ⟨N, W, w0, A, T , R, O⟩, we can construct a public
+POMDP ⟨˜
+W, ˜w0, ˜
+A, ˜T , ˜R, ˜O⟩as follows.
+• The world states of the public POMDP ˜
+W are the histories
+H of the common-payoff FOSG.
+• The initial world state of the public POMDP ˜w0 is the one
+tuple (w0).
+• The actions of the public POMDP are called prescription
+vectors. A prescription vector is denoted by Γ and has N
+components. The ith component of a prescription vector
+Γi is the prescription for player i. A prescription Γi maps
+si to an element of Ai(si) for each si ∈Si(spub(h)). In
+words, a prescription instructs a player in the common-
+payoff FOSG how to act as a function of its private infor-
+mation. An example is shown in Figure 1.
+• Given ˜w ≡h and Γ, the transition distribution ˜T ( ˜w, Γ) is
+induced by T (h, a), where
+a ≡Γ(h) := (Γ1(s1(h)), . . . , ΓN(sN(h))) .
+• Given ˜w ≡h and ˜w′ ≡h′, the reward ˜R( ˜w, Γ, ˜w′) ≡
+R1(h, Γ(h), h′) = · · · = RN(h, Γ(h), h′).
+2In control literature, this is called the common information ap-
+proach.
+a
+b
+c
+d
+e
+Action
+Information State
+s1(s)1
+s1(s)2
+s2(s)1
+s2(s)2
+s2(s)3
+Γ1
+Γ2
+Figure 1: An example prescription vector. There are two
+players, with ﬁve actions each. Player one (red) has two pos-
+sible information states while player two (blue) has three.
+The prescription vector decides each player’s action as a
+function of its information state, as shown by the darkened
+squares.
+• Given ˜w ≡h and ˜w′ ≡h′, the observation ˜O( ˜w, Γ, ˜w′) ≡
+Opub(h, Γ(h), h′).
+In summary, the public POMDP can be informally de-
+scribed as involving a coordinator who only observes pub-
+lic observations and instructs the players how to act based
+on these observations. One can imagine that this formula-
+tion could be executed at test time in a decentralized fashion
+by having each player carry around an identical copy of the
+central coordinator. Since each player feeds its copy of the
+coordinator the same public observations, each copy of the
+coordinator produces the same prescription vector and it is
+as if a single coordinator were acting in the public POMDP.
+As with any with POMDP, the public POMDP can also be
+considered as a belief MDP, as is exampled in Figure 2. We
+follow the precedent set by Foerster et al., who refer to this
+perspective as the public belief MDP (PuB-MDP).
+The public POMDP and PuB-MDP have proven highly
+valuable and have been applied extensively in control lit-
+erature (Gagrani and Nayyar 2018; Afshari and Mahajan
+2018; Vasconcelos and Martins 2016; Arabneydi and Ma-
+hajan 2014; Gagrani and Nayyar 2017; Ouyang, Asghari,
+and Nayyar 2018; Lessard and Nayyar 2013; Tavafoghi,
+Ouyang, and Teneketzis 2018; Tavafoghi, Ouyang, and
+Teneketzis 2016; Ouyang, Tavafoghi, and Teneketzis 2015;
+Zhang, Miehling, and Bas¸ar 2019; Nayyar et al. 2014; Gupta
+2020) and, to a lesser extent, reinforcement learning (Foer-
+ster et al. 2019; Hadﬁeld-Menell et al. 2016; Arabneydi and
+Mahajan 2015) literature. Unfortunately, the public POMDP
+is so massive (there are roughly |Ai|N·|Si| actions at each
+decision point) that it is infeasible to apply POMDP solu-
+tion methods (Hausknecht and Stone 2015; Silver and Ve-
+ness 2010; Somani et al. 2013; Smith and Simmons 2012;
+Pineau, Gordon, and Thrun 2006; Ross et al. 2008; Spaan
+and Vlassis 2005; Shani, Pineau, and Kaplow 2013), out-of-
+
+Γ0
+Γ00
+O0
+pub
+O0
+pub
+O00
+pub
+O00
+pub
+bs
+bΓ0
+s0
+bΓ0
+s00
+bΓ00
+s00
+bΓ00
+s0
+Figure 2: A visualization of a decision point in the PuB-
+MDP. The game begins in state bs, a distribution over the
+public set Ipub(s). The coordinator is given a choice between
+two possible prescriptions Γ′ and Γ′′. Both choices generate
+observations O′
+pub and O′′
+pub with positive probabilities (in-
+ducing public states s′ and s′′ respectively). Accordingly,
+there are four possible belief states for the next time step.
+the-box, to common-payoff games of non-trivial size.
+The Tiny Hanabi Suite
+To emphasize the contrast in guarantees between algorithms
+running in the PuB-MDP and independent learning algo-
+rithms, we display results from the Tiny Hanabi Suite—a
+collection of six very small Dec-POMDPs detailed in the
+appendix. We compare independent Q-learning (IQL), hys-
+teretic Q-learning (HQL) (Matignon, Laurent, and Le Fort-
+Piat 2007), independent advantage actor centralized critic
+(IA2C2) (Lowe et al. 2017; Foerster et al. 2017), value de-
+composition networks (VDN) (Sunehag, Lever et al. 2017),
+simpliﬁed action decoding (SAD) (Hu and Foerster 2020),
+and Q-learning in the PuB-MDP. All algorithms were im-
+plemented tabularly and tuned across nine hyperparameter
+settings. The results shown in Figure 3 are averages over
+32 runs. Code for the Tiny Hanabi Suite is available at
+https://github.com/ssokota/tiny-hanabi.
+Despite tuning, reinforcement learning algorithms per-
+form poorly. HQL, VDN and SAD solve only four of the
+six games, IQL solves only three, and IA2C2 solves only
+one. In contrast, Q-learning in the PuB-MDP solves all six
+games. There results reafﬁrm that the differences in guaran-
+tees between algorithms that operate in the PuB-MDP and
+algorithms that operate within the independent reinforce-
+ment learning paradigm are not just theoretical—they also
+manifest in practice, even for modern multi-agent reinforce-
+ment learning algorithms.
+Cooperative Approximate Policy Iteration
+In this section, we introduce CAPI, a novel instance of ap-
+proximate policy iteration operating within the PuB-MDP.
+At a high level, at each decision point, CAPI generates a
+large number of prescription vectors using a policy and eval-
+uates each of these prescription vectors according to its ex-
+pected reward and the expected estimated value of the next
+belief state, selecting the most highly assessed prescription
+vector as its action. We provide pseudocode for CAPI in Al-
+gorithm 1. Each step is explained in greater detail below.
+1. At each decision point, CAPI takes a belief state b and a
+number of rollouts K as argument.
+2. CAPI produces its policy π(b) (over prescription vectors)
+as a function of the belief state. CAPI can either keep a
+separate tabular policy for each public state in the game
+or produce it by passing the belief state through a neural
+network.
+3. CAPI acquires K prescription vectors as a function of the
+policy π(b). Acquisition can be done either by sampling
+or taking the K-most-likely.
+4. CAPI evaluates each of the K prescription vectors. For
+each prescription vector Γ(k), this involves
+(a) Computing expected reward r(k) for Γ(k) given b.
+(b) Computing the next belief state b(k,Opub) for each
+Opub.
+(c) Estimating the value v(k,Opub) of b(k,Opub) using the
+value network.
+(d) Computing the probability distribution p(k) over
+public observations given b and Γ(k).
+The assessed value is the expected reward plus the ex-
+pected estimated value of the next belief state
+q(k) ←r(k) +
+E
+Opub∼p(k)v(k,Opub).
+5. CAPI trains the policy to more closely resemble the
+most highly assessed prescription vector Γ(k∗) and the
+value network to more closely resemble the correspond-
+ing value q(k∗).
+6. CAPI returns a random prescription vector among those
+it assessed if it is exploring. Otherwise it returns the most
+highly assessed prescription vector.
+0.66
+0.68
+0.70
+0.72
+0.74
+Game A
+Approach
+IQL
+HQL
+IA2C2
+VDN
+SAD
+PuB-MDP
+0.70
+0.75
+0.80
+0.85
+0.90
+0.95
+1.00
+Game B
+0.650
+0.675
+0.700
+0.725
+0.750
+0.775
+0.800
+0.825
+Game C
+0
+250K
+500K
+750K
+1M
+0.76
+0.78
+0.80
+0.82
+Game D
+0
+250K
+500K
+750K
+1M
+0.6
+0.7
+0.8
+0.9
+1.0
+Game E
+0
+250K
+500K
+750K
+1M
+0.625
+0.650
+0.675
+0.700
+0.725
+0.750
+0.775
+Game F
+Episode
+Expected Return
+Figure 3: Performance comparison in the Tiny Hanabi Suite.
+Q-learning in the PuB-MDP consistently solves every game.
+In contrast, the algorithms operating within the independent
+reinforcement learning paradigm (IQL, HQL, IA2C2, VDN,
+SAD) are unable to do so.
+
+Algorithm 1 CAPI
+procedure ACT(b, K)
+[Γ(k)] ←prescription vectors(π(b), K)
+[r(k)] ←expected rewards(b, [Γ(k)])
+[b(k,Opub)] ←next beliefs(b, [Γ(k)])
+[v(k,Opub)] ←estimate values([b(k,Opub)])
+[p(k)] ←pub observation probabilities(b, [Γ(k)])
+[q(k)] ←[r(k)] + pub expectation([p(k)], [v(k,Opub)])
+k∗←argmax([q(k)])
+add to buffer(b, Γ(k∗), q(k∗))
+if explore then
+return random([Γ(k)])
+return Γ(k∗)
+We run CAPI without sampling transitions, meaning that
+the episode is played out for every transition (i.e., every
+branch of the public tree) that occurs with positive probabil-
+ity, rather than sampling each transition. After each episode,
+we train the value network and policy and wipe the buffer.
+As of yet, we have left two important details unexplained.
+First, how can CAPI pass a belief state over an exponential
+number of histories into a network? To do so, CAPI adopts
+a trick from DeepStack (Moravˇc´ık, Schmid et al. 2017; Ko-
+var´ık and Lis´y 2019), and instead passes the public state s
+and each player’s contribution to the reach probability
+
+P π
+i |Si(s)(· | s)
+
+i∈N
+as input, where P π
+i denotes player i’s contribution to the
+reach probability and f |X denotes the function f restricted
+to the domain X. This information is a sufﬁcient statistic for
+the belief state, but is more compact (albeit still exponential
+in the general case). An explanation of sufﬁciency is offered
+in the appendix and can also be found in Kovar´ık and Lis´y.
+Second, how can CAPI maintain a policy over an expo-
+nentially large space? To do so, CAPI adopts a trick from
+BAD (Foerster et al. 2019) and uses a distribution over pre-
+scription vectors that factors across information states
+P(Γ | b) =
+Y
+i∈N
+Y
+si∈Si(b)
+π(Γ(si) | b).
+This parameterization reduces the space required to store
+the distribution from |Ai|N·|Si| to |Ai| · N · |Si|, making
+it explicitly manageable in the games we consider. While
+this parameterization is constraining in that direct optimiza-
+tion by gradient ascent will only guarantee a local optima,
+search gives CAPI the opportunity to escape these local op-
+tima. CAPI can optionally exploit this parameterization to
+add structured exploration by randomly setting rows of the
+policy to uniform random.
+Experiments
+Problem Domains
+We consider two common-payoff games from Open-
+Spiel (Lanctot, Lockhart et al. 2019) to demonstrate the ef-
+ﬁcacy of CAPI.
+Trade Comm
+The ﬁrst is a communication game based on
+trading called Trade Comm. The game proceeds as follows.
+1. Each player is independently dealt one of num items
+with uniform chance.
+2. Player 1 makes one of num utterances utterances,
+which is observed by player 2.
+3. Player 2 makes one of num utterances utterances,
+which is observed by player 1.
+4. Both players privately request one of the num items ∗
+num items possible trades.
+The trade is successful if and only if both player 1 asks to
+trade its item for player 2’s item and player 2 asks to trade its
+item for player 1’s item. Both players receive a reward of one
+if the trade is successful and zero otherwise. In our experi-
+ment, we use num items = num utterances = 12.
+This means that there is exactly enough bandwidth for the
+players to losslessly communicate their items and an opti-
+mal policy receives an expected reward of one.
+This deceivingly easy-sounding game nicely illustrates
+the difﬁculty of common-payoff games. It is too large to be
+tackled directly by using a public POMDP transformation
+and POMDP solution methods (the combination of which
+have been applied to games having fewer than 10 actions,
+whereas Trade Comm has 100s). But simultaneously, as
+is shown in the appendix, independent deep reinforcement
+learning (Mnih, Kavukcuoglu et al. 2015; Mnih et al. 2016)
+catastrophically fails to learn a good policy.
+The code used to generate the results for CAPI is available
+at https://github.com/ssokota/capi.
+Abstracted Tiny Bridge
+For our second game, we con-
+sider Abstracted Tiny Bridge, which is a small common-
+payoff version of contract bridge retaining some interesting
+strategic elements. In the game, each player is dealt one of
+12 hands as a private observation. The two players then bid
+to choose the contract. The common payoff is determined
+by the chosen contract, the hand of the player who chose the
+contract, and the hand of player who did not chose the con-
+tract. The challenge of the game is that the players must use
+their bids (actions) both to signal their hands and to select the
+contract, for which there are increasingly limited options as
+more bids are made. The exact rules are detailed on Open-
+Spiel.
+Despite its name, Abstracted Tiny Bridge is much larger
+than games traditionally considered in Dec-POMDP liter-
+ature, having over 50,000 nonterminal Markov states. For
+reference, Mars Rover (Amato and Zilberstein 2009), the
+largest game considered by many Dec-POMDP papers, has
+only 256.
+Baselines
+We again use tabular IQL, HQL, IA2C2, VDN, and SAD as
+baselines. In our preliminary experiments the tabular imple-
+mentations of these algorithms outperformed the respective
+deep variants.
+
+IA2C2
+VDN
+SAD
+CAPI
+IQL
+HQL
+1.0
+0.9
+0.8
+0.7
+Figure 4: Performance comparison in Trade Comm. CAPI
+consistently solves the game (30/32), whereas none of IQL,
+HQL, IA2C2, VDN, or SAD found an optimal policy on
+any of the 32 runs. Results for IA2C2 and VDN are below
+the bottom cutoff of the graph. Reported results are for best
+joint policy discovered.
+Results
+Below, we describe the high level takeaways of our experi-
+ments. Implementation details can be found in the appendix.
+Trade Comm
+In Figure 4, we show results for IQL, HQL,
+IA2C2, VDN, and SAD after 24 hours (as many as 100 mil-
+lion episodes) and results for CAPI after 2,000 episodes. To
+give context to the scores on the graph, the optimal return
+is one (gray line) and the best joint policies that do not re-
+quire coordination achieve an expected return of only 1/144.
+IA2C2 and VDN (below bottom cutoff of graph) barely out-
+performed the best no-coordination joint policy. The poor
+performance for IA2C2 may be attributable to the stochas-
+ticity of its policies, which are not well suited to Trade
+Comm’s sparse rewards. For VDN, the poor performance
+may be caused by its assumption that the joint value func-
+tion decomposes additively, which provides a bad inductive
+bias for Trade Comm’s non-monotonic value landscape. In
+contrast to IA2C2 and VDN, HQL, IQL, SAD, and CAPI
+signiﬁcantly outperform the best no-coordination joint poli-
+cies. Among the three, CAPI does the best, solving the game
+in 30 out of the 32 runs and nearly solving it on the remain-
+ing 2. In contrast, none of IQL, HQL, and SAD solve Trade
+Comm on any of their respective 32 runs.
+Abtracted Tiny Bridge
+In Figure 5, we show results for
+IQL, HQL, IA2C2, VDN, and SAD after 10 million episodes
+and results for CAPI after 100 thousand episodes. To give
+context to the scores on the graph, the optimal return is the
+gray line and the best joint policy that we are aware of that
+does not require coordination achieves an expected return of
+20.32. IA2C2 arguably performed the worst, having both the
+lowest scoring minimum, median and maximum. IQL and
+VDN performed comparably, with VDN performing slightly
+worse. HQL and SAD arguably performed the best among
+IA2C2
+VDN
+SAD
+CAPI
+IQL
+HQL
+19.6
+19.8
+20.0
+20.2
+20.4
+20.6
+20.8
+21.0
+Figure 5: Performance comparison in Abstracted Tiny
+Bridge. CAPI solves the game on 18 of the 32 runs. None
+of IQL, HQL, IA2C2, VDN, or SAD solve the game on any
+of their respective runs. Reported results are for best joint
+policy discovered.
+the independent reinforcement learning algorithms, consis-
+tently discovering policies that outperform the others on av-
+erage. CAPI shows the strongest performance, solving the
+game on 18 of its 32 runs, contrasting the independent rein-
+forcement learning algorithms, which do not solve the game
+on any of their runs and perform signiﬁcantly worse on av-
+erage.
+Related Work
+From Dec-POMDP Literature
+Independently from Nayyar, Mahajan, and Teneketzis,
+Dibangoye et al. (Dibangoye et al. 2016) show that
+a common-payoff game can be converted into a non-
+observable MDP (NOMDP) (Oliehoek and Amato 2014),
+a special kind of POMDP in which the agent (in this case
+the coordinator) receives no observations. Dibangoye et al.
+call the corresponding belief MDP the occupancy state
+MDP. Dibangoye et al. also introduce feature-based heuris-
+tic search value iteration (FB-HSVI), a novel planning algo-
+rithm with asymptotic optimality guarantees. In a large-scale
+study, Dibangoye et al. show that combining the occupancy
+state, FB-HSVI, and equivalence relations over information
+states is able to solve games with hundreds of states and out-
+performs contemporaneously existing methods.
+MacDermed and Isbell build on the occupancy state MDP
+approach, showing that it can be extended to inﬁnite horizon
+problems when beliefs are bounded. They also show how
+belief compression can be combined with point-based value
+iteration (Spaan and Vlassis 2005) to achieve good empir-
+ical results. There is also recent work that extends the oc-
+cupancy state MDP approach to the reinforcement learning
+problem setting (Dibangoye and Buffet 2018) and to special
+cases involving asymmetric observability (Xie, Dibangoye,
+and Buffet 2020).
+
+Compared to the games investigated in these works, the
+games investigated in this work are larger. However, the
+scalability that is gained by leveraging deep learning and
+CAPI’s policy parameterization precludes CAPI from hav-
+ing the same guarantees as these algorithms.
+From Cooperative MARL Literature
+Outside of this work, there has also been work by the multi-
+agent reinforcement learning community to apply the PuB-
+MDP at scale. BAD (Foerster et al. 2019) scales a policy-
+based approach to the PuB-MDP by using an independence
+assumption across private features to analytically approxi-
+mate belief states and an independence assumption to pa-
+rameterize the distribution over prescription vectors. Foer-
+ster et al. also introduce a belief update correction procedure
+resembling expectation propagation (Minka 2001) and use
+population-based training to show how BAD can be scaled
+to two-player Hanabi.
+Compared to BAD, CAPI is signiﬁcantly less scalable—
+two-player Hanabi is much larger than the games considered
+in this work. However, the cost of this scalability is that BAD
+cannot solve games even as small as game E of the Tiny
+Hanabi Suite. In contrast, our results demonstrate that CAPI
+is capable of discovering optimal policies.
+There has also been work applying decision-time search
+at scale in common-payoff games. SPARTA (Lerer et al.
+2020) runs a one-ply search over the next action in the game
+at each public belief state, using an externally speciﬁed pol-
+icy as a blueprint according to which the rest of the rollout
+is played. Lerer et al. show that in the limit in the number
+of rollouts, SPARTA produces a policy no worse than its
+blueprint. In practice, empirical results on Hanabi suggest
+that SPARTA’s policy tends to signiﬁcantly outperform its
+blueprint.
+Similarly to SPARTA, CAPI performs decision-time plan-
+ning in the PuB-MDP. Unlike SPARTA, CAPI is a self-
+contained learning algorithm and does not require an exter-
+nally speciﬁed blueprint. It is also unlike SPARTA in that its
+design principles are geared toward solving games, whereas
+SPARTA is designed for scalability and has failure cases
+even in small games.
+From Adversarial Game Literature
+Public belief states have also played an important role in
+recent successes in adversarial games. In poker, DeepStack
+(Moravˇc´ık, Schmid et al. 2017), Libratus (Brown and Sand-
+holm 2018), and Pluribus (Brown and Sandholm 2019)
+combine public belief states (Brown and Sandholm 2017;
+ˇSustr, Kovaˇr´ık, and Lis´y 2019) with equilibrium computa-
+tion methods and precomputed value functions (Kovar´ık and
+Lis´y 2019). More recently, Brown et al. proposed ReBeL
+(Brown et al. 2020), which is similar to CAPI in that both
+learn policies and value functions over public belief states
+from self-play and use decision-time planning.
+From Mixed-Motive Game Literature
+Recent work on the game Diplomacy is similar to CAPI in
+how it handles a combinatorial action space (Anthony, Ec-
+cles et al. 2020; Gray, Lerer et al. 2020). The sampled best
+response algorithm Anthony, Eccles et al. propose is espe-
+cially similar in that it also performs a one-ply search using
+a variant of policy iteration with sampled actions. The equi-
+librium search algorithm Gray, Lerer et al. propose is also
+similar in that it performs a one-ply search over the K-most-
+likely actions.
+Conclusion and Future Work
+In this work, inspired by BAD (Foerster et al. 2019) and the
+seminal work of Nayyar, Mahajan, and Teneketzis, we pro-
+pose CAPI, a novel approximate policy iteration algorithm
+for common-payoff imperfect information games. In many
+ways, CAPI is similar to BAD, but differs notably in that it
+is more correct and less scalable. Empirically, we demon-
+strate the efﬁcacy of CAPI by showing that it is able to solve
+games on which modern multi-agent reinforcement learning
+algorithms struggle.
+The direction for future work that we are most interested
+in is the construction of a single public knowledge approach
+inheriting CAPI’s performance (or better) on small games
+and BAD’s performance (or better) on large games. The ex-
+istence of such an algorithm would be an exciting and unify-
+ing discovery. It may require effective mechanisms for learn-
+ing or approximating public belief states and for working
+with compressed or implicit representations of prescription
+vectors. Both of these mechanisms would also be of signiﬁ-
+cance for two-player zero-sum games, where the intractabil-
+ity of public belief states and prescription vectors is a lim-
+iting factor for applying decision-time planning approaches
+to larger problems.

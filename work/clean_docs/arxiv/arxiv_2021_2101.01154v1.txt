@@ -1,0 +1,416 @@
+High-resolution land cover change from
+low-resolution labels: Simple baselines for the 2021
+IEEE GRSS Data Fusion Contest
+Kolya Malkin
+Yale University
+Caleb Robinson∗
+Microsoft AI for Good
+Nebojsa Jojic
+Microsoft Research
+Abstract
+We present simple algorithms for land cover change detection in the 2021 IEEE
+GRSS Data Fusion Contest [2]. The task of the contest is to create high-resolution
+(1m / pixel) land cover change maps of a study area in Maryland, USA, given
+multi-resolution imagery and label data. We study several baseline models for this
+task and discuss directions for further research.
+See
+https://dfc2021.blob.core.windows.net/competition-data/
+dfc2021_index.txt for the data and https://github.com/calebrob6/
+dfc2021-msd-baseline for an implementation of these baselines.
+1
+Introduction
+We describe a possible road map towards estimating high-resolution (e.g., 1m) land cover change,
+using high-resolution multitemporal input imagery and low-resolution (e.g., 30m) noisy land cover
+labels for one or more time points. The examples here use the data from the multitemporal semantic
+change detection track of the 2021 IEEE Geoscience and Remote Sensing Society’s Data Fusion
+Contest (DFC-MSD) [2]. The input imagery is from the National Agriculture Imagery Program
+(NAIP) for the years 2013 and 2017, captured at 1m resolution, and the available labels are from the
+30m-resolution National Land Cover Database (NLCD) for the years 2013 and 2016. The NLCD
+labels are derived from Landsat imagery, and the contest also provides multiyear Landsat data for the
+period between 2013 and 2017. All the data is limited to Maryland, USA.
+The task exempliﬁes the situation commonly found worldwide. New imagery comes in faster than
+high-quality high-resolution labels are being created. However, some older, noisy, and low-resolution
+labels are often available, e.g., 30m NLCD in the United States, or 500m MODIS land cover available
+worldwide. How could one use machine learning to build models that predict high-resolution change
+without a large set of high-resolution change examples? The hope springs from the success of weakly
+supervised segmentation and label-super resolution research, e.g. [8, 7], which demonstrated that it
+is possible to train high-resolution label predictors for high-resolution input imagery using regional
+supervision, where a large block of land (e.g. 30m×30m) is labeled with a single class, which often
+designates an area where land cover follows particular mixing proportions. Weak supervision was the
+topic of the 2020 IEEE GRSS Data Fusion Contest [1].
+Taking the next step to predict land cover change could be as straightforward as applying these
+techniques separately for different time points and comparing the super-resolved labels to estimate
+change, and in this paper we evaluate what such simple baselines could accomplish. We demonstrate
+some simple lessons in terms of scope of training and model selection that could aid in development of
+techniques speciﬁcally built for high-resolution change detection. Such techniques would presumably
+not use the multiyear images in isolation, but analyze them jointly to take advantage of the fact that
+most land cover does not change from year to year.
+
+arXiv:2101.01154v1  [cs.CV]  4 Jan 2021
+
+The paper is organized as follows. We ﬁrst describe the data in the DFC-MSD task and illustrate
+the types of changes that are being scored in the contest. Then we study training neural networks to
+approximate functions y = f(x) where x are high-resolution (1m) image patches and y are upsampled
+30m labels, and discuss how the choices for model complexity and scope of training data can affect
+the results. In particular, a highly expressive and well-trained function f could learn to predict blurry
+labels, because the targets y cone in 30×30 blocks, while very simple color and texture models, e.g.,
+[7, 9], tend to super-resolve them at 1m, as they are unable to assign the same label to 30×30 blocks
+of pixels with varying color and texture. Finally, we discuss possible approaches that could use all
+the data in concert to build more accurate prediction models.
+All data can be downloaded from the addresses listed at https://dfc2021.blob.core.windows.
+net/competition-data/dfc2021_index.txt; alternative fast download instructions can be
+found on the DFC-MSD webpage [2]. Example code is available in the accompanying code repository
+at https://github.com/calebrob6/dfc2021-msd-baseline.
+2
+The change detection task
+2.1
+Data
+The input data in the DFC-MSD comprises 9 layers covering the study area of the state of Maryland
+in the United States (∼35,000 km2). All layers are upsampled from their native resolutions to 1m /
+pixel and provided as 2250 aligned tiles of dimensions not exceeding 4000×4000. The layers are
+the following:
+(1) NAIP (2 layers): 1m-resolution 4-band (red, green, blue, and near-infrared) aerial imagery from
+the US Department of Agriculture’s National Agriculture Imagery Program (NAIP) from two
+points in time: 2013 and 2017.
+(2) Landsat (5 layers): 30m-resolution 9-band imagery from the Landsat-8 satellite from ﬁve time
+points: 2013, 2014, 2015, 2016, and 2017. Each of these images is a median-composite from all
+cloud and cloud-shadow masked surface-reﬂectance scenes intersecting Maryland.
+(3) NLCD (2 layers): 30m-resolution coarse land cover labels from the US Geological Survey’s
+National Land Cover Database [5], in 15 classes (see Table 1) from two time points: 2013 and
+2016. These labels were created in a semi-automatic way, with Landsat imagery as the principal
+input.
+An example of the input layers is shown in Figure 1.
+2.2
+Task
+The goal of the DFC-MSD is to classify pixels in the study area as belonging to classes describing
+land cover change between the times when NAIP 2013 and 2017 aerial photographs were taken.
+Speciﬁcally, we wish to detect the loss or gain of four land cover classes in a simpliﬁed scheme based
+on that of the NLCD: water, tree canopy, low vegetation, and impervious surfaces, as well as the
+absence of land cover change. An approximate correspondence between NLCD classes and the target
+classes is shown in Table 1.
+We require that any pixel classiﬁed as a gain of one land cover class must be simultaneously classiﬁed
+as a loss of another class. Thus, the task is equivalent to creating two aligned land cover maps in the
+four target classes for the two time points and computing their disagreement: pixels assigned class c1
+in 2013 and c2 in 2017 are considered loss of c1 and gain of c2; pixels in which the maps agree are
+considered no change. See Figure 2 for examples of the desired outputs. For example, in the second
+row, a part of the forest is cut (loss of tree canopy). In its place we see some gain in impervious
+surfaces (buildings and roads), as well as some cleared ﬁelds, which are placed in the low vegetation
+category. In a few places, new trees were planted, resulting in no change in land cover between the
+two time points. In the ﬁrst row, where forest is also cut, most of it is still undeveloped and consists
+of cleared ﬁelds. The undisclosed evaluation data consists of many small areas of interest such as the
+ones in the ﬁgure, as well as a set of areas where there has been no change. Ambiguous areas are
+blocked from evaluation. These include shadows and areas which humans have difﬁculty recognizing.
+2
+
+Figure 1: Four of the input data layers in the DFC-MSD. Above: NAIP imagery from 2013 and 2017.
+Below: Coarse NLCD land cover labels from 2013 and 2016. See Table 1 for the color scheme.
+This problem is made difﬁcult by the very different spectral characteristics of the two NAIP layers
+(due to differences in sensors, seasons, and time of day when they were created), as well as the lack of
+high-resolution label data: the only available training labels are the NLCD layers, which are coarse,
+created for different points in time than NAIP, and have a different class scheme.
+2.3
+Contest description
+The DFC-MSD is organized in two phases: the validation phase, in which contestants have 100
+attempts to submit their proposed land cover change maps for a subset of the study area to an
+evaluation server and receive feedback on their performance, and the test phase, in which contestants
+have 10 attempts to submit change maps for a different subset of the study area.
+For the validation phase, a set of 50 out of the 2250 tiles were selected for evaluation. Within these
+tiles, regions of interest were identiﬁed and high-resolution change maps created by the contest
+organizers. Some regions of interest contain pixels with land cover change, while others have only
+the no change label. While participants submit predictions for all 50 tiles, evaluation is performed
+only over the areas of interest; predictions for pixels outside areas of interest are ignored. The class
+statistics for the validation set are shown in Table 2.
+The scoring metric is the average intersection over union (IoU) between the predicted and ground
+truth labels for eight classes (loss and gain of each of the four target classes, excluding no change).
+(Recall that the IoU for a class c is deﬁned as
+# pixels labeled c in prediction and in ground truth
+# pixels labeled c in prediction or in ground truth ,
+(1)
+or, equivalently,
+f
+2−f , where f is the F1 score for class c.) Notice that while IoU for the no
+change class is not computed, predictions of change for pixels with no change still contribute to the
+3
+
+Approximate class freq.
+NLCD class
+Target class
+W%
+TC%
+LV%
+I%
+Open Water
+water
+98
+2
+0
+0
+Developed, Open Space
+–
+0
+39
+49
+12
+Developed, Low Intensity
+–
+0
+31
+34
+35
+Developed, Medium Intensity
+impervious
+1
+13
+22
+64
+Developed High Intensity
+impervious
+0
+3
+7
+90
+Barren Land (Rock/Sand/Clay)
+–
+5
+13
+43
+40
+Deciduous Forest
+tree canopy
+0
+93
+5
+0
+Evergreen Forest
+tree canopy
+0
+95
+4
+0
+Mixed Forest
+tree canopy
+0
+92
+7
+0
+Shrub/Scrub
+tree canopy
+0
+58
+38
+4
+Grassland/Herbaceous
+low vegetation
+1
+23
+54
+22
+Pasture/Hay
+low vegetation
+0
+12
+83
+3
+Cultivated Crops
+low vegetation
+0
+5
+92
+1
+Woody Wetlands
+tree canopy
+0
+94
+5
+0
+Emergent Herbaceous Wetlands
+tree canopy
+8
+86
+5
+0
+Table 1: The approximate correspondence between the NLCD classes and the four target classes. The
+last four columns show estimated frequencies of target classes of pixels labeled with each NLCD
+class, computed from a high-resolution land cover product, speciﬁc to Maryland, in a similar class
+scheme [3]. The colors next to NLCD classes are those used in Figure 1. The two colors next to the
+target classes are those used to show loss and gain respectively in Figures 2 and 4.
+Class
+water
+tree canopy
+low vegetation
+impervious
+loss
+0.70%
+8.12%
+10.20%
+1.33%
+gain
+0.86%
+1.05%
+7.55%
+10.90%
+Table 2: Class statistics for the validation set. The total number of pixels in regions of interest is
+13,496,574, or about 1.7% of the total area of the validation tiles; 59.29% are labeled as no change.
+denominator in (1) and decrease the score. The evaluation server outputs the IoU for each class upon
+submission.
+For the test phase, a different set of 50 tiles and regions of interest is selected. The submission and
+evaluation formats remain the same.
+3
+Methods
+3.1
+Baselines
+We study four baseline algorithms, each of which takes as input the 2013 and 2017 NAIP layers and
+the 2013 and 2016 NLCD layers.
+(1) NLCD diff: We use solely the NLCD layers to assign each pixel a high-resolution class according
+to the second column of Table 1; the Barren Land and Developed, Low Intensity classes are
+assigned impervious and the Developed, Open Space class is assigned low vegetation. This
+results in two (coarse) land cover maps in the four target classes. The map derived from NLCD
+2013 is used as the prediction for 2013; the map derived from NLCD 2016 is used as the
+prediction for 2017. Land cover change is computed from these two maps.
+(2) We train small fully convolutional neural networks (5 layers of 64-ﬁlter 3×3 convolutions with
+ReLU activation and a logistic regression layer; 151k parameters) to predict the NLCD labels
+from NAIP imagery. Two FCNs are trained: one for NAIP 2013, targeting NLCD 2013, and one
+for NAIP 2017, targeting NLCD 2016.
+We found the following scheme to work best for creating target labels from the (probabilistic)
+FCN predictions: the predicted probabilities (at each pixel) of the classes Developed, Open
+4
+
+Figure 2: Examples of paired NAIP 2013 and NAIP 2017 imagery and the desired predictions. See
+Table 1 for the color scheme. Pixels with no change are shown in black.
+Space, Developed, Low Intensity, and Barren Land, which do not have a dominant high-
+resolution target class, are set to 0, and the probabilities are renormalized. The remaining classes
+are then mapped to the four target labels according to the second column of Table 1: the output
+probability of each target label is the sum of the probabilities of all NLCD classes mapping to it.
+The target class with highest probability is then taken as the prediction. The land cover change is
+computed from the two resulting prediction layers.
+(a) FCN / tile:
+Two separate FCNs are trained for each of the validation tiles. Overﬁtting
+models with a small receptive ﬁeld to the coarse NLCD labels and evaluating them results
+in a super-resolution of these labels: the FCNs cannot detect the 30m block structure in the
+NLCD labels they were trained to predict, so colors and textures are mapped to the classes of
+the low-resolution blocks in which they are most likely to appear.
+(b) FCN / all: The same as (a), but a single FCN is trained on the entire dataset. This may give
+an advantage due to the much larger training data offering more potential for generalization.
+However, it may also hurt predictions if pixels with similar appearance tend to belong to
+different classes in distant parts of the study area.
+5
+
+Algorithm
+−W
+−TC
+−LV
+−I
++W
++TC
++LV
++I
+avg.
+NLCD diff
+0.148
+0.167
+0.282
+0.014
+0.031
+0.001
+0.106
+0.362
+0.139
+FCN / tile
+0.641
+0.436
+0.407
+0.091
+0.255
+0.073
+0.302
+0.528
+0.342
+FCN / all
+0.584
+0.644
+0.601
+0.400
+0.292
+0.181
+0.607
+0.716
+0.503
+U-Net / all
+0.325
+0.484
+0.476
+0.307
+0.237
+0.205
+0.342
+0.517
+0.361
+Table 3: Baseline IOUs. −C and +C denote loss and gain of class C, respectively.
+(3) U-Net / all: The same as (2b), but with a model of the U-Net family [10], speciﬁcally, a U-Net
+with a ResNet-18 [4] encoder structure where the ﬁrst 3 blocks in the ResNet are used in the
+downsampling path, and convolutions with 128, 64, and 64 ﬁlters are used in the correspond-
+ing upsampling layers (1.2m total parameters). We use an implementation from the PyTorch
+Segmentation Models library2; see the accompanying GitHub repo for details.
+The IoU scores for each of these models are shown in Table 3. Some examples of their predictions
+appear in Figure 4.
+3.2
+Discussion
+From Table 3, we see that NLCD difference alone is a poor predictor of land cover change. There
+may be several reasons for this. First, this algorithm gives only coarse change predictions, in 30m
+blocks, that miss ﬁne details; many changes are in small, thin regions (such as new houses or roads).
+Second, the 2013 and 2016 NLCD layers were created in a joint pipeline in which certain kinds
+of change involving the Developed classes were explicitly forbidden [5] (see Figure 3). Third, the
+NLCD difference simply misses some changes (e.g., in the lower right corner of Figure 1), either
+because of errors made by the algorithm that produced the NLCD labels, or because NLCD and NAIP
+represent different time points.
+Interestingly, ﬁtting FCNs to predict the coarse NLCD labels is a strong baseline and an efﬁcient
+way to super-resolve the NLCD labels to 1m resolution. In some cases, the FCN trained on a
+single tile simply ignores changes in areas that have no change in NLCD: it has overﬁt to the local
+correspondences of (incorrect) NLCD labels and textures that appear. For example, in Figure 4(d), it
+predicts the construction area as tree canopy – the label suggested by both 2013 and 2016 NLCD
+labels. However, in other cases, the FCN trained on one tile correctly classiﬁes areas that appear
+ambiguous to other models: in Figure 4(e), the silty part of the body of water is predicted correctly as
+water in both years, as suggested by the Open Water label in both NLCD layers, and thus shown as
+no change. However, to the FCN trained on all tiles, the local information that this shade of water
+is indeed water is trumped by evidence from other tiles that this color and texture tends to be low
+vegetation, resulting in an incorrect prediction.
+Differences between class appearances across geographic regions motivated prior work on alternative
+loss functions for weakly supervised segmentation (label super-resolution) [8]; it has also been found
+that tile-by-tile algorithms sometimes perform better than those trained on a large dataset [7] – in
+segmentation problems with wide variation of appearances over space, it is sometimes the case that
+“less is more”. We believe that methods that combine global models with tile-by-tile analysis warrant
+further study.
+We also attempted to train models targeting high-resolution labels from the Chesapeake Conservancy
+land cover dataset [3], which use a class scheme slightly different from ours. While the use of
+these labels is not allowed in the DFC-MSD, as they are not available outside of a small geographic
+region, we found that they do not improve the predictions: surprisingly, models trained on these
+high-resolution labels over the entire study area perform no better than those trained on coarse NLCD
+labels.
+The last two rows of Table 3 suggest that sometimes “less is more” when it comes to neural
+architectures as well. The U-Net has about 80× more parameters than the FCN. Figure 5 shows the
+raw predictions of NLCD labels from the two models, both trained on the entire dataset. The FCN,
+which has a small (5×5) receptive ﬁeld, is unable to learn that NLCD labels come in 30×30 blocks,
+2https://github.com/qubvel/segmentation_models.pytorch
+6
+
+while the U-Net has a large receptive ﬁeld and learns to make blurry predictions. (In fact, the winning
+weak supervision entry in the 2020 Data Fusion Contest [9] used very simple texture/color mixture
+models to super-resolve MODIS labels, followed by smoothing with a small FCN.)
+We also found that targeting the same year of labels for both 2013 and 2017 networks does not
+change the results much, as the models primarily learn their textures from the vast area where there is
+no change anyway. In fact, we should note that training separate models for different time points
+is a starting point, but we expect that the best approaches will analyze imagery jointly, since most
+pixels do not change their class from one year to the next. Such situations are often exploited in
+computer vision, e.g., in background subtraction or co-segmentation. The probabilistic index map
+model [6], for example, learns to assign a distribution over labels to each pixel in an aligned image
+stack assuming that within each image assignments are consistent, but the palette of assigned colors
+(or textures) to each index can freely change.
+4
+Conclusion
+In this paper, we have described simple algorithms for land cover change detection and raised
+questions for future research to answer: How can machine learning models optimally combine noisy,
+low-resolution labels for detection and classiﬁcation of change in high-resolution images? How
+should they strike the balance between local analysis and models that work over a geographically
+diverse study area? How can low-resolution (Landsat) imagery aid in change detection? The 2021
+IEEE GRSS Data Fusion Contest will help to answer these questions, fostering innovation in weakly
+supervised segmentation and change detection in this important application domain.

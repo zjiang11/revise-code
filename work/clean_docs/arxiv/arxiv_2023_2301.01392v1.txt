@@ -1,0 +1,831 @@
+Published in Transactions on Machine Learning Research (01/2023)
+Benchmarks and Algorithms for Oﬄine Preference-Based
+Reward Learning
+Daniel Shin
+
+Computer Science Department
+Stanford University
+Anca D. Dragan
+
+EECS Department
+University of California, Berkeley
+Daniel S. Brown
+
+School of Computing
+University of Utah
+Reviewed on OpenReview: https: // openreview. net/ forum? id= TGuXXlbKsn
+Abstract
+Learning a reward function from human preferences is challenging as it typically requires
+having a high-ﬁdelity simulator or using expensive and potentially unsafe actual physical
+rollouts in the environment. However, in many tasks the agent might have access to oﬄine
+data from related tasks in the same target environment. While oﬄine data is increasingly
+being used to aid policy optimization via oﬄine RL, our observation is that it can be
+a surprisingly rich source of information for preference learning as well. We propose an
+approach that uses an oﬄine dataset to craft preference queries via pool-based active learning,
+learns a distribution over reward functions, and optimizes a corresponding policy via oﬄine
+RL. Crucially, our proposed approach does not require actual physical rollouts or an accurate
+simulator for either the reward learning or policy optimization steps. To test our approach,
+we ﬁrst evaluate existing oﬄine RL benchmarks for their suitability for oﬄine reward learning.
+Surprisingly, for many oﬄine RL domains, we ﬁnd that simply using a trivial reward function
+results in good policy performance, making these domains ill-suited for evaluating learned
+rewards (even those learned by non preference-based methods). To address this, we identify
+a subset of existing oﬄine RL benchmarks that are well suited for reward learning and also
+propose new oﬄine reward learning benchmarks which allow for more open-ended behaviors
+allowing us to better test oﬄine reward learning from preferences. When evaluated on
+this curated set of domains, our empirical results suggest that combining oﬄine RL with
+learned human preferences can enable an agent to learn to perform novel tasks that were not
+explicitly shown in the oﬄine data.
+1
+Introduction
+For automated sequential decision making systems to eﬀectively interact with humans in the real world, these
+systems need to be able to safely and eﬃciently adapt to and learn from diﬀerent users. Apprenticeship
+learning (Abbeel & Ng, 2004)—also called learning from demonstrations (Argall et al., 2009) or imitation
+learning (Osa et al., 2018)—seeks to allow robots and other autonomous systems to learn how to perform a
+task through human feedback. Even though traditional apprenticeship learning uses expert demonstrations
+(Argall et al., 2009; Osa et al., 2018; Arora & Doshi, 2021), preference queries—where a user is asked to
+compare two trajectory segments—have been shown to more accurately identify the reward (Jeon et al., 2020)
+while reducing the burden on the user to generate near-optimal actions (Wirth et al., 2017; Christiano et al.,
+1
+arXiv:2301.01392v1  [cs.LG]  3 Jan 2023
+
+Published in Transactions on Machine Learning Research (01/2023)
+Reward Learning
+Collect
+Preference 
+Labels
+Oﬄine Dataset
+RL Policy
+Figure 1: Oﬄine Preference-Based Reward Learning (OPRL) enables safe and eﬃcient preference-based policy
+customization without any environmental interactions. Given an oﬄine database consisting of trajectories,
+OPRL queries for pairwise preference labels over trajectory segments from the database, learns a reward
+function from these preference labels, and then performs oﬄine RL using the learned reward function.
+2017). However, one challenge is that asking these queries requires either executing them in the physical world
+(which can be unsafe), or executing them in a simulator and showing them to the human (which requires
+simulating the world with high enough ﬁdelity).
+Learning a policy via RL has the same challenges of needing a simulator or physical rollouts (Sutton & Barto,
+2018). To deal with these problems, oﬄine RL has emerged as a promising way to do policy optimization
+with access to oﬄine data only (Levine et al., 2020). Our key observation in this paper is that an analogous
+approach can be applied to reward learning: rather than synthesizing and executing preference queries
+in a simulator or in the physical world, we draw on an oﬄine dataset to extract segments that would be
+informative for the user to compare. Since these segments have already been executed and recorded by the
+agent, all we need to do is replay them to the human, and ask for a comparison.
+We call this approach Oﬄine Preference-based Reward Learning (OPRL), a novel approach that consists of
+oﬄine preference-based reward learning combined with oﬄine RL. Our approach is summarized in Figure 1.
+OPRL has two appealing and desirable properties: safety and eﬃciency. No interactions with the environment
+are needed for either reward learning or policy learning, removing the sample complexity and safety concerns
+that come from trial and error learning in the environment.
+Although the individual components of our framework are not novel by themselves, our novel contribution lies
+in the fundamentally new and unexplored capability of learning unseen tasks during test time. For example
+as seen in Figure 2, even if all demonstrations are short segments of random point to point navigation, we
+demonstrate that OPRL can recover a policy that is able to go in a counter-clockwise orbit around the entire
+maze inﬁnitely. The key to achieving this is the ability to stitch together incomplete segments from the
+original dataset to create one long trajectory for a new task during test time.
+By actively querying for comparisons between segments (or snippets) from a variety of diﬀerent rollouts, the
+agent can gain valuable information about how to customize it’s behavior based on a user’s preferences. This
+is true even when none of the data in the oﬄine dataset explicitly demonstrates the desired behavior. For
+example, in Figure 2, an agent learns an orbiting behavior from human preferences, despite never having seen
+a complete orbit in the oﬄine data.
+To eﬀectively study oﬄine reward learning, we require a set of benchmark domains to evaluate diﬀerent
+approaches. However, while there are many standard RL benchmarks, there are fewer benchmarks for reward
+learning or even imitation learning more broadly. Recent work has shown that simply using standard RL
+benchmarks and masking the rewards is not suﬃciently challenging since often learning a +1 or -1 reward
+everywhere is suﬃcient for imitating RL policies (Freire et al., 2020). While there has been progress in
+developing imitation learning benchmarks (Toyer et al., 2020; Freire et al., 2020), existing domains assume an
+online reward learning and policy optimization setting, with full access to the environment, which is only
+realistic in simulation due to eﬃciency and safety concerns.
+2
+
+Published in Transactions on Machine Learning Research (01/2023)
+Samples from oﬄine 
+data distribution
+Examples of pairwise preference 
+queries selected from oﬄine data
+States (position & velocity) 
+with highest learned reward.
+Trajectories from 
+learned policy
+Figure 2: OPRL selects active queries from an oﬄine dataset consisting of random point to point navigation.
+These active queries elicit preferences about a human’s preferences (the human wants the robot to perform
+counter-clockwise orbits and prefers blue over red trajectories). Note that none of the segments in the oﬄine
+dataset consists of a complete counter-clockwise orbit. However, OPRL is able to recover a counter-clockwise
+orbiting policy given human preferences. The learned reward function matches the human’s preferences and,
+when combined with oﬄine RL, leads to an appropriate policy that looks signiﬁcantly diﬀerent from the
+original oﬄine data distribution. Because oﬄine data is often not collected for the speciﬁc task a human
+wants, but for other tasks, being able to repurpose data from a variety of sources is important for generalizing
+to diﬀerent user preferences in oﬄine settings where we cannot easily just gather lots of new online data.
+One of our contributions is to evaluate a variety of existing oﬄine RL benchmarks (Fu et al., 2020) in
+the oﬄine reward learning setting, where we remove access to the true reward function. Surprisingly, we
+ﬁnd that many oﬄine RL benchmarks are ill-suited for studying and comparing diﬀerent reward learning
+approaches—simply replacing all actual rewards in the oﬄine dataset with zeros, or a constant, results
+in performance similar to, or better than, the performance obtained using the true rewards!
+This is
+problematic since it means that high performance in these domains is not always indicative of a better learned
+reward—rather it appears that performance in many domains in mainly aﬀected by the quality of the data
+(expert vs suboptimal) and the actual reward value has little impact on oﬄine RL.
+To better isolate and study the eﬀect of diﬀerent reward learning approaches, we identify a subset of
+environments where simply using a trivial reward function guess results in signiﬁcant degradation in policy
+performance, motivating the use of these environments when evaluating reward learning methods. We identify
+high oﬄine data variability and multi-task data as two settings where reward learning is necessary for good
+policy learning.
+Because most existing oﬄine RL domains are not suitable for studying the eﬀects of reward learning, we
+also propose several new tasks designed for open-ended reward learning in oﬄine settings. Figure 2 shows
+an example from our experiments where the learning agent has access to a dataset composed of trajectories
+generated oﬄine by a force-controlled pointmass robot navigating between random start and goal locations
+chosen along a 5x3 discrete grid. OPRL uses this dataset to learn to perform counter-clockwise orbits, a
+behavior never explicitly seen in the oﬄine data. Figure 2 shows a sequence of active queries over trajectory
+snippets taken from the oﬄine dataset. The blue trajectories were labeled by the human as preferable to
+the red trajectories. We also visualize the learned reward function. Using a small number of queries and a
+dataset generated by a very diﬀerent process than the desired task, we are able to learn the novel orbiting
+behavior in a completely oﬄine manner.
+We summarize the contributions of this paper as follows:
+1. We propose and formalize the novel problem of oﬄine preference-based reward learning.
+2. We evaluate a large set of existing oﬄine RL benchmarks, identify a subset that is well-suited for
+evaluating oﬄine reward learning, and propose new benchmarks that allow for more open-ended
+behavior.
+3. We perform an empirical evaluation of OPRL, comparing diﬀerent methods for maintaining uncertainty
+and comparing diﬀerent acquisition functions that use the uncertainty estimates to actively select
+3
+
+Published in Transactions on Machine Learning Research (01/2023)
+informative queries. We provide evidence that ensemble-based disagreement queries outperform other
+approaches.
+4. Our results suggest that there is surprising value in oﬄine datasets. The combination of oﬄine
+reward learning and oﬄine RL leads to highly eﬃcient reward inference and enables agents to learn
+to perform tasks not explicitly demonstrated in the oﬄine dataset.
+2
+Related Work
+Prior work on preference-based reward learning typically focuses on online methods that require actual
+rollouts in the environment or access to an accurate simulator or model (Wirth et al., 2017; Christiano et al.,
+2017; Sadigh et al., 2017; Biyik & Sadigh, 2018; Brown et al., 2019; 2020b; Lee et al., 2021). However, accurate
+simulations and model-based planning are often not possible. Furthermore, even when an accurate simulator
+or model is available, there is the added burden of solving a diﬃcult sim-to-real transfer problem (Tobin
+et al., 2017; Peng et al., 2018; Chebotar et al., 2019). In most real-world scenarios, the standard preference
+learning approach involving many episodes of trial and error in the environment is likely to be unacceptable
+due to safety and eﬃciency concerns.
+Prior work on safe apprenticeship learning either enables learners to estimate risky actions (Zhang & Cho,
+2016) and request human assistance (Hoque et al., 2021), optimizes policies for tail risk rather than expected
+return (Lacotte et al., 2019; Javed et al., 2021), or provides high-conﬁdence bounds on the performance of the
+agent’s policy when learning from demonstrations (Brown & Niekum, 2018; Brown et al., 2020a); however,
+these methods all rely on either an accurate dynamics model or direct interactions with the environment. By
+contrast, our approach towards safety is to develop a fully oﬄine apprenticeship learning algorithm to avoid
+costly and potentially unsafe physical data collection during reward and policy learning.
+While there has been some work on oﬄine apprenticeship learning, prior work focuses on simple environments
+with discrete actions and hand-crafted reward features (Klein et al., 2011; Bica et al., 2021) and requires
+datasets that consist of expert demonstrations that are optimal for a particular task (Lee et al., 2019). Other
+work has considered higher-dimensional continuous tasks, but assumes access to expert demonstrations or
+requires experts to label trajectories with explicit reward values (Cabi et al., 2019; Zolna et al., 2020). By
+contrast, we focus on fully oﬄine reward learning via small numbers of qualitative preference queries which are
+known to be much easier to provide than ﬁne-grained reward labels or near-optimal demonstrations (Kendall,
+1948; Stewart et al., 2005; Saaty, 2008; Wirth et al., 2017).
+Prior work by Castro et al. (2019) is similar to
+ours in that they learn a reward function from oﬄine ranked demonstrations of varying qualities. However,
+their proposed approach is only evaluated on MDPs with ﬁnite state spaces where they learn a unique
+reward for each state by solving a quadratic program. By contrast, our approach learns reward features from
+low-level, continuous state information and uses a diﬀerentiable pairwise preference loss function rather than
+quadratic programming.
+Other prior work has considered oﬄine imitation learning. Methods such as behavioral cloning are trained
+on oﬄine expert demonstrations, but suﬀer from compounding errors (Pomerleau, 1988). DemoDICE (Kim
+et al., 2021) seeks to imitate expert demonstrations that are provided oﬄine and improves stability by
+also leveraging a dataset of suboptimal demonstrations. By contrast, our approach does not require expert
+demonstrations, just an oﬄine dataset of state transitions and learns an explicit reward function from
+preferences. IQ-Learn (Garg et al., 2021) is capable of both oﬄine and online imitation learning. Rather
+than learning a reward function, they learn a parameterized Q-function. Similar to DemoDICE, IQ-Learn
+requires access to expert demonstrations, whereas we only require human preference labels over oﬄine data
+of any quality—some of our experiments use data generated from a completely random policy. The main
+downside to imitation learning methods like DemoDICE and IQ-Learn is the requirement of having expert
+demonstrations. We avoid this problem by learning rewards from preference labels over pairs of trajectory
+segments, something that is easily provided, even for humans who cannot provide expert demonstrations.
+There has also been previous work that focused on apprenticeship learning from heterogeneous human
+demonstrations in resource scheduling and coordination problems (Paleja et al., 2019). Our approach also
+4
+
+Published in Transactions on Machine Learning Research (01/2023)
+works by learning from heterogeneous data, but uses preference queries to learn a reward function which is
+then used for oﬄine RL algorithms rather than learning a scheduling algorithm from human demonstrations.
+3
+Problem Deﬁnition
+We model our problem as a Markov decision process (MDP), deﬁned by the tuple (S, A, r, P, ρ0, γ), where S
+denotes the state space, A denotes the action space, r : S × A →R denotes the reward, P(s′|s, a) denotes the
+transition dynamics, ρ0(s) denotes the initial state distribution, and γ ∈(0, 1) denotes the discount factor.
+In contrast to standard RL, we do not assume access to the reward function r. Furthermore, we do not
+assume access to the MDP during training. Instead, we are provided a static dataset, D, consisting of
+trajectories, D = {τ0, ..., τN}, where each trajectory τi consists of a contiguous sequence of state, action,
+next-state transitions tuples τi = {(si,0, ai,0, s′
+i,0), ..., (si,M, ai,M, s′
+i,M)}. Unlike imitation learning, we do not
+assume that this dataset comes from a single expert attempting to optimize a speciﬁc reward function r(s, a).
+Instead, the dataset D may contain data collected randomly, data collected from a variety of policies, or even
+from a variety of demonstrations for a variety of tasks.
+Instead of having access to the reward function, r, we assume access to an expert that can provide a small
+number of pairwise preferences over trajectory snippets from an oﬄine dataset D. Given these preferences,
+the goal is to ﬁnd a policy π(a|s) that maximizes the expected cumulative discounted rewards (also known as
+the discounted returns), J(π) = Eπ,P,ρ0 [P∞
+t=0 γtr(st, at)], under the unknown true reward function r in a
+fully oﬄine fashion—we assume no access to the MDP other than the oﬄine trajectories contained in D.
+4
+Oﬄine Preference-Based Reward Learning
+We now discuss our proposed algorithm, Oﬄine Preference-based Reward Learning (OPRL). OPRL is an
+oﬄine, active preference-based learning approach which ﬁrst searches over an oﬄine dataset of trajectories and
+sequentially selects new queries to be labeled by the human expert in order to learn a reward function that
+models the user’s preferences and can be used to generate a customized policy based on a user’s preferences
+via oﬄine RL.
+As established by a large body of prior work (Christiano et al., 2017; Ibarz et al., 2018; Brown et al., 2019;
+Palan et al., 2019), the Bradley-Terry pairwise preference model (Bradley & Terry, 1952) is an appropriate
+model for learning reward functions from user preferences over trajectories. Given a preference over trajectories,
+τi ≺τj, we seek to maximize the probability of the preference label:
+P
+ τi ≺τj | θ) =
+exp
+X
+s∈τj
+ˆrθ(s)
+exp
+X
+s∈τi
+ˆrθ(s) + exp
+X
+s∈τj
+ˆrθ(s)
+,
+(1)
+by approximating the reward at state s using a neural network, ˆrθ(s), such that P
+s∈τi ˆrθ(s) < P
+s∈τj ˆrθ(s)
+when τi ≺τj.
+OPRL actively queries to obtain informative preference labels over trajectory snippets sampled from the
+oﬄine dataset.
+In order to perform active learning, OPRL needs a way to estimate the uncertainty over the
+predicted preference label for unlabeled trajectory pairs, in order to determine which queries would be most
+informative (result in the largest reduction in uncertainty over the true reward function). In this paper, we
+investigate two diﬀerent methods to represent uncertainty (ensembles and Bayesian dropout) along with two
+diﬀerent acquisition functions (disagreement and information gain). We describe these approaches below.
+4.1
+Representing Reward Uncertainty
+We compare two of the most popular methods for obtaining uncertainty estimates when using deep learning:
+ensembles (Lakshminarayanan et al., 2016) and Bayesian dropout (Gal & Ghahramani, 2016). On line 4 of
+5
+
+Published in Transactions on Machine Learning Research (01/2023)
+Algorithm 1, we initialize an ensemble of reward models for ensemble queries or a single reward model for
+Bayesian dropout.
+Ensemble Queries
+Following work on online active preference learning work by Christiano et al. (2017), we
+test the eﬀectiveness of training an ensemble of reward models to approximate the reward function posterior
+using the Bradley-Terry preference model. Similar to prior work (Christiano et al., 2017; Reddy et al., 2020),
+we found that initializing the ensemble networks with diﬀerent seeds was suﬃcient to produce a diverse set of
+reward functions.
+Bayesian Dropout
+We also test the eﬀectiveness of using dropout to approximate the reward function
+posterior. As proposed by Gal & Ghahramani (2016), we train a reward network using pairwise preferences
+and apply dropout to the last layer of the network during training. To predict a return distribution over
+candidate pairs of trajectories, we still apply dropout and pass each trajectory through the network multiple
+times to obtain a distribution over the returns.
+4.2
+Active Learning Query Selection
+In contrast to prior work on active preference learning, we do not require on-policy rollouts in the environ-
+ment (Christiano et al., 2017; Lee et al., 2021) nor require synthesizing queries using a model (Sadigh et al.,
+2017). Instead, we generate candidate queries by searching over randomly chosen pairs of sub-trajectories
+obtained from the oﬄine dataset. Given a distribution over likely returns for each trajectory snippet in
+a candidate preference query, we estimate the value of obtaining a label for this candidate query. We
+consider two methods for computing the value of a query: disagreement and information gain. We then take
+the trajectory pair with the highest predicted value and ask for a pairwise preference label. On line 6 of
+Algorithm 1, we can either use disagreement or information gain as the estimated value of information (VOI).
+Disagreement
+When using disagreement to select active queries, we select pairs with the highest ensemble
+disagreement among the diﬀerent return estimates obtained from either ensembling or Bayesian dropout.
+Following Christiano et al. (2017), we calculate disagreement as the variance in the binary comparison
+predictions: if fraction p of the posterior samples predict τi ≻τj while the other 1 −p ensemble models
+predict τi ⪯τj, then the variance of the query pair (τi, τj) is p(1 −p).
+Information Gain Queries
+As an alternative to disagreement, we also consider the expected information
+gain (Cover, 1999) between the reward function parameters θ and the outcome Y of querying the human
+for a preference. We model our uncertainty using an approximate posterior p(θ | D), given by training an
+ensemble or dropout network on our oﬄine dataset D. Houlsby et al. (2011) show that the information gain
+of a potential query can be formulated as:
+I(θ; Y | D) = H(Y | D) −Eθ∼p(θ|D)[H(Y | θ, D)].
+(2)
+Intuitively, the information gain will be maximized when the ﬁrst term is high, meaning that the overall
+model has high entropy, but the second term is low, meaning that each individual hypothesis θ from the
+posterior assigns low entropy to the outcome Y . This will happen when the individual hypotheses strongly
+disagree with each other and there is no clear majority. We approximate both terms in the information gain
+equation with samples obtained via ensemble or dropout. See Appendix D for further details.
+Searching the Oﬄine Dataset for Informative Queries
+We note that this process of searching for
+informative queries can be performed quite eﬃciently since the information gain or ensemble disagreement
+for each candidate query can be computed in parallel. Furthermore, we can leverage GPU parallelization by
+feeding all of the states in one or more trajectories into the reward function network as a batch. Finally, we
+note that searching for the next active query can be formulated as an any-time algorithm—we can continue
+to sample random pairs of trajectories from the oﬄine dataset to evaluate and when a particular time or
+computation limit is reached and then simply return the most informative query found so far.
+6
+
+Published in Transactions on Machine Learning Research (01/2023)
+Algorithm 1 OPRL
+1: Require: A dataset D = {τ0, ..., τN}, where each trajectory τi consists of τi = {(si,0, ai,0, s′
+i,0), ...,
+(si,M, ai,M, s′
+i,M)}.
+2: // REWARD LEARNING
+3: Generate dataset of pairs of snippets Dsnip
+4: Initialize reward model ˆrψ
+5: for each iteration do
+6:
+Compute estimate of VOI across all pairs in Dsnip
+7:
+Find snippet pair (τs,1, τs,2) with highest estimated VOI
+8:
+Query preference label y
+9:
+Store query pair and label Drew ←(τs,1, τs,2, y)
+10:
+Train reward model with updated Drew
+11: end for
+12: Label transitions in D with ˆrψ
+13: // POLICY LEARNING
+14: Run selected oﬄine RL algorithm on D
+4.3
+Policy Optimization
+Given a learned reward function obtained via preference-learning, we can then use any existing oﬄine or
+batch RL algorithm (Levine et al., 2020) to learn a policy without requiring knowledge of the transition
+dynamics or rollouts in the actual environment. The entire OPRL pipeline is summarized in Algorithm 1.
+5
+Experiments and Results
+We ﬁrst evaluate a variety of popular oﬄine RL benchmarks from D4RL (Fu et al., 2020) to determine which
+domains are most suited for evaluating oﬄine reward learning. Prior work on reward learning has shown that
+simply showing good imitation learning performance on an RL benchmark is not suﬃcient to demonstrate
+good reward learning (Freire et al., 2020). In particular, we seek domains where simply using an all zero
+or constant reward does not result in good performance. After isolating several domains where learning a
+shaped reward actually matters (Section 5.1), we evaluate OPRL on these selected benchmark domains and
+investigate the performance of diﬀerent active query strategies (Section 5.2). Finally, we propose and evaluate
+several tasks speciﬁcally designed for oﬄine reward learning (Section 5.3). To further analyze our method,
+we include sensitivity analyses on the number of initial queries, queries per round, ensemble models, and
+dropout samples (Appendix B, C)
+Videos of learned behavior and code is available in the Supplement.
+5.1
+Evaluating Oﬄine RL Benchmarks
+An important assumption made in our problem statement is that we do not have access to the reward function.
+Before describing our approach for reward learning, we ﬁrst investigate in what cases we actually need to
+learn a reward function. We study a set of popular benchmarks used for oﬄine RL (Fu et al., 2020). To test
+the sensitivity of these methods to the reward function, we evaluate the performance of oﬄine RL algorithms
+on these benchmarks when we set the reward equal to zero for each transition in the oﬄine dataset and when
+we set all the rewards equal to a constant (the average reward over the entire dataset).
+We evaluated four of the most commonly used oﬄine RL algorithms: Advantage Weighted Regression
+(AWR) (Peng et al., 2019), Batch-Constrained deep Q-learning (BCQ) (Fujimoto et al., 2019), Bootstrapping
+Error Accumulation Reduction (BEAR) (Kumar et al., 2019), and Conservative Q-Learning (CQL) (Kumar
+et al., 2020). Table 1 shows the resulting performance across a large number of tasks from the D4RL
+benchmarks (Fu et al., 2020).
+7
+
+Published in Transactions on Machine Learning Research (01/2023)
+Table 1: Oﬄine RL performance on D4RL benchmark tasks comparing the performance with the true reward
+to performance using a constant reward equal to the average reward over the dataset (Avg) and zero rewards
+everywhere (Zero). Even when all the rewards are set to the average or to zero, many oﬄine RL algorithms
+still perform surprisingly well. In this table, we present the experiments ran with AWR. Results are averages
+over three random seeds. Bolded environments are ones where we ﬁnd the degradation percentage to be over
+a chosen threshold and are used for later experiments with OPRL. The degradation percentage is calculated
+as max(GT−max(AVG,ZERO,RANDOM),0)
+GT−min(AVG,ZERO,RANDOM)
+× 100% and the threshold is set to 20%. The degradation percentage is
+used to determine domains where trivial reward functions do not lead to good performance to isolate the
+eﬀect of reward learning in later experiments.
+Task
+GT
+Avg
+Zero
+Random
+Degradation %
+flow-ring-random
+-42.5
+-42.9
+-44.3
+-166.2
+0.3
+FLOW-MERGE-RANDOM
+160.3
+85.2
+85.6
+117.0
+57.7
+MAZE2D-UMAZE
+104.4
+56.5
+55.0
+49.5
+87.3
+MAZE2D-MEDIUM
+134.6
+30.5
+34.5
+44.8
+86.3
+HALFCHEETAH-RANDOM
+11.0
+-49.4
+-48.3
+-285.8
+20.0
+halfcheetah-medium-replay
+4138.2
+3934.7
+3830.2
+-285.8
+4.6
+halfcheetah-medium
+4096.0
+3984.4
+3898.3
+-285.8
+2.5
+halfcheetah-medium-expert
+669.9
+401.7
+560.5
+-285.8
+11.4
+halfcheetah-expert
+467.8
+511.1
+493.1
+-285.8
+0.0
+hopper-random
+123.3
+129.8
+29.1
+18.3
+0.0
+hopper-medium-replay
+1045.6
+1127.4
+954.6
+18.3
+0.0
+hopper-medium
+1152.1
+1192.8
+963.6
+18.3
+0.0
+hopper-medium-expert
+623
+615.8
+587.3
+18.3
+1.2
+hopper-expert
+571.7
+617.2
+427.6
+18.3
+0.0
+KITCHEN-COMPLETE
+0.3
+0.2
+0.3
+0.0
+25.0
+kitchen-mixed
+0.3
+0.5
+0.3
+0.0
+16.7
+kitchen-partial
+0.3
+0.2
+0.3
+0.0
+0.0
+We ﬁnd that for tasks with only expert data, there is no need to learn a reward function since using a
+trivial reward function often leads to expert performance. We attribute this to the fact that many oﬄine
+RL algorithms are similar to behavioral cloning (Levine et al., 2020). Thus, when an oﬄine RL benchmarks
+consists of only expert data, oﬄine RL algorithms do not need reward information to perform well. In
+Appendix E we show that AWR reduces to behavioral cloning in the case of an all zero reward function.
+Conversely, when the oﬄine dataset contains a wide variety of data that is either random or multi-task
+(e.g. the Maze2D environment consists of an agent traveling to randomly generated goal locations), we ﬁnd
+that running oﬄine RL algorithms on the dataset with an all zero or constant reward function signiﬁcantly
+degrades performance.
+5.2
+Reward Learning on a Subset of D4RL
+To evaluate the beneﬁt of oﬄine reward learning, we focus our attention on the D4RL benchmark domains
+shown in Figure 3 which showed signiﬁcant degradation in Table 1 since these are domains where we can be
+conﬁdent that good performance is due to learning a good reward function. We deﬁne signiﬁcant degradation
+to be degradation percentage over 20%, which was chosen to give enough room for OPRL to improve on in
+comparison to uninformative rewards like avg or zero masking. We selected both of the Maze environments,
+the Flow Merge traﬃc simulation, the Halfcheetah random environment, and the Franka Kitchen-Complete
+environment. To facilitate a better comparison across diﬀerent methods for active learning, we use oracle
+preference labels, where one trajectory sequence is preferred over another if it has higher ground-truth return.
+We report the performance of OPRL using AWR (Peng et al., 2019), which we empirically found to work for
+8
+
+Published in Transactions on Machine Learning Research (01/2023)
+(a) U-Maze
+(b) Medium Maze
+(c) Flow Merge
+(d) Halfcheetah
+(e) Franka Kitchen
+Figure 3: Experimental domains chosen from D4RL (Fu et al., 2020) for use in oﬄine preference-based reward
+learning.
+(a) Maze2D-Umaze
+(b) Maze2D-Medium
+(c) Half-Cheetah-v2
+Figure 4: (a) Ensemble disagreement after 10 rounds of active queries (1 query per round) in Maze2d-Umaze.
+(b) Ensemble disagreement after 10 rounds of active queries (1 query per round) in Maze2d-Medium. (c)
+Ensemble disagreement after 10 rounds of active queries (10 queries per round) in Halfcheetah.
+policy optimization across the diﬀerent tasks. In the appendix we also report results when using CQL (Kumar
+et al., 2020) for policy optimization.
+5.2.1
+Maze Navigation
+We ﬁrst consider the Maze2d domain (Fu et al., 2020), which involves moving a force-actuated ball (along
+the X and Y axis) to a ﬁxed target location. The observation is 4 dimensional, which consists of the (x, y)
+location and velocities. The oﬄine dataset consists of one continuous trajectory of the agent navigation to
+random intermediate goal locations. The true reward, which we only use for providing synthetic preference
+labels, is the negative exponentiated distance to a held-out goal location.
+For our experimental setup, we ﬁrst randomly select 5 pairs of trajectory snippets and train 5 epochs with
+our models. After this initial training process, for each round, one additional pair of trajectories is queried to
+be added to the training set and we train one more epoch on this augmented dataset. The learned reward
+model is then used to predict the reward labels for all the state transitions in the oﬄine dataset, which is
+then used to train a policy via oﬄine RL (e.g. AWR (Peng et al., 2019)). As a baseline, we also compare
+against a random, non-active query baseline.
+The results are provided in Table 2. We found that ensemble disagreement is the best performing approach
+for both Maze2D-Umaze and Maze2D-Medium and outperforms T-REX. The oﬄine RL performance for
+ensemble disagreement are shown in Figure 4. We ﬁnd that ensemble disagreement on Maze2D-Umaze is able
+to quickly approach the performance when using the ground-truth reward function on the full dataset of 1
+million state transitions after only 15 preference queries (5 initial + 10 active). Maze2D-Medium is more
+diﬃcult and we ﬁnd that 15 preference queries is unable to recover a policy on par with the policy trained
+with ground truth rewards. We hypothesize that this is due to the fact that Maze2D is goal oriented and
+learning a reward with trajectory comparisons might be diﬃcult since the destination matters more than the
+path.
+9
+
+Published in Transactions on Machine Learning Research (01/2023)
+Table 2: OPRL Performance Using Reward Predicted After N Rounds of Querying: Oﬄine RL
+performance using rewards predicted either using a static number of randomly selected pairwise preferences (T-
+REX) (Brown et al., 2019), or active queries using Ensemble Disagreement(EnsemDis), Ensemble Information
+Gain (EnsemInfo), Dropout Disagreement (DropDis), and Dropout Information Gain (DropInfo). N is set
+to 5 for Maze2D-Umaze, 10 for Maze2d-Medium and ﬂow-merge-random, 15 for Halfcheetah. N is selected
+based on the size of the dimension of observation space and the complexity of the environment. Results are
+averages over three random seeds and are normalized so the performance of oﬄine RL using the ground-truth
+rewards is 100.0 and performance of a random policy is 0.0. The results provide evidence that Ensembles are
+at least as good and often much better than random queries and that Dropout often fails to perform as well
+as random queries.
+Query Aquisition Method
+Random
+EnsemDis
+EnsemInfo
+DropDis
+DropInfo
+maze2d-umaze
+78.2
+93.5
+89.2
+88.0
+61.3
+maze2d-medium
+71.6
+86.4
+71.0
+52.6
+44.4
+halfcheetah-random
+96.1
+113.7
+100.6
+84.4
+91.7
+flow-merge-random
+110.1
+89.0
+92.1
+86.2
+84.2
+kitchen-complete
+79.6
+105.0
+158.8
+48.5
+65.4
+halfcheetah-medium-replay
+98.8
+100.0
+99.7
+96.2
+94.0
+halfcheetah-medium
+102.2
+103.0
+100.7
+94.4
+99.1
+halfcheetah-medium-expert
+111.4
+91.0
+112.8
+86.0
+113.9
+halfcheetah-expert
+104.3
+176.4
+124.6
+86.0
+129.3
+hopper-random
+81.9
+86.7
+64.7
+72.0
+75.1
+hopper-medium-replay
+97.8
+98.4
+103.5
+94.6
+97.3
+hopper-medium
+90.4
+93.6
+91.7
+89.4
+92.0
+hopper-medium-expert
+81.2
+81.4
+81.0
+90.0
+84.3
+hopper-expert
+69.0
+93.2
+122.4
+94.0
+100.4
+kitchen-mixed
+110.0
+120.0
+96.7
+110.0
+90.0
+kitchen-partial
+91.2
+111.8
+117.6
+126.5
+97.1
+5.2.2
+MuJoCo Tasks
+We next tested OPRL on the MuJoCo environment Halfcheetah-v2. For the tasks, the agent is rewarded
+for making the Halfcheetah move forward as fast as possible. The MuJoCo tasks presents an additional
+challenge in comparison to the Maze2d domain since they have higher dimensional observations spaces, 17 for
+Halfcheetah-v2. The dataset contains 1 million transitions obtained by rolling out a random policy. Our
+experimental setup is similar to Maze2D, except we start with 50 pairs of trajectories instead of 5 and we
+add 10 trajectories per round of active queries instead of 1 query per round. We found that increasing the
+number of queries was helpful due to the fact that MuJoCo tasks have higher dimensional observational
+spaces, which requires more data points to learn an accurate reward function. The learning curve is shown in
+Figure 4 (c). We found ensemble disagreement to be the best performing approach for the Halfcheetah task.
+We see a noticeable improvement as the number of active queries increases, however, 10 rounds of active
+queries is not suﬃcient to reach the same performance as the policy learned with the ground truth reward.
+5.2.3
+Flow Merge
+The Flow Merge environment involves directing traﬃc such that the ﬂow of traﬃc is maximized in a highway
+merging scenario. Results are shown in Table 2. Random queries achieved the best performance, but all
+query methods were able to recover near ground truth performance.
+5.2.4
+Robotic Manipulation
+The Franka Kitchen domain involves interacting with various objects in the kitchen to reach a certain state
+conﬁguration. The objects you can interact with include a water kettle, a light switch, a microwave, and
+10
+
+Published in Transactions on Machine Learning Research (01/2023)
+Figure 5: Constrained Goal Navigation. The highlighted yellow region represents a constraint region
+that the human prefers the agent to avoid while also traveling to the goal position shown in red. OPRL
+produces trajectories that match this preference by taking a more round-about, but more preferred, path to
+the goal.
+cabinets. Our results in Table 1 show that setting the reward to all zero or a constant reward causes the
+performance to degrade signiﬁcantly. Interestingly, the results in Table 2 show that OPRL using Ensemble
+Disagreement and Ensemble InfoGain are able to shape the reward in a way that actually leads to better
+performance than using the ground-truth reward for the task. In the appendix, we plot the learning curves
+and ﬁnd that OPRL also converges to a better performance faster.
+5.3
+New Oﬄine Preference-Based Reward Learning Tasks
+To explore the full beneﬁts of learning a reward function from preferences, we propose and study several
+new tasks to highlight the need for a shaped reward function, rather than simply a goal indicator. To create
+these environments we adapted common gym environments including several that are in the D4RL set of
+benchmarks. The following section shows that OPRL can learn novel behaviors despite the oﬄine data never
+containing successful or complete examples of these behaviors. We believe this is an exciting result that has
+not been previously demonstrated or recognized as possible in prior preference learning work.
+5.3.1
+Maze Navigation with Constraint Region
+We created a new variant of the Maze2d-Medium task where there is a constraint region in the middle of the
+maze that the supervisor does not want the robot to enter. Figure 5 shows this scenario where entering the
+highlighted yellow region is undesirable. After only 25 active queries using ensemble disagreement, we obtain
+the behavior shown in Figure 5 where the oﬄine RL policy has learned to reach the goal while avoiding the
+constraint region.
+5.3.2
+Open Maze Behaviors
+Next, we took the D4RL Open Maze environment and dataset and used it to teach an agent to patrol the
+domain in counter-clockwise orbits, clockwise orbits, approximating a digital 2 shape, preferring to stay at
+the top, and approximating a "Z" shape. The open maze counter-clockwise orbiting uses human preferences
+provided by one of the authors by showing the human user trajectory snippets visualized as in 2 and querying
+preferences. The dataset only contains the agent moving to randomly chosen goal locations, thus this domain
+highlights the beneﬁts of stitching together data from an oﬄine database as well as the beneﬁts of learning a
+shaped reward function rather than simply using a goal classiﬁer to use as the reward function which has
+been used in prior work on oﬄine RL work (Eysenbach et al., 2021). The original data distribution, samples
+of the preference queries, and the resulting learned policies are shown in ﬁgures 2 and 6. Our results involving
+the open maze behaviors in Figure 6 and our work on constrained maze in Figure 5 can be seen as a mixture
+of experts since the data consists of a mixture of demonstrations for a variety of starts and goals. OPRL
+can leverage diverse data to achieve diﬀerent preferences (including ones not explicitly demonstrated), such
+as taking a longer rather than shorter path to a goal because of a speciﬁc user constraint preference in the
+medium maze, or various behaviors in the open maze.
+11
+
+Published in Transactions on Machine Learning Research (01/2023)
+Figure 6: Learned “Shape" Policies adapt to particular user’s preferences to learn counterclockwise orbits,
+a digital 2 shape, preferring to stay at the top, and a “Z" shape, respectively. Green circles represent random
+initial states and red circles represent the position of the agent at the end of a rollout.
+Table 3: Quantitative Results for Open Ended Cartpole Behaviors: We evaluated the trained OPRL
+policies to calculate how often the pole was balanced (θ ≤±24◦) and in view (cart position in [-2.4,2.4]) or in
+view and windmilling clockwise or counter-clockwise (by looking at the sign of the angular velocity). This
+table contains results showing the average (standard error of the mean) number of time steps in a 200-length
+trajectory that the diﬀerent behaviors are exhibited in the randomly collected Oﬄine Data (ﬁrst row) and
+when rolling out the trained OPRL policy (second row).
+Balance
+Windmill (CW)
+Windmill (CCW)
+Avg. Steps
+SE
+Avg. Steps
+SE
+Avg. Steps
+SE
+Offline Data
+23.07
+(0.37)
+71.39
+(2.01)
+72.12
+(2.06)
+OPRL
+111.35
+(3.36)
+128.20
+(0.14)
+190.37
+(1.43)
+5.3.3
+Open-Ended CartPole Behaviors
+We created an oﬄine dataset of 1,000 random trajectories of length 200 in a modiﬁed CartPole domain where
+the trajectories only terminate at the end of 200 timesteps—this allows the pole to swing below the track
+and also allows the cart to move oﬀthe visible track to the left or right. Given this dataset of behavior
+agnostic data, we wanted to see whether we could optimize diﬀerent policies, corresponding to diﬀerent human
+preferences. We can also see this data from a random controller as highly suboptimal data for the following
+tasks. We optimized the following policies: balance, where the supervisor prefers the pole to be balanced
+upright and prefers the cart to stay in the middle of the track; clockwise windmill, where the supervisor
+prefers the cart to stay in the middle of the track but prefers the pole to swing around as fast as possible in
+the clockwise direction; and counter-clockwise windmill, which is identical to clockwise windmill except the
+preference is for the pole to swing in the counter-clockwise direction. OPRL is able to learn policies for all
+three behaviors. See the supplementary video for examples of the learned behaviors.
+To quantitatively evaluate OPRL on these open-ended behaviors, we measure the average number of steps
+that OPRL policy is performing the task (e.g. balanced, windmill clockwise, windmill counter-clockwise)
+compared to the average number of steps these behavior appear in the original dataset as seen in Table 3. We
+see that OPRL is able to perform the task about 5 times more frequently for the balance task and around 2
+times more frequently for the windmill tasks when compared to the original dataset. This gives evidence that
+OPRL is able to leverage oﬄine data to optimize tasks not explicitly shown in the data.
+5.3.4
+Pilot User Study
+We ran a small user study where we recruited 6 participants and asked them to give pairwise preference labels
+to teach an agent a goal location in Medium-Maze (Fig 3(b)) and a counter-clockwise orbiting behavior in
+OpenMaze (Sec 5.3.2). For Medium-Maze we quantitatively evaluated the performance of OPRL with respect
+to the GT reward from D4RL. Similar to our simulation results, we found that EnsemDis version of OPRL
+12
+
+Published in Transactions on Machine Learning Research (01/2023)
+performed the best, achieving scores of 122.6 compared to GT performance of 134.6 and the remaining results
+are included in Table 10. All users were able to successfully use OPRL to teach an orbiting behavior nearly
+identical to Fig 6 (left) as shown in Fig 9 in the Appendix. In Table 10 we show results per user as well as
+results when aggregating all user preferences labels. We ﬁnd that the combined data set (POOLED) achieved
+performance better than most of the individual users. We hypothesize this is because each user only answered
+100 random queries which were used to create the pool for active learning. The POOLED results show the
+beneﬁt of having a large-enough active learning pool when performing oﬄine preference learning. Overall, we
+found that users were able to provide preference labels that enable oﬄine RL to generate behaviors aligned
+with human users.
+6
+Discussion and Future Work
+Our goal is to learn a policy from user preferences without requiring access to a model, simulator, or
+interactions with the environment. Toward this goal, we propose OPRL: Oﬄine Preference-based Reward
+Learning. We evaluate several diﬀerent oﬄine RL benchmarks and ﬁnd that those that contain mainly random
+data or multi-task data are best suited for reward inference. While most prior work on reward learning
+has focused on learning from expert demonstrations, preference-based reward learning enables us to learn a
+user’s intent even from random datasets by selecting informative sub-sequences of transitions and requesting
+pairwise preferences over these sub-sequences. Our results suggest that using ensemble disagreement as an
+acquisition function is the best choice since it leads to the best performance for 3 out of the 5 tasks and
+outperforms the random baseline for all 5 tasks. Additionally, using ensemble disagreement with only 10-15
+preference queries we are able to learn policies with similar performance to policies trained with full access to
+tens of thousands of ground-truth reward samples. Finally, our results suggest there is surprising value in
+oﬄine datasets even if the datasets do not explicitly contain data that matches a user’s preferences or if the
+datasets contain suboptimal data. We are excited about the potential of oﬄine reward and policy learning
+and believe that our work provides a stepping stone towards safer and more eﬃcient autonomous systems
+that can better learn from and interact with humans. Preference-learning enables users to teach a system
+without needing to be able to directly control the system or demonstrate optimal behavior. We believe this
+makes preferences ideally suited for many tasks in as healthcare, ﬁnance, or robotics. Future work includes
+developing more complex and realistic datasets and benchmarks and developing oﬄine RL algorithms and
+active query strategies that are well-suited for reward inference and oﬄine RL.

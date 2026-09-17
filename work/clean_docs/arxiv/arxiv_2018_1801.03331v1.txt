@@ -1,0 +1,2273 @@
+Reasoning about Unforeseen Possibilities During Policy
+Learning
+Craig Innesa, Alex Lascaridesa, Stefano V. Albrechta, Subramanian Ramamoorthya,
+Benjamin Rosmanb
+aSchool of Informatics, University of Edinburgh
+bMobile Intelligent Autonomous Systems, CSIR, and School of Computer Science and Applied
+Mathematics, University of the Witwatersrand
+Abstract
+Methods for learning optimal policies in autonomous agents often assume that the way
+the domain is conceptualised—its possible states and actions and their causal structure—
+is known in advance and does not change during learning. This is an unrealistic assump-
+tion in many scenarios, because new evidence can reveal important information about
+what is possible, possibilities that the agent was not aware existed prior to learning.
+We present a model of an agent which both discovers and learns to exploit unforeseen
+possibilities using two sources of evidence: direct interaction with the world and com-
+munication with a domain expert. We use a combination of probabilistic and symbolic
+reasoning to estimate all components of the decision problem, including its set of ran-
+dom variables and their causal dependencies. Agent simulations show that the agent
+converges on optimal polices even when it starts out unaware of factors that are critical
+to behaving optimally.
+1. Introduction
+Consider the following decision problem from the domain of crop farming (inspired
+by Kristensen and Rasmussen (2002)): Each harvest season, an agent is responsible for
+deciding how best to grow barley on the land it owns. At the start of the season, the
+agent makes some decisions about which grain variety to plant and how much fertiliser
+to use. Come harvest time, those initial decisions aﬀect the yield and quality of the
+crops harvested. We can think of this problem as a single-stage (or “one-shot”) decision
+problem, in which the agent chooses one action based on a set of observations, then
+receives a ﬁnal reward based on the outcome of its action.
+Suppose the agent has experience from several harvests, and believes it has a good
+idea of the best seeds and fertiliser to use for a given climate. One harvest, something
+totally unexpected happens: Despite choosing what it thought were the best grains and
+
+1
+arXiv:1801.03331v1  [cs.AI]  10 Jan 2018
+
+fertiliser, many of the crops have come out deformed and of poor quality. A neighbouring
+farmer tells the agent the crops have been infected by a fungus that spreads in high
+temperatures, and that the best way to protect crops in future is to apply fungicide. The
+agent must now revise its model of the environment and its reward function to account for
+fungus (a concept it previously was not aware of), extend its available actions to include
+fungicide application (an action it previously did not realise existed), reason about the
+probabilistic dependencies these new concepts have to the ones it was already aware of,
+and reason about how they aﬀect rewards.
+This example illustrates at least three challenges, the combination of which typically
+is not handled by current methods for learning optimal decision policies (we defer a
+detailed discussion of related work to Section 6):
+• In addition to starting unaware of the probabilistic dependency structure of the
+decision problem, the agent starts unaware of even the true hypothesis space of
+possible problem structures, including the sets of possible actions and environment
+variables, and their causal relations.
+• Domain exploration alone might not be enough to discover these unknown factors.
+For instance, it is unlikely the agent would discover the concept of fungus or the
+action of fungicide application by just continuing to plant crops. External expert
+instruction is necessary to overcome unawareness.
+• An expert might interject with contextually relevant advice during learning, not
+just at the beginning of the problem. Further, that advice may refer to concepts
+which are not a part of the agent’s current model of the domain.
+In the face of such strong unawareness, one might be tempted to side-step learning
+an explicit model of the problem, and instead learn optimal behaviour directly from
+the data. Deep reinforcement learning (e.g. Mnih et al. (2015)) has proved extremely
+useful for learning implicit representations of large problems, particularly in domains
+where the input sensory streams are complex and high-dimensional (e.g computer vision).
+However, in many such models, the focus of attention for abstraction and representation
+learning is on perceptual features rather than causal relations (see, e.g., Pearl (2017))
+and other decision-centric attributes.
+For instance, in works such as by Chen et al.
+(2015), who demonstrate an end-to-end solution to the problem of autonomous driving,
+the decisions are not elaborated beyond “follow the lane” or “change lanes” although
+signiﬁcant perceptual representation learning may need to happen in order to work with
+the predicate “lane” within the raw sensory streams. For safety critical decisions, or ones
+involving signiﬁcant investment (e.g. driving a car, advising on a medical procedure,
+deciding on crops to grow for the year) it is important 1 that a system can explain the
+reasoning behind its decisions so the user can trust its judgement.
+We present a learning agent that, in a complementary approach to representation
+learning in batch mode from large corpora, uses evidence and a reasoning mechanism to
+incrementally construct an interpretable model of the decision problem, based on which
+optimal decision policies are computed. The main contributions of this paper are:
+1As evidenced by signiﬁcant recent interest from agencies interested in the application of AI, e.g., the
+DARPA Explainable AI programme DARPA-BAA-16-53 (2016)
+2
+
+• An agent which, starting unaware of factors on which an optimal policy depends,
+learns optimal behaviour for single-stage decision problems via direct experience
+and advice from a domain expert. The learning uses decision networks to represent
+beliefs about the variables and causal structure of the decision problem, providing
+a compact and interpretable model. Crucially, the agent can revise all components
+of this model, including the set of random variables, their causal dependencies, and
+the domain of the reward function (Section 4).
+• A communication framework via which an expert can oﬀer both solicited and un-
+solicited advice to the agent during learning: that is, the expert advice is oﬀered
+piecemeal, in reaction to the agent’s latest attempts to solve the task, rather than
+all of it being conveyed prior to learning. Messages from the expert can include
+entirely new concepts which the agent was previously unaware of, and provide
+important qualitative information to complement the quantitative information con-
+veyed by statistical correlations in the domain trials (Section 3.2).
+• Experiments across a suite of randomly generated decision problems, which demon-
+strate that our agent can learn the optimal policy from evidence, even if it were
+when initially unaware of variables that are critical to its success (Section 5).
+The kinds of applications we ultimately have in mind for this work include tasks in
+which there is a need for ﬂexible and robust responses to a vast array of contingencies. In
+particular, we are interested in the paradigm of continual (or life-long) learning (Silver,
+2011; Thrun and Pratt, 2012), wherein the agent must continually and incrementally
+add to its knowledge, and so revise the hypothesis space of possible states and actions
+within which decisions are made. In this context, there is a need for autonomous model
+management (Liebman et al., 2017), which calls for reasoning about what the hypothesis
+space is, in addition to policy learning within those hypothesis spaces.
+2. The Learning Task
+We consider learning in single-stage decision problems. In these problems, the agent
+chooses an action based on a set of initial observations, then immediately receives a
+ﬁnal reward based on the outcome of its action. Subsequent repetitions of the same
+decision problem have mutually independent initial observations, and the immediate
+reward depends only on the current action and its outcome. Solving the problem of
+unforeseen possibilities for single-stage scenarios is a necessary ﬁrst step towards the
+long-term goal of extending this work to multi-stage, sequential decision problems.
+To learn an optimal decision policy, the agent must compute which action will max-
+imise its expected reward, given its observations of the state in which the action is to
+be performed. Formally, the optimal action ⃗a∗given observations ⃗e is the action which
+maximizes expected utility:
+⃗a∗= arg max
+⃗a∈v(A) EU(⃗a|⃗e) = arg max
+⃗a∈v(A)
+X
+⃗s∈v(C)
+Pr(⃗s|⃗a,⃗e)R(⃗s)
+(1)
+Here, A = {A1, A2, . . . , An} is the set of action variables and C = {C1, C2, . . . , Cm}
+is the set of chance variables (or state variables). An action ⃗a ∈v(A) is an assignment
+3
+
+to each of the action variables in A, such that ⃗a = (a1, a2, . . . , an) with a1 ∈A1, a2 ∈A2,
+etc. (We use v(Q) to denote the Cartesian product of all sets in Q.) Similarly, a state
+⃗s ∈C is an assignment to each chance variable in C. The reward received in state ⃗s is
+R(⃗s).
+In our task, the agent faces the extra diﬃculty of starting unaware of certain actions
+and concepts (i.e., chance variables) on which the true optimal policy depends. Conse-
+quently, it begins learning with an incomplete hypothesis space. It also has an incorrect
+model of the domain’s causal structure—i.e., there may be missing or incorrect depen-
+dencies. Further, the learning agent will start with an incomplete or incorrect reward
+function. The agent’s learning task, then, is to use evidence to converge on an optimal
+policy, despite beginning with an initial model deﬁned over an incomplete set of possible
+states and actions and incorrect dependencies among them.
+Since we are interested in interpretable solutions, our approach is that the learn-
+ing agent uses evidence to dynamically construct an interpretable model of the decision
+problem from which an optimal policy can be computed. Formally, we treat this task of
+learning an optimal policy as one of learning a decision network (dn). dns capture pref-
+erences with a numeric reward function and beliefs with a Bayes Net, thereby providing
+a compact representation of all the components in equation (1).
+Deﬁnition 1.
+Decision Network
+A Decision Network (dn) is a tuple ⟨C, A, Π, θ, R⟩, where C is a set of chance
+variables, A is a set of action variables (the agent controls their values), and
+R is a reward function whose domain is ΠR ⊆C and range is R.2 ⟨Π, θ⟩is a
+Bayes Net deﬁned over C ∪A. That is, Π is a directed acyclic graph (dag),
+deﬁning for each C ∈C its parents Πc ⊆C ∪A, such that C is conditionally
+independent of (C ∪A) \ Πc given Πc. θ deﬁnes for each variable C ∈C its
+conditional probability distribution θc = Pr(C|Πc).
+A policy for a dn is a function π from the observed portion ⃗e of the current state
+(i.e., ⃗e is a subvector of v(C)) to an action v(A). As is usual with dns, any variable
+X whose value depends on the action performed (in other words, X is a descendant of
+A) cannot be observed until after performing an action. More formally, C = B ∪O,
+where the “before” variables B are non-descendants of A, and the “outcome” variables
+O are descendants of A (i.e., where Π∗is the closure of Π, X ∈O iﬀ∃A ∈A such that
+A ∈Π∗
+X). So a policy π for the dn is a function from v(B′) to v(A), where B′ ⊆B are
+the observable variables in B.
+Figure 1a shows a dn representation of the barley example from the introduction. The
+action variables (rectangles) are A = {Grain, Harrow, Fungicide, Fertiliser, Pesticide},
+the chance variables (ovals) are C = B∪O where B includes Precipitation, Temperature,
+Soil Type etc. and O includes Y ield, Protein, Fungus, and Bad Press. The reward
+domain is ΠR = {Y ield, Protein, Fungus, Bad Press}.
+Our dn formulation has some similarities to inﬂuence diagrams (Howard and Math-
+eson, 2005). In contrast to DNs, inﬂuence diagrams allow action nodes to have parents
+via “information arcs” from chance nodes. While this feature is useful to model multi-
+stage decision problems, we do not require it here since all action variables are assigned
+simultaneously.
+2 Agents do not have intrinsic preferences over actions, but rather over their outcomes.
+4
+
+Our agent will incrementally learn all components of the dn, including its set of
+random variables, dependencies and reward function. We denote the true dn by dn+,
+and the agent’s current model of the dn at time t as dnt. A similar convention is used
+for each component of the dn (so, for instance, At is the set of action variables the agent
+is aware of at time t). Thus, we compute an update function dnt = update(dnt−1, et),
+where et is the latest body of evidence and the dns dnt−1 and dnt may diﬀer in any
+respect. Figure 1b gives an example of an agent’s possible starting model dn0 for the
+barley example.
+Notice that dn0 is missing factors that inﬂuence the optimal policy deﬁned by dn+
+(e.g. it is unaware of the concept of fungus). It is also missing dependencies that are a
+part of dn+ (e.g. it does not think the choice of grain has any inﬂuence on the amount
+of crops that will grow). One usually assumes that all variables in a dn are connected to
+the utility node because a variable that is not has no eﬀects on optimal behaviour. So
+the agent knows that dn+ is so connected, but dn+’s set of variables, causal structure
+and reward function are all hidden and must be inferred from evidence.
+We make four main assumptions to restrict the scope of the learning task:
+1. The agent can observe the values of all the variables it is aware of (so the domain
+of its policy function at time step t is v(Bt)). However, it cannot observe a chance
+variable’s values at times before it was aware of it, even after becoming aware of it—
+i.e. the agent cannot re-perceive past domain trials upon discovering an unforeseen
+factor.
+2. The agent cannot perform an action it is unaware of. Formally, if X ∈A+ but
+X ̸∈At, then the fully aware expert perceives the learning agent’s action as en-
+tailing X = 0 (plus other values of other variables in A+). This diﬀers from the
+learning agent’s own perception of its action: X = 0 is not a part of the agent’s
+representation of what it just did because it is not aware of X! Once the agent
+becomes aware of X, then knowing that inadvertent actions are not possible, it
+can infer all its past actions entail X = 0. This contrasts with chance variables,
+whose values at times when the agent was unaware of them will always be hidden.
+Clearly, this assumption does not hold across all decision problems (e.g. an agent
+might inadvertently lean on a button, despite not knowing the button exists). If we
+wished to lift this assumption, we could simply treat action variable unawareness in
+the same way as we treat chance variable unawareness (as described in Section 4).
+3. The set of random variables in the agent’s initial dn dn0 is incomplete rather than
+wrong: that is, B0 ⊆B+, O0 ⊆O+ and A0 ⊆A+. Further, the initial domain
+of R is a subset of its true domain: i.e., Π0
+R ⊆Π+
+R. This constraint together with
+the dialogue strategies in Section 3.2 simplify reasoning: dn updates may add new
+random variables but never removes them; and may extend the domain of R but
+never retracts it. However, the causal structure Π and reward function R can be
+revised, not just reﬁned.
+4. The expert has complete knowledge of the actual decision problem dn+ but lacks
+complete knowledge of dnt—the learning agent’s perception of its decision problem
+at time t. Further, we make the expert cooperative—her advice is always sincere,
+competent and relevant (see Section 3.2 for details).
+5
+
+Local
+Concern
+Bad
+Press
+R
+Gross
+Crops
+Yield
+Fertiliser
+Nitrogen
+Protein
+Pesticide
+Infestation
+Fungicide
+Fungus
+Harrow
+Weeds
+Grain
+Insect
+Prevalence
+Precipitation
+Soil
+Type
+Temperature
+(a) True Decision Problem
+Soil
+Type
+Nitrogen
+Gross
+Crops
+Yield
+Fertiliser
+R
+Grain
+Protein
+Precipitation
+(b) Agent’s Initial Model
+Figure 1: The graphical component of the dn for the “Barley” problem. Action variables are represented
+by rectangles, chance variables by ovals, and the reward node by a diamond.
+Any competent agent attempting this learning task should obey two key principles:
+Consistency: At all times t, dnt should be consistent. That is, Πt should be a dag
+deﬁned over the vocabulary Ct∪At, θt should abide by the basic laws of probability,
+and Rt should be a well-deﬁned function that captures an asymmetric and transitive
+preference relation over Ct.
+Satisfaction: Evidence is informative about what can happen (however rarely), not just
+informative about likelihood. At all times t, dnt should satisfy all the possibilities
+that are entailed by the observed evidence so far.
+Consistency is clearly desirable, because anything can be inferred from an inconsistent
+dn, making any action optimal. Satisfaction is not an issue in traditional approaches
+to learning optimal policies, because evidence never reveals a possibility that is not
+6
+
+within the hypothesis space of the learning agent’s initial dn. But in our task, without
+Satisfaction, the posterior dn may fail to represent an unforeseen possibility that is
+monotonically entailed by observed evidence. It would then fail to capture the unforeseen
+possibility’s eﬀects on expected utilities and optimal policy. Our experiments in Section 5
+show that when starting out unaware of factors on which optimal policies depend, a
+baseline agent that does not comply with Satisfaction performs worse than an agent that
+does. We will say dnt is valid if it complies with Consistency and Satisfaction; it is
+invalid otherwise.
+A valid dn is necessary, but not suﬃcient: dnt should not only be valid, but in
+addition its probabilistic component ⟨Πt, θt⟩should reﬂect the relative frequencies in the
+domain trials. Section 4 will deﬁne a dn update procedure with all of these properties.
+The set of valid dns is always unbounded—it is always possible to add a random
+variable to a valid dn while preserving its validity.
+So in addition to the above two
+monotonic constraints on dn update, we adopt two intuitively compelling defeasible
+principles that make dn update tractable. Indeed, the agent needn’t enumerate all valid
+dns; instead, dn update uses the defeasible principles to dynamically construct a single
+dn from evidence:
+Minimality: The dn should have minimal complexity.
+In other words, its random
+variables discriminate one possible state from another, two states have distinct
+payoﬀs, and/or two factors are probabilistically dependent only when evidence
+justiﬁes this.
+Conservativity: The agent should minimise changes to the dn’s hypothesis space when
+observing new evidence.
+Minimality is a form of Occam’s razor: make the model as simple as possible while
+accounting for evidence. Conservativity captures the compelling intuition that you pre-
+serve as much as possible of what you inferred from past evidence even when you have
+to revise the dn to restore consistency with current evidence. Minimality and Conserva-
+tivity underlie existing symbolic models of commonsense reasoning (Poole, 1993; Hobbs
+et al., 1993; Alchourr´on et al., 1985), the acquisition of causal dependencies (Bramley
+et al., 2015; Buntine, 1991) and preference change (Hansson, 1995; Cadilhac et al., 2015).
+Our ﬁnal desirable feature is to support active learning: to give the agent some
+control over the evidence it learns from next, both from the domain trials (Section 3.1)
+and the dialogue content (Section 3.2).
+3. Evidence
+We must use evidence to overcome ignorance about how to conceptualise the domain,
+not just ignorance about likelihoods and payoﬀs. We regiment this by associating each
+piece of evidence et with a formula δt that expresses (partial) information about the true
+decision problem dn+, where δt follows monotonically from et, in the sense that it would
+be impossible to observe et unless δt is true of the decision problem dn+ that generated
+et. Thus δt is a partial description of a dn that must be satisﬁed by the actual (complete)
+decision network dn+.
+7
+
+We illustrate this with three examples. First, given the assumptions we made about
+the relationship between the agent’s initial dn dn0 and dn+ (i.e., that B0 ⊆B+, A0 ⊆A+,
+O0 ⊆O+ and Π0
+R ⊆Π+
+R), dn0 in Figure 1b yields the partial description δ0 given in (2):
+{Grain, Fertiliser} ⊆A+
+∧
+{Soil Type, Precipitation} ⊆B+
+∧
+{Nitrogen, Gross Crops, Y ield, Protein} ⊆O+
+∧
+{Y ield, Protein} ⊆Π+
+R
+(2)
+The second example concerns domain trials: suppose the agent is in a state where
+it experiences the reward r and observes that the Y ield variable has value y and the
+Protein variable has value p. Equation (3) must be true of dn+, where the domain of
+quantiﬁcation is dn+’s atomic states:
+∃s(s →y ∧p ∧R+(s) = r)
+(3)
+Thirdly, suppose the expert advises the agent to apply pesticide. Then, Pesticide ∈A+
+must be true.
+We capture this relationship between a complete dn and formulae like (2) and (3) by
+deﬁning a syntax and semantics of a language for partially describing dns (details are in
+the Appendix). Each model for interpreting the formulae δ in this language corresponds
+to a unique complete dn, and dn |= δ if and only if δ (partially) describes dn. Where δt
+represents the properties that a dn generating observed evidence et must have, dn+ |= δt
+(because dn+ generated et), although other dns may satisfy δt too. This relationship
+between dn+, et and δt enables the agent to accumulate an increasingly speciﬁc partial
+description of dn+ as it observes more and more evidence: where e0:t−1 is the sequence
+of evidence e1, . . . , et−1 and δ0:t−1 its associated partial description of dn+, observing
+the latest evidence et yields e0:t with an associated partial description δ0:t that is the
+conjunction of δ0:t−1 and δt. The agent will thus estimate a valid dn from evidence (as
+deﬁned in Section 2) under the following conditions:
+1. δ0:t captures the necessary properties of a dn that generates e0:t
+2. The agent’s model obeys this partial description. That is, dnt |= δ0:t
+This section describes how we achieve the ﬁrst condition; Section 4 deﬁnes how we
+achieve the second, with Section 4.2 also ensuring that the probabilistic component
+⟨Πt, θt⟩reﬂects the relative frequencies in the domain trials.
+3.1. Domain Evidence: Sample0:t
+Domain evidence consists of a set of domain trials. In a domain trial τi, the agent
+observes ⃗bi ∈v(Bi), performs an action ⃗ai ∈v(Ai), and observes its outcome ⃗oi ∈
+v(Oi) and reward ri. From now on, for notational convenience, we may omit the vector
+notation, or freely interchange vectors with conjunctions of their values. Each domain
+trial therefore consists of a tuple:
+Sample0:t = [⟨bi, ai, oi, ri⟩: 0 < i ≤t]
+(4)
+8
+
+The domain trial τi = ⟨bi, ai, oi, ri⟩entails the partial description (5) of dn+: in words,
+there is an atomic state s ∈v(C+ ∪A+) in dn+ that entails the observed values bi, ai
+and oi and which has the payoﬀri.
+∃s((s →(bi ∧ai ∧oi)) ∧R+(s) = ri)
+(5)
+Formula (5) follows monotonically from τi because the agent’s perception of a domain
+trial is incomplete but never wrong: the agent’s random variables have observable values,
+and they are always a subset of those in dn+ thanks to the agent’s starting point dn0 and
+the dialogue strategies (see Section 3.2). Thus, even if the agent subsequently discovers a
+new random variable X, (5) still follows from τi, regardless of X’s value at time i (which
+remains hidden to the agent). But on discovering X, tuples in (4) get extended—the
+agent will observe X’s value in subsequent domain trials. Thus in contrast to standard
+domain evidence, the size of the tuples in (4) is dynamic. We discuss in Section 4 how
+the agent copes with these dynamics. The expert also keeps a record Sample+
+0:t of the
+domain trials; these inﬂuence her dialogue moves (see Section 3.2). Her representation of
+each trial is at least as speciﬁc as the agent’s because she is aware of all the variables—so
+the size of the tuples in Sample+
+0:t is static.
+Domain trials can reveal to the agent that its conceptualisation of the domain is
+deﬁcient. If there are two trials in Sample0:t with the same observed value for Πt
+R (i.e.,
+the current estimated domain of the reward function) but the rewards are diﬀerent, then
+this entails that Πt
+R is invalid. If Sample0:t contains two domain trials with the same
+observed values for every chance variable Ct of which the agent is currently aware, but
+the rewards are diﬀerent, then the vocabulary Ct is invalid. Section 4 will deﬁne how the
+agent detects and learns from these circumstances.
+The agent’s strategy for choosing an action mixes exploitation and exploration in
+an ϵ-greedy approach: In a proportion (1 −ϵ) of the trials, the agent chooses what it
+currently thinks is an optimal action. In the remainder, the agent chooses an action at
+random.
+3.2. Dialogue Evidence: D0:t
+The interaction between the agent and the expert consists of the agent asking ques-
+tions that the expert then answers, and unsolicited advice from the expert.
+All the
+dialogue moves are about dn+, and the signals are in the formal language for partially
+describing dns (see the Appendix), but with the addition of a sense ambiguous term,
+which we motivate and describe shortly. The agent’s and expert’s lexica are diﬀerent,
+however: the agent’s vocabulary lacks the random variables in dn+ that it is currently
+unaware of, and so the expert’s utterances may feature neologisms. As we said earlier, we
+bypass learning how to ground neologisms (but see Larsson (2013); Forbes et al. (2015);
+Yu et al. (2016)) by assuming that once the agent has heard a neologism, it can observe
+its denotation in all subsequent domain trials.
+The sense ambiguous term is wb
+t: its intended denotation is what the expert observes
+about the state at time t before the agent acts—i.e., [[wb
+t]] ∈v(B+). But this denotation
+is hidden to the agent, whose default interpretation is [[wb
+t]] projected onto Bt—i.e., it
+is restricted by the agent’s conceptualisation of the domain at time t. The expert uses
+wb
+t to advise the agent of a better action than the one it performed at t. We will see
+in Section 3.2.1 that using wb
+t in the expert’s signal minimises its neologisms, which
+9
+
+makes learning more tractable.
+But hidden messages may create misunderstandings;
+Section 3.2.2 describes how the agent detects and learns from them.
+The agent and expert both keep a dialogue history: D0:t for the agent and D+
+0:t for
+the expert. Each utterance in a dialogue history is a tuple ⟨ωi, σi, µi⟩, where ωi is the
+speaker (i.e., either the expert or the learning agent), σi the signal, and µi its (default)
+interpretation. Since wb
+i may be misinterpreted, µi and µ+
+i may diﬀer and so µi is not
+equivalent to δi—δi is the information about dn+ that follows from the signal σi whatever
+the denotation of wb
+i might be. We will specify δi for each signal σi in Section 3.2.1.
+3.2.1. The expert’s dialogue strategy
+As noted earlier, the expert’s dialogue strategy is Cooperative: the message µ+ that
+she intends to convey with her signal σ is satisﬁed by the actual decision problem dn+,
+so that dn+ |= µ+. This makes her sincere, competent and relevant. In many realistic
+scenarios, this assumption may be untrue (a human teacher, for example, might occa-
+sionally make mistakes). We intend to explore relaxations of this assumption in future
+work.
+Further, the expert’s dialogue strategy limits the amount of information she is allowed
+to send in each signal. There are two motivations for limiting the amount of information.
+The ﬁrst stems from the deﬁnition itself of our learning task; and the second is practical.
+First, recall from Section 1 that we allow the expert advice to occur piecemeal, with
+signals being interleaved among the learner’s domain trials. This is because a major aim
+of our learning task is to reﬂect the kind of teacher-apprentice learning seen between
+humans, where the teacher only occasionally interjects to say things that relate to the
+learner’s latest attempts to solve the task. There are many tasks where an expert may be
+incapable of exhaustively expressing everything they know about the problem domain,
+but rather can only express relevant information in reaction to speciﬁc contingencies that
+they experience.
+The second, more practical motivation is to make learning tractable. The number
+of possible causal structures Π is hyperexponential in the number of random variables
+(Buntine, 1991). Prior work utilises defeasible principles such as Conservativity (Bramley
+et al., 2015) and Minimality (Buntine, 1991) to make inferring Π tractable. However,
+if the expert’s signal σt features a set N of variables that the agent was unaware of,
+then the agent must add each variable in N to the causal structure Πt, and moreover by
+Consistency and Satisfaction, each of these must be connected to Πt’s utility node. But
+Πt−1 did not feature these variables at all, and so the number of maximally conservative
+and minimal updates that satisfy this connectedness is hyperexponential in the size of
+N.
+Thus, an expert utterance with many neologisms undermines the eﬃciency and
+incrementality of learning.
+We avoid this complexity by restricting all expert signals to containing at most one
+neologism. Speciﬁcally, the expert must have conclusive evidence that the agent is aware
+of all but one of the random variables that feature in her signal σ. The expert knows
+the agent is aware of a variable X if: (a) X has already been mentioned in the dialogue,
+either by her or by the agent; or (b) X is an action variable and the agent has performed
+its positive value x (recall that inadvertent action is not possible):
+Ce
+=
+{X ∈C+ | ∃σi ∈D+
+0:t : X ∈σi}
+Ae
+=
+{X ∈A+ | ∃σi ∈D+
+0:t : X ∈σi or ∃τi ∈Sample+
+0:t : x ∈τi}
+(6)
+10
+
+Here, Ce and Ae respectively are the set of chance and action variables that the expert
+knows the agent is aware of. The following principle, which we refer to as 1N, applies to
+all the expert’s signals:
+At Most One Neologism (1N): Each expert signal σ features at most one variable
+from (A+ ∪C+)\(Ae ∪Ce) (i.e., at most one neologism). Furthermore, if σ features
+such a variable X, then σ declares its type: i.e., σ includes the conjunct X ∈B+,
+X ∈O+ or X ∈A+, as appropriate.
+The expert uses an ambiguous term wb
+t to comply with Cooperativity and 1N in
+contexts where, without wb
+t, she would be unable express any advice.
+For instance,
+assume that the expert’s knowledge of the agent’s “before” vocabulary is given by Be.
+The expert would typically be unable to express that, given bt ∈v(B+), the agent
+should have performed an alternative action a′ to the action at that the agent actually
+performed—by 1N, she cannot use the vector b+
+t ∈v(B+) in her signal if |B+| −|Be| > 1.
+If instead she were to use the vector be
+t, where be
+t = b+
+t ↾Be (i.e., b+
+t projected onto Be),
+then the resulting statement (7) may be false (and so violate Cooperativity), because
+these expected utilities marginalise over all possible values of B+ \ Be, rather than using
+their actual values:
+EU(a′|be
+t) > EU(at|be
+t)
+(7)
+Alternatively, by replacing be
+t in the signal (7) with the ambiguous term wb
+t, her intended
+message becomes hidden but it abides by both Cooperativity and 1N.
+The expert’s dialogue policy is to answer all the agent’s queries as and when they
+arise, and to occasionally oﬀer unsolicited advice about a better action. She does the
+latter when two conditions hold:
+(i) The agent has been behaving suﬃciently poorly to justify the need for advice
+(ii) The current context is one where she can express a better option while abiding by
+Cooperativity and 1N.
+Condition (i) is deﬁned via two parameters γ and β: in words, the last piece of advice
+was oﬀered greater than γ time steps ago, and from then until now, the fraction of
+suboptimal actions taken by the agent is greater than β. This is formalised in equation
+(8), where t′ is the time of the last advice and a+,∗
+i
+is the optimal action given dn+
+and b+
+i . In the experiments in Section 5, we vary γ and β to test how changing the
+expert’s penchant for oﬀering unsolicited advice aﬀects the learning agent’s convergence
+on optimal policies. Condition (ii) for giving advice is satisﬁed when the observed reward
+rt is no higher than the expected payoﬀfrom the agent’s action a+
+t (equation (9)), and
+there is an alternative action a′ with a higher expected payoﬀ, which can be expressed
+while complying with Cooperativity and 1N (equation (10)).
+|t −t′| > γ ∧|{a+
+i : t′ ≤i ≤t and EU(a+
+i |b+
+i ) < EU(a+,∗
+i
+|b+
+i )}|
+|t −t′|
+> β
+(8)
+EU(a+
+t |b+
+t ) ≥rt
+(9)
+∃A∃a′(a′ ∈v(Ae ∪{A}) ∧EU(a′|b+
+t ) ≥EU(a+
+t ↾(Ae ∪{A})|b+
+t ))
+(10)
+11
+
+When the context satisﬁes these conditions, then there are witness constants A and a′
+that satisfy (10). These constants are used to articulate the advice: the expert utters (11),
+where at is the expression formed by projecting the vector a+
+t ∈v(A+) onto Ae ∪{A}.
+EU(a′|wb
+t) > EU(at|wb
+t)
+(11)
+In our Barley example, the message (11) might be paraphrased as: in the current cir-
+cumstances, it would have been better to apply pesticide and not use fertiliser than to
+not apply pesticide and use fertiliser.
+The agent’s default interpretation of (11) is (12), where bt ∈v(Bt):
+X
+s∈Ct×At
+Pr(s|a′, bt)R+(s) ≥
+X
+s∈Ct×At
+Pr(s|at, bt)R+(s)
+(12)
+So ⟨expert, (11), (12)⟩is added to D0:t. While the intended message of (11) is true (be-
+cause (10) is true), (12) may be false, and so no monotonic entailments about probabili-
+ties can be drawn from it. For example, in our Barley example, suppose that the agent’s
+current model of the domain is Figure 1b, and the agent has observed soil type n and
+precipitation c. Then the agent’s defeasible interpretation of the expert’s advice is that
+it would have been better to apply pesticide (p) and not use fertiliser (¬f) (than to not
+apply pesticide and use fertiliser) in any state where n ∧c is true (note that relative to
+the dn shown in Figure 1b, the expert mentioning applying pesticide leads it to discover
+this entirely new action):
+X
+s∈Ct×At
+Pr(s|p, ¬f, n, c)R+(s) ≥
+X
+s∈Ct×At
+Pr(s|¬p, f, n, c)R+(s)
+(13)
+But this (defeasible) interpretation could be false: the expert’s (true) intended message
+may have been that p ∧¬f is better in a much more speciﬁc situation: one where not
+only is n ∧c true, but also the local concern is low and the insect prevalence is high
+(in other words, the probabilities in (13) should have been conditioned on ¬l and i as
+well). However, (11) and the mutually known dialogue policy monotonically entails (14),
+whatever the true referent for wb
+t might be.
+∃s((s →(a′ ∧bt)) ∧R+(s) > rt)
+(14)
+So (14) is added to δ0:t, and for dnt to be valid it must satisfy it; similarly for A ∈A+.3
+In our example, the agent adds (15) to δ0:t:
+∃s((s →(p ∧¬f ∧n ∧c)) ∧R+(s) > rt)
+(15)
+Thus the expert’s unsolicited advice can result in the agent discovering an unforeseen
+action term A (in this case, adding pesticide) and/or prompt a revision to the reward
+function Rt, which in turn may reveal to the agent that its conceptualisation of the
+domain is deﬁcient (just as (5) may do).
+3Our learning algorithms in Section 4 do not exploit the (defeasible) information about likelihood
+that is expressed in (12); that is a matter for future work.
+12
+
+dialogue
+evidence
+domain
+evidence
+misunder-
+standing?
+ask
+(16)
+estimate
+Ct, At,
+Πt
+R, Rt
+unforeseen
+rewards?
+estimate
+Πt
+ask
+(17)
+unknown
+eﬀects?
+ask
+(18)
+estimate
+θt
+no
+no
+yes
+yes
+no
+yes
+Figure 2: Information ﬂow when updating a dn with the latest evidence.
+Diamonds are tests and
+rectangles are processes.
+3.2.2. The agent’s dialogue strategy
+The agent aims to minimise the expert’s eﬀort during the learning process, and so asks
+a question only when dn update fails to discriminate among a large number of dns. In
+this paper, we identify three such contexts (as shown in Figure 2): (i) Misunderstandings;
+(ii) Unforeseen Rewards; and (iii) Unknown Eﬀects. We now describe each of these in
+turn.
+Misunderstandings. The agent checks whether the (default) interpretation of the cur-
+rent signal is consistent with those of prior signals; when they are inconsistent, the agent
+knows there has been a misunderstanding (because of Cooperativity). For instance, sup-
+pose Bt = ∅—so the agent assumes [[wb
+i]] = ⊤for all i ⪯t—and the expert advised
+EU(a|wb
+t−n) > EU(a′|wb
+t−n) and EU(a′|wb
+t) > EU(a|wb
+t). The agent’s default interpre-
+tations of these signals fails the consistency test. Thus the agent infers that it is unaware
+of a B variable, but does not know its name. If the agent were to guess what variable
+to add, then learning would need to support retracting it on the basis of subsequent evi-
+dence, or reason about when it is identical to some subsequent factor the agent becomes
+aware of. This is a major potential complexity in reasoning and learning. We avoid it by
+deﬁning a dialogue strategy that ensures that the agent’s vocabulary is always a subset
+of the true vocabulary. Here, that means the agent asks the expert for the name of a
+B variable. In words, question (16) expresses: what is diﬀerent about the state before I
+acted just now and the state before I acted n time steps ago?4
+?λV (V ∈B+ ∧value(V, t −n) ̸= value(V, t))
+(16)
+4Strictly speaking, answers to this question are partial descriptions of the domain trials Sample+
+0:t as
+well as dn+. The formal details of this are straightforward but tedious, so we gloss over it here.
+13
+
+This signal uses a standard representation for questions (Groenendijk and Stokhof,
+1982): ? is an operator that maps a function to a set of propositions (the true answers),
+and the function’s arguments correspond to the wh-elements of the question (which,
+what etc). Its semantics, given in the Appendix, follows (Asher and Lascarides, 2003):
+a proposition is a true answer if and only if it substitutes speciﬁc individual(s) for the
+λ-term(s) to create a true proposition—so “something” is not an answer but “nothing”
+is an answer, corresponding to the empty set. An answer can thus be non-exhaustive—it
+needn’t include all the referents that satisfy the body of the λ-expression.
+The agent’s policy for when to ask (16) guarantees that it has a true positive answer.
+By the 1N rule, the expert’s answer includes one variable, chosen at random if there is
+a choice. E.g., she answers with the signal X ∈B+; so X ∈B+ is added to δ0:t. In our
+barley example, the answer might be, for instance, “the temperature was high”, where
+the concept “temperature” is a neologism to the learning agent.
+The agent now knows that its default interpretations of prior signals that feature wb
+i
+(i ≺t) are incorrect—on learning X ∈B+, it now knows that these terms do not denote
+⊤. But the agent cannot observe the correct interpretation. Testing whether subsequent
+messages are consistent with prior messages would thus involve reasoning about past
+hidden values of X, which would be complex and fallible. For the sake of simplicity, we
+avoid it: if the agent discovers a new B-variable at time t, then she ceases to test whether
+subsequent messages µt+m are consistent with past ones µt−m′ (m, m′ ≥0). In eﬀect,
+the agent “forgets” past signals and their (default) interpretations, but does not forget
+their monotonic consequences, which are retained in δ0:t.
+Unforeseen rewards. The current reward function’s domain, Πt
+R, may be too small to be
+valid (see Sections 2 and 3.1). If the agent were to guess what variable to add to Πt
+R, then
+learning would need to support retracting it on the basis of subsequent evidence—this is
+again a major potential complexity in reasoning and learning. Instead, when the agent
+infers Πt
+R is too small (we deﬁne how the agent infers this in Section 4), the agent seeks
+monotonic evidence for ﬁxing it by asking the expert (17):
+?λV (V ∈Π+
+R
+^
+X∈Πt
+R
+V ̸= X)
+(17)
+For instance, in the barley domain, this question could express something like “Other
+than having a high yield and high protein crops, what else do I care about?” to which
+the answer might be “You care about bad publicity”. This is a true (non-exhaustive)
+answer, even though the agent (also) cares about avoiding outbreaks of fungus.
+Non-exhaustive answers enable the expert to answer the query while abiding by Co-
+operativity and the 1N rule. But they also generate a choice on which answer to give.
+The expert’s choice is driven by a desire to be informative: she includes in her answer
+all variables in Π+
+R that she knows the agent is aware of (i.e., the variables Y ∈Ce ∩Π+
+R)
+and one potential neologism (i.e., X ∈(C+ \ Ce) ∩Π+
+R) if it exists, with priority given to
+a variable whose value is diﬀerent in the latest trial τt from a prior trial τt′ that had the
+same values as τt on all the variables mentioned in the query (17) but a diﬀerent reward.
+If her answer includes a potential neologism, then by 1N she declares its type.
+For example, let Πt−1
+R
+= {O1, O2} and Π+
+R = {O1, O2, O3, O4, O5}. Suppose that
+O3 ∈Ce but O4, O5 ̸∈Ce. Now suppose that the latest trial τt entails o1, ¬o2 and reward
+14
+
+of 1, but a prior trial entails o1, ¬o2 and a reward of 0.5. Then even if O3 has diﬀerent
+values in these trials, the agent does not infer (defeasibly) that O3 ∈Π+
+R. Rather, she asks
+(17): i.e., ?λV (V ∈Π+
+R ∧V ̸= O1 ∧V ̸= O2). The expert’s answer includes O3 because
+O3 ∈Ce∩Π+
+R. In addition, she can mention either O4 or O5, but not both (because of 1N).
+Suppose that τt entails o4 and a prior trial with a diﬀerent reward entails o1 ∧¬o2 ∧¬o4.
+However, O5 lacks this property. Then her answer is: O3 ∈Π+
+R ∧O4 ∈Π+
+R ∧O4 ∈O+.
+The ambiguous term wb
+t is not a part of the expert’s answer, and so the message is
+observable—indeed, it is the same as the signal. This becomes a conjunct in δ0:t, and
+so in our example, for dnt to be valid it must satisfy O4 ∈Πt
+R and O4 ∈Ot (and so
+Πt
+R ⊃Πt−1
+R
+and if O4 truly was a neologism to the agent then Ot ⊃Ot−1 as well).
+Section 4 deﬁnes how to estimate a valid dnt from this evidence.
+Unknown Eﬀects. There are contexts where the search space of possible causal structures
+remains very large in spite of the defeasible principles for restricting it, in which case the
+agent asks a question whose answer will help to restrict the search space:
+?λV (X ∈ΠV )
+(18)
+In words, what does X aﬀect? For instance, in the barley domain, it might express:
+What does the temperature aﬀect? (to which an answer might be the risk of weeds).
+In Section 4 we will deﬁne precisely the contexts in which the agent asks this question,
+including which variable X it asks about. The expert’s answer X ∈Π+
+Y gives priority to
+a variable Y that she believes the agent is unaware of. This increases the chances that
+the agent will learn potentially valuable information about the hypothesis space.
+The expert’s answer X ∈Π+
+Y has an observable interpretation; X ∈Π+
+Y is added to
+δ0:t and since dnt |= δ0:t, X ∈Πt
+Y . Thus some dependencies in Πt are inferred mono-
+tonically via observable expert messages. Others are inferred defeasibly via statistical
+pattern recognition in the domain trials (see Section 4).
+4. The Model for Learning
+We now deﬁne dn update in a way that meets the criteria from Section 2. We must
+estimate all components of the dn from the latest evidence et, in a way that satisﬁes the
+partial description δ0:t that has accumulated so far (this is required to make the dn valid).
+That is, one must estimate the set of random variables Ct and At, the domain Πt
+R ⊆Ct
+of the reward function as well as the function Rt itself, the dependencies Πt among
+Ct ∪At, and the conditional probability tables (cpts) θt, given Πt. These components
+are estimated from the prior dn dnt−1, the latest evidence et and the partial description
+δ0:t in the following order, as shown in Figure 2:
+1.
+(a) Estimate Bt, Ot, At and Πt
+R;
+(b) Estimate Rt, given Πt
+R;
+2.
+(a) Estimate Πt, given Bt ∪Ot ∪At and Πt
+R;
+(b) Estimate θt, given Πt.
+15
+
+Step 1 proceeds via constraint solving (see Section 4.1); step 2 via a combination of
+symbolic and statistical inference (see Section 4.2). Update proceeds in this order because
+the set of dependencies one must deliberate over depends on the set of random variables
+it is deﬁned over, and the global constraint on dependencies—namely, that the utility
+node is a descendant of all nodes in the dn—must be deﬁned in terms of the domain Πt
+R
+of the reward function. Likewise, the set of cpts θt that one must estimate is deﬁned
+by the dependency structure Πt. The search for a valid dn can prompt backtracking,
+however: e.g., failure to derive a valid dependency structure Πt may ultimately lead to
+a re-estimate of the set of random variables Bt ∪Ot ∪At. We now proceed to describe
+in detail each of these components of dn update.
+4.1. Random Variables and Reward Function
+The ﬁrst step in dn update is to identify dnt’s random variables—that is, the sets
+Bt, Ot and At—and the reward function Rt. This is achieved via constraint solving,
+with the constraints provided by δ0:t.
+The number of valid vocabularies is always unbounded, because any superset of a
+valid vocabulary is valid. As motivated in Section 2, we make search tractable via greedy
+search for a minimal valid vocabulary: the agent (defeasibly) infers the vocabulary in
+(19a–c) (this covers all the variables the agent is aware of thanks to the dialogue strategy
+from Section 3.2), and also defeasibly infers the minimal domain for Rt, deﬁned in (19d).
+Bt ={X : X ∈B+ is a conjunct in δ0:t}
+(19a)
+At ={X : X ∈A+ is a conjunct in δ0:t}
+(19b)
+Ot ={X : X ∈O+ is a conjunct in δ0:t}
+(19c)
+Πt
+R ={X : X ∈Π+
+R is a conjunct in δ0:t}
+(19d)
+The evidence described in Section 3 yields three kinds of formulae in δ0:t that (par-
+tially) describe R+: (5), (14), and X ∈Π+
+R. The agent uses constraint solving to ﬁnd,
+or fail to ﬁnd, a reward function Rt that satisﬁes all conjuncts in δ0:t of the form (5)
+and (14), plus the constraint (20), which will ensure Rt is well-deﬁned with respect to
+its (estimated) domain (19d).
+∀s1∀s2((s1 ↾Πt
+R ↔s2 ↾Πt
+R) →Rt(s1) = Rt(s2))
+(20)
+Constraints of the form (5) and (14) are skolemized and fed into an oﬀ-the-shelf
+constraint solver (with R+ replaced with Rt). The possible denotations of these skolem
+constants are the atomic states deﬁned by the vocabulary (19a–c). If there is a solution,
+the constraint solver returns for each skolem constant a speciﬁc denotation x ∈v(Ct×At).
+Substituting the skolem terms with their denotations projected onto Πt
+R yields equal-
+ities Rt(y) = r (from (5)) and inequalities Rt(y) > r (from (14)), where y ∈v(Πt
+R). A
+complete function Rt is constructed from this partial function by defaulting to indiﬀer-
+ence (recall Minimality): for any y ∈v(Πt
+R) where there is an inequality Rt(y) > r but
+no equality Rt(y) = r, we set Rt(y) = r + c for some constant c (in our experiments,
+c = 0.1); for any y ∈v(Πt
+R) for which there are no equalities or inequalities, we set
+Rt(y) = 0.
+16
+
+The constraint solver may yield no solution: i.e., there is no function Rt with the
+currently estimated domain (19d) satisfying all observed evidence about states and their
+rewards.
+This is the context “unforeseen rewards” described in Section 3.2 (see also
+Figure 2): the agent asks (17), deferring dn update until it receives the expert’s answer.
+The expert’s answer is guaranteed to provide a new variable to add to Πt
+R. It may also
+be a neologism—a variable the agent was unaware of—and so after updating δ0:t with
+the expert’s answer, the agent backtracks to re-compute (19a–d).
+4.2. Estimating ⟨Πt, θt⟩
+Current approaches to incrementally learning Π in a graphical model of belief exploit
+local inference to make the task tractable.
+There are essentially two forms of local
+inference.
+The ﬁrst is a greedy local search over a full structure: remove an edge from the
+current dag or add an edge that does not create a cycle, then test whether the result
+has a higher likelihood given the evidence (e.g., Bramley et al. (2015); Friedman and
+Goldszmidt (1997)). This is Conservative: Π changes only when evidence justiﬁes it.
+However, adapting it to our task is problematic. Firstly, such techniques rely heavily
+on a decent initial dag to avoid getting stuck in a local maximum; but in our task the
+agent’s initial unawareness of the possibilities makes an initial decent dag highly unlikely.
+Secondly, removing an edge can break the global constraint on dns that all nodes connect
+to the utility node. We would need to add a third option of doing local search given Π:
+replace one edge in Π with another edge somewhere else. This additional option expands
+the search space considerably.
+We therefore adopt the alternative form of local inference: assume conditional inde-
+pendence among parent sets. Buntine (1991) assumes that X’s parent set is conditionally
+independent of Y ’s given evidence e0:t and the total temporal order ≻over the random
+variables—X ≻Y means that X may be a parent to Y but not vice versa. This indepen-
+dence assumption on its own is not suﬃcient for making reasoning tractable, however. If
+a Bayes Net has 21 variables (as the ones we experiment with in Section 5 do), then a
+variable may have 220 possible parent sets—a search space that is too large to be man-
+ageable. So Buntine (1991) prunes X’s possible parent sets to those that evidence so
+far makes reasonably likely (we will deﬁne “reasonably likely” in a precise way shortly).
+There are then two alternative ways of updating:
+• Parameter Update: Estimate the posterior probability of a parent set from
+its prior probability and the latest evidence under an assumption that the set of
+reasonable parent sets does not change.
+• Structural Update: Review and potentially revise which parent sets are rea-
+sonable, given a batch of evidence. (Thus, Structural Update changes the set of
+possible structures which are considered).
+We adapt Buntine’s model to our task in two ways. Firstly, Buntine’s model assumes
+that the total ordering on variables is known. In our task the total order is hidden,
+and marginalising over all possible temporal orders is not tractable—it is exponential
+on the size of the vocabulary. We therefore make an even stronger initial independence
+assumption than Buntine when deciding which parent sets are reasonable: Speciﬁcally,
+17
+
+that X’s parent set is conditionally independent of Y ’s given evidence e0:t alone. Unfor-
+tunately, this allows combinations of parent sets with non-zero probabilities to be cyclic.
+We therefore have an additional step where we greedily search over the space of total
+orderings (similar to (Friedman and Koller, 2003)), and use Integer Linear Programming
+(Vanderbei, 2015) at each step to ﬁnd a “most likely” causal structure Πt which both
+obeys the currently proposed ordering and that is also a valid dn—in particular, it is a
+dag where the utility node is a descendant of all other nodes.
+Secondly, as the agent’s vocabulary of random variables expands, we need to provide
+new probability distributions over the larger set of possible parent sets, which in turn
+will get updated by subsequent evidence. We now describe each of these components of
+the model in turn.
+4.2.1. Parameter Update
+Each variable V ∈Ct is associated with a set Pv of reasonable parent sets. Each
+parent set Πv ∈Pv is some combination of variables from Ct ∪At. Parameter Update
+determines the posterior distribution over Pv given its prior distribution and the latest
+piece of evidence under the assumption that the possible values of Pv do not change.
+Updates from Domain Trials. Suppose that the latest evidence et is a domain trial (i.e.,
+τt ∈Sample0:t). Parameter Update uses Dirichlet distributions to support incremental
+learning: if τt ↾V = i and τt ↾Πv = j, then we can calculate the posterior probability of
+Πv in a single step using (21):
+Pr(Πv|e0:t) = Pr(Πv|e0:t−1)
+(nv=i|j+αv=i|j−1)
+(nv=.|j+αv=.|j−1)
+(21)
+Here, nv=i|j is the number of trials in Sample0:t where V = i and Πv = j, and αv=i|j
+is a “pseudo-count” which represents the Dirichlet parameter for V = i and Πv = j.
+The sum of all trials where Πv = j is given by nv=.|j. Formula (21) follows from the
+recursive structure of the Γ function in the Dirichlet distribution (the Appendix provides
+a derivation, which corrects an error in (Buntine, 1991)).
+Estimating θt, given Πt, likewise exploits the Dirichlet distribution (Buntine, 1991,
+p56):
+Eθ|Sample0:t,Π(θv=i|j) =
+R
+θ θv=i|jPr(Sample|Π, θ)Pr(θ|Π)
+R
+θ Pr(Sample|Π, θ)Pr(θ|Π)
+=
+nx=i|j + αv=i|j
+nv=.|j + αv=.|j
+(22)
+In words, (22) computes the conditional probability tables (cpts) directly from the
+counts in the trials and the appropriate Dirichlet parameters, which in turn quantify
+the extent to which one should trust the counts in the domain trials for estimating
+likelihoods—the higher the value of the αs relative to the ns, the less the counts inﬂuence
+the probabilities. Note that the α-parameters vary across the values of the variables and
+their (potential) parent sets. We motivate this shortly, when we describe how to perform
+dn update when a new random variable needs to be added to it. At the start of the
+learning process, αv=i|j = 0.5 for all V , i and j.
+18
+
+Updates from Expert Evidence. Now suppose et is an expert utterance σt, but not one
+that introduces a neologism (we discuss dn update over an expanded vocabulary at the
+end of this section). Then Parameter Update starts by using ∧-elimination on δt (i.e.,
+the partial description of dn+ that σt entails) to infer a conjunction πt,v of all conjuncts
+in δ0:t of the form X ∈Πv. Note that δt does not contain conjuncts of the form X ̸∈Πv
+(see Section 3.2), although it may entail such formulae (e.g., from conjuncts declaring a
+variable’s type). Formula (23) then computes a posterior distribution over Pv, where η
+is a normalising factor:
+Pr(Πv|e0:t) =
+ ηPr(Πv|e0:t−1)
+if Πv ⊢πt,v
+0
+otherwise
+(23)
+Equation (23) is Conservative—it preserves the relative likelihood of parent sets that
+are consistent with πt,v. It oﬀers a way to rapidly and incrementally update the proba-
+bility distribution over Pv with at least some of the information that is revealed by the
+latest expert evidence.
+Enforcing global constraints on Π. Equations (21) and (23) on their own do not comply
+with Satisfaction nor even with Consistency. If we naively construct the “most likely”
+global structure by simply picking the highest probability parent set Πv for each vari-
+able V independently, their combination might be cyclic, or violate information about
+parenthood entailed by δ0:t.
+To ﬁnd a global structure which is valid as well as likely, we combine ILP techniques
+with a greedy local search over the space of total orderings.
+We ﬁrst compute Pr(Pv|e0:t, ≻) from Pr(Pv|e0:t), where ≻is a total temporal order
+over dnt’s random variables that satisﬁes the partial order entailed by δ0:t. Next, we
+use ILP techniques to determine the most likely structure Πm
+≻which obeys the current
+ordering ≻, and is a dag with all nodes connected to the utility node. We stop searching
+when all valid total orders ≻′ formed via a local change to ≻yield a less likely structure
+(i.e., Pr(Πm
+≻′|e0:t, ≻′) ≤Pr(Πm
+≻|e0:t, ≻)), and return Πm
+≻as Πt. We now describe these
+steps in detail.
+The partial description δ0:t imposes a partial order on the random variables, thanks
+to the expert’s declarations of the form X ∈ΠY (this corresponds to condition (i) in
+Fact 1), its entailments about each variable’s type (i.e., At, Bt or Ot), which are in eﬀect
+constraints on the relative position of variables within the dag (conditions (ii)–(iv) in
+Fact 1); and information about whether a variable is an immediate parent to the utility
+node (condition (v)):
+Fact 1. Total orders that satisfy δ0:t
+A total order ≻of random variables satisﬁes the partial order entailed by δ0:t iﬀit
+satisﬁes the following 5 conditions:
+(i) If δ0:t |= X ∈Πy, then X ≻Y ;
+(ii) If δ0:t |= A ∈A+ then X ̸≻A for any X, and A ̸≻Y for any Y where δ0:t |= Y ∈
+Bt;
+(iii) If δ0:t |= O ∈O+ then there is a variable X where δ0:t |= X ∈A+ and X ≻O;
+(iv) If δ0:t |= B ∈B+ ∧O ∈O+ then B ≻O; and
+19
+
+(v) for any X, Y , if δ0:t |= X ∈Π+
+R and δ0:t ̸|= Y ∈Π+
+R, then Y ≻X.
+Note that thanks to dn0 and the dialogue strategies, where Φ is B+, O+, A+, Π+
+R or Πy,
+one can test whether δ0:t |= X ∈Φ via ∧-elimination.
+The agent starts by choosing (at random) a total order ≻that satisﬁes Fact 1.
+The agent then uses (24) to estimate the probabilities over direct parenthood relations
+(pa(X, Y ) means X is a parent to Y ) given the evidence and ≻:
+Pr(pa(X, Y )|e0:t, ≻) =
+ P
+Πy∈Py:X∈Πy Pr(Πy|e0:t)
+if X ≻Y
+0
+if Y ≻X
+(24)
+Thanks to Fact 1 this makes any combination of non-zero probability parenthood rela-
+tions a dag with no B-variable being a descendant to an A variable, and all A variables
+have no parents. But it does not guarantee that all nodes are connected to the utility
+node. We use an ILP step to impose this global constraint. The result is a valid structure
+Π (i.e., it satisﬁes δ0:t) that evidence so far also deems to be likely (we give an outline
+proof of its validity on page 25).
+The ILP Step is formally deﬁned as follows:
+Decision variables: Where X, Y ∈Ct ∪At, pa(X, Y ) is a Boolean variable with value
+1 if X is a parent of Y (i.e., X ∈Πy), and 0 otherwise
+Objective Function: We want to ﬁnd the most likely combination of valid parenthood
+relations: i.e., we want to solve (25):
+max
+X
+X,Y ∈Ct∪At
+Pr(pa(X, Y ))∗pa(X, Y )+(1−Pr(pa(X, Y )))∗(1−pa(X, Y )) (25)
+Constraints: C1 ensures three things: (i) variables cannot have a parent which is not
+present in at least one of the reasonable parent sets (see (24)); (ii) parent sets obey
+all expert declarations of the form Z ∈Πz′ (by equation (23)); and (iii) parents
+obey the currently proposed temporal ordering ≻(by equation (24)) thereby guar-
+anteeing that the ﬁnal graph is acyclic with no B variable being a descendant of A
+and all A variables are orphans. Constraints C2 and C3 ensure that the ﬁnal graph
+satisﬁes the necessary global conditions for being a dn, namely that every variable
+is in some way connected to the utility node, and that every outcome variable has
+at least one action ancestor. C4 ensures that the decision variables take on binary
+values (0 or 1).
+C1 :
+∀X, Y.(Pr(pa(X, Y )) = 0 =⇒pa(X, Y ) = 0)
+Disallow impossible parents
+C2 :
+∀X /∈Πt
+R.(P
+y pa(X, Y ) ≥1)
+One child minimum
+C3 :
+∀O ∈O.(P
+y∈O∪A pa(Y, O) ≥1)
+No orphaned outcomes
+C4 :
+∀X, Y.pa(X, Y ) ∈{0, 1}
+Binary Restriction
+Linear Relaxation of the ILP Step. Finding the solution to a Linear Program where
+all decision variables must be integers is an NP-hard problem. So we approximate the
+solution via Linear Relaxation: we replace C4 with (26), so that the values of decision
+variables can be real numbers:
+∀X, Y.pa(X, Y ) ∈[0, 1]
+(26)
+20
+
+We then round the resulting values to integers. This reduces the time needed to compute
+a solution, but one must be careful in the rounding procedure: simply rounding each
+pa∗(X, Y ) to its nearest integer may create an inconsistent dn. Rounding in two phases
+avoids this. In the ﬁrst phase, we produce a set of rounded decision variables pa′(X, Y )
+that satisfy C1 and C2:
+pa′(X, Y ) =
+
+1
+if pa∗(X, Y ) ≥0.5 ∨(X /∈Πt
+R ∧∀Z ̸= Y.(pa∗(X, Y ) ≥pa∗(X, Z)))
+0
+otherwise
+In the second phase, we ensure that constraint C3 is also satisﬁed, producing the ﬁnal
+integer values for all the variables pa(X, Y ):
+pa(X, Y ) = 1 iﬀpa′(X, Y ) = 1
+∨
+(Y ∈O∧
+∀Z((Z ̸= X ∧Z ∈O ∪A) →
+(pa′(Z, Y ) = 0 ∧Pr(pa(X, Y )) > Pr(pa(Z, Y )))))
+Because the random variable Pv does not contain all possible parent sets to V (so
+as to keep learning tractable), it is possible that there is in fact no solution to the ILP
+step for any valid temporal order ≻. This is a context in which the agent performs a
+Structural Update, which in turn changes the variables that satisfy the antecedent to
+constraint C1.
+4.2.2. Structural Update
+To make learning tractable, Pv includes only reasonable parent sets to V —a strict
+subset of those that are possible. But as evidence changes, so does what is reasonably
+likely. Therefore, the agent occasionally performs a Structural Update: the full batch of
+evidence e0:t is used to review and potentially revise the possible values of Pv and its
+probability distribution.
+Figure 3 depicts the structure of the algorithm that corresponds roughly to the nodes
+“estimate Πt” and “estimate θt” in Figure 2. In particular, it depicts the four contexts
+in which Structural Update is performed in our experiments in Section 5:
+1. There have been 100 domain trials since last structural update
+2. The agent has just discovered an unforeseen factor
+3. The latest dialogue evidence σt yields a 0 probability to all parent sets in Pv via
+equation (23)
+4. The algorithm for enforcing global constraints on Π fails to produce any valid
+structure
+The input to Structural Update consists of a (chance) variable V , the batch of ev-
+idence e0:t, the prior distribution Prt−n(Πv) over all possible parent sets to V (where
+t −n is the time of the previous structural update), and the current partial description
+δ0:t of the dn. Its output is a (perhaps new) set of values for Pv (i.e., those parent sets
+to V that are currently deemed “reasonable”), the posterior probability Prt(Πv) for each
+possible parent set Πv (whether it is in Pv or not) and the posterior probability distri-
+bution Prt(Pv) (which is computed by normalising Prt(Πv) for Πv ∈Pv). Informally,
+21
+
+> 100 trials?
+Structural
+Update
+Neologism?
+Re-compute
+priors
+Parameter
+Update
+Enforce
+Global
+Constraints
+success?
+Return Πt
+Return θt
+(see (22))
+C ←C ∗0.1
+P r(Πv) = 0
+∀Πv ∈Pv?
+Enforce
+Global
+Constraints
+success?
+yes
+no
+yes
+no
+yes
+no
+no
+yes
+yes
+no
+Figure 3: Algorithm for Estimating ⟨Πt, θt⟩.
+the Structural Update algorithm dynamically constructs a parent lattice Lt
+v, with each
+node corresponding to a parent set to V and arcs corresponding to the superset relation.
+When expanding the lattice by adding a new node, we estimate its posterior probability
+given the evidence e0:t. We stop expanding the lattice when all its leaves have a posterior
+probability that is below a certain threshold. Thus Minimality is implicit: Structural
+Update assumes that supersets of suﬃciently improbable parent sets will not improve
+their probability.
+More formally, the root(s) of the parent lattice Lt
+v are the minimal valid parent sets:
+i.e., they contain X if δ0:t |= X ∈Πv, and if δ0:t |= V ∈Ot then Lt
+v’s root(s) each contain
+at least one variable from At ∪Ot. For each root Πv, one computes its posterior proba-
+bility, given the evidence e0:t. If a node was alive in the previous Structural Update, then
+this posterior probability is already calculated via the sequence of Parameter Updates
+that were performed between the previous and current structural updates. It is therefore
+immediately available. If the node was marked as asleep in the previous lattice, however,
+then the node’s posterior probability will not have been updated with the intervening
+domain trials—it is computed now by performing a sequence of Parameter Updates (see
+22
+
+equation (21)).
+The highest of these posterior probabilities is taken to be the Best-Posterior. One
+then marks the nodes as alive if its posterior probability is ≥C ∗Best-Posterior for some
+constant C (in the experiments in Section 5, C = 0.001), and asleep otherwise. You then
+create a new node in the lattice by adding a variable to an alive leaf node. You compute
+its posterior probability, and if it exceeds the current Best-Posterior, then you update
+Best-Posterior and re-classify which nodes in the lattice are alive and which are asleep
+accordingly. You stop when all the leaves in the current lattice are asleep.
+The set Pv is deﬁned to be all the alive parent sets in Lt
+v and their ancestors in Lt
+v.5
+Having (re-)estimated Pv for each variable V , you test whether each variable X ̸∈Πt
+R is
+in at least one reasonable parent set: if it is not then there is clearly no valid Π that one
+can generate from them (since X will not connect to the utility node). This test failing
+is the context “Unknown Eﬀects” in the agent’s dialogue strategy, which we described in
+Section 3.2.2: i.e., instead of expanding the search space by reducing the asleep threshold
+C, the agent seeks further evidence by asking the expert (18): what is an eﬀect of X?
+The evidence e0:t and partial description δ0:t get updated with the expert’s answer, and
+dn update begins again—backtracking to estimating the random variables via (19a–c)
+may be necessary because the expert’s answer may be a neologism. The experiments in
+Section 5 show that this querying strategy keeps a tight reign on the size of the search
+space, while still ensuring that many of the dependencies in Πt are inferred defeasibly
+from the domain trials, rather than monotonically from explicit expert declarations about
+parenthood.
+The posterior probabilities that are computed during the lattice expansion are as-
+sumed to be the posterior probabilities Prt(Πv|Lt
+v)—the probability that Πv is Π+
+v ,
+given that Π+
+v ∈Lt
+v (if Πv ̸∈Lt
+v, then Prt(Πv|Lt
+v) = 0). The posterior probabilities
+on every possible parent structure is then deﬁned by (27) to (29), where Pr(Lt
+v) is the
+probability that the true parent set Π+
+v is in Lt
+v, and p is the probability mass we wish
+to assign to the unexplored space:
+Prt(Πv) = Prt(Lt
+v)Prt(Πv|Lt
+v) + Prt(¬Lt
+v)Prt(Πv|¬Lt
+v)
+(27)
+Prt(Πv|¬Lt
+v) =
+
+
+
+0
+if Πv ∈Lt
+v
+1
+2|Ct∪At\V | −|Ltv|
+if Πv ̸∈Lt
+v
+(28)
+Prt(¬Lv) =
+p
+Prt(Lv) =
+1 −Prt(¬Lv)
+(29)
+Thus Structural Update returns for each chance variable V the values Pv, Prt(Pv) and
+Prt(Πv) for all possible parent sets Πv. But the algorithm does not require the agent
+5This contrasts with Buntine’s Structural Update, in which Pv is the alive parent sets only.
+We
+include asleep subsets of alive parent sets because our version of Parameter Update abstracts over all
+possible total temporal orders of the variables. To illustrate the issue, suppose that there is a very strong
+statistical correlation in the domain trials between X and Y —so strong that the only alive parent set
+for Px is {Y }, and the only alive parent set for Py is {X}. If Px = {{Y }} and Py = {{X}}, then these
+generate no consistent structure. But if Pv includes all subsets of alive parent sets, then we avoid this
+problem: ∅will be a possible value of Px and of Py, even though Parameter Update deems ∅to be an
+unlikely parent set for X and for Y .
+23
+
+to enumerate or reason about parent sets within the unexplored space. These become
+relevant only if in the next Structural Update, the agent expands the parent lattice to
+include a parent set that was absent from the prior lattice.
+The process for estimating Πt concludes, as always, by applying the algorithm for
+enforcing global constraints that we described earlier (see Figure 3). If this succeeds, it
+returns Πt, and from this one computes θt via (22). If not, then the agent reduces the
+asleep threshold (by multiplying C by 0.1) and attempts Structural Update again.
+4.2.3. Initial Distribution
+We implicitly encode the defeasible principle of Minimality in our initial distribution
+over parent sets by making larger parent sets less likely than smaller ones. The agent
+starts with a small probability ρ that Y is a parent to X (provided this is consistent with
+the variables’ types as stipulated in δ0). The probability of a parent set Πx is then the
+product of each individual parent’s presence or absence:
+Pr0(pa(Y, X)) ∝
+ 0
+if δ0 |= ¬pa(Y, X)
+ρ
+otherwise
+(30)
+Pr(Πx) =
+Y
+Y ∈ΠX
+Pr(pa(Y, X))
+Y
+Z̸∈ΠX
+(1 −Pr(pa(Z, X)))
+(31)
+For each X ∈C0, the agent uses (30), (31) and Structural Update to dynamically con-
+struct the set P 0
+x of reasonable parent sets of X and its initial probability distribution.
+4.2.4. Updating with Evidence containing a Neologism
+Suppose the latest evidence et is an expert utterance σt that features a neologism
+Z. Then by (19a–c), Z is a random variable in dnt but it was not a part of dnt−1.
+This means that the prior distributions over the possible parent sets no longer cover all
+possible parent sets! These must be updated to take account of the extra possibilities
+aﬀorded by the addition of Z, and to ensure that the deﬁnitions we have given so far
+for calculating posterior distributions from evidence (e.g., equation (21)) remain well-
+deﬁned.
+In addition, the agent cannot observe Z’s past values in Sample0:t—i.e., it
+cannot observe nz=i|j, nor nv=i|j when Z ∈Πv.
+However, we need these counts for
+Parameter Update (see (21)) and estimating θt (see (22)). The Dirichlet α-parameters
+in (21) and (22) that involve Z are also not deﬁned. We now describe how the agent
+revises all these parameters, so as to ensure that (21) and (22) remain well deﬁned and
+continue to support probabilistic reasoning over the newly expanded hypothesis space.
+We start by deﬁning how the agent computes the probability distribution over the
+expanded set of possible parent sets.
+The agent starts this process by performing a
+Structural Update on the batch of evidence e0:t−1 that preceded the latest evidence et
+with the neologism Z. This ensures that the (small) probability mass p that is assigned
+to the set of “unreasonable” parent sets takes into account all evidence to date. This
+yields a revised (prior) probability distribution Pr(Πx|e0:t−1) for every possible parent
+set Πx of X ∈Ct that does not include the new variable Z. Equation (32) then assigns
+probabilities to all possible parent sets to X ̸= Z, including parent sets containing Z:
+Pr(Πx|e0:t) ∝
+
+
+
+0
+if δ0:t |= ¬Πx
+(1 −ρ)Pr(Πx|e0:t−1)
+if Z ̸∈Πx
+ρPr(Π′
+x|e0:t−1)
+if Πx = Π′
+x ∪{Z}
+(32)
+24
+
+This update is Conservative, because it preserves the relative likelihood among the
+parent sets that do not include Z—in particular, unreasonable parent sets remain un-
+reasonable. It is also Minimal because it re-assigns only a small proportion ρ of the
+probability mass of a parent set that does not include Z to the parent set formed by
+adding Z to it—in particular, adding Z to an unreasonable parent set is unreasonable.
+As usual, the agent needn’t actively enumerate each possible parent set nor compute its
+probability; rather (32) is used to dynamically construct the lattice Lt
+x, from which the
+agent identiﬁes the reasonable parent sets P t
+x for X and P t
+x’s probability distribution,
+where the possibilities now include the additional variable Z.
+If Z is a chance variable, then equation (33) in combination with (31) deﬁnes Pr(Πz|e0:t)
+(if Z is an action variable, then ΠZ = ∅):
+Pr(pa(Y, Z)|e0:t) =
+
+
+
+1
+if δ0:t |= pa(Y, Z)
+0
+if δ0:t |= ¬pa(Y, Z)
+ρ
+otherwise
+(33)
+This is Minimal because any variable being a parent to Z is assigned a low default
+probability ρ; so the dynamic lattice construction Lt
+z for identifying P t
+z and its probability
+distribution will restrict search considerably. With Pv and its distribution for all V ∈Ct
+in place, one applies the algorithm for enforcing global constraints to yield Πt.
+We now return to the issue of the counts nv=i|j, and the Dirichlet α-parameters.
+Our model avoids the computational complexity of marginalising over Z’s past values by
+throwing away the past domain trials Sample0:t−1 and their counts nv=i|j, but retaining
+the relative likelihoods they gave rise to by packing these into updated values for the
+Dirichlet α-parameters, as shown in (34) (where K is a constant):
+Where Z ∈dnt but Z ̸∈dnt−1
+nv=i|j =
+0 for all v, Πv
+αv=i|j =
+
+K ∗Prt−1(V = i, Πv = j)
+if V ̸= Z and Z ̸∈Πv
+K ∗0.5
+if V = Z or Z ∈Πv
+(34)
+With the α-parameters and the counts nv=i|j now deﬁned over the expanded set of atomic
+states, the agent can compute θt, given Πt and e0:t, using (22). Furthermore, it ensures
+that the equations (21) and (22) remain well-deﬁned, should the dn get updated by
+subsequent observed evidence.
+Equation (34) makes the agent Conservative because when it observes subsequent
+evidence, the revised α-parameters ensure that the likelihoods inferred from the past
+domain trials bias the estimated likelihoods of Π and of θ that are based on that subse-
+quent evidence (via equations (21) and (22) respectively). Indeed, the larger K is, the
+more Conservative you are: i.e., the more the probability distribution over dependen-
+cies and cpts before your set of random variables changed inﬂuences reasoning about
+dependencies and cpts after the set of random variables changes.
+4.2.5. DN Update is Valid
+We have now deﬁned how to use evidence to update each of the dn’s components. It
+meets the desiderata from Section 2. In particular:
+Fact 2. dn update complies with Consistency and Satisfaction: i.e., dnt is a consistent
+dn, and dnt |= δ0:t.
+25
+
+Outline proof. δ0:t contains three kinds of conjuncts: (i) X ∈B+, X ∈A+, X ∈O+,
+X ∈Π+
+R; (ii) formulae of the form (5) and (14); and (iii) X ∈Πy. Equations (19) together
+with the algorithm for enforcing global constraints guarantees that Πt satisﬁes all the
+conjuncts of type (i), including their consequences on each variable’s relative position
+in the causal structure Π+. This is because Πt satisﬁes a total order ≻(see equation
+(24) and C1 in the ILP step), where by Fact 1 ≻satisﬁes the partial order imposed by
+δ0:t—e.g., where δ0:t |= X ∈B+, Πt
+x ⊂Bt. Rt is a consistent preference function because:
+(a) equation (20) makes Rt well-deﬁned on its domain Πt
+R; and (b) since its range is R it
+deﬁnes an asymmetric and transitive relation. Further, since all conjuncts in δ0:t of form
+(ii) are constraints on R+, it follows immediately that the constraint solver returns a
+reward function Rt that satisﬁes these. Equation (23) plus C1 in the ILP step guarantees
+that Πt entails conjuncts of type (iii). Furthermore, the algorithm for enforcing global
+constraints guarantees Πt is a dag with all nodes connected to the utility node: it is a
+dag because Πt satisﬁes a consistent total order ≻; and all nodes are connected to the
+utility node because of constraints C2 and C3 in the ILP Step. Finally, equation (22)
+guarantees that θt is a consistent probability distribution. Thus dnt is consistent, and
+dnt |= δ0:t. ■
+5. Experiments
+Our experiments show that our agent can learn the optimal policy for a given task,
+even when initially unaware of factors that are critical to its success. Further, we show
+the usefulness of the defeasible principles our agent adheres to (such as Minimality and
+Conservativity) by comparing our agent with several variations which abandon those
+principles.
+We evaluate our agent against two diﬀerent scenarios. In the ﬁrst scenario, we have
+the agent learn in 10 randomly generated decision problems. By varying the true decision
+problem the agent must learn, these experiments evaluate whether the model’s ability
+to converge on optimal behaviour is robust to the type of domain it has to learn about.
+In the second scenario, we have the agent learn the hand-crafted “Barley” example from
+the introduction (see Figure 1).
+This experiment allows us to show how the model
+performs on a concrete example of our novel task which is explicitly designed to require
+the exploitation of unforeseen possibilities to be successful.
+Our primary metric is policy error (PE). Equation (35) deﬁnes PEt at time t as the
+weighted average of the expected diﬀerence in reward between the true optimal policy
+π∗
++ and the agent’s perceived optimal policy π∗
+t (observations b are projected onto the
+agent’s current conceptualisation of the domain to ensure π∗
+t is deﬁned):
+PEt =
+X
+b∈v(B+)
+Pr+(b)
+
+EU+(π∗
++(b)|b) −EU+(π∗
+t (b ↾Bt)|b)
+
+(35)
+We also measure the agent’s cumulative reward over the learning period:
+Rt =
+X
+τi∈Sample0:t
+ri
+(36)
+Additionally, we measure the runtime the agent takes to reason with the 3000 train-
+ing samples. We do not measure the agent’s performance in terms of, for instance, the
+26
+
+minimum edit distance between dnt and dn+, because the mapping from an optimal pol-
+icy to its dn is one to many—for us, constructing a dn is merely the means for achieving
+optimal behaviour, and structural diﬀerences between dn+ and dnt may be benign in
+this respect.
+All experiments are run over 3000 training examples. However, we assume that each
+time the expert sends a message, the agent misses out on an opportunity to interact with
+the domain. This means that the more the expert intervenes, the fewer domain trials
+the agent gets rewards from.
+5.1. Random dns: Setup
+In these experiments, we tested each agent variation against 10 diﬀerent decision
+problems. Each true decision network dn+ consists of 21 Boolean variables: 7 action
+variables; 7 “before” variables; and 7 “outcome” variables (i.e., |A+| = |B+| = |O+| = 7).
+This results in non-trivial decision problems with over 2 million atomic states.
+We
+generate both the structure and parameters for each dn+ randomly using an adapted
+version of the Bayesian network generation algorithm in (Ide et al., 2004).6
+We also
+create a reward domain for each dn+ by choosing 5 chance variables at random, then
+generate a reward function which yields rewards in the range 0–50.
+We then assign an agent an initial conceptualisation dn0 of the decision problem; we
+test how unawareness aﬀects learning by varying dn0. To evaluate an agent’s performance
+in learning, we run 100 simulations, each consisting of the agent observing and learning
+from 3000 pieces of evidence (a mix of domain trials and expert messages). Running
+100 simulations allows us to smooth over the fact that learning may be aﬀected by the
+non-deterministic outcomes of the actions it performs. Our performance metrics then
+take the average over the 100 simulations.
+We evaluate and compare agents that vary along the following dimensions:
+Initial Awareness: We compare an agent which starts at dn0 with full knowledge of
+the (true) decision problem’s set of random variables against one which starts with
+just one action and outcome variable:
+Vocab Size at dn0
+Min-Vocab
+2
+Full-Vocab
+21
+Expert Tolerance: We vary the expert’s tolerance to the agent’s suboptimal behaviour
+when she deliberates over whether to oﬀer unsolicited advice: this is achieved by
+varying β and γ in (8):
+β
+γ
+Low-Tolerance
+0.001
+1
+Default-Tolerance
+0.9
+50
+6Our adaptation adds additional rules to ensure the algorithm generates only valid dns. For example,
+the structure must conform to the rules of each variable’s type.
+27
+
+Minimality: An agent can be minimal, slightly minimal, or maximal. They vary on
+the following three dimensions: (i) adopting a greedy search for a minimal domain
+of R (see equation (19d)) vs. deﬁning the domain of Rt to be all of Ct (i.e., the
+maximum possible domain, creating many more arrows in the graphical component
+of the dn); (ii) the prior probability ρ that is assigned to the parenthood relations
+(see equations (30) and (32)) can make parenthood (defeasibly) unlikely (ρ = 0.1)
+or equally likely as unlikely (ρ = 0.5); and (c) the asleep threshold C that prunes
+the search space to reasonable parent sets can result in pruning (C = 0.001) or not
+(C = 0).
+Minimal Πt
+R?
+ρ
+C
+Minimal
+yes
+0.1
+0.001
+Slightly-minimal
+yes
+0.5
+0.001
+Maximal
+no
+0.5
+0
+Conservativity: An agent can be conservative or non-conservative. They vary on how
+they calculate the probability distribution over the expanded set of possible options
+when a new variable gets added to the dn.
+All agents set nv=i|j to 0 when it discovers a new variable. But the conservative
+and non-conservative agents vary on the how they re-set the probability distribution
+over dependencies and the Dirichlet α-parameters:
+Estimating Pr(Πt
+v) and Pr(θt)
+when adding a new variable
+Conservative
+Use (32), (33), and (34) with K = 20
+Non-Con
+Use (30) and αn=i|j = α0 = 0.5
+Domain Strategy: The agent’s domain-level strategy is to execute an optimal action
+vs. some other action in a ratio of (1 −ϵ) : ϵ, and initially ϵ = 0.3 (see Section 3.1).
+We vary how this strategy changes during learning as follows: (i) ϵ does not change
+(Static); or (ii) ϵ gets progressively reduced (Decay).
+Initial ϵ
+Decay factor
+(per time step)
+Static
+0.3
+1.0
+Decay
+0.3
+0.999
+Unless stated otherwise, the agents we evaluate are Min-Vocab, Minimal, Conservative
+and Static, and the expert has Default Tolerance.
+The baseline agent for our task adopts a standard ϵ-greedy strategy (with ϵ set to
+0.3) to learn an optimal policy from dn0: it ignores observed evidence that makes dn0
+invalid. So whatever the observed evidence, the baseline agent’s random variables C0∪A0
+and dependencies Π0 do not change. All our other agents learn valid dns (see Fact 2).
+We compare the performance of the following nine agents on our task: the Baseline agent,
+Default (i.e., min-vocab, minimal, conservative, static, default tolerance), Low-Tolerance
+28
+
+PEt
+p-value
+Default
+0.34
+-
+Baseline
+1.85
+0.00
+Low-Tol
+0.51
+0.01
+Slightly-Min
+0.49
+0.01
+Decay
+0.47
+0.03
+Full-Vocab
+0.08
+0.00
+Non-Con
+0.78
+0.00
+Maximal
+1.21
+0.00
+(a) dnbest
++
+PEt
+p-value
+Default
+0.97
+-
+Baseline
+3.05
+0.00
+Low-Tol
+1.10
+0.20
+Slightly Min
+1.08
+0.24
+Decay
+0.86
+0.20
+Full-Vocab
+0.03
+0.00
+Non-Con
+1.44
+0.00
+Maximal
+1.30
+0.00
+(b) dnworst
++
+Table 1: Policy error (PE) for agents at t=3000. Average of 100 runs reported.
+(expert has low tolerance); Slightly-Min (agent is slightly minimal), Maximal (agent is
+maximal), Non-Con (agent is non-conservative), Decay (agent explores progressively less
+during learning), and Full-Vocab (the agent starts out aware of dn+’s vocabulary, but
+not its dependencies or reward function).
+In some of the 100 simulations, an agent that lacks the computational advantages
+of Minimality—a principle we argued would enhance tractability—crashes before it is
+observed and learned from 3000 pieces of evidence.7 In that case, the agent’s dn just
+before the crash occurred is used to compute the performance metric for that simulation.
+5.2. Random dns: Results
+Across a variety of randomly generated dns, each with diﬀerent dependencies, cpts,
+and reward domains, our agent converges to a near-optimal policy with a relatively small
+amount of data (3000 pieces of evidence). Tables 1 and 2 show the performance metrics
+for each agent in terms of ﬁnal policy error (PE) and accumulated reward, respectively.
+Figure 4 also shows the rewards gained from the domain trials during learning (averaged
+across blocks of 150 domain trials and 100 simulations). We report numbers for the dn
+dnbest
++
+where the agent was most successful at achieving a low PE, and for dnworst
++
+where
+the agent was least successful, so as to give a measure of the lower and upper bounds of
+the agent’s performance. (Full details on dnbest
++
+and dnworst
++
+are in the Appendix.) The
+p-values compare each agent variation to the Default agent, and measure the probability
+of seeing a result of this magnitude (or greater) given the null hypothesis that the true
+average of both learning agents is identical.
+From these results we see that the Default agent signiﬁcantly outperforms the Baseline
+agent, both in terms of ﬁnal PE and total accumulated reward. Its PE is also signiﬁcantly
+lower than the Maximal and Non-Conservative agents.
+We now discuss the various factors that aﬀect learning.
+7We deﬁne a crash as an “Out of Memory” error on a Java Virtual Machine with a 4GB Memory
+Allocation Pool, or a simulation taking longer than its maximum allocated time of 12 hours.
+29
+
+Reward
+p-value
+Default
+70043
+-
+Baseline
+69541
+0.01
+Low-Tol
+48726
+0.00
+Slightly-Min
+62145
+0.00
+Decay
+70940
+0.00
+Full-Vocab
+72701
+0.00
+Non-Con
+70079
+0.85
+Maximal
+36760
+0.00
+(a) dnbest
++
+Reward
+p-value
+Default
+79894
+-
+Baseline
+79211
+0.00
+Low-Tol
+53568
+0.00
+Slightly-Min
+79711
+0.32
+Decay
+81518
+0.00
+Full-Vocab
+84342
+0.00
+Non-Con
+79397
+0.00
+Maximal
+77158
+0.00
+(b) dnworst
++
+Table 2: Accumulated reward for agents at t=3000. Average of 100 runs reported
+Initial awareness. As expected, starting with complete knowledge of the vocabulary is
+an advantage. Tables 1 and 2 show that the Full-Vocab agent achieves the lowest PE and
+highest cumulative rewards across all simulations. This is unsurprising: the agent never
+has to “throw away” counts from the trials, and it deliberates over all actions from the
+start. However, the Full-Vocab agent takes signiﬁcantly longer to run than the Default
+agent, often anywhere from 3 to 8 times as long (see Table 3). There are two reasons
+for this.
+First, inference over a dn with more variables is usually more expensive—
+the Full-Vocab agent infers a 21 variable dn from the start, while the Default agent
+initially updates a dn with a much smaller vocabulary. Second, starting with a large
+initial vocabulary and a fairly weak prior makes it more diﬃcult for Structural Update
+to prune the search space of parent sets.
+There is often an initial explosion in the
+number of parent sets that the Full-Vocab agent considers reasonable, because it has not
+yet gathered enough information from the domain trials to discriminate unreasonable
+parent sets from reasonable ones. In contrast, when the agent starts out aware of fewer
+variables, each new variable is incrementally introduced into a context where the agent
+has observed enough evidence to construct a more aggressive prior via equation (32).
+Time (s)
+p-value
+Default
+3081
+-
+Baseline
+13
+0.00
+Low-Tol
+8196
+0.00
+Slightly-Min
+12264
+0.00
+Decay
+2923
+0.30
+Full-Vocab
+12628
+0.00
+Non-Con
+2174
+0.00
+(a) dnbest
++ .
+Time (s)
+p-value
+Default
+1266
+-
+Baseline
+15
+0.00
+Low-Tol
+2162
+0.00
+Slightly-Min
+4979
+0.00
+Decay
+1198
+0.31
+Full-Vocab
+9465
+0.00
+Non-Con
+1134
+0.02
+(b) dnworst
++
+Table 3: Run time in seconds for agents at t=3000. Average over 100 runs reported. (“Maximal” agent
+omitted, as none of the agent’s runs managed to ﬁnish)
+30
+
+Expert tolerance. In comparison to the Default expert, the Low-Tolerance expert results
+in a marginally worse PE, and signiﬁcantly worse total accumulated reward. This is
+partly because each time the agent receives a message from the expert, it misses both
+an opportunity to receive a reward by taking an action in the domain, and also an
+opportunity to improve its estimate of Π and θ by observing an additional domain trial.
+In our experiments, the Low Tolerance expert can end up sending as many as 15 times
+more messages than the Default. One advantage of the Low-Tolerance expert, however,
+is that the agent makes early improvements to its policy. This is illustrated by Figure 5,
+which shows the PEs over time.
+Minimality. The results show that at least some level of minimality is necessary. In the
+vast majority of simulations (70%–100%, depending on dn+), the Maximal agent runs
+out of either time or memory, and so fails to collect rewards or improve its policy via the
+3000 pieces of evidence. By comparison, the Default agent does not crash in any of the
+simulations.
+Without a mechanism to prune the set of parent sets or the domain of the reward
+function, the agent must consider an exponential number of options.
+For more than
+a small number of variables, this quickly becomes intractable. The diﬀerences are less
+dramatic for the Slightly-Minimal agent: fewer simulations crash, and those that do tend
+to crash come later in the simulation. However, its PE is still signiﬁcantly worse than
+the Default agent’s PE. Excluding crashed agents from the results yields no signiﬁcant
+diﬀerence in PE, suggesting that even with inﬁnite time and resources, there is not
+necessarily any harm to adopting Minimality. The largest diﬀerence is in the run times:
+the Slightly Minimal Agent takes around 4 times as long to run as the Default agent.
+Thus, Minimality makes the problem tractable without harming performance.
+Conservativity. The Non-Conservative agent has a signiﬁcantly worse PE than the De-
+fault agent.
+There appear to be two beneﬁts to preserving information about which
+parent sets are unreasonable when a neologism is introduced. First, it directs the agent
+towards more accurate representations of the dependencies within the dn, and therefore
+hopefully allows it to make better decisions with equivalent samples. Second, having a
+more aggressive prior leads the (Conservative) Default agent to learn more vocabulary—
+on average 19 versus 17—as it is more likely to encounter a context where it asks the
+expert question (18) (“What is aﬀected by X?”).
+This also explains why the Non-
+Conservative agent is marginally faster than the Default agent—it reasons with a smaller
+vocabulary.
+Domain Strategy. The Decay agent gathered a signiﬁcantly larger total reward than the
+Default agent, without a signiﬁcant diﬀerence in their PEs. In other words, gradually
+reducing the extent to which the agent explores the space as it gathers more evidence
+helps it to converge faster on a decent policy. But we haven’t demonstrated here whether
+the Decay agent would maintain this advantage as one increases the number of variables
+of dn+: it may be a disadvantage to gradually explore less if the agent is more radically
+unaware at the start of the learning process than we used in our experiments here.
+Additionally, while it was not within the scope of these experiments to explore the
+space of exploration versus exploitation strategies (we arbitrarily chose an initial split of
+0.7:0.3), it is possible that superior initial parameters (and decay rates) exist for learning
+the optimal policy.
+31
+
+0
+500
+1000
+1500
+2000
+2500
+3000
+Time Step
+22.0
+22.5
+23.0
+23.5
+24.0
+24.5
+25.0
+Reward
+Default
+Baseline
+Continuous Decay
+Full Vocab
+Non Conservative
+0
+500
+1000
+1500
+2000
+2500
+3000
+Time Step
+0
+5
+10
+15
+20
+25
+Reward
+Low Tolerance
+Slightly Minimal
+Maximal
+Figure 4: Rewards on dnbest
++
+. Results averaged across 100 simulations, and blocks of 150 time steps.
+Note the scales in the two graphs diﬀer, to help depict the performance of all agent types—the dips in
+the second ﬁgure are due to the agents crashing before t=3000.
+32
+
+0
+500
+1000
+1500
+2000
+2500
+3000
+Time Step
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+Policy Error
+Default
+Baseline
+Low Tolerance
+Full Vocab
+Non Conservative
+Maximal
+Figure 5: Policy error at each time step on dnbest
++
+(averaged across 100 simulations).
+5.3. Barley dn: Setup
+In these experiments, we test our default agent’s performance on the hand-crafted
+barley example (see Figure 1) and compare it against the baseline agent (which ignores
+evidence that makes dn0 invalid).
+The Barley dn is intended to reﬂect a somewhat
+realistic domain for our novel task, and has been explicitly designed so that learning the
+optimal policy requires knowledge of factors that the agent is initially unaware of.
+As in the previous experiment, we run 100 simulations over 3000 pieces of evidence
+then average the results. The structure of the agent’s initial decision network dn0 and
+the true decision network dn+ are shown in Figure 1. The cpts for each node are in the
+Appendix.
+5.4. Barley dn: Results
+Figure 7 shows the policy error and average reward over 3000 pieces of evidence for
+the Barley dn. As expected, the baseline quickly stops improving as it reaches the bounds
+of what is achievable given its limited level of awareness. On the other hand, the default
+agent continues to improve its policy as it discovers unforeseen concepts and actions, and
+eventually converges upon a near-optimal policy.
+In addition to learning a near-optimal policy, the agent also learns a fairly accurate
+and eﬃcient representation of the underlying decision network for the task. Figure 6
+shows an example of the agent’s learned graph at t=3000. Notice that, in this run, the
+agent did not manage to discover two pieces of the true vocabulary—namely Weeds and
+Infestation. Both of these are outcome variables which are not in the reward domain.
+In future work, we aim to explore methods to allow the agent discover these variables
+33
+
+Local
+Concern
+Bad
+Press
+R
+Gross
+Crops
+Yield
+Fertiliser
+Nitrogen
+Protein
+Pesticide
+Infestation
+Fungicide
+Fungus
+Harrow
+Weeds
+Grain
+Insect
+Prevalence
+Precipitation
+Soil
+Type
+Temperature
+(a) True dn
+Local
+Concern
+Bad
+Press
+R
+Gross
+Crops
+Yield
+Fertiliser
+Nitrogen
+Pesticide
+Fungus
+Grain
+Protein
+Soil
+Type
+Fungicide
+Insect
+Prevalence
+Precipitation
+Harrow
+Temperature
+(b) Learned dn
+Figure 6: Diﬀerence in structure between the true dn and one learned by default agent at t=3000 for a
+(randomly chosen) simulation
+34
+
+0
+500
+1000
+1500
+2000
+2500
+3000
+Time Step
+0
+1
+2
+3
+4
+5
+6
+Policy Error
+Default
+Baseline
+0
+500
+1000
+1500
+2000
+2500
+3000
+Time Step
+11.5
+12.0
+12.5
+13.0
+13.5
+14.0
+14.5
+Reward
+Default
+Baseline
+Figure 7: Reward and policy error for agents on the Barley task
+which provide a more eﬃcient factorization of the problem if discovered, but which are
+not necessarily vital for learning the optimal policy.
+Despite missing these two variables, the agent attempts to make reasonable com-
+pensations for their absence. For example, in the absence of the Infestation variable,
+the agent assumes that Insect-Prevalence is directly connected to Y ield. The few other
+incorrect edges are either due to reversals of causality (for instance, the model assumes
+Protein inﬂuences Nitrogen instead of vice versa) or by the model’s bias towards simplic-
+ity in the absence of suﬃcient domain trials (for example, Precipitation has a relatively
+weak inﬂuence on Nitrogen compared to its many other parents, so the agent instead
+spuriously connects Precipitation to Local-Concern—a variable with no parents).
+6. Related Work
+The literature on learning optimal policies includes methods for dealing with nu-
+merous types of change, such as non-stationary rewards (Besbes et al., 2014), or noise
+in sensing and actuation (da Silva et al., 2006). Such methods have also been applied
+in situations involving hidden variables (e.g., with Partially Observed Markov Decision
+Processes (Leonetti et al., 2011)), or in cases where the learner must reason about the
+underlying probabilistic structure of the problem (e.g, with Factored Markov Decision
+Processes (Degris et al., 2006)). However, these methods require all possible states and
+actions to be known in advance of learning. That is, the agent starts out with complete
+knowledge of C and A. In contrast, our agent learns these components from evidence.
+There are a few notable exceptions in the reinforcement learning (rl) literature, which
+attempt to relax the standard assumption that all possible states and actions are known
+in advance of learning. Rong (2016) deﬁnes Markov Decision Processes with Unawareness
+(mdpus), and also provides algorithms for learning optimal policies, even when the agent
+starts out unaware of actions and states that inﬂuence what is optimal.
+This work
+allows an agent to discover an unforeseen atomic state or unforeseen action via a random
+35
+
+exploration function that is a part of the mdpu. Our work contrasts with this in several
+ways. First, we support discovering unforeseen possibilities from evidence that stems
+from communication with an expert, not just via exploration. Secondly, and in light
+of this quite diﬀerent kind of evidence, the agent is not simply discovering at most one
+new atomic state from the latest piece of evidence, but rather discovering an unforeseen
+concept, which instantly extends the set of atomic states considerably: e.g., an unforeseen
+concept corresponding to a Boolean random variable doubles the set of atomic states.
+Accordingly, and in contrast to mdpus, the set of atomic states in our task is not deﬁned
+by a single random variable whose set of possible values change as the agent becomes
+more aware. Rather, the domain states are conceptualised via a set of random variables
+in a dependency structure, and the agent must learn that dependency structure so that
+computing joint probability distributions in the domain remains tractable.
+Learning
+the concepts and their dependencies is challenging but ultimately worth it, because the
+probabilistic conditional independence they encapsulate makes learning and reasoning
+(whether exact or approximate) more tractable. This enables us to conduct experiments
+in Section 5 where the (true) decision problem consists of 2 million distinct atomic states,
+compared with the few thousand distinct atomic states in the discretised models that are
+used in Rong’s experiments.
+Selective perception methods, such as McCallum’s (McCallum and Ballard, 1996) U-
+tree algorithm, were designed for problems in which the true state space may technically
+be available, but is infeasibly large to reason with. The U-tree method initially treats
+all states as indistinguishable, then recursively splits states in two as the agent discovers
+signiﬁcant diﬀerences in their expected reward. The agent thus learns an increasingly
+complex representation of the state space. The U-tree algorithm handles sequential plan-
+ning while our model (currently) supports only single-stage decision problems; however,
+there are three main learning tasks that our model supports that the U-tree algorithm
+does not. First, our model accommodates situations where the agent is made aware of
+an entirely new possible action, while the U-Tree algorithm assumes that the set of ac-
+tions remains ﬁxed. Secondly, our model learns from (qualitative) evidence provided by
+a domain expert, as well as evidence from trial and error. And thirdly, our model learns
+unforeseen concepts and causal relations among them, while the U-tree algorithm does
+not reason about which dimensions deﬁne the state space, nor their causal dependencies.
+This third diﬀerence is related to the second: we ultimately want our model to enable an
+agent to learn about the domain and how to behave in it from a human expert, and it is
+quite natural for a human to justify why one state is diﬀerent from another on the basis
+of the concepts on which optimal behaviour depends by saying, for instance, “sandy soil
+causes abundant barley yields”. Our model supports learning from this type of evidence.
+Deep reinforcement learning (drl, Mnih et al. (2015)) also aims to learn a suitable
+abstraction of the data to enhance convergence towards optimal policies. drl combines
+deep learning (i.e., a convolutional neural network or cnn (Bengio et al., 2013; Hinton
+et al., 2006)) with rl, and has proven extremely useful (e.g., Chouard (2016)). However,
+the major successes in drl have not so far considered changing state-action spaces in
+the sense of the examples we have discussed. Instead, the focus has been on using a
+large number (typically, in the millions or tens of millions) of domain trials to re-describe
+a large state-action space in terms of abstracted versions that render policy learning
+more tractable. We believe that agents can learn more eﬃciently if they exploit evidence
+from both domain trials and messages conveyed by an expert. Unfortunately, expert
+36
+
+evidence about causal relations (“X causes Y”) or preference (“If C is true, then doing
+X is better than doing Y”) are inherently symbolic. Adjusting weights in a sub-symbolic
+representation like a cnn so that it satisﬁes certain qualitative properties is currently an
+unsolved problem. Another limitation is that the implicit models generated by drl lack
+explainability—they are unable to elaborate on why a given action was recommended
+over another. Our approach complements methods like drl by dynamically building an
+interpretable model of the decision problem. Such interpretable models make it easier
+for the agent to explain the reasons behind a given decision, and also allow the agent to
+evaluate its interpretation of expert messages against its current conceptualisation of the
+decision problem via the standard logical technique of model checking.
+The agent must learn how to revise its model of the decision problem to incorporate
+newly discovered actions and concepts. Hence, part of our task is to learn the domain’s
+causal structure. Several approaches exist for jointly learning causal dependencies and
+probability distributions (e.g., Bramley et al. (2015); Buntine (1991); Friedman (1998))
+and exploiting causal structure to speed-up inference (Albrecht and Ramamoorthy, 2016).
+We extend this work to meet our objectives. First, models for learning dependencies all
+assume that the vocabulary of random variables does not change during learning, but in
+our task it changes when the agent becomes aware of an unforeseen action or concept.
+Secondly, optimal action depends on payoﬀs as well as beliefs, and so we must integrate
+learning dependencies with learning potential payoﬀs. Finally, Bramley et al. (2015) and
+Friedman (1998) use only domain trials as evidence, and although Buntine (1991) uses
+expert evidence, the messages are only about causal relations and they are all declared
+prior to learning. In contrast, we want to interleave dialogue and learning: this enables
+the expert to oﬀer advice in a timely and contextually relevant manner; consequently,
+she can explain particular outcomes and correct mistakes.
+The dns used to model the decision problems in this paper resemble a simpliﬁed ver-
+sion of inﬂuence diagrams (Howard and Matheson, 2005). Inﬂuence diagrams allow one
+to express multi-stage decision problems by deﬁning information arcs between chance
+nodes and decision nodes, to help an agent assess whether it is worth observing a given
+trial or not (known as a value-of-information calculation). There has been some work
+on inferring the probabilistic structure and utilities of other agents in inﬂuence diagrams
+(Bielza et al., 2010; Nielsen and Jensen, 2004; Suryadi and Gmytrasiewicz, 1999). How-
+ever, as explained in Section 2, the added complexity of the inﬂuence diagram deﬁnition
+was unnecessary to tackle the single-stage, fully observable tasks addressed in this paper.
+Moreover, in our work we assume that the agent knows its own utility function.
+There are several areas of research in which expert evidence is used to improve the
+performance of a learning agent. In Transfer learning— where knowledge of the optimal
+policy for a source task is used to improve performance on a related target task—the
+transfer of knowledge is sometimes captured via an expert “giving advice” to a learner
+(Torrey et al., 2006). Typically, both the source and target task must belong to the same
+domain. If they do not, an explicit mapping is usually provided from the states and
+actions in the source task to the states and actions in the target task. In contrast, our
+agent incrementally learns a single task, but is occasionally made aware of new concepts,
+which it must learn to accommodate into its existing knowledge. Another diﬀerence is
+that in transfer learning, the expert advice is all declared before the agent begins learning.
+In our model, the agent and expert engage in a dialogue throughout learning.
+Knox and Stone (2009) use human expert evidence to inform rl, but they conﬁne
+37
+
+this evidence to updating the likely outcomes of actions and their rewards; they do not
+support cases where expert evidence reveals information that the agent was not aware
+was possible. On the other hand, researchers have developed models for learning optimal
+policies via a combination of domain actions and natural language instructions, where the
+instructions may include neologisms, whose semantics the agent must learn (e.g., Liang
+(2005)). But this work assumes that the neologism denotes an already known concept
+within the agent’s abstract planning language. On encountering the neologism “block” ,
+for example, the agent’s task is to learn that it maps to the concept block that is already
+an explicit part of the agent’s domain model. In contrast, we support learning optimal
+policies when the neoglogism denotes a concept that the agent is currently unaware of;
+e.g., to support learning when block is not a part of the agent’s conceptualisation of the
+domain, and yet this (unforeseen) concept is critical to optimal behaviour.
+Forbes et al. (2015) use embodied natural language instructions to support teaching
+a robot a new skill (a task known as learning by demonstration). Their model learns how
+to map a natural language neologism to what might be a novel combination of sensory
+values—in this sense, the meaning of the neologism may be an unforeseen concept—and
+this novel concept then informs the task of learning new motor controls. In eﬀect, this
+work links a rapidly growing body of research on learning how to ground natural lan-
+guage neologisms in the embodied environment (known as the symbol grounding problem;
+(Siskind, 1996; Dobnik et al., 2012; Yu et al., 2016; Hristov et al., 2017) inter alia) with
+learning a new skill. But it does not support integrating the newly acquired skill into an
+existing hypothesis space consisting of other actions, consequences and rewards; so they
+do not support learning optimal policies when not only this new skill but other actions
+(and related concepts) are needed as well.
+Our aim in this paper is to supply a complementary set of learning algorithms to this
+prior work. Like Forbes et al. (2015), our agent learns from both trial and error and from
+instruction. But we focus on a complementary task: instead of focussing, as they do, on
+learning how to execute a new skill, we focus on learning when it is optimal to execute
+it. Given that we wish to support larger planning tasks, we also broaden the goals to
+discovering and learning to exploit arbitrary unforeseen concepts, not just the learning
+of spatial concepts that Forbes et al. (2015) are limited to (see also Dobnik et al. (2012)).
+On the other hand, natural language ambiguity makes extracting the hidden message
+from natural language utterances a highly complex process (Grice, 1975; Bos et al.,
+2004; Zettlemoyer and Collins, 2007; Reddy et al., 2016). We bypass this complexity by
+using a formal language as the medium of conversation. This formal language can be
+broadly construed as the kind of language one uses to represent the output of natural
+language semantic parsing (Artzi and Zettlemoyer, 2013). Replacing the expert that we
+deploy in our experiments with an expert human would require linking the model we
+present in this paper with existing work on grounded natural language acquisition and
+understanding. This task is beyond the scope of the current paper, and forms a major
+focus of our future work.
+Lakkaraju et al. (2017) tackle learning “unknown unknowns” via interaction with an
+oracle. This work addresses a speciﬁc type of unawareness: an agent assigns an incorrect
+label to a trial with high conﬁdence. Crucially however, they assume that the correct
+label for this trial must be a label that the agent is already currently aware of. In other
+words, they exclude the option that the hypothesis space itself is incomplete, which is
+the type of unawareness that we are interested in.
+38
+
+There is a growing body of work on modelling unaware agents (e.g., Feinberg (2004);
+Halpern and Rˆego (2013); Board et al. (2011); Heifetz et al. (2013)). These theories
+predict when the agent’s unawareness causes it to deviate from what is actually optimal.
+But with the exception of Rong (2016), this work does not address how an agent learns
+from evidence: i.e., how to use evidence to become aware of an unforeseen factor and to
+estimate how this gets incorporated into its updated conceptualisation of the decision
+problem. We ﬁll this gap. This prior work interprets awareness with respect to models
+that include every possible option.
+A fully aware agent (e.g., the domain expert in
+our experiments) or an analyst can model an unaware agent this way, but it does not
+characterise the unaware agent’s own subjective perspective (Li, 2008). In contrast, our
+learning task requires the unaware agent to use evidence to change its set of possible
+options: it dynamically constructs this set and its causal structure from evidence.
+Finally, the barley example from Section 1 shows that becoming aware of an unfore-
+seen possibility can prompt revisions, rather than reﬁnements, to the reward function.
+But the models that support preference revision on discovering an unforeseen possibility
+assume a qualitative preference model (Hansson, 1995; Cadilhac et al., 2015). Following
+Cadilhac et al. (2015), we use evidence to dynamically construct an ever more speciﬁc
+partial description of preferences, and defeasible reasoning yields a complete preference
+model from the (partial) description—the agent defaults to indiﬀerence.
+But unlike
+Cadilhac et al. (2015), the learning agent uses evidence to estimate numeric payoﬀs
+rather than qualitative preference relations.
+7. Conclusions and Future Work
+This paper presents a method for discovering and learning to exploit unforeseen possi-
+bilities while attempting to converge on optimal behaviour in single-stage decision prob-
+lems. The method supports learning by trial and error as well as learning by instruction
+via messages from a domain expert.
+We model the problem as one of dynamically
+building an interpretable conceptualisation of the domain: we argued that building an
+interpretable model oﬀers a straightforward way to exploit both the qualitative evidence
+and the quantitative evidence. Speciﬁcally, our model is the ﬁrst to support learning all
+components of a decision network, including its set of random variables.
+Our algorithms build upon the common sense notions of Minimality and Conservativ-
+ity. Minimality is encoded in the following ways: greedy search for a minimal vocabulary
+and domain for the reward function; defaulting to indiﬀerence; defeasibly low prior proba-
+bilities of dependencies; and the assumption that any superset of a suﬃciently improbable
+parent set is at least as improbable. Conservativity is encoded by retaining the relative
+likelihoods among dependencies and cpts learned so far when a new variable gets added
+to the dn.
+Our experiments show that these principles signiﬁcantly enhance the performance of
+the agent in its learning task, as measured by policy error and cumulative reward, when
+learning a dn of 21 random variables from 3000 pieces of evidence. The model was also
+shown to be robust to the topology of the true dn: in other words, it learns eﬀective
+policies, whatever the true conceptualisation of the domain might be. An agent that
+starts with a minimal subset of the true hypothesis space is also competitive with one
+that starts with full knowledge of the set of random variables that deﬁne the atomic
+states.
+39
+
+There are several novel formal components to our model.
+For instance, we have
+combined symbolic constraint solving with Dirichlet distribution based estimates to guide
+learning, and the novel ILP step ensures that the estimated causal structure of the domain
+is valid—i.e., all nodes are connected to the utility node, and the dependencies satisfy all
+observed evidence to date. This component on its own presents an important extension
+to existing work on learning dependencies, since it supports learning a dn as opposed to
+just a Bayesian network.
+These are just the ﬁrst steps towards building an agent that can learn to conceptualise
+and exploit its domain via its own action and via messages from teachers or experts.
+We would like to extend this model to handle decision problems where some of the
+critical factors for solving the task have hidden values even after the agent becomes
+aware of them; this would involve replacing our Parameter Update algorithm with a
+modiﬁed version of Structural EM (Friedman, 1998). We would also like to extend it to
+handle dynamic environments: i.e., to learn (factored) mdps, where the dns learned here
+correspond to just one time slice. This would not only extend the scope of this work from
+single-stage decision making to sequential planning; it would also be essential if we were
+to replace deﬁning the agent’s and expert’s dialogue strategy with learning an optimal
+dialogue strategy. We would also like to enrich dialogue in three ways. First, we would
+like the learner to utilise defeasible messages about likelihood. Second, we would like
+to relax the assumption that the expert’s intended message is always true. And ﬁnally,
+we would like to support dialogues in natural language—the latter two enhancements
+are a necessary step for an agent to discover and exploit unforeseen possible options via
+interaction with a human teacher.

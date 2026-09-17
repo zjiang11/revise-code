@@ -1,0 +1,713 @@
+Multi-Vehicle Control in Roundabouts using
+Decentralized Game-Theoretic Planning
+Arec Jamgochian , Kunal Menda and Mykel J. Kochenderfer
+Department of Aeronautics and Astronautics, Stanford University
+
+Abstract
+Safe navigation in dense, urban driving environ-
+ments remains an open problem and an active
+area of research.
+Unlike typical predict-then-
+plan approaches, game-theoretic planning consid-
+ers how one vehicle’s plan will affect the ac-
+tions of another.
+Recent work has demonstrated
+signiﬁcant improvements in the time required to
+ﬁnd local Nash equilibria in general-sum games
+with nonlinear objectives and constraints. When
+applied trivially to driving, these works assume
+all vehicles in a scene play a game together,
+which can result in intractable computation times
+for dense trafﬁc.
+We formulate a decentralized
+approach to game-theoretic planning by assum-
+ing that agents only play games within their ob-
+servational vicinity, which we believe to be a
+more reasonable assumption for human driving.
+Games are played in parallel for all strongly con-
+nected components of an interaction graph, signif-
+icantly reducing the number of players and con-
+straints in each game, and therefore the time re-
+quired for planning. We demonstrate that our ap-
+proach can achieve collision-free, efﬁcient driv-
+ing in urban environments by comparing perfor-
+mance against an adaptation of the Intelligent
+Driver Model and centralized game-theoretic plan-
+ning when navigating roundabouts in the INTER-
+ACTION dataset. Our implementation is available
+at http://github.com/sisl/DecNashPlanning.
+1
+Introduction
+A better understanding of human driver behavior could yield
+better simulators to stress test autonomous driving policies.
+A well-studied line of work attempts to build interpretable
+longitudinal or lateral motion models parameterized by only
+a few parameters. For example, the Intelligent Driver Model
+(IDM) control law has ﬁve parameters that govern longitudi-
+nal acceleration (Treiber et al., 2000; Kesting et al., 2010).
+There are different ways to infer model parameters from
+data (Liebner et al., 2012; Buyer et al., 2019; Bhattacharyya,
+Senanayake, et al., 2020). However, one can typically only
+use these models in well-deﬁned, simple scenarios (e.g. high-
+way driving). Building models from data in complicated sce-
+narios (e.g. roundabouts) remains an open area of research.
+Figure 1: The DR USA Roundabout FT roundabout (Zhan et al.,
+2019). Planning in a dense trafﬁc environment requires negotiating
+with multiple agents, but not with all agents in a scene.
+A general approach is to assume every driver acts to opti-
+mize their own objective, as is the case in a Markov Game.
+If no agent has any incentive for unilaterally switching its
+policy, then the resulting joint policy is a Nash equilib-
+rium (Kochenderfer et al., 2022). While typical policies may
+be formed using predictions about other vehicles, Nash equi-
+librium policies have the beneﬁt of considering how agents
+may respond to the actions of others. Nash equilibrium (and
+other game-theoretic) policies therefore can more closely
+capture human driving, where drivers reason about how their
+driving decisions will affect the plans of other drivers and ne-
+gotiate accordingly.
+Nash equilibrium strategies for ﬁnite-horizon linear-
+quadratic games obey coupled Riccati differential equations,
+and can be solved for in discrete time using dynamic pro-
+gramming (Bas¸ar and Olsder, 1998; Engwerda, 2007). More
+recent work has explored efﬁciently ﬁnding Nash equilibria
+in games with non-linear dynamics by iteratively linearizing
+them (Fridovich-Keil et al., 2020) or by searching for roots
+of the gradients of augmented Lagrangians (Le Cleac’h et al.,
+2020). Both kinds of approaches have been applied to urban
+driving scenarios. However, they focus on scenarios where
+the number of agents is low, and the methods are empirically
+shown in the latter work to scale poorly as the number of
+agents is increased.
+In dense, urban driving environments, the number of agents
+in a particular scene can be quite large. Navigating a round-
+about, such as the one shown in Figure 1, can require success-
+fully negotiating with many other drivers. Luckily, modeling
+arXiv:2201.02718v1  [cs.RO]  8 Jan 2022
+
+multi-agent driving in dense trafﬁc as one large, coordinated
+game of negotiations is unrealistic. Drivers typically perform
+negotiations with the only vehicles closest to them. Further-
+more, they cannot negotiate with drivers who do not see them.
+In this work, we formulate multi-vehicle decentralized,
+game-theoretic control under the latter assumption that games
+are only played when drivers see one another.
+We use a
+time-dependent interaction graph to encodes agents’ observa-
+tions of other agents, and we delegate game-theoretic control
+to strongly connected components (SCCs) within that graph.
+Furthermore, we make the assumption any time a driver ob-
+serves a vehicle that does not observe them in turn, that driver
+must use forecasts of the other vehicle’s movements in their
+plan. Thus, the game of an SCC of agents has additional col-
+lision constraints imposed by outgoing edges from that SCC.
+We demonstrate our method on a roundabout simulator de-
+rived from the INTERACTION dataset (Zhan et al., 2019).
+We observe that a decentralized model based on IDM is un-
+tenable for safe control, and that our decentralized approach
+to game-theoretic planning can generate safe, efﬁcient be-
+havior. We observe that our approach provides signiﬁcant
+speedup to centralized game-theoretic planning, though it is
+still not fast enough for real-time control.
+In summary, our contributions are to:
+• Introduce a method for achieving (partially) decentral-
+ized game-theoretic control, and
+• Apply that method to demonstrate human-like driving in
+roundabouts using real data.
+The remainder of this paper is organized as follows: Section 2
+outlines background material, Section 3 describes our ap-
+proach and methodologies, Section 4 highlights experiments
+and results, and Section 5 concludes.
+2
+Background
+Research to model and predict human driver behavior was re-
+cently surveyed by Brown et al. (2020). The ﬁeld of imitation
+learning (IL) seeks to learn policies that mimic expert demon-
+strations. One class of IL algorithms requires actively query-
+ing an expert to obtain feedback on the policy while learn-
+ing. Naturally, this method does not scale (Ross and Bagnell,
+2010; Ross, Gordon, et al., 2011).
+Other methods use ﬁxed expert data and alternate between
+optimizing a reward function, and re-solving a Markov de-
+cision process for the optimal policy, which can be expen-
+sive (Abbeel and Ng, 2004; Ziebart et al., 2008). More re-
+cent methods attempt to do these steps progressively while
+using neural network policies and policy gradients (Finn et
+al., 2016; Ho, Gupta, et al., 2016). Generative Adversarial
+Imitation Learning (GAIL) treats IL as a two-player game
+in which a generator is trying to generate human-like behav-
+ior to fool a discriminator, which is, in turn, trying to dif-
+ferentiate between artiﬁcial and expert data (Ho and Ermon,
+2016). GAIL was expanded to perform multi-agent imitation
+learning in simulated environments (Song et al., 2018). GAIL
+has recently been tested with mixed levels of success on real-
+world highway driving scenarios (Bhattacharyya, Phillips, et
+al., 2018; Bhattacharyya, Wulfe, et al., 2020). GAIL has not
+yet been implemented in more complex driving environments
+(e.g. roundabouts), where success will likely require signiﬁ-
+cant innovation.
+The literature on multi-agent planning is rich and exten-
+sive. A common assumption is cooperation, which can be
+modeled with one single reward function that is shared by all
+agents.
+Multi-agent cooperative planning is surveyed recently
+by Torreno et al., 2017. In real driving, agents do not coop-
+erate, but rather optimize their individual reward functions.
+One approach is to model real driving as a general-sum dy-
+namic game. In non-cooperative games, different solution
+concepts have been proposed. Nash equilibria are solutions in
+which no player can reduce their cost by changing their strat-
+egy alone (Kochenderfer et al., 2022). The problem of ﬁnd-
+ing Nash equilibria for multi-player dynamic games in which
+player strategies are coupled through joint state constraints
+(e.g. for avoiding collisions) is referred to as a Generalized
+Nash Equilibrium Problem (GNEP) (Facchinei and Kanzow,
+2007).
+Nash equilibrium strategies for ﬁnite-horizon linear-
+quadratic games obey coupled Riccati differential equations,
+and can be solved for in discrete time using dynamic pro-
+gramming (Bas¸ar and Olsder, 1998; Engwerda, 2007).
+A
+recent approach, iLQGames, can solve more general dif-
+ferential dynamic games by iteratively making and solving
+linear-quadratic approximations until convergence to a lo-
+cal, closed-loop Nash equilibrium strategy (Fridovich-Keil
+et al., 2020).
+An alternative method, ALGAMES, uses a
+quasi-Newton root-ﬁnding algorithm to solve a general-sum
+dynamic game for a local open-loop Nash equilibrium (Le
+Cleac’h et al., 2020). Unlike iLQGames, ALGAMES allows
+for hard constraints in the joint state and action space, but
+it must be wrapped in model-predictive control to be used
+practically. We note that neither method ﬁnds global Nash
+equilibria, and the same game can result in different equilib-
+ria depending on the initialization. The problem of inferring
+which Nash equilibrium most closely matches observations
+of other vehicles is considered by Peters et al., 2020. Since
+the reward functions of other vehicles may be unknown, ad-
+ditional work formulates an extension in which an Unscented
+Kalman Filter is used to update beliefs over parameters in the
+other vehicle’s reward functions (Le Cleac’h et al., 2021).
+In this paper, we adopt the convention presented in AL-
+GAMES. We denote the state and control of player i at time t
+as xi
+t and ui
+t respectively. We denote the full trajectory of all
+agents x1:N
+1:T as X for shorthand. Xi indicates agent i’s full
+trajectory, Xt indicates the joint state at time t. Similarly, we
+use U to indicate the joint action plan u1:N
+1:T , U i to indicate
+agent i’s full plan, and Ut to indicates the joint action at time
+t. The cost function of each player is denoted Ji(X, U i).
+The objective of each player is to choose actions that mini-
+mize the cost of their objective function subject to constraints
+imposed by the joint dynamics f, and by external constraints
+C (e.g. collision avoidance constraints, action bounds, etc.):
+min
+X,U i
+Ji(X, U i)
+s.t.
+Xt+1 = f(t, Xt, Ut), t = 1, . . . , T −1,
+C(X, U) ≤0
+(1)
+A joint plan U optimizes the GNEP and is, therefore, an open-
+loop Nash equilibrium if each plan U i is optimal to its respec-
+tive problem when the remaining agents plans U −i are ﬁxed.
+That is to say, no agent can improve their objective by only
+changing their own plan.
+
+Figure 2:
+Sample roundabout frame from the INTERACTION
+dataset (Zhan et al., 2019). Observation edges are denoted with ar-
+rows, and strongly connected components are drawn with circles.
+Each strongly connected component must make a game-theoretic
+plan while respecting forecasts of agents from edges leaving that
+component.
+3
+Methodology
+3.1
+Decentralized Game-Theoretic Planning
+We note that in dense trafﬁc, the assumption that all agents
+play a game with all other agents is unrealistic. More realisti-
+cally, agents only negotiate with a subset of the agents in the
+scene at any one given point in time. If there are many agents
+in the scene, then agents typically negotiate with the ones in
+their immediate vicinity.
+Furthermore, this game-theoretic negotiation exists only
+when there is two-way communication between agents. If
+two drivers can observe one another, they can negotiate, but
+if a trailing vehicle is in a leading driver’s blind spot, then
+the leading driver is agnostic to the trailing vehicle’s actions
+while the trailing driver must plan around predictions about
+the behavior of the leading vehicle.
+We encode this information ﬂow using a directed graph
+G = (V, E) where node i ∈V captures information about
+agent i and an edge (i, j) ∈E captures whether agent i
+can observe agent j. We deﬁne the agent i’s neighbor set
+Ni = {j | (i, j) ∈E} as the set of all agents that agent i
+actively observes.
+At each point in time, we can generate the interaction graph
+Gt based on the agents each agent actively observes. We as-
+sume that a human driver can only reason about a small sub-
+set of agents that are within its ﬁeld of view, so we add those
+observed agents to the ego vehicle’s neighbor set. The cardi-
+nality of each neighbor set |Ni| can therefore be much smaller
+than the total number of agents in a scene. We then instanti-
+ate one game for each of the strongly connected components
+(SCCs) of Gt.
+Within each SCC, agents must compute a Nash equilib-
+rium. Agents within the SCC negotiate with one another, but
+are constrained by the predictions of observed agents who do
+not observe them (e.g. the outgoing edges of each strongly
+connected component). If two agents observe one another,
+and one of those two agents observed a third leading car, then
+the agents must make a joint plan subject to predictions about
+the third car. This can be done by instantiating a game with all
+three cars and ﬁxing the actions of the third car to be those of
+its forecasted plan. In our experiments, we forecast that ob-
+served agents maintain their velocities, however, our method
+is amenable to more complex forecasting methods. An exam-
+ple interaction graph is shown in Figure 2.
+To control the vehicles, this decentralized planning is
+wrapped in model predictive control. Once each planner de-
+termines the plan of all the agents in each sub-component,
+the ﬁrst action of each plan is taken, a new interaction graph
+is generated, and new game-theoretic planners are instanti-
+ated. Decentralized game-theoretic planning is summarized
+in Algorithm 1.
+Algorithm 1 Decentralized Game-Theoretic Planning
+1: procedure DECNASH(X1)
+2:
+for t ←1 : T do
+3:
+gt ←InteractionGraph(Xt)
+4:
+SCCs ←StronglyConnectedComponents(gt)
+5:
+for SCC ∈SCCs do
+6:
+game ←Game(SCC, Xt)
+7:
+U[SCC.nodes] ←NashSolver(game)
+8:
+Xt+1 ←ExecuteAction(Xt, U)
+We believe that this model of human driving more real-
+istically captures real-life driving negotiations, where each
+driver makes plans based only on a few observed neighboring
+vehicles, and where game-theoretic negotiations only occur
+between vehicles that actively observe one other. For exam-
+ple, if a driver observes a vehicle they know is not observing
+them, then that driver must plan using forecasts of the ob-
+served vehicle’s motion, rather than play a game to commu-
+nicate their intent. Furthermore, this decentralized approach
+is much more scalable since the number of players, as well
+as the O(n2) safety constraints within each game, stays rela-
+tively small even when there are many vehicles in the driving
+scenario. The dependence on the number of players was ob-
+served empirically by Le Cleac’h et al. (2020), who saw a ten-
+to twenty-fold increase in computation time for their method
+when moving from two to four agents per game.
+3.2
+Roundabout Game
+We formulate the local negotiations between agents in a
+roundabout as separate GNEPs to be solved in parallel. Each
+problem can be thought of to have N-players, Nc of which
+are controlled, and No = N −Nc of which are observed. Nc
+is the size of the SCC being considered, and No is the num-
+ber of outgoing edges from that SCC. Since we only control
+Nc agents in our decentralized plan, we only need to consider
+the ﬁrst Nc ≤N optimization problems in the dynamic game
+in Eq. (1).
+In our roundabout game, we assume that vehicle trajec-
+tories are determined beforehand (e.g. by a trajectory plan-
+ner), and the goal of our planner is to prescribe accelerations
+of vehicles along their respective trajectories. We do so by
+parametrizing a vehicle’s trajectory using a polynomial map-
+ping a distance travelled along the path to the x and y posi-
+tions of the vehicle. A vehicle modulates acceleration along
+this pre-determined path in order to safely and efﬁciently nav-
+igate to its goal. We think it is valid to assume that trajecto-
+ries can be computed a priori in roundabouts, but this may be
+a less-valid assumption in highway trafﬁc, where agents can
+plan their paths to react to other agents. Our decentralized
+
+method can, however, be extended to other driving environ-
+ments by reformulating the game setup.
+With our assumptions, each vehicle’s state can be written:
+xi
+t =
+
+
+pi
+xt = p(si
+t; θxi)
+pi
+yt = p(si
+t; θyi)
+si
+t
+vi
+t
+
+, where p(s; θ) =
+|θ|−1
+X
+i=0
+θisi.
+(2)
+Here, s and v encode the vehicle position and velocity along
+its path and are the minimal state representation. To simplify
+collision constraints, the ﬁrst two elements in the state ex-
+pand the path position to x and y locations using coefﬁcients
+θxi and θyi. Each vehicle directly controls its own accel-
+eration, leading to the following continuous-time dynamics,
+which are discretized at solve time:
+˙xi
+t =
+
+
+˙p(si
+t, vi
+t; θxi)
+˙p(si
+t, vi
+t; θyi)
+vi
+t
+ui
+t
+
+, where ˙p(s, v; θ) = v
+|θ|−1
+X
+i=1
+θiisi−1.
+(3)
+To incentivize vehicles to reach their velocity targets
+while penalizing unnecessary accelerations, we use a linear-
+quadratic objective:
+Ji(Xi, U i) =
+T
+X
+t=1
+qi∥vi
+t −vi
+target∥2
+2 + ri∥ui
+t∥2
+2,
+(4)
+where qi and ri are vehicle-dependent objective weighting
+parameters, and vi
+target is the vehicle’s desired free-ﬂow speed.
+Controls are constrained to be within the control limits
+of each controlled vehicle, and to be equivalent to the pre-
+dicted controls for the observed vehicles.
+That is, for all
+t ∈{1, ..., T}, we have
+ui
+min ≤ui
+t ≤ui
+min
+∀i ∈{1, ..., Nc}
+(5)
+ui
+t = ˆui
+t
+∀i ∈{Nc + 1, ..., N}
+(6)
+where ˆui
+t is the predicted control of observed vehicle i at time
+t.
+Finally, we impose collision constraints between each pair
+of (both observed and unobserved) vehicles at every point in
+time. That is, for every pair of agents i and j at every time in
+the horizon, we introduce constraints
+(pi
+xt −pj
+xt)2 + (pi
+yt −pj
+yt)2 ≥r2
+safe,
+(7)
+where rsafe is a safety radius.
+4
+Experiments
+In our experiments, we empirically demonstrate our ap-
+proach’s ability to generate human-like behavior in real-
+world, complicated driving scenarios.
+We use the IN-
+TERACTION dataset (Zhan et al., 2019), which consists
+of drone-collected motion data from scenes with compli-
+cated driving interactions. We focus on control in a round-
+about, a traditionally difﬁcult driving scenario that requires
+negotiating with potentially many agents.
+From the data,
+we extract vehicle spawn times and approximate true paths
+with twentieth-order polynomials.
+In our simulator, we
+ﬁx these values and allow for different methods to pro-
+vide (one-dimensional) acceleration control for all agents
+in the scene, thereby controlling agents along paths gener-
+ated from real-world data.
+Our code is made available at
+github.com/sisl/DecNashPlanning.
+We analyze behavior generated from a fully decentral-
+ized policy in which vehicles follow an adaptation of
+IDM (Treiber et al., 2000), a centralized game-theoretic pol-
+icy, and our decentralized game-theoretic method. We discuss
+observed behavior and compare collision rates, average speed
+shortfalls, planning times, and agents in each game.
+4.1
+IDM Adaptation
+Given speed v(t) and relative speed r(t) to a followed vehi-
+cle, the Intelligent Driver Model (IDM) for longitudinal ac-
+celeration predicts acceleration as
+ddes = dmin + τ · v(t) −
+v(t) · r(t)
+2
+p
+amax · bpref
+(8)
+a(t) = amax
+"
+1 −
+ v(t)
+vtarget
+4
+−
+ ddes
+d(t)
+2#
+,
+(9)
+where ddes is the desired distance to the lead vehicle, dmin is
+the minimum distance to the lead vehicle that the driver will
+tolerate, τ is the desired time headway, amax is the controlled
+vehicle’s maximum acceleration, bpref is the preferred decel-
+eration, and vtarget is the driver’s desired free-ﬂow speed.
+Though IDM is intended for modeling longitudinal driv-
+ing, we adapt it for use in roundabout driving by designating
+the closest vehicle within a 20◦half-angle cone from the con-
+trolled vehicle’s heading as the “follow” vehicle, and calcu-
+lating the relevant parameters by casting the “follow” vehicle
+to the controlled vehicle’s path.
+4.2
+Game-Theoretic Planning
+We implement our decentralized game-theoretic planning ap-
+proach as described in Section 3.1. To generate an interaction
+graph, we say agent i observes agent j (e.g. (i, j) ∈E) if j is
+within a 20 meter, 120◦half-angle cone from i’s heading. To
+compute strongly connected components and their outgoing
+edges, we use Kosaraju’s algorithm (Nuutila and Soisalon-
+Soininen, 1994), which uses two depth-ﬁrst search traversals
+to compute strongly connected components in linear time.
+We implement the one-dimensional dynamic roundabout
+game setup as described in Section 3.2. For predictions of the
+outgoing edges of each strongly connected component, we
+assume each observed uncontrolled vehicle will maintain its
+velocity throughout the planning horizon (i.e. ˆui
+t from Eq. (6)
+is 0 for all t). We use Algames.jl (Le Cleac’h et al., 2020)
+to solve for Nash equilibria by optimizing an augmented La-
+grangian with the objective gradients. At each point in time,
+we plan a four-second horizon, where decisions are made ev-
+ery 0.2 seconds.
+We also compare our method against a fully centralized
+approach—that is, one where all agents in a frame play a sin-
+gle game together.
+4.3
+Results
+As a baseline, our IDM adaptation performs surprisingly well
+even though IDM is designed to model single-lane driving.
+We observe successful navigation within the ﬁrst few hun-
+dred frames, with collisions happening rarely when two ve-
+hicles do not observe one another while merging. As time
+
+progresses, we observe severe slowdowns as more agents en-
+ter the scene, and an eventual standstill. During standstill,
+the number of collisions increases dramatically as new vehi-
+cles enter the scene before space is cleared. One could imag-
+ine designing sets of rules to circumvent problems from the
+IDM-based approach, but rule design for such a complex en-
+vironment can be very difﬁcult because of the edge cases that
+must be considered. Regardless, this approach highlights the
+lack of safety in simple systems.
+On the contrary, decentralized game-theoretic planning
+generates human-like driving without explicitly encoding
+rules. We observe agents accelerating and decelerating natu-
+rally with the ﬂow of locally observed trafﬁc. We also observe
+instances of agents safely resolving complex trafﬁc conﬂicts
+which would be difﬁcult to encode in rules-based planners.
+Although our quantitative experiments focus on evaluating
+performance at a single, more difﬁcult roundabout, we see
+human-like, safe driving emerge across roundabout environ-
+ments. That is, we observe collision-free generalization to
+different roundabouts without doing any additional parame-
+ter tuning. For videos of resulting behavior please refer to
+supplementary material.
+A sample decentralized open-loop, Nash equilibrium plan
+can be seen in Figure 3. In it, one highlighted strongly con-
+nected component consists of three vehicles that observe one
+another, and observe one other vehicle that does not observe
+them in turn. The optimal plan for this strongly connected
+component has the three vehicles in the component safely in-
+teracting to proceed towards their goals, while the other ob-
+served but non-controlled vehicle maintains its velocity.
+Figure 4 depicts the safe resolution of a trafﬁc conﬂict by
+our method that would be otherwise hard to resolve. In it, the
+vehicles resolve who has right-of-way and merge safely be-
+hind one another without wholly disrupting the ﬂow of trafﬁc,
+which happens often in the IDM adaptation baseline.
+In Table 1, we compare the performance of the IDM adap-
+tation, centralized game-theoretic planning, and decentral-
+ized game-theoretic planning in some key metrics averaged
+over ﬁve 100-second roundabout simulations where decisions
+are made at 10 Hz. Namely, we compare the number of col-
+lisions per 100 seconds, the average shortfall below target
+speed, the number of players per game given our choice of
+interaction graph, and the time to generate a joint policy. For
+our decentralized approach, we deﬁne the number of play-
+ers per game and the time to generate a joint policy using
+the largest values across strongly connected components at
+each time step, as the games can be parallelized. We note that
+our solution times are slow because we are approximating the
+paths as twentieth-order polynomials, and the times are meant
+to highlight relative improvement when using a decentralized
+approach.
+We observe that though generating a joint policy is quick in
+the IDM adaptation, it leads to unsafe behavior that is signiﬁ-
+cantly reduced in the game-theoretic approaches. We observe
+that the game-theoretic approaches are both a) much safer in
+terms of collision rate and b) much more efﬁcient in terms
+of vehicle speed. We see an average of 55.8, 4.8, and 0.2
+collisions per 100 seconds when using the IDM, centralized
+game-theoretic, and decentralized game-theoretic policies re-
+spectively. Similarly, we see that the mean vehicle shortfall
+velocity improves from 8.7 m/s with IDM, to 3.2 m/s with
+the centralized game-theoretic policy, to 2.8 m/s with our
+(a) Interaction Graph
+Vehicle 1
+Vehicle 2
+Vehicle 3
+Vehicle 4
+(b) Planned Trajectory for SCC
+0
+0.2
+0.4
+0.6
+0.8
+1
+1.2
+1.4
+1.6
+6
+8
+10
+12
+Time (s)
+Velocity (m/s)
+vtarget
+Vehicle 1
+Vehicle 2
+Vehicle 3
+Vehicle 4
+(c) Planned Velocity Proﬁle for SCC
+Figure 3: A snapshot of an interaction graph, with a particular
+strongly connected component highlighted (a).
+There are three
+agents in the SCC and a fourth one which is observed but not con-
+trolled. The three vehicles inside the SCC safely negotiate with one
+another en route their goals. The planned Nash equilibrium trajec-
+tory is shown in (b) with points for every 0.2 seconds. The planned
+velocity proﬁle is depicted in (c).
+
+Figure 4: A set of snapshots of trafﬁc conﬂicts which gets resolved safely through decentralized game-theoretic planning. Snapshots are
+shown at one second intervals (ten decision frames). The vehicles quickly resolve right-of-way and merge safely without the need for a
+complex set of rules.
+Table 1: A comparison of performance metrics with the IDM adap-
+tation, centralized game-theoretic planning (C-Nash), and decentral-
+ized game-theoretic planning (Dec-Nash) models, performed over
+ﬁve scenes of 100 seconds of driving. We compare the mean number
+of collisions per 100 seconds (collisions), the mean vehicle shortfall
+below target speed (vtarget−vavg), the number of players in the largest
+game at each time step (# players), and the time to generate a joint
+policy.
+Model
+Collisions
+vtarget −vavg
+# Players
+Time (s)
+IDM
+55.80±11.53
+8.68±0.13
+1
+0.005±0.001
+C-Nash
+4.80±1.88
+3.22±0.16
+6.23±2.34
+6.43±5.74
+Dec-Nash
+0.20±0.20
+2.79±0.12
+1.83±1.00
+2.24±1.97
+method.
+We notice that using a centralized game-theoretic approach
+leads to more driving hesitancy, which ultimately results in
+slower average velocities when compared to our approach.
+We observe collisions in the centralized approach being
+caused by a) the solver being unable to ﬁnd adequate solu-
+tions when the games are too large, and b) vehicles spawning
+before their path has been cleared. With the decentralized
+game-theoretic policy, we only observed one collision in the
+500 total seconds of driving, which we believe to have also
+been caused by the game in question being too large.
+Furthermore, we observe that our decentralized approach
+can generate plans much more quickly than a centralized one.
+We also expect that in larger urban intersections and round-
+abouts with much denser trafﬁc, the performance gaps would
+become even more profound, and our method will be a neces-
+sity to keep game-theoretic plan generation tractable.
+5
+Conclusion
+Generating safe, human-like behavior in dense trafﬁc is chal-
+lenging for rule-based planners because of the complex ne-
+gotiations which drivers undergo to resolve conﬂicts. Game-
+theoretic planning shows promise in allowing multiple agents
+to safely navigate a dense environment because it enables
+agents to reason about how their plans affect other agents’
+plans.
+Though ﬁnding a Nash equilibrium in a general-
+sum Markov game can be quite expensive, recent work has
+demonstrated signiﬁcant improvements in optimization ef-
+ﬁciency for games with nonlinear dynamics and objectives
+(Fridovich-Keil et al., 2020; Le Cleac’h et al., 2020). These
+methods, however, are shown empirically to scale poorly with
+the number of agents in the game.
+In this project, we take a decentralized approach to game-
+theoretic planning for urban navigation, in which we assume
+that planning games are only played between vehicles that
+are mutually interacting (e.g. who are visible to one another
+within a strongly connected graph component). This assump-
+tion signiﬁcantly reduces the number of agents in each game,
+and therefore collision constraints, allowing reduced Nash
+equilibrium optimization time. We demonstrate our approach
+in roundabouts, where we control agent accelerations assum-
+ing paths are known a priori (e.g. from a trajectory planner).
+We observe the emergence of human-like driving behavior
+which is safe and efﬁcient when compared to a baseline IDM
+adaptation, and which is quick when compared to centralized
+game-theoretic planning.
+Our approach has the limitation that it assumes shared
+knowledge of other agents’ objective functions within a
+strongly connected component, and is therefore not fully de-
+centralized. Future work involves relaxing this assumption.
+Recent work tries to infer parameters of other players’ un-
+known objective functions (Le Cleac’h et al., 2021), but this
+presents challenges in the decentralized case when other play-
+ers may only stay in a strongly connected component for a
+short period of time. Future work also involves designing ob-
+jectives to better imitate human behavior.

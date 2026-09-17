@@ -1,0 +1,1171 @@
+Tuffy: Scaling up Statistical Inference in
+Markov Logic Networks using an RDBMS∗
+Feng Niu
+Christopher Ré
+AnHai Doan
+Jude Shavlik
+University of Wisconsin-Madison
+
+ABSTRACT
+Markov Logic Networks (MLNs) have emerged as a powerful
+framework that combines statistical and logical reasoning;
+they have been applied to many data intensive problems in-
+cluding information extraction, entity resolution, and text
+mining. Current implementations of MLNs do not scale to
+large real-world data sets, which is preventing their wide-
+spread adoption. We present Tuffy that achieves scalabil-
+ity via three novel contributions: (1) a bottom-up approach
+to grounding that allows us to leverage the full power of the
+relational optimizer, (2) a novel hybrid architecture that al-
+lows us to perform AI-style local search eﬃciently using an
+RDBMS, and (3) a theoretical insight that shows when one
+can (exponentially) improve the eﬃciency of stochastic local
+search. We leverage (3) to build novel partitioning, loading,
+and parallel algorithms. We show that our approach outper-
+forms state-of-the-art implementations in both quality and
+speed on several publicly available datasets.
+1.
+INTRODUCTION
+Over the past few years, Markov Logic Networks (MLNs)
+have emerged as a powerful and popular framework com-
+bining logical and probabilistic reasoning. MLNs have been
+successfully applied to a wide variety of data management
+problems, e.g., information extraction, entity resolution, and
+text mining. In contrast to probability models like factor
+graphs [23] that require complex distributions to be speci-
+ﬁed in tedious detail, MLNs allow us to declare a rigorous
+statistical model at a much higher conceptual level using
+ﬁrst-order logic. For example, to classify papers by research
+area, one could write a rule such as “it is likely that if one
+paper cites another they are in the same research area.”
+∗We gratefully acknowledge the support of Defense Ad-
+vanced Research Projects Agency (DARPA) Machine Read-
+ing Program under Air Force Research Laboratory (AFRL)
+prime contract no. FA8750-09-C-0181. Any opinions, ﬁnd-
+ings, and conclusion or recommendations expressed in this
+material are those of the authors and do not necessarily re-
+ﬂect the view of DARPA, AFRL, or the US government.
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for proﬁt or commercial advantage and that copies
+bear this notice and the full citation on the ﬁrst page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior speciﬁc
+permission and/or a fee. Articles from this volume were invited to present
+their results at The 37th International Conference on Very Large Data Bases,
+August 29th - September 3rd 2011, Seattle, Washington.
+Proceedings of the VLDB Endowment, Vol. 4, No. 6
+Copyright 2011 VLDB Endowment 2150-8097/11/03... $ 10.00.
+Our interest in MLNs stems from our involvement in a
+DARPA project called “Machine Reading.” The grand chal-
+lenge is to build software that can read the Web, i.e., extract
+and integrate structured data (e.g., entities, relationships)
+from Web data, then use this structured data to answer user
+queries. The current approach is to use MLNs as a lingua
+franca to combine many diﬀerent kinds of extractions into
+one coherent picture. To accomplish this goal, it is critical
+that MLNs scale to large data sets.
+Unfortunately, none of the current MLN implementations
+scale beyond relatively small data sets (and even on many
+of these data sets, existing implementations routinely take
+hours to run). The ﬁrst obvious reason is that these are in-
+memory implementations: when manipulating large inter-
+mediate data structures that overﬂow main memory, they
+either crash or thrash badly.
+Consequently, there is an
+emerging eﬀort across several research groups to scale up
+MLNs.
+In this paper, we describe our system, Tuffy1,
+that leverages an RDBMS to address the above scalability
+and performance problems.
+There are two aspects of MLNs: learning and inference [21].
+We focus on inference, since typically a model is learned
+once, and then an application may perform inference many
+times using the same model; hence inference is an on-line
+process, which must be fast. Moreover, MLN learning al-
+gorithms typically invoke inference as a subroutine repeat-
+edly. Conceptually, inference2 in MLNs has two phases: a
+grounding phase, which constructs a large, weighted SAT
+formula, and a search phase, which searches for a low cost
+(weight) assignment (called a solution) to the SAT formula
+from grounding (using WalkSAT [13], a local search proce-
+dure). Grounding is a non-trivial portion of the overall in-
+ference eﬀort: on a classiﬁcation benchmark (called RC) the
+state-of-the-art MLN inference engine, Alchemy [7], spends
+over 96% of its execution time in grounding. The state-of-
+the-art strategy for the grounding phase (and the one used
+by Alchemy) is a top-down procedure (similar to the proof
+strategy in Prolog). In contrast, we propose a bottom-up
+grounding strategy. Intuitively, bottom-up grounding allows
+Tuffy to fully exploit the RDBMS optimizer, and thereby
+signiﬁcantly speed up the grounding phase of MLN infer-
+ence.
+On an entity resolution task, Alchemy takes over
+7 hours to complete grounding, while Tuffy’s grounding
+ﬁnishes in less than 2 minutes.
+1http://www.cs.wisc.edu/hazy/tuffy/
+2We focus on maximum a posteriori inference which is crit-
+ical for many integration tasks. We discuss marginal infer-
+ence in Appendix A.5.
+373
+
+But not all phases are well-optimized by the RDBMS: dur-
+ing the search phase, we found that the RDBMS implemen-
+tation performed poorly. The underlying reason is a funda-
+mental problem for pushing local search procedures into an
+RDBMS: search procedures often perform inherently sequen-
+tial, random data accesses.
+Consequently, any RDBMS-
+based solution must execute a large number of disk ac-
+cesses, each of which has a substantial overhead (due to the
+RDBMS) versus direct main-memory access. Not surpris-
+ingly, given the same amount of time, an in-memory solu-
+tion can execute between three and ﬁve orders of magnitude
+more search steps than an approach that uses an RDBMS.
+Thus, to achieve competitive performance, we developed a
+novel hybrid architecture that supports local search proce-
+dures in main memory whenever possible. This is our second
+technical contribution.
+Our third contribution is a simple partitioning technique
+that allows Tuffy to introduce parallelism and use less
+memory than state-of-the-art approaches. Surprisingly, this
+same technique often allows Tuffy to speed up the search
+phase exponentially. The underlying idea is simple: in many
+cases, a local search problem can be divided into multiple
+independent subproblems. For example, the formula that
+is output by the grounding phase may consist of multiple
+connected components. On such datasets, we derive a suf-
+ﬁcient condition under which solving the subproblems inde-
+pendently results in exponentially faster search than running
+the larger global problem (Thm. 3.1). An application of our
+theorem shows that on an information extraction testbed,
+a system that is not aware of this phenomenon (such as
+Alchemy) must take at least 2200 more steps than Tuffy
+to reach a solution with the same quality. Empirically we
+found that, on some real-world datasets, solutions found by
+Tuffy within one minute have higher quality than those
+found by non-partitioning systems (such as Alchemy) even
+after running for days.
+The exponential diﬀerence in running time for indepen-
+dent subproblems versus the larger global problem suggests
+that in some cases, further decomposing the search space
+may improve the overall runtime. To implement this idea
+for MLNs, we must address two diﬃcult problems: (1) parti-
+tioning the formula from grounding (and so the search space)
+to minimize the number of formula that are split between
+partitions, and (2) augmenting the search algorithm to be
+aware of partitioning. We show that the ﬁrst problem is NP-
+hard (even to approximate), and design a scalable heuristic
+partitioning algorithm. For the second problem, we apply
+a technique from non-linear optimization to leverage the in-
+sights gained from our characterization of the phenomenon
+described above. The eﬀect of such partitioning is dramatic.
+As an example, on a classiﬁcation benchmark (called RC),
+Tuffy (using 15MB of RAM) produces much better result
+quality in minutes than Alchemy (using 2.8GB of RAM)
+even after days of running. In fact, Tuffy is able to an-
+swer queries on a version of the RC dataset that is over two
+orders of magnitude larger.
+(We estimate that Alchemy
+would need 280GB+ of RAM to process it.)
+Related Work. MLNs are an integral part of state-of-the-
+art approaches in a variety of applications: natural language
+processing [22], ontology matching [29], information extrac-
+tion [18], entity resolution [25], etc.
+And so, there is an
+application push to support MLNs.
+Pushing statistical reasoning models inside a database sys-
+tem has been a goal of many projects [5,10,11,20,27]. Most
+closely related is the BayesStore project, in which the
+database essentially stores Bayes Nets [17] and allows these
+networks to be retrieved for inference by an external pro-
+gram. In contrast, Tuffy uses an RDBMS to optimize the
+inference procedure. The Monte-Carlo database [10] made
+sampling a ﬁrst-class citizen inside an RDBMS. In contrast,
+in Tuffy our approach can be viewed as pushing classical
+search inside the database engine. One way to view an MLN
+is a compact speciﬁcation of factor graphs [23]. Sen et al. [23]
+proposed new algorithms; in contrast, we take an existing,
+widely used class of algorithms (local search), and our focus
+is to leverage the RDBMS to improve performance.
+There has also been an extensive amount of work on prob-
+abilistic databases [1, 2, 4, 19] that deal with simpler proba-
+bilistic models. Finding the most likely world is trivial in
+these models; in contrast, it is highly non-trivial in MLNs
+(in fact, it is NP-hard [6]).
+Finally, none of these prior ap-
+proaches deal with the core technical challenge Tuffy ad-
+dresses, which is handling AI-style search inside a database.
+Additional related work can be found in Appendix D.
+Contributions, Validation, and Outline. To summarize,
+we make the following contributions:
+• In Section 3.1, we design a solution that pushes MLNs
+into RDBMSes.
+The key idea is to use bottom-up
+grounding that allows us to leverage the RDBMS opti-
+mizer; this idea improves the performance of the ground-
+ing phase by several orders of magnitude.
+• In Section 3.2, we devise a novel hybrid architecture to
+support eﬃcient grounding and in-memory inference.
+By itself, this architecture is far more scalable and,
+given the same amount of time, can perform orders of
+magnitude more search steps than prior art.
+• In Section 3.3, we describe novel data partitioning
+techniques to decrease the memory usage and to in-
+crease parallelism (and so improve the scalability) of
+Tuffy’s in-memory inference algorithms.
+Addition-
+ally, we show that for any MLN with an MRF that
+contains multiple components, partitioning could ex-
+ponentially improve the expected (average case) search
+time.
+• In Section 3.4, we generalize our partitioning results
+to arbitrary MLNs using our characterization of the
+partitioning phenomenon. These techniques result in
+our highest quality, most space-eﬃcient solutions.
+We present an extensive experimental study on a diverse set
+of MLN testbeds to demonstrate that our system Tuffy is
+able to get better result quality more quickly and work over
+larger datasets than the state-of-the-art approaches.
+2.
+PRELIMINARIES
+We illustrate a Markov Logic Network program using the
+example of classifying papers by topic area. We then deﬁne
+the semantics of MLNs and the mechanics of inference.
+2.1
+The Syntax of MLNs
+Figure 1 shows an example input MLN program for Tuffy
+that is used to classify paper references by topic area, such
+as databases, systems, AI, etc. In this example, a user gives
+374
+
+paper(PaperID, URL)
+wrote(Author, Paper)
+refers(Paper, Paper)
+cat(Paper, Category)
+weight
+rule
+5
+cat(p, c1), cat(p, c2) => c1 = c2
+(F1)
+1
+wrote(x, p1), wrote(x, p2), cat(p1, c) => cat(p2, c)
+(F2)
+2
+cat(p1, c), refers(p1, p2) => cat(p2, c)
+(F3)
++∞
+paper(p, u) => ∃x. wrote(x, p)
+(F4)
+-1
+cat(p, ‘Networking’)
+(F5)
+wrote(‘Joe’, ‘P1’)
+wrote(‘Joe’, ‘P2’)
+wrote(‘Jake’, ‘P3’)
+refers(‘P1’, ‘P3’)
+cat(‘P2’, ‘DB’)
+· · ·
+Schema
+A Markov Logic Program
+Evidence
+Figure 1: A Sample Markov Logic Program: The goal is to classify papers by area. As evidence we are given
+author and citation information of all papers, as well as the labels of a subset of the papers; we want to
+classify the remaining papers. Any variable not explicitly quantiﬁed is universally quantiﬁed.
+Tuffy a set of relations that capture information about the
+papers in her dataset: she has extracted authors and cita-
+tions and stored them in the relations wrote(Author,Paper)
+and refers(Paper,Paper). She may also provide evidence,
+which is data that she knows to be true (or false). Here, the
+evidence shows that Joe wrote papers P1 and P2 and P1
+cited another paper P3. In the relation cat (for ‘category’),
+she provides Tuffy with a subset of papers and the cate-
+gories into which they fall. The cat relation is incomplete:
+some papers are not labeled. We can think of each possi-
+ble labeling of these papers as an instantiation of the cat
+relation, which can be viewed as a possible world [8]. The
+classiﬁcation task is to ﬁnd the most likely labeling of papers
+by topic area, and hence the most likely possible world.
+To tell the system which possible world it should produce,
+the user provides (in addition to the above data) a set of
+rules that incorporate her knowledge of the problem.
+A
+simple example rule is F1:
+cat(p, c1), cat(p, c2) => c1 = c2
+(F1)
+Intuitively, F1 says that a paper should be in one category.
+In MLNs, this rule may be hard, meaning that it behaves
+like a standard key constraint: in any possible world, each
+paper must be in at most one category. This rule may also
+be soft, meaning that it may be violated in some possible
+worlds. For example, in some worlds a paper may be in two
+categories. Soft rules also have weights that intuitively tell
+us how likely the rule is to hold in a possible world. In this
+example, F1 is a soft rule and has weight 5. Roughly, this
+means that a ﬁxed paper is at least e5 times more likely
+to be in a single category compared to being in multiple
+categories. MLNs can also involve data in non-trivial ways,
+we refer the reader to Appendix A.1 for a more complete
+exposition.
+Query Model. Given the data and the rules, a user may
+write arbitrary queries in terms of the relations. In Tuffy,
+the system is responsible for ﬁlling in whatever missing data
+is needed: in this example, the category of each unlabeled
+paper is unknown, and so to answer a query the system infers
+the most likely labels for each paper from the evidence.
+2.2
+Semantics of MLNs
+We describe the semantics of MLNs. Formally, we ﬁrst
+ﬁx a schema σ (as in Figure 1) and a domain D. Given as
+input a set of formula ¯F = F1, . . . , FN (in clausal form3)
+with weights w1, . . . , wN, they deﬁne a probability distribu-
+tion over possible worlds (deterministic databases). To con-
+struct this probability distribution, the ﬁrst step is ground-
+3Clausal form is a disjunction of positive or negative literals.
+For example, the rule is R(a) => R(b) is not in clausal form,
+but is equivalent to ¬R(a) ∨R(b), which is in clausal form.
+ing: given a formula F with free variables ¯x = (x1, · · · , xm),
+then for each ¯d ∈Dm, we create a new formula g ¯
+d called
+a ground clause where g ¯
+d denotes the result of substitut-
+ing each variable xi of F with di.
+For example, for F3
+the variables are {p1, p2, c}: one tuple of constants is ¯d =
+(‘P1’, ‘P2’, ‘DB’) and the ground formula f ¯
+d is:
+cat(‘P1’, ‘DB’), refers(‘P1’, ‘P2’) => cat(‘P2’, ‘DB’)
+Each constituent in the ground formula, such as cat(‘P1’,
+‘DB’) and refers(‘P1’, ‘P2’), is called a ground predicate
+or atom for short. In the worst case there are D3 ground
+clauses for F3. For each formula Fi (for i = 1 . . . N), we per-
+form the above process. Each ground clause g of a formula
+Fi is assigned the same weight, wi. So, a ground clause of
+F1 has weight 5, while any ground clause of F2 has weight
+1. We denote by G = (¯g, w) the set of all ground clauses of
+¯F and a function w that maps each ground clause to its as-
+signed weight. Fix an MLN ¯F, then for any possible world
+(instance) I we say a ground clause g is violated if w(g) > 0
+and g is false in I or if w(g) < 0 and g is true in I. We
+denote the set of ground clauses violated in a world I as
+V (I). The cost of the world I is
+cost(I) =
+X
+g∈V (I)
+|w(g)|
+(1)
+Through cost, an MLN deﬁnes a probability distribution
+over all instances (denoted Inst) as:
+Pr[I] = Z−1 exp {−cost(I)} where Z =
+X
+J∈Inst
+exp {−cost(J)}
+A lowest cost world I is called a most likely world. Since
+cost(I) ≥0, if cost(I) = 0 then I is a most likely world. On
+the other hand the most likely world may have positive cost.
+There are two main types of inference with MLNs: MAP
+(maximum a posteriori) inference, where we want to ﬁnd a
+most likely world, and marginal inference, where we want to
+compute marginal probabilities. Tuffy is capable of both
+types of inference, but we present only MAP inference in the
+body of this paper. We refer the reader to Appendix A.5 for
+details of marginal inference.
+2.3
+Inference
+We now describe the state of the art of inference for MLNs
+(as in Alchemy, the reference MLN implementation).
+Grounding. Conceptually, to obtain the ground clauses of
+an MLN formula F, the most straightforward way is to
+enumerate all possible assignments to the free variables in
+F. There have been several heuristics in the literature that
+improve the grounding process by pruning groundings that
+have no eﬀect on inference results; we describe the heuristics
+that Tuffy (and Alchemy) implements in Appendix A.3.
+375
+
+The set of ground clauses corresponds to a hypergraph where
+each atom is a node and each clause is a hyperedge. This
+graph structure is often called a Markov Random Field (MRF).
+We describe this structure formally in Appendix A.2.
+Search. Finding a most likely world of an MLN is a general-
+ization of the (NP-hard) MaxSAT problem. In this paper we
+concentrate on one of the most popular heuristic search al-
+gorithms, WalkSAT [13], which is used by Alchemy. Walk-
+SAT works by repeatedly selecting a random violated clause
+and “ﬁxing” it by ﬂipping (i.e., changing the truth value of)
+an atom in it (see Appendix A.4). As with any heuristic
+search, we cannot be sure that we have achieved the op-
+timal, and so the goal of any system that executes such a
+search procedure is: execute more search steps in the same
+amount of time.
+Problem Description. The primary challenge that we ad-
+dress in this paper is scaling both phases of MAP inference
+algorithms, grounding and search, using an RDBMS. Sec-
+ond, our goal is to improve the number of (eﬀective) steps
+of the local search procedure using parallelism and partition-
+ing – but only when it provably improves the search quality.
+To achieve these goals, we attack three main technical chal-
+lenges: (1) eﬃciently grounding large MLNs, (2) eﬃciently
+performing inference (search) on large MLNs, and (3) de-
+signing partitioning and partition-aware search algorithms
+that preserve (or enhance) search quality and speed.
+3.
+TUFFY SYSTEMS
+In this section, we describe our technical contributions: a
+bottom-up grounding approach to fully leverage the RDBMS
+(Section 3.1); a hybrid main-memory RDBMS architecture
+to support eﬃcient end-to-end inference (Section 3.2); and
+data partitioning which dramatically improves Tuffy’s space
+and time eﬃciency (Section 3.3 and Section 3.4).
+3.1
+Grounding with a Bottom-up Approach
+We describe how Tuffy performs grounding.
+In con-
+trast to top-down approaches (similar to Prolog) that em-
+ploy nested loops and that is used by prior MLN systems
+such as Alchemy, Tuﬀy takes a bottom-up approach (sim-
+ilar to Datalog) by expressing grounding as a sequence of
+SQL queries. Each SQL query is optimized by the RDBMS,
+which allows Tuffy to complete the grounding process or-
+ders of magnitude more quickly than prior approaches.
+For each predicate P( ¯A) in the input MLN, Tuffy creates
+a relation RP (aid, ¯A, truth) where each row ap represents
+an atom, aid is a globally unique identiﬁer, ¯A is the tuple
+of arguments of P, and truth is a three-valued attribute
+that indicates if ap is true or false (in the evidence), or not
+speciﬁed in the evidence. These tables form the input to
+grounding, and Tuffy constructs them using standard bulk-
+loading techniques.
+In Tuffy, we produce an output table C(cid, lits, weight)
+where each row corresponds to a single ground clause. Here,
+cid is the id of a ground clause, lits is an array that stores
+the atom id of each literal in this clause (and whether or
+not it is negated), and weight is the weight of this clause.
+We ﬁrst consider a formula without existential quantiﬁers.
+In this case, the formula F can be written as F(¯x) = l1 ∨
+· · · ∨lN where ¯x are all variables in F. Tuffy produces a
+SQL query Q for F that joins together the relations corre-
+sponding to the predicates in F to produce the atom ids of
+the ground clauses (and whether or not they are negated).
+The join conditions in Q enforce variable equality inside
+F, and incorporate the pruning strategies described in Ap-
+pendix A.3. For more details on the compilation procedure
+see Appendix B.1.
+3.2
+A Hybrid Architecture for Inference
+Our initial prototype of Tuﬀy runs both grounding and
+search in the RDBMS. While the grounding phase described
+in the previous section has good performance and scalabil-
+ity, we found that performing search in an RDBMS is often
+a bottleneck.
+Thus, we design a hybrid architecture that
+allows eﬃcient in-memory search (in Java) while retaining
+the performance beneﬁts of RDBMS-based grounding. To
+see why in-memory search is critical, recall that WalkSAT
+works by selecting an unsatisﬁed clause C, selecting an atom
+in C, and “ﬂipping” that atom to satisfy C. Thus, Walk-
+SAT performs a large number of random accesses to the
+data representing ground clauses and atoms. Moreover, the
+data that is accessed in one iteration depends on the data
+that is accessed in the previous iteration. And so, this ac-
+cess pattern prevents both eﬀective caching and parallelism,
+which causes a high overhead per data access.
+Thus, we
+implement a hybrid architecture where the RDBMS per-
+forms grounding and Tuffy is able to read the result of
+grounding from the RDBMS into memory and perform in-
+ference. If the grounding result is too large to ﬁt in memory,
+Tuffy invokes an implementation of search directly inside
+the RDBMS (Appendix B.2). This approach is much less ef-
+ﬁcient than in-memory search, but it runs on datasets larger
+than main memory without crashing. Appendix B.3 illus-
+trates the architecture of Tuffy in more detail.
+While it is clear that this hybrid approach is at least
+as scalable as a direct memory implementation (such as
+Alchemy), there are in fact cases where Tuffy can run
+in-memory search whereas Alchemy would crash. The rea-
+son is that the space requirement of a purely in-memory im-
+plementation is determined by the peak memory footprint
+throughout grounding and search, whereas Tuffy needs
+main memory only for search. For example, on a dataset
+called Relational Classiﬁcation (RC), Alchemy allocated
+2.8 GB of RAM only to produce 4.8 MB of ground clauses.
+On RC, Tuffy uses only 19 MB of RAM.
+3.3
+Partitioning to Improve Performance
+In the following two sections, we study how to further im-
+prove Tuffy’s space and time eﬃciency without sacriﬁcing
+its scalability. The underlying idea is simple: we will try
+to partition the data. By splitting the problem into smaller
+pieces, we can reduce the memory footprint and introduce
+parallelism, which conceptually breaks the sequential nature
+of the search. These are expected beneﬁts of partitioning.
+An unexpected beneﬁt is an exponentially increase of the
+eﬀective search speed, a point that we return to below.
+First, observe that the logical forms of MLNs often re-
+sult in an MRF with multiple disjoint components (see Ap-
+pendix B.4). For example, on the RC dataset there are 489
+components. Let G be an MRF with components G1, · · · , Gk;
+let I be a truth assignment to the atoms in G and Ii its pro-
+376
+
+jection over Gi. Then, it’s clear that ∀I
+costG(I) =
+X
+1≤i≤k
+costGi(Ii).
+Hence, instead of minimizing costG(I) directly, it suﬃces
+to minimize each individual costGi(Ii). The beneﬁt is that,
+even if G itself does not ﬁt in memory, it is possible that
+each Gi does. As such, we can solve each Gi with in-memory
+search one by one, and ﬁnally merge the results together. 4
+Component detection is done after the grounding phase
+and before the search phase, as follows. We maintain an in-
+memory union-ﬁnd structure over the nodes, and scan the
+clause table while updating this union-ﬁnd structure. The
+result is the set of connected components in the MRF. An
+immediate issue raised by partitioning is I/O eﬃciency.
+Efﬁcient Data Loading. Once an MRF is split into compo-
+nents, loading in and running inference on each component
+sequentially one by one may incur many I/O operations,
+as there may be many partitions. For example, the MRF
+of the Information Extraction (IE) dataset contains thou-
+sands of 2-cliques and 3-cliques. One solution is to group
+the components into batches. The goal is to minimize the
+total number of batches (and thereby the I/O cost of load-
+ing), and the constraint is that each batch cannot exceed the
+memory budget. This is essentially the bin packing problem,
+and we implement the First Fit Decreasing algorithm [26].
+Once the partitions are in memory, we can take advantage
+of parallelism. We use a round-robin scheduling policy.
+Improving Search Speed using Partitioning. Although
+processing each component individually produces solutions
+that are no worse than processing the whole graph at once,
+we give an example to illustrate that component-aware pro-
+cessing may result in exponentially faster speed of search.
+Example 1 Consider an MRF consisting of N identical
+connected components each containing two atoms {Xi, Yi}
+and three weighted clauses
+{(Xi, 1), (Yi, 1), (Xi ∨Yi, −1)},
+where i = 1 . . . N and the second component of each tuple
+is the weight. Based on how WalkSAT works, it’s not hard
+to show that, if N = 1, starting from a random state, the
+expected hitting time5 of the optimal state, i.e. X1 = Y1 =
+True, is no more than 4. Therefore, if we run WalkSAT on
+each component separately, the expected runtime of reach-
+ing the optimum is no more than 4N.
+Now consider the
+case where we run WalkSAT on the whole MRF. Intuitively,
+reaching the optimal state requires “ﬁxing” suboptimal com-
+ponents one by one. As the number of optimal components
+increases, however, it becomes more and more likely that
+one step of WalkSAT “breaks” an optimal component in-
+stead of ﬁxing a suboptimal component.
+Such check and
+balance makes it very diﬃcult for WalkSAT to reach the
+4Alchemy exploits knowledge-based model construction
+(KBMC) [28] to ﬁnd the minimal subgraph of the MRF that
+is needed for a given query. Alchemy, however, does not
+use the fact that the MRF output by KBMC may contain
+several components.
+5The hitting time is a standard notion from Markov
+Chains [9], it is a random variable for the number of steps
+taken by WalkSAT to reach an optimum for the ﬁrst time.
+optimum. Indeed, Appendix B.5 shows that the expected
+hitting time is at least 2N – an exponential gap!
+Let G be an MRF with components G1, . . . , GN. Component-
+aware WalkSAT runs WalkSAT except that for each Gi, it
+keeps track of the lowest-cost state it has found so far on
+that Gi.
+In contrast, regular WalkSAT simply keeps the
+best overall solution it has seen so far. For i = 1, . . . , N,
+let Oi be the set of optimal states of Gi, and Si the set of
+non-optimal states of Gi that diﬀer only by one bit from
+some x∗∈Oi; let Pi(x →y) be the transition probability of
+WalkSAT running on Gi, i.e., the probability that one step
+of WalkSAT would take Gi from x to y. Given x, a state of
+Gi, denote by vi(x) the number of violated clauses in Gi at
+state x; deﬁne
+αi(x) =
+X
+y∈Oi
+Pi(x →y), βi(x) =
+X
+y∈Si
+Pi(x →y).
+For any non-empty subset H ⊆{1, . . . , N}, deﬁne
+r(H) = mini∈H minx∈Oi vi(x)βi(x)
+maxi∈H maxx∈Si vi(x)αi(x).
+Theorem 3.1. Let H be an arbitrary non-empty subset of
+{1, . . . , N} s.t. |H| ≥2 and r = r(H) > 0. Then, in expec-
+tation, WalkSAT on G takes at least 2|H|r/(2+r) more steps
+to ﬁnd an optimal solution than component-aware WalkSAT.
+The proof is in Appendix B.5. In the worst case, there is
+only one component, or r(H) = 0 for every subset of compo-
+nents H (which happens only if there is a zero-cost solution),
+and partitioning would become pure overhead (but negli-
+gible in our experiments).
+On an information extraction
+(IE) benchmark dataset, there is some H with |H| = 1196
+and r(H) = 0.5. Thus, the gap on this dataset is at least
+2200 ≈1060. This explains why Tuffy produces lower cost
+solutions in minutes than non-partition aware approaches
+such as Alchemy produce even after days.
+3.4
+Further Partitioning MRFs
+Although our algorithms are more scalable than prior ap-
+proaches, if the largest component does not ﬁt in memory
+then we are forced to run the in-RDBMS version of inference,
+which is ineﬃcient. Intuitively, if the graph is only weakly
+connected, then we should still be able to get the exponential
+speed up of partitioning. Consider the following example.
+G1 
+G2 
+e 
+a 
+b 
+Figure 2: Ex. 2
+Example 2 Consider an MRF
+consisting of two equally sized
+subgraphs G1 and G2, plus an
+edge e = (a, b) between them
+(Figure 2).
+Suppose that the
+expected hitting time of Walk-
+SAT on Gi is Hi. Since H1 and
+H2 are essentially independent, the hitting time of WalkSAT
+on G could be roughly H1H2. On the other hand, consider
+the following scheme: enumerate all possible truth assign-
+ments to one of the boundary variables {a, b}, say a – of
+which there are two – and conditioning on each assignment,
+run WalkSAT on G1 and G2 independently.
+Clearly, the
+overall hitting time is no more than 2(H1 + H2), which is
+a huge improvement over H1H2 since Hi is usually a high-
+order polynomial or even exponential in the size of Gi.
+377
+
+To capitalize on this idea, we need to address two chal-
+lenges:
+1) designing an eﬃcient MRF partitioning algo-
+rithm; and 2) designing an eﬀective partition-aware search
+algorithm. We address each of them in turn.
+MRF Partitioning. Intuitively, to maximally utilize the
+memory budget, we want to partition the MRF into roughly
+equal sizes; to minimize information loss, we want to min-
+imize total weight of clauses that span over multiple parti-
+tions, i.e., the cut size. To capture this notion, we deﬁne a
+balanced bisection of a hypergraph G = (V, E) as a partition
+of V = V1 ∪V2 such that |V1| = |V2|. The cost of a bisection
+(V1, V2) is |{e ∈E|e ∩V1 ̸= ∅and e ∩V2 ̸= ∅}|.
+Theorem 3.2. Consider the MLN Γ given by the single
+rule p(x), r(x, y) →p(y) where r is an evidence predicate.
+Then, the problem of ﬁnding a minimum-cost balanced bi-
+section of the MRF that results from Γ is NP-hard in the
+size of the evidence (data).
+The proof (Appendix B.6) is by reduction to the graph min-
+imum bisection problem [14], which is hard to approximate
+(unless P = NP, there is no PTAS). In fact, the problem
+we are facing (multi-way hypergraph partitioning) is more
+challenging than graph bisection, and has been extensively
+studied [12, 24]. And so, we design a simple, greedy parti-
+tioning algorithm: it assigns each clause to a bin in descend-
+ing order by clause weight, subject to the constraint that no
+component in the resulting graph is larger than an input
+parameter β. We include pseudocode in Appendix B.7.
+Partition-aware Search. We need to reﬁne the search pro-
+cedure to be aware of partitions: the central challenge is
+that a clause in the cut may depend on atoms in two dis-
+tinct partitions. Hence, there are dependencies between the
+partitions. We exploit the idea in Example 2 to design the
+following partition-aware search scheme – which is an in-
+stance of the Gauss-Seidel method from nonlinear optimiza-
+tion [3, pg. 219]. Denote by X1, . . . , Xk the states (i.e., truth
+assignments to the atoms) of the partitions. First initialize
+Xi = x0
+i for i = 1 . . . k. For t = 1 . . . T, for i = 1 . . . k, run
+WalkSAT on xt−1
+i
+conditioned on {xt
+j|1 ≤j < i}∪{xt−1
+j
+|i <
+j ≤k} to obtain xt
+i. Finally, return {xT
+i |1 ≤i ≤k}.
+Tradeoffs. Although ﬁne-grained partitioning improves per-
+partition search speed (Theorem 3.1) and space eﬃciency, it
+also increases cut sizes – especially for dense graphs – which
+would in turn slow down the Gauss-Seidel inference scheme.
+Thus, there is an interesting tradeoﬀof partitioning gran-
+ularity. In Section B.8, we describe a basic heuristic that
+combines Theorem 3.1 and the Gauss-Seidel scheme.
+4.
+EXPERIMENTS
+In this section, we validate ﬁrst that our system Tuffy is
+orders of magnitude more scalable and eﬃcient than prior
+approaches. We then validate that each of our techniques
+contributes to the goal.
+Experimental Setup. We select Alchemy, the currently
+most widely used MLN system, as our comparison point.
+Alchemy and Tuffy are implemented in C++ and Java,
+respectively. The RDBMS used by Tuffy is PostgreSQL
+8.4. Unless speciﬁed otherwise, all experiments are run on an
+1.0E+03
+2.0E+03
+3.0E+03
+0
+20
+40
+cost 
+IE 
+Alchemy 
+Tuffy 
+0.0E+00
+1.0E+04
+2.0E+04
+3.0E+04
+0
+50
+100
+cost 
+LP 
+Alchemy 
+Tuffy 
+0.0E+00
+1.0E+05
+2.0E+05
+0
+2000
+4000
+6000
+8000
+cost 
+ER 
+Alchemy grounding took 7 hr. 
+Tuffy 
+0.0E+00
+2.0E+03
+4.0E+03
+6.0E+03
+0
+2000
+4000
+6000
+cost 
+RC 
+Alchemy 
+Tuffy 
+Figure 3: Time-cost plots of Alchemy vs. Tuﬀy; the
+x axes are time (sec)
+Intel Core2 at 2.4GHz with 4 GB of RAM running Red Hat
+Enterprise Linux 5. For fair comparison, in all experiments
+Tuffy runs a single thread unless otherwise noted.
+Datasets. We run Alchemy and Tuffy on four datasets;
+three of them (including their MLNs) are taken directly
+from the Alchemy website [7]: Link Prediction (LP), given
+an administrative database of a CS department, the goal
+is to predict student-adviser relationships; Information Ex-
+traction (IE), given a set of Citeseer citations, the goal is
+to extract from them structured records; and Entity Resolu-
+tion (ER), which is to deduplicate citation records based on
+word similarity. These tasks have been extensively used in
+prior work. The last task, Relational Classiﬁcation (RC),
+performs classiﬁcation on the Cora dataset [15]; RC con-
+tains all the rules in Figure 1. Table 1 contains statistics
+about the data.
+LP
+IE
+RC
+ER
+#relations
+22
+18
+4
+10
+#rules
+94
+1K
+15
+3.8K
+#entities
+302
+2.6K
+51K
+510
+#evidence tuples
+731
+0.25M
+0.43M
+676
+#query atoms
+4.6K
+0.34M
+10K
+16K
+#components
+1
+5341
+489
+1
+Table 1: Dataset statistics
+4.1
+High-level Performance
+We empirically demonstrate that Tuffy with all the tech-
+niques we have described has faster grounding, higher search
+speed, lower memory usage, and in some cases produces
+much better solutions than a competitor main memory ap-
+proach, Alchemy.
+Recall that the name of the game is
+to produce low-cost solutions quickly. With this in mind,
+we run Tuffy and Alchemy on each dataset for 7500 sec-
+onds, and track the cost of the best solution found up to
+any moment; on datasets that have multiple components,
+namely IE and RC, we apply the partitioning strategy in
+Section 3.3 on Tuffy. As shown in Figure 3, Tuffy of-
+ten reaches a best solution within orders of magnitude less
+time than Alchemy; secondly, the result quality of Tuffy
+is at least as good as – sometimes substantially better (e.g.,
+on IE and RC) than – Alchemy. Here, we have zoomed
+the time axes into interesting areas. Since “solution cost”
+is undeﬁned during grounding, each curve begins only when
+grounding is completed6. We analyze the experiment results
+in more detail in the following sections.
+6The L-shaped curves indicate that search converges very
+quickly compared to grounding time.
+378
+
+LP
+IE
+RC
+ER
+Alchemy
+48
+13
+3,913
+23,891
+Tuffy
+6
+13
+40
+106
+Table 2: Grounding time (sec)
+0.0E+00
+1.0E+04
+2.0E+04
+0
+1000
+2000
+cost 
+time (sec) 
+LP 
+Alchemy (solid) 
+Tuffy-p (dash) 
+Tuffy-mm 
+0.0E+00
+2.0E+05
+4.0E+05
+0
+4000
+8000
+cost 
+time (sec) 
+RC 
+Alchemy 
+Tuffy-p 
+Tuffy-mm 
+Figure 4: Time-cost plots of Alchemy vs.
+Tuﬀy-p
+(i.e., Tuﬀy without partitioning) vs. Tuﬀy-mm (i.e.,
+Tuﬀy with RDBMS-based search)
+4.2
+Effect of Bottom-up Grounding
+We validate that the RDBMS-based grounding approach
+in Tuffy allows us to complete the grounding process orders
+of magnitude more eﬃciently than Alchemy. To make this
+point, we run Tuffy and Alchemy on the four datasets,
+and show their grounding time in Table 2. We can see that
+Tuffy outperforms Alchemy by orders of magnitude at
+run time in the grounding phase (a factor of 225 on the
+ER dataset). To understand the diﬀerences, we dug deeper
+with a lesion study (i.e., disabling one aspect of a system at
+a time), and found that sort join and hash join algorithms
+(along with predicate pushdown) are the key components of
+the RDBMS that speeds up the grounding process of Tuffy
+(Appendix C.2). Tuffy obviates the need for Alchemy to
+reimplement the optimization techniques in an RDBMS.
+4.3
+Effect of Hybrid Architecture
+We validate two technical claims: (1) the hybrid memory
+management strategy of Tuffy (even without our parti-
+tioning optimizations) has comparable search rates to exist-
+ing main memory implementations (and much faster than
+RDBMS-based implementation) and (2) Tuffy maintains
+a much smaller memory footprint (again without partition-
+ing). Thus, we compare three approaches: (1) Tuffy with-
+out the partitioning optimizations, called Tuffy-p (read:
+Tuﬀy minus p), (2) a version of Tuffy (also without parti-
+tioning) that implements RDBMS-based WalkSAT (detailed
+in Appendix B.2), Tuffy-mm, and (3) Alchemy.
+Figure 4 illustrates the time-cost plots on LP and RC of
+all three approaches. We see from RC that Tuffy-p is able
+to ground much more quickly than Alchemy (40 sec com-
+pared to 3913 sec). Additionally, we see that, compared to
+Tuffy-mm, Tuffy-p’s in-memory search is orders of mag-
+nitude faster at getting to their best reported solution (both
+approaches ﬁnish grounding at the same time, and so start
+search at the same time). To understand why, we measure
+the ﬂipping rate, which is the number of steps performed by
+WalkSAT per second. As shown in Table 3, the reason is
+that Tuffy-mm has a dramatically lower ﬂipping rate. We
+discuss the performance bound of any RDBMS-based search
+implementation in Appendix C.1.
+To validate our second claim, that Tuffy-p has a smaller
+memory footprint, we see in Table 4, that on all datasets,
+the memory footprint of Tuffy is no more than 5% of
+Alchemy. Drilling down, the reason is that the interme-
+diate state size of Alchemy’s grounding process may be
+LP
+IE
+RC
+ER
+Alchemy
+0.20M
+1M
+1.9K
+0.9K
+Tuffy-mm
+0.9
+13
+0.9
+0.03
+Tuffy-p
+0.11M
+0.39M
+0.17M
+7.9K
+Table 3: Flipping rates (#ﬂips/sec)
+LP
+IE
+RC
+ER
+clause table
+5.2 MB
+0.6 MB
+4.8 MB
+164 MB
+Alchemy RAM
+411 MB
+206 MB
+2.8 GB
+3.5 GB
+Tuffy-p RAM
+9 MB
+8 MB
+19 MB
+184 MB
+Table 4:
+Space eﬃciency of Alchemy vs.
+Tuﬀy-p
+(without partitioning)
+larger than the size of grounding results. For example, on
+the RC dataset, Alchemy allocated 2.8 GB of RAM only to
+produce 4.8 MB of ground clauses. While Alchemy has to
+hold everything in memory, Tuffy only needs to load the
+grounding result from the RDBMS at the end of grounding.
+It follows that, given the same resources, there are MLNs
+that Tuffy can handle eﬃciently while Alchemy would
+crash. Indeed, on a dataset called “ER+” which is twice
+as large as ER, Alchemy exhausts all 4GB of RAM and
+crashes soon after launching, whereas Tuffy runs normally
+with peak RAM usage of roughly 2GB.
+From these experiments, we conclude that the hybrid ar-
+chitecture is crucial to Tuffy’s overall eﬃciency.
+4.4
+Effect of Partitioning
+In this section, we validate that, when there are multi-
+ple components in the data, partitioning not only improves
+Tuffy’s space eﬃciency, but – due to Theorem 3.1 – may
+actually enable Tuffy to ﬁnd substantially higher quality
+results. We compare Tuffy’s performance (with partition-
+ing enabled) against Tuffy-p: a version of Tuffy with
+partitioning disabled.
+We run the search phase on each of the four datasets using
+three approaches: Alchemy, Tuffy-p, and Tuffy (with
+partitioning). Tuffy-p and Alchemy run WalkSAT on the
+whole MRF for 107 steps. Tuffy runs WalkSAT on each
+component in the MRF independently, each component Gi
+receiving 107|Gi|/|G| steps, where |Gi| and |G| are the num-
+bers of atoms in this component and the MRF, respectively.
+This is weighted round-robin scheduling.
+LP
+IE
+RC
+ER
+#components
+1
+5341
+489
+1
+Tuffy-p RAM
+9MB
+8MB
+19MB
+184MB
+Tuffy RAM
+9MB
+8MB
+15MB
+184MB
+Tuffy-p cost
+2534
+1933
+1943
+18717
+Tuffy cost
+2534
+1635
+1281
+18717
+Table 5:
+Performance of Tuﬀy vs.
+Tuﬀy-p (i.e.,
+Tuﬀy without partitioning)
+As shown in Table 5, when there are multiple compo-
+nents in the MRF, partitioning allows Tuffy to use less
+memory than Tuffy-p.
+(The IE dataset is too small to
+yield notable diﬀerences). We see that Tuffy’s component-
+aware inference can produce signiﬁcantly better results than
+Tuffy-p. We then extend the run time of all systems. As
+shown in Figure 5, there continues to be a gap between
+Tuffy’s component-aware search approach and the original
+WalkSAT running on the whole MRF. This gap is predicted
+by our theoretical analysis in Section 3.3. Thus, we have
+379
+
+1000
+1400
+1800
+2200
+2600
+0
+20
+40
+60
+80
+cost 
+time (sec) 
+IE 
+Tuffy 
+Tuffy-p (dotted) 
+Alchemy (solid) 
+0
+1000
+2000
+3000
+0
+100
+200
+300
+cost 
+time (sec) 
+RC 
+Tuffy 
+Tuffy-p 
+Alchemy grounding took over 1 hr. 
+Figure 5: Time-cost plots of Tuﬀy vs Tuﬀy-p (i.e.,
+Tuﬀy without partitioning)
+0E+0
+1E+3
+2E+3
+3E+3
+0
+100
+200
+300
+cost 
+time (sec) 
+RC 
+15MB
+13MB
+12MB
+2.4E+3
+2.6E+3
+2.8E+3
+3.0E+3
+0
+50
+100
+150
+cost 
+time (sec) 
+LP 
+9MB
+5MB
+3.5MB
+0E+0
+2E+4
+4E+4
+6E+4
+8E+4
+0
+500 1000 1500
+cost 
+time (sec) 
+ER 
+200MB
+100MB
+50MB
+Figure 6:
+Time-cost plots of Tuﬀy with diﬀerent
+memory budgets
+veriﬁed that partitioning makes Tuffy substantially more
+eﬃcient in terms of both space and search speed.
+We also validate that Tuffy’s loading and parallelism
+makes a substantial diﬀerence: without our batch loading
+technique, Tuffy takes 448s to perform 106 search steps
+per component on RC, while 117s to perform the same op-
+eration with batch loading. With the addition of 8 threads
+(on 8 cores), we further reduce the runtime to 28s. Addi-
+tional loading and parallelism experiments in Appendix C.3
+support our claim that our loading algorithm and partition-
+ing algorithm contribute to improving processing speed.
+4.5
+Effect of Further Partitioning
+To validate our claim that splitting MRF components can
+further improve both space eﬃciency and sometimes also
+search quality (Section 3.4), we run Tuffy on RC, ER, and
+LP with diﬀerent memory budgets – which are fed to the
+partitioning algorithm as the bound of partition size. On
+each dataset, we give Tuffy three memory budgets, with
+the largest one corresponding to the case when no compo-
+nents are split. Figure 6 shows the experiment results. On
+RC, we see another improvement of the result quality (cf.
+Figure 5). Similar to Example 2, we believe the reason to be
+graph sparsity: “13MB” cuts only about 420 out of the to-
+tal 10K clauses. In contrast, while MRF partitioning lowers
+RAM usage considerably on ER, it also leads to slower con-
+vergence – which correlates with poor partitioning quality:
+the MRF of ER is quite dense and even 2-way partition-
+ing (“100MB”) would cut over 1.4M out of the total 2M
+clauses. The dataset LP illustrates the interesting tradeoﬀ
+where a coarse partition is beneﬁcial whereas ﬁner grained
+partitions would be detrimental. We discuss this tradeoﬀin
+Appendix B.8.
+5.
+CONCLUSION
+Motivated by a large set of data-rich applications, we
+study how to push MLN inference inside an RDBMS. We
+ﬁnd that the grounding phase of MLN inference performs
+many relational operations and that these operations are a
+substantial bottleneck in state-of-the-art MLN implementa-
+tions such as Alchemy. Using an RDBMS, Tuffy not only
+achieves scalability, but also speeds up the grounding phase
+by orders of magnitude. We then develop a hybrid solution
+with RDBMS-based grounding and in-memory search. To
+improve the space and time eﬃciency of Tuffy, we study a
+partitioning approach that allows for in-memory search even
+when the dataset does not ﬁt in memory. We showed that
+further partitioning allows Tuffy to produce higher quality
+results in a shorter amount of time.
+6.

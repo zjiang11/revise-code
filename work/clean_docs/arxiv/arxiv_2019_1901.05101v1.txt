@@ -1,0 +1,580 @@
+Work in Progress
+RENEG AND BACKSEAT DRIVER: LEARNING FROM
+DEMONSTRATION WITH CONTINUOUS HUMAN FEED-
+BACK
+Jacob Beck
+Department of Computer Science
+Brown University
+Providence, RI, 02906, USA
+
+Zoe Papakipos
+Department of Computer Science
+Brown University
+Providence, RI, 02906, USA
+
+Michael Littman
+Department of Computer Science
+Brown University
+Providence, RI, 02906, USA
+
+ABSTRACT
+In autonomous vehicle (AV) control, requiring an agent to make mistakes, or even
+allowing mistakes, can be quite dangerous and costly in the real world. For this
+reason we investigate methods of training an AV without allowing the agent to
+explore and instead having a human explorer collect the data. Supervised learning
+has been explored for AV control, but it encounters the issue of the covariate shift.
+That is, training data collected from an optimal demonstration consists only of
+the states induced by the optimal control policy, but at runtime, the trained agent
+may encounter a vastly different state distribution and has seen little relevant train-
+ing data. To mitigate this issue, we intentionally have our human explorer make
+sub-optimal decisions. In order to have our agent not replicate these suboptimal
+decisions, supervised learning requires that we either erase these actions, or re-
+place these action with the correct action. Erasing these actions is wasteful and
+replacing these actions is difﬁcult, since it is not easy to know the correct ac-
+tion without driving the car. Since supervised learning falls short, we introduce
+an alternate framework that includes continuous scalar feedback on each action,
+marking which actions we should replicate, which we should avoid, and how sure
+of this we are. Our framework, called “ReNeg”, learns from human demonstra-
+tion and human evaluative feedback, collected entirely before any training begins.
+Our agent learns continuous control from sub-optimal behavior, but sub-optimal
+behavior that is safely performed by a human. We ﬁnd that a human demonstrator
+can explore sub-optimal states in a safe and controlled manner, while still getting
+enough gradation in the states to beneﬁt learning. The way we collect data and
+the algorithm we use to compute feedback on the data we call “Backseat Driver.”
+Backseat Driver gives us state-action pairs matched with scalar values represent-
+ing the score for those action in those states. We call the more general learning
+framework ReNeg, since it learns a regression from states to actions given nega-
+tive as well as positive examples. We empirically validate several models in the
+ReNeg framework, testing on lane-following with limited data. We ﬁnd that the
+best solution is a generalization of mean-squared error and outperforms supervised
+learning on the positive examples alone.
+1
+PROBLEM FORMULATION
+We seek a way learn autonomous vehicle control using only RGB input from a front-facing camera.
+(Example input image in the appendix.) Speciﬁcally, we want to produce a policy network to map
+1
+arXiv:1901.05101v1  [cs.LG]  16 Jan 2019
+
+Work in Progress
+states to actions in order to follow a lane as close to center as possible. We would like the agent
+to behave optimally in dangerous situations, and recover to safe situations. For this to happen, the
+data the agent trains on must include these sub-optimal states. However, we do not want to leave
+the safety determination up to any machine. Thus, we require that a human explorer take all the
+actions. This is referred to as “Learning from Demonstration” or LfD. An expert human does the
+exploration and thus can limit the danger by controlling how dangerous the negative examples are
+(i.e. the human can swerve to show suboptimal driving but never drive off the road, as an RL agent
+likely would). Still, in order to get into sub-optimal states, the explorer will need to take sub-optimal
+actions. Ideally we could replace these sub-optimal actions with labels corresponding to the correct
+and optimal actions to take so we could perform supervised learning, which provides the strongest
+signal. However, it is notoriously difﬁcult to assign supervised labels to driving data because it is
+hard to know the correct steering angle to control a vehicle when your steering has no effect on what
+happens to the vehicle (Ross et al., 2012). Instead of trying to enable humans to assign supervised
+labels by somehow showing the consequences of their actions, we focus on letting humans assign
+feedback that evaluates the sub-optimal actions, without actually representing the optimal action.
+Thus our goal is to learn a deterministic continuous control policy from demonstration, including
+both good and bad actions and continuous scores representing this valence. Our problem statement
+is somewhere in between supervised learning and RL: we focus on a general approach that is ca-
+pable of mapping continuous sensor input to an arbitrary (differentiable) continuous policy output
+and capable of using feedback for singular predetermined actions. Our problem falls within the
+supervised setting since our agent cannot chose want actions to take, in order to avoid the agent
+exploring dangerous states, and all data collection is done prior to training. However, we also wish
+to incorporate evaluative scalar feedback given to each data point, which traditionally falls under
+the RL framework. We refer to this problem setting as the ReNeg framework, since we are essen-
+tially performing a regression with scalar weights attached to each data point, that can be positive
+and negative. For the demonstration, a human demonstrator drives, yielding state-action pairs the
+agent can learn from. In order to teach the agent which actions are good or bad, an expert critic, or
+“backseat driver,” labels the actions with a continuous scalar.
+For a viable solution to this problem, we need to deﬁne a loss function that induces an effective and
+robust policy. We also need to choose what driving data to collect to expose the agent to a variety of
+good and bad states, and in particular show the agent how to get out of bad states where an accident
+is imminent. What data to collect is non-obvious: we want to explore a range of good and bad states
+so the agent learns a reasonable policy for how to act in all kinds of states. However, to make this
+feasible in the real world, we want to avoid exploring dangerous states. Finally, we need to carefully
+choose a way to collect human feedback that contains signal from which the agent can learn, but is
+not too hard to collect. We will discuss the choices we made for these three parts of the problem
+in the Loss Function, Driving Data, and Feedback sections respectively. Although we validate in
+simulation, speciﬁcally Unity, for the sake of ease, the algorithms we test could be easily trained in
+the real world.
+2
+RELATED WORK
+Learning from demonstration has mostly been studied in the supervised learning framework and
+the Markov Decision Process (MDP) framework. In the former, it is generally known as imitation
+learning (or behavioral cloning in the AV setting), and in the latter, it is generally known as appren-
+ticeship learning. There are other relevant RL algorithms, but none for LfD in our problem setting,
+as we will show.
+The supervised learning in this area has focused on a least squares regression that maps from an
+input state to action. The easiest approach to take here is to have an expert perform an optimal
+demonstration, and then simply use that as training data. The main issue here is that the runtime and
+training distributions can be vastly different. That is, once the trained agent is acting on its own after
+training and encounters states it has not seen, it does not know how to act, and strays further from the
+intended behavior. This problem is known as the Covariate Shift and the widely accepted solution
+generally follow the approach laid out in DAgger Ross et al. (2010). DAgger allows the agent to
+explore and then uses the expert to label the new dataset, then training on all of the combined data.
+Such an approach has even been improved upon both to address scalar feeddback by incorporating
+2
+
+Work in Progress
+experts that can label Q values with the AggreVaTeD algorithm (Ross & Bagnell, 2014), and to and
+to address deep neural networks by ﬁnding a policy gradient with the Deeply AggreVaTeD algorithm
+(Sun et al., 2017). However, these DAgger based policies require the agent to ex-plore and make
+mistakes.
+The MDP research on apprenticeship learning has largely been on inverse reinforcement learning,
+or IRL (Abbeel & Ng, 2004), in which a reward function is estimated given the demonstration
+of an expert. However, often in this framework, the reward function is restricted to the class of
+linear combinations of the discrete features of the state, and the framework only allows for positive
+examples. In addition, there has been work on inverse reinforcement learning from failure (Shiarlis
+et al., 2016), which allows for a sequence of positive or a sequence of negative examples. There
+is also distance minimization for reward learning from scored trajectories (Burchﬁel et al., 2016),
+which allows for gradation in the scores, but does not allow for an arbitrary reward function on
+continuous inputs or labels for atomic actions as opposed to a trajectory or sequence of actions.
+Moreover, these IRL methods are not a candidate for our problem, since they require an exact MDP
+solution with a tractable transition function and exploration to ﬁnd the optimal policy. The issue we
+have is not that we don’t have the reward function, but that even with the more informative feedback,
+we cannot use exploration to learn the optimal policy.
+It is interesting to note that there are off-policy RL algorithms as well, but we would like to highlight
+that this is not the same thing as LfD. LfD, as we use it, means that we have collected all of our data
+before training. This could be thought of as on-policy only if our policy and start state never changes.
+Whereas, off-policy RL (e.g. Off-Policy Actor-Critic(Degris et al., 2012), Q-Learning(Watkins &
+Dayan, 1992), Retrace(Munos et al., 2016)) generally requires agents to have a non-zero probability
+of choosing any action in any state, in order for the algorithm to converge. (Moreover, it is the
+somewhat parenthetical opinion of at least one of authors of this paper that in the off-policy policy
+gradient RL framework, using importance sampling to calculate an expectation over a different
+action distribution is ﬁne, but changing the objective function from an expectation over the learned
+policy state-visitation distribution to an expectation over the behavior (exploratory) state-visitation
+distribution, as in (Degris et al., 2012), is an unsatisfactory answer that does not give the optimal
+policy for the agent when running on the learned policy, as we will want to do.) Normalized Actor
+Critic (NAC) does attempt to bridge the gap between off-policy and LfD, and works with bad as
+well as good demonstration, however, NAC does not allow for restricted exploration either, since it
+adds entropy to the objective function to encourage exploration (Gao et al., 2018). NAC has also
+only been done for discrete action control, not continuous as we want to do.
+Finally, there are many RL algorithms that use human evaluative feedback, but none for LfD. One
+RL algorithm with human feedback of note is COACH (MacGlashan et al., 2017), which is based
+on the stochastic policy gradient. COACH is an on-policy RL algorithm that uses human-feedback
+to label the agent’s actions while exploring. COACH’s view on human feedback helps us to draw
+connections to RL, as we will discuss later. However, COACH was designed for on-policy explo-
+ration and uses discrete feedback values of 1 and -1, whereas we generalize to continuous values in
+[−1, 1]. We cannot use a stochastic policy gradient in a justiﬁed manner, since we do not explore
+with a stochastic policy.
+Out of all the LfD work in the AV context, the most notable has either been on behavioral cloning
+(Bojarski et al., 2016) (Pan et al., 2017) or using IRL to solve sub-tasks such as driving preferences
+that act on top of a safely functioning trajectory planner (Kuderer et al., 2015). To the best of our
+knowledge, no research so far has focused on using any kind of evaluative scalar feedback provided
+by a human in the context of AV control with LfD. That is, no one has solved how to take states,
+actions, and continuous feedback with respect to those actions, and convert them into a control
+policy for an AV, without having the AV explore. We believe that this is a major oversight: many
+AV research groups are investing huge amounts of time into collecting driving data; if they used our
+model, they could improve performance simply by having an expert labeler sit in the car with the
+driver for no additional real time.
+3
+
+Work in Progress
+3
+OUR APPROACH
+3.1
+LOSS FUNCTION
+Let θ be the steering angle in the demonstrated example; ˆθ the steering angle predicted by the policy
+network (or PNet); D the absolute difference between θ and ˆθ, |θ - ˆθ|; and fθ, or f, the feedback
+for the demonstrated angle. We collect f ∈[−1, 1]. The loss function we choose should have the
+following 3 properties:
+1. Minimizing the loss should minimize the D for positive examples. That is, when f > 0,
+∂Loss
+∂D
+≥0.
+2. Minimizing the loss should maximize the distance between θ and ˆθ for negative examples.
+That is, when f < 0, ∂Loss
+∂D
+≤0.
+3. The rate at which the loss is minimized should be determined by the magnitude of the
+feedback. That is, when f > 0, ∂|Loss|
+∂f
+> 0, and when f < 0, ∂|Loss|
+∂f
+< 0.
+These three properties together ensure that the network avoids the worst negative examples as much
+as possible, while seeking the best examples. Given an input state s, the ﬁrst loss function that
+comes to mind is what we term “scalar loss”:
+Lossscalar = fs ∗(θs −ˆθ(s))2
+This loss function is notable for several reasons. First, it is a generalization of mean squared error,
+the standard behavioral cloning loss function:
+LossMSE = (θs −ˆθ(s))2
+Mean squared error is a well-principled loss function if you assume Gaussian noise in your training
+data. That is, you assume the probability of your data can be given by Gaussian noise around some
+mean and you learn to predict ˆθ as that mean. Given this assumption, you can derive MSE as the loss
+that produces a maximum likelihood estimate for your parameters. Let the parameters of the model
+be represented by p and probability be Pr. ˆθ is parameterized by p and will be used interchangeably
+with ˆθp, when clarity is needed. Please note that θ refers to the angle label, and not the model
+parameters:
+argmaxpPr(data)
+argmaxp
+Y
+θ∈data
+Pr(θ|ˆθp)
+argmaxp
+X
+θ∈data
+log(Pr(θ|ˆθ))
+argmaxp
+X
+θ∈data
+log(Pr(θ|ˆθ))
+argminp
+X
+θ∈data
+−log(Pr(θ|ˆθ))
+Loss = −log(Pr(θ|ˆθ))
+Loss = −log(e−(θ−ˆ
+θ)2
+2σ2
+√
+2πσ2 )
+Loss = (θ −ˆθ)2
+2σ2
+−log(
+√
+2πσ2)
+Generally, log(
+√
+2πσ2) is left out since it is a constant w.r.t. our parameters and so will go away
+when the gradient is taken, leaving:
+Loss = (θ −ˆθ)2
+2σ2
+4
+
+Work in Progress
+Generally, 2σ2 is also left out, since it only acts to scale the gradient, and can be accounted for by
+adjusting the learning rate of gradient descent, leaving:
+Loss = (θ −ˆθp)2
+However, we note that, if we interpret |f|, the magnitude of our feedback, as
+1
+2σ2 , we can view
+|f| as a measure of certainty. This certainly applies to a Gaussian distribution with a variance of
+at least 1
+2, since f ∈(0, 1] for positive examples. For negative examples, we generalize further by
+removing the magnitude calculation, and allowing our feedback to be negative. This enforces that
+we minimize the probability of negative data:
+Loss = f ∗(θ −ˆθp)2
+To be able to easily recover behavioral cloning, we introduce two hyperparameters. The ﬁrst such
+parameter is the ability to threshold feedback values. If we threshold, we simply replace every
+f with sign(f). Thresholding eliminates gradations in positive and negative data. Additionally,
+we introduced the parameter α, which scales down all our negative examples’ feedback: f :=
+max(f, αf). This trades off between behavioral cloning and avoiding negative examples. We apply
+max(f, αf) after we threshold, so if we threshold with and set α to 0.0, we recover behavioral
+cloning.
+Our scalar loss is also notable since it closely resembles a loss that induces a stochastic policy
+gradient. In a standard RL policy network such as REINFORCE, the gradient would be ∇p =
+∇p(Qπ(θ) ∗−log(Pr(θ))) (Williams, 1992). The loss then, that would induce this gradient is
+Loss = Qπ(θ) ∗−log(Pr(θ)). R, the return, or a sample contributing to Qπ(θ), is generally used.
+In continuous control, one could instead predict a mean ˆθ for a normal distribution and then sample
+your action θ from that normal distribution. As demonstrated above, if you replace log(Pr(θ)) with
+the probability density function for a normal distribution, the loss you wind up with is precisely
+MSE scaled by R. Substituting this scalar into the derivation above at every step, you get:
+Loss = R ∗(θ −ˆθ)2
+A full derivation of this loss given the stochastic policy gradient and Gaussian policy can be found
+in the appendix. Clearly if we view fθ, our feedback, as Rˆθ and assume a Gaussian policy, we get
+our scalar loss function. COACH in fact points out that you can view online feedback given for the
+current policy, fˆθ as a sample from Qπ(ˆθ), or Aπ(ˆθ), the advantage function, and empirically veriﬁes
+that this works for on-line RL with discrete feedback (MacGlashan et al., 2017). This similarity was
+useful for inspiration and ideation, but actually falls short of rigorous justiﬁcation for two reasons.
+Since we are training off-policy, and, more speciﬁcally, on a pre-determined policy that does not
+explore stochastically and does not vary depending on the current predicted policy, we run into
+major issues justifying our loss this way.
+First, the main “off-policy” issue here is that for the stochastic policy gradient to hold, the explo-
+ration must be stochastic. However, in our case, the data is drawn from a pre-determined, determin-
+istic policy. We can illuminate the intuition for why the stochastic policy gradient no longer works
+by considering a simple example. Consider the network attempting to learn the correct predicted ˆθ
+for a given state. Consider that there is only one demonstrated θ, -1, with a feedback of -1. Now,
+no matter what ˆθ the network predicts, the θ action that is taken during training will always be -1,
+and the feedback will always be -1. Moreover, consider that the actual optimum is ˆθ = 1, and the
+network is currently predicting ˆθ = −2. Using our scalar loss, the network will increase distance
+between θ and ˆθ by decreasing ˆθ, making the policy worse and worse. This would not happen when
+using a stochastic RL policy, since the network can explore states around the current predicted ˆθ by
+choosing appropriate actions.
+Using a stochastic RL policy, given enough samples on either side of ˆθ, the network will have larger
+and larger gradients, the more negative ˆθ is. But these gradients will not keeping “pushing” the
+prediction to the left of -1, but rather will randomly cause ˆθ to move around, gradually moving
+to the right as it ﬁnds better feedback, and eventually converging at the optimum of ˆθ = 1. The
+network will move less “violently” and more “stably” the closer ˆθ gets to 0. And when the network
+eventually reaches the positive numbers, it might get “pulled” to the left a bit when it happens to
+5
+
+Work in Progress
+sample a worse action, but it will not get pulled as strongly as when it samples a better action to the
+right. We can now intuitively see the issue: the neural network cannot not inﬂuence the probability
+of seeing an example again, which can lead to problems with learning the policy. In RL, a policy
+network can try a bad action, and then move the policy away from that action and not revisit it.
+On the other hand, if we have a bad example in our training set for a given state, on every epoch
+of training, our neural net will encounter this example and take a step away from it, thus pushing
+our network as far away from it as possible. Taking these steps is not necessarily helpful since the
+network may not have favored taking the bad action before.
+We could use some sort of importance sampling (Silver et al., 2014) (Degris et al., 2012), as is done
+with stochastic off-policy exploration, to scale down the loss for examples we are far away from.
+However, this would make our update have almost no effect when we are far away from positive
+examples, and with the deterministic exploration of ReNeg, the distinction between positive and
+negative examples now matters. We can’t have it both ways just by multiplying by the probability of
+ˆθ given our model. (This happens since the Gaussian PDF decreases exponentially with difference
+|θ −ˆθ|, but the loss only increases quadratically with the difference, due to the logarithm. Thus the
+gradient tends toward 0 due to the differing rates of growth, as the difference gets large.) Moreover,
+importance sampling consistently reduced performance for learning from demonstration in the NAC
+paper (Gao et al., 2018).
+Another, perhaps less signiﬁcant issue, is that our feedback represents Q∗, and not Qπ. Even if
+the human critic could re-assigned labels as the agent trains, he/she would have no way to sample
+the return from Qπ, without letting the agent explore freely. This is signiﬁcant because an action
+that is optimal for the expert may be a dangerous and poor decision for a non-optimal policy. This
+is perhaps less signiﬁcant than the other issue, since there are no actions in our data that could be
+considered both good and risky. What is good for one policy (i.e. steering back to the middle of
+the road) is generally good for all policies, and so can act rather greedily with respect to Q∗, even
+though it will not always be following the optimal policy.
+For these reasons, we ﬁnd the comparison to stochastic policy gradients useful, but ultimately un-
+compelling. Applying RL losses to supervised learning does not provide the mathematical justiﬁ-
+cation we need. The stochastic policy gradient is no longer computing the gradient of the current
+policy at all. Thus, we focus primarily on extending and generalizing MSE. Yet, we can still learn
+from the policy gradient comparison. In particular, we acknowledge that the sign of our feedback is
+far more signiﬁcant than it was in the RL context (which is one of the reasons we introduce the α
+parameter, which scales down the importance of negative examples, in the event that we collect too
+many negative examples). In RL, using the stochastic policy gradient, it did not matter if negative
+examples “pulled” ˆθ closer to them, so long as the positive examples pulled ˆθ more, since you would
+eventually try one of those actions, if it is a nearby optimum. However, since actions are no longer
+sampled dependent on the current policy, suddenly the sign matters very much. In fact, even if we
+have a positive example for a state, if we have more negative examples than positive examples, we
+may wind up ignoring our positive examples entirely in an effort to get away from our negative
+examples. This case highlights the trouble inherent in using negative examples: It is hard to know
+how and when to take into account the negative examples.
+Figure 1: Potential outcomes of regression with negative examples
+Now, let us consider negative examples in the ReNeg framework. For example, as shown in Figure
+1, if we perform a regression on positive and negative examples with more negative examples than
+6
+
+Work in Progress
+positive in one state, we may wind up in a case where our loss is minimized by a prediction of
+positive or negative inﬁnity, and thus our regression is “overwhelmed” by the negative examples.
+This led us to our second “exponential” loss:
+Lossexp = |θ(s) −ˆθ(s)|2f
+Using this loss, negative examples will have inﬁnite loss at distance 0, and then drop off expo-
+nentially with distance. We hope that this will create regressions more akin to the second image
+in Figure 1. In this image, adding more negative points will still nudge the regression away more
+and more, but one positive point not too close by should be enough to prevent it from diverging
+to positive or negative inﬁnity. It should be noted that the loss in a particular state still could only
+have negative examples, especially in a continuous state-space like ours where states are unlikely to
+be revisited. However, the reduction in loss caused by diverging to inﬁnity would be so small that
+it should not happen simply due to continuity with nearby states enforced by the structure of the
+network. In addition, one concern with this loss could be that for positive fractional differences, and
+negative non-fractional differences, the desired property 3) of loss functions no longer holds. That
+is, our positive loss will not grow with f if the difference being exponentiated is a fraction. And for
+negative exponents, the loss will only grow if the difference is a fraction that shrinks as it is raised
+to increasing powers of f. However, we hope that for negative examples, distances that are more
+than 1 unit away will not occur often (since 1 unit is half the distance range). We discuss a potential
+future solution in the appendix to patch this loss function.
+Our ﬁnal loss function should produce regressions more like the ﬁnal image in Figure 1: We propose
+directly modelling the feedback with another neural network (which we call the FNet) for use as a
+loss function for our PNet. If this FNet is correctly able to learn to copy how we label data with
+feedback, it could be used as a loss function for regression with our PNet. Thus, in order to maximize
+feedback, our loss function would be as follows:
+LossF Net = −FNet(s, ˆθ)
+After learning this FNet, we can either use it as a loss function to train a policy network or, every time
+we want to run inference, we can run a computationally expensive gradient descent optimization to
+pick the best action. Because the latter does not depend on the training distribution (so we do not
+have the issue of the runtime and training distributions being different), and it is more efﬁcient, we
+choose an even easier version of the latter: we pick the best action out of a list of discrete options
+according to the FNet’s predictions. One feature of the FNet is that adding more negative points will
+not “push” our regression further away from this point, but rather just make our FNet more conﬁdent
+of the negative feedback there. This may not be the desired effect for all applications. Moreover, the
+FNet cannot operate on purely positive points with no gradation. That is, behavioral cloning cannot
+be recovered from it.
+3.2
+DRIVING DATA
+We recorded 20 minutes of optimal driving and labeled all of this data with a feedback of 1.0.
+Choosing the suboptimal data and how to label it was a bit more tricky. One reason that we are
+not using reinforcement learning is that letting the car explore actions is dangerous. In this vein,
+we wanted to collect data only on “safe” driving. However, the neural network needs data that will
+teach it about bad actions well as good actions that recover the car from bad states. In order to
+explore these types of states and actions, we collected two types of bad driving: “swerving” and
+“lane changing”. The ﬁrst image in Figure 2 is swerving. In swerving, the car was driving in a “sine
+wave” pattern on either side of the road. We collected 10 minutes of this data on the right side of the
+road and 10 minutes on the left. The second image is lane changing. For this, we drove to the right
+side of the road, straightened out, stayed there, and then returned to the middle. We repeated this for
+10 minutes, and then collected 10 minutes on the left-hand side as well.
+3.3
+“BACKSEAT DRIVER” FEEDBACK
+Backseat Driver is the framework we use to compute and collect feedback in the AV context. Our
+feedback includes much more information than just a reward (as is used in RL): we take our label
+to directly measure how “good” an action is relative to other possible actions. We use this approach
+instead of labeling rewards for actions both because we found it an easy way to label data with
+7
+
+Work in Progress
+feedback, and because it contains more signal. How exactly to label the data with feedback, however,
+is non-obvious. At ﬁrst, we considered labeling using a slider from -1 to 1. However, using a slider
+can be non-intuitive in many cases and there would be discontinuities in feedback you would want to
+give. For example, if the demonstrator is driving straight off the road and then starts to turn left back
+onto the road, there would be a large discontinuity in the very negative and then slightly positive
+feedback.
+Figure 2: Types of driving:
+swerving (left), lane change
+(right)
+In order to circumvent these issues, and to make the labeling process
+more intuitive, we decided to collect feedback using the steering
+wheel. We found that it is easier for people to focus on the steer-
+ing angle, since that is how we are used to controlling cars. Our
+ﬁrst thought was to just turn the steering wheel to the correct an-
+gle. However, this is very difﬁcult to estimate, especially on turns,
+when you cannot see the actual effects your steering is having on
+the car. (Note that if we did this, our algorithm would turn into
+behavioral cloning.) Instead, we decided to label the differential.
+That is, we turned the wheel to the left if the car should steer more
+left. This signal shows where the error is (i.e. “You should be turn-
+ing more” or “You’re turning the wrong way”). Note that the label
+does not need to be the exact correct angle; it just needs to show in
+which direction the current action is erring, and proportionally how
+much. We call this method of human feedback collection “Backseat
+Driver.” In order to process the angle labels into a feedback value
+in [−1, 1], we used the equation below:
+FEEDBACK(c, θ)
+1
+if sign(c) == sign(θ) or |c| ≤ϵ
+2
+return 1 −|c|
+3
+else
+4
+return −|c|
+Note: We ﬁrst normalize all of our corrections by dividing by the greatest collected correction c, so
+all of our c values fall in [−1, 1]. In line 1 above, if we are turning the steering wheel in the same
+direction as the car (with some ϵ of error), then the feedback should be positive. (We set epsilon to
+5
+θmax so that it allows up to 5 degrees of tolerance.) Since c represents a delta in steering, a greater
+delta should result in a less positive signal. Therefore, the feedback should be proportional to −|c|.
+We add 1 to ensure all c in the same direction as θ are positive. If c is in a different direction than we
+were steering (line 3), then the feedback should be negative, so we just return −|c| as the feedback.
+Thus the greater the delta, the more negative the feedback will be. If c is in the same direction, on
+the other hand, we chose to scale these feedbacks up so that the feedback is positive, but less positive
+for a greater differential. This makes sense since if, for example, the car is steering left and we tell it
+to steer more left, this is not as bad as if the car is steering the wrong way. Thus, slow actions back
+to the center of the road will be rewarded less than quick actions back to the center of the road.
+3.4
+ARCHITECTURE
+We chose to use only an hour of data because we wanted to see how far we could get with limited
+data. While our feedback is relatively easy to collect compared to other options, it still takes up
+human hours, so we would like to limit its necessity. We sampled states at a rate of approximately
+two frames per second, since states that are close in time tend to look very similar. We augmented
+our data by ﬂipping it left-right, inverting the angle label, and leaving the feedback the same. After
+this augmentation, we had 17,918 training images and 3,162 validation images (a 85:15 split).
+We chose to learn our policy with an end-to-end optimization of a neural network to approximate a
+continuous control function. Such networks are capable of tackling a wide array of general problems
+and end-to-end learning has the potential to better optimize all aspects of the pipeline for the task
+at hand. Given the option to use separate (differentiable) modules for sub-tasks such as computer
+vision, or to connect these modules in a way that is differentiable for the speciﬁc task, the latter will
+8
+
+Work in Progress
+Average Time Lasted (sec)
+0
+2
+4
+6
+8
+Scalar
+Exponential
+Fnet
+Figure 3: Initial comparison of loss functions.
+Average Time Lasted (sec)
+0
+50
+100
+150
+α = 1 LR = 1e-6
+α = 1 LR = 1e-6 (thresholded)
+α = 1 LR = 5e-6
+α = 1 LR = 1e-5
+α = 0 LR = 1e-6
+α = 0 LR = 5e-6
+α = 0 LR = 1e-5
+Figure 4: Scalar loss function performance in-
+cluding negative examples vs. only positive ex-
+amples
+always perform better, since the end-to-end model always has the ability to simply not update the
+sub-module if it will not help training loss.
+We used transfer learning to help bootstrap learning with limited data for both the PNet and Fnet. We
+decided to start with a pretrained Inception v3 since it has relatively few parameters, but has been
+trained to have strong performance on ImageNet, giving us a head start on any related computer
+vision task. We kept some early layers of Inception and added several of our own, followed by a
+tanh activation for the output. We tried splitting the network at various layers and found that one
+about halfway through the network (called mixed 2) worked best. The layers we added after the split
+were fully connected layers of sizes 100, 300, and 20. For the FNet, the angle input is concatenated
+onto the ﬁrst fully-connected layer. (Find an architecture diagram in the appendix.)
+4
+EXPERIMENTS
+We tested our trained models by running them in our Unity simulator and recording the time until
+the car crashed or all four tires left the road. (Note: We designed the ReNeg framework so it need
+not be run in a simulator. This would work just as well in the real world. We only used a simulator
+because it was all we had access to.) We ﬁrst tested our PNet with the scalar loss, our PNet with
+the exponential loss, and our FNet. We plotted their mean times over the eight runs with standard
+deviation. See Figure 3 below. (All of these were on the default hyperparameters listed in the
+appendix, except for the exponential loss model, for which we set α to 0.1 since otherwise we could
+not get it to converge.) Based on the predicted angles, the FNet seemed to primarily predict feedback
+based on state, not angle; this makes sense given that the feedback in “bad” states is generally “bad”,
+except for the split second when the “good” action takes place.
+Given that the scalar loss performed best (and was training correctly), we spent more time tuning
+the hyperparameters for this model. This can be seen in Figure 4. We note several interesting things
+from ﬁgure 4 exploring the scalar loss. First, the pink group is identical to the solid blue group except
+that all the α values are 0, meaning that negative-feedback examples are zeroed out and effectively
+ignored in training. The blue bars are much higher than their pink counterparts, indicating that the
+negative data is useful. Second, we can see that thresholding the feedback to -1 and 1 (the blue
+crosshatch pattern) increased the scalar performance to about 30 seconds (compared to 6 seconds
+with the default hyperparameters). At ﬁrst this could be taken to indicate that having gradations in
+positive and negative data could be harmful to training. However, we see that the same performance
+9
+
+Work in Progress
+is achieved (and surpassed) by increasing the learning rate instead of thresholding, by looking to
+the 2 rightmost blue bars. The reason for this is likely that we tuned the learning rate to work well
+on thresholded data, and so, when we don’t threshold/clone our data, the scalars on the loss drop
+signiﬁcantly, forcing the network to take smaller steps, and effectively decreasing the learning rate.
+Increasing the learning rate instead of thresholding yields much better performance, indicating that
+gradations in the data (with a high learning rate) do help training.
+Average Time Lasted (sec)
+0
+50
+100
+Scalar
+Behavioral Cloning
+Figure 5:
+Over 3 training
+runs, our scalar loss model
+performed over 1.5 times as
+well as the behavioral cloning
+benchmark, with signiﬁcantly
+less variance.
+Note, α can in fact be in [0, ∞], however we focused on α = 0
+and α = 1, since this corresponds to no negative examples and
+an equal weighting between positive and negative examples. It it
+difﬁcult to tune independently due its relationship with the learning
+rate. Moreover, all we are trying to show is that using negative
+examples, with some relative importance to the positive examples,
+can be beneﬁcial.
+After selecting the best learning rate for each model, we then trained
+new versions of each network 2 more times, for a total of 3 models
+each, to account for stochasticity in SGD. (The best learning rate
+for both turned out to be 1e-5; see the appendix for more details on
+tuning.) Each time, we let the model drive the car for 8 trials and
+calculated the performance as the mean time before crashing over
+these 8 trials. We then calculated the mean performance for each
+over the 3 training sessions. Figure 5 shows the results.
+5
+CONCLUSION
+We hypothesized that for the task of learning lane following for
+autonomous vehicles from demonstration, adding in negative ex-
+amples would improve model performance. Our scalar loss model
+performed over 1.5 times as well as the behavioral cloning base-
+line, showing our hypothesis to be true. The speciﬁc method of
+regression with negative examples we used allows for learning de-
+terministic continuous control problems from demonstration from
+any range of good and bad behavior. Moreover, the loss function that empirically worked the best
+in this domain does not require an additional neural network to model it, and it induces a stochas-
+tic policy gradient that could be used for ﬁne-tuning with RL. We also introduced a novel way of
+collecting continuous human feedback for autonomous vehicles intuitively and efﬁciently, called
+Backseat Driver. We thus believe our work could be extremely useful in the autonomous control
+industry: with no additional real world time, we can increase performance over supervised learning
+by simply having a backseat driver.
+10
+
+Work in Progress

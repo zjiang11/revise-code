@@ -1,0 +1,1137 @@
+An Exploration of Embodied Visual Exploration
+Santhosh K. Ramakrishnan1,3, Dinesh Jayaraman2,3, and Kristen Grauman1,3
+1 The University of Texas at Austin
+2 University of Pennsylvania
+3 Facebook AI Research
+
+Abstract. Embodied computer vision considers perception for robots in novel,
+unstructured environments. Of particular importance is the embodied visual ex-
+ploration problem: how might a robot equipped with a camera scope out a new
+environment? Despite the progress thus far, many basic questions pertinent to
+this problem remain unanswered: (i) What does it mean for an agent to explore
+its environment well? (ii) Which methods work well, and under which assump-
+tions and environmental settings? (iii) Where do current approaches fall short,
+and where might future work seek to improve? Seeking answers to these ques-
+tions, we ﬁrst present a taxonomy for existing visual exploration algorithms and
+create a standard framework for benchmarking them. We then perform a thor-
+ough empirical study of the four state-of-the-art paradigms using the proposed
+framework with two photorealistic simulated 3D environments, a state-of-the-art
+exploration architecture, and diverse evaluation metrics. Our experimental results
+offer insights and suggest new performance metrics and baselines for future work
+in visual exploration. Code, models and data are publicly available. 4
+Keywords: Visual navigation · Visual exploration · Learning for navigation
+1
+Introduction
+Visual recognition has seen tremendous success in recent years that is driven by large-
+scale collections of internet data [55,39,62,35] and massive parallelization. However,
+the focus on passively analyzing manually captured photos after learning from curated
+datasets does not fully address issues faced by real-world robots, who must actively cap-
+ture their own visual observations. Embodied active perception [1,8,7,71] tackles these
+problems by learning task-speciﬁc motion policies for navigation [76,26,25,56,3] and
+recognition [43,32,74] often via innovations in computer vision and deep reinforcement
+learning (RL), where the agent is rewarded for reaching a speciﬁc target or inferring the
+right label.
+In contrast, in embodied visual exploration [49,57,16,54], the goal is inherently
+more open-ended and task-agnostic: how does an agent learn to move around in an
+environment to gather information that will be useful for a variety of tasks that it may
+have to perform in the future?
+4 Code: https://github.com/facebookresearch/exploring_exploration
+arXiv:2001.02192v2  [cs.CV]  21 Aug 2020
+
+2
+S. Ramakrishnan et al.
+Automatically gather information
+Solve downstream tasks
+Please get me coffee in the 
+living room.
+Fig. 1. An intelligent agent is dropped into an unknown, unmapped environment. The agent’s
+observations are the egocentric RGB-D views it sees as it moves around. There is no map provided
+to the agent; it must look around for obstacles and objects of interest as it moves. Given a limited
+time budget, it has to intelligently explore the environment and gather useful information about its
+geometry and semantics. Such intelligent exploration prepares an agent to efﬁciently solve future
+tasks. For example, if the robot is asked to fetch coffee for a person in the living room, it should
+use its knowledge of objects, rooms, and the layout of the environment to efﬁciently perform
+this task. This article organizes and systematically evaluates current paradigms for handling the
+exploration phase (lefthand panel).
+Intelligent exploration in 3D environments is important as it allows unsupervised
+preparation for future tasks. Embodied agents that have the ability to explore are ﬂex-
+ible to deploy, since they can use knowledge about previously seen environments to
+quickly gather useful information in the new one, without having to rely on humans.
+This ability allows them to prepare for unspeciﬁed downstream tasks in the new en-
+vironment. For example, a newly deployed home-robot could prepare itself by auto-
+matically discovering rooms, corridors, and objects in the house. After this exploration
+stage, it could quickly adapt to instructions such as “Bring coffee from the kitchen to
+Steve in the living room.” See Fig. 1.
+A variety of exploration methods have been proposed both in the reinforcement
+learning and computer vision literature. They employ ideas like curiosity [59,49,11],
+novelty [65,9,57], coverage [16,15], and reconstruction [33,54,61] to overcome sparse
+rewards [9,49,11,57] or learn task-agnostic policies that generalize to new tasks [33,16,54].
+In this study, we consider algorithms designed to handle complex photorealistic indoor
+environments where a mobile agent observes the world through its camera’s ﬁeld of
+view and can exploit common semantic priors from previously seen environments (as
+opposed to exploration in randomly generated mazes or Atari games).
+How do different exploration algorithms work for different types of environments
+and downstream tasks? Despite the growing literature on embodied visual exploration,
+it has been hard to analyze what works when and why. This difﬁculty is due to sev-
+eral reasons. First, prior work evaluates on different simulation environments such
+as SUN360 [54,61], ModelNet [54,61], VizDoom [49,57], SUNCG [16], DeepMind-
+Lab [57], and Matterport3D [15]. Second, prior work uses different baselines with
+varying implementations, architectures, and reinforcement learning algorithms. Finally,
+
+An Exploration of Embodied Visual Exploration
+3
+exploration methods have been evaluated from different perspectives such as overcom-
+ing sparse rewards [49,11], pixelwise reconstruction of environments [33,53,54,61],
+area covered in the environment [16,15], object interactions [50,27], or as an infor-
+mation gathering phase to solve downstream tasks such as navigation [16], recogni-
+tion [33,54,61], or pose estimation [54]. Due to this lack of standardization, it is hard to
+compare any two methods in the literature.
+This paper presents a uniﬁed view of exploration algorithms for visually rich 3D
+environments, and a common evaluation framework to understand their strengths and
+weaknesses. First, we formally deﬁne the exploration task. Next, we provide a taxon-
+omy of exploration approaches and sample representative methods for evaluation. We
+evaluate these methods and several baselines on common ground: two well-established
+3D datasets [2,14] and a state-of-the-art neural architecture [16]. Unlike navigation and
+recognition, which have clear-cut success measures, exploration is more open-ended.
+Hence, we quantify exploration quality along multiple meaningful dimensions such as
+mapping, robustness to sensor noise, and relevance for different downstream tasks. Fi-
+nally, by systematically evaluating different exploration methods using this benchmark,
+we highlight their strengths and weaknesses, and we identify key factors for learning
+good exploration policies.
+Our main contribution is the ﬁrst uniﬁed and systematic empirical study of explo-
+ration paradigms on 3D environments. In the spirit of recent inﬂuential studies in other
+domains [20,42,24,45,44], we aim ﬁrst and foremost to provide a reliable, unbiased, and
+thorough view of the state of the art that can be a reference to the ﬁeld moving forward.
+To facilitate this, we introduce technical improvements to shore up existing approaches,
+and we propose new baselines and performance metrics. We will publicly release all
+code to standardize the development and evaluation of exploration algorithms.
+Next, we detail the empirical study framework in Sec. 2, the taxonomy of existing
+exploration paradigms in Sec. 3, and the exploration evaluation framework in Sec. 4. Fi-
+nally, we present the experiments and ablation studies in Sec. 5 and conclude in Sec. 6.
+2
+Empirical study framework
+First, we deﬁne a framework for systematically studying different exploration algo-
+rithms. We formulate exploration as a sequential information-gathering task: at each
+time step, the agent takes as input the current view and history of accumulated views,
+updates its internal model of the environment (e.g., a spatial memory or map), and se-
+lects the next action (i.e., camera motion) to maximize the information it gathers about
+the environment. How the latter is deﬁned is speciﬁc to the exploration algorithm, as
+we will detail in Sec. 3. This process may be formalized as a ﬁnite-horizon partially
+observed Markov decision process (POMDP). In the next few sections, we describe the
+POMDP formulation, the 3D simulators used to realize it, the policy architecture that
+accounts for partial observability while taking actions, and the policy learning algo-
+rithm.
+
+4
+S. Ramakrishnan et al.
+Active Vision Dataset
+Matterport3D Dataset
+Fig. 2. Examples of 3D environment layouts in the Active Vision Dataset [2] (ﬁrst two columns)
+and Matterport3D [14] (last three columns). The top row shows a ﬁrst-person view and the bottom
+row shows the 3D layout of the environment with free space in gray, occupied space in white,
+and the viewpoint as the blue arrow.
+2.1
+The exploration POMDP
+We model exploration as a partially observed Markov decision process (POMDP) [41].
+A POMDP can be represented as a tuple (S,O,A,Λ,T ,R,ρ0,γ,Texp) with state space
+S, observation space O, action space A, state-conditioned observation distribution Λ,
+transition distribution T , reward function R, initial state distribution ρ0, and discount
+factor γ. The agent is spawned at an initial state s0∼ρ0 in an unknown environment.
+At time t, the agent at state st receives an observation ot ∼Λ(.|st), executes a cam-
+era motion action at ∼π(ˆst), receives a reward rt ∼R(.|st,at,st+1), and reaches state
+st+1∼T (.|st,at). The state representation ˆst is obtained using the history of observa-
+tions {ok}t
+k=1, and π is the agent’s policy. We assume a ﬁnite episode length Texp.
+The goal is to learn an optimal exploration policy π∗that maximizes the expected
+cumulative sum of the discounted rewards over an episode:
+π∗= argmax
+π
+Eτ∼π
+Texp
+∑
+t=0
+γtrt
+
+,
+(1)
+where τ is a sequence of {(st,at,rt)}T
+t=1 tuples generated by starting at s0 ∼ρ0 and
+behaving according to policy π at each time step. The reward function R captures the
+method-speciﬁc incentive for exploration (see Sec. 3). Next, we concretely deﬁne the
+instantiation of the POMDP in terms of photorealistic 3D simulators.
+2.2
+Simulators for embodied perception
+In order to standardize the experimentation pipeline, we use simulators built on top
+of two realistic 3D datasets: Active Vision Dataset [2] (AVD) and Matterport3D [14]
+(MP3D). See Fig. 2. There are several other valuable 3D assets in the community [72,37,6,64];
+
+An Exploration of Embodied Visual Exploration
+5
+Properties
+Active Vision Dataset [2] Matterport3D [14]
+View sampling
+Discrete
+Continuous
+Size (average navigable space)
+Small (9.7m2)
+Large (516.34m2)
+Train / val / test splits
+9 / 2 / 4
+61 / 11 / 18
+Large scale data
+No
+Yes
+Outdoor components
+No
+Yes
+Clutter
+Signiﬁcant
+Mild
+Forward motion
+0.3 m
+0.25 m
+Rotation angle
+30◦
+10◦
+Table 1. The contrasting properties of AVD and MP3D provide diverse testing conditions. Last
+two rows show the action magnitudes.
+we choose MP3D and AVD for this study due to their complementary attributes (see
+Tab. 1). We anticipate that the different facets of the two datasets will allow us to better
+elicit any differences in behavior between the paradigms we test.
+The Active Vision Dataset (AVD) is a dataset of dense RGB-D scans from 15
+unique indoor houses and ofﬁce buildings [2]. We simulate embodied motion by con-
+verting the dataset into a connectivity graph with discrete points and moving along the
+edges of the graph (similar to [5]). Compared to Matterport3D, AVD environments are
+relatively smaller in size, fewer in number, and have noisy depth inputs and coarsely dis-
+cretized movements. The coarse sampling of views in AVD prevents continuous sim-
+ulation of camera motion, as the reconstructed meshes tend to have signiﬁcant mesh
+defects. However, movement along discrete nodes placed approximately 0.3m apart al-
+lows a realistic simulation for an embodied agent in cluttered home interiors, which are
+lacking in real estate photos or computer graphics datasets.
+Matterport3D (MP3D) is a dataset of photorealistic 3D meshes from 90 indoor
+buildings [14]. The MP3D environments are generally larger in size, greater in quan-
+tity, and offer more ﬁnely discretized movements than AVD. Some MP3D environments
+contain outdoor components such as swimming pools, porches, and gardens which
+present unique challenges to exploration, as we will see in Sec. 5.3. We use the publicly
+available Habitat simulator [44], which provides fast simulation.
+In these simulation environments, the state space S consists of the agent’s position
+and orientation within the environment. The observation space O consists of an RGB-D
+sensor, an odometer to track the camera position, and a bump sensor to detect collisions.
+We consider exploration under both idealized noise-free sensing and realistic noisy con-
+ditions. The action space A is discrete and has three actions: move forward, turn left,
+and turn right. The motion values are given in Tab. 1.
+We stress that though the agents we test are simulated robots, the 3D visual spaces
+in which we test them are real—they are comprised of real meshes captured from real
+images, not generated from models with computer graphics. While real robots do in-
+troduce challenges beyond perception, realistic simulations have the advantage of repro-
+ducibility and scaling agent experience, and hence are widely used today [4,14,18,44,58,64,72].
+
+6
+S. Ramakrishnan et al.
+Furthermore, our experiments examine the effects of noisy odometry and noisy occu-
+pancy in these environments. Finally, recent work shows promising results transferring
+from simulated environments (including Matterport3D) to real-world exploration and
+navigation, supporting simulators as a meaningful testbed for our benchmark [15,34].
+2.3
+Policy architecture
+In order to successfully explore an unknown environment, the agent needs to keep track
+of where it is currently located, how much of the environment has been explored, what
+information was contained in the explored regions, and what are the potentially un-
+explored parts of the environment. We select a state-of-the-art policy architecture that
+is well-suited to these objectives and has shown successful exploration in partially-
+observed and visually rich 3D environments [16].
+The agent receives sensory readings from an RGB-D sensor, an odometer that mea-
+sures the motion resulting from the past action, and a bump sensor that detects collisions
+resulting from past actions. The policy architecture consists of three parts: (1) spatial
+memory, (2) temporal memory, and (3) an actor-critic model (see Fig. 3). We elaborate
+on these parts in the following.
+Spatial memory As the agent explores an environment, it needs to keep track of what
+areas are explored and where the obstacles are present, and then decide where to navi-
+gate next in order to explore further. This is done by maintaining a top-down occupancy
+map that represents free, occupied, and unexplored regions in the environment (see
+Fig. 3). The map is built geometrically by using depth inputs to estimate the occupied
+and free regions based on pixel heights at a given location, and then registering them to
+the allocentric map based on the agent’s pose.
+Let {(Di, pi)}N
+i=1 be the sequence of depth maps Di and pose estimates pi of the
+agent up to time N. The agent’s pose at time i is expressed as pi = (Ri,t i), with Ri,t i
+representing the agent’s camera rotation and translation in the world coordinates. Let
+the agent initially start at the origin of the map, i.e., p0 = 0, and let K ∈R3×3 be the
+intrinsic camera matrix, which is assumed to be provided. Each pixel xij in the depth
+map Di can then be projected to the 3D point cloud as follows:
+wi j =
+
+Ri t i
+0 1
+
+K−1xij, ∀j ∈{1,...,Si}, ∀i ∈{1,...,N},
+(2)
+where Si is the total number of pixels in Di. This gives us the set of points W =
+SN
+i=1
+SSi
+j=1 wi j representing all observed points during exploration. We discretize the
+top-down view of the environment into discrete 2D cells of size s and classify each cell
+b into three categories—free space, obstacle, and unexplored space—as follows:
+class(b) =
+
+
+
+
+
+obstacle,
+if ∃w ∈W b | height(w) ∈[ηl,ηh]
+free space,
+if height(w) < ηl ∀w ∈W b
+unexplored,
+if W b = ∅
+(3)
+where height(w) is the height of point w, ηl and ηh are height thresholds in meters used
+to determine occupancy, and W b ⊂W is the set of points present within cell b with
+
+An Exploration of Embodied Visual Exploration
+7
+Bump sensor
+𝝅
+𝑉
+Allocentric map
+Encoders
+Actor
+Critic
+Collision encoder
+Action encoder
+ResNet-18
+GRU
+Obstacle
+Free space
+Unexplored
+Depth
+RGB
+Odometer
+Fig. 3. Policy architecture: The agent receives RGB-D, collision, and odometer inputs from the
+environment at each time-step. The agent maintains a spatial occupancy memory (allocentric
+map) that is constructed from the depth and pose inputs over time. Local egocentric crops cen-
+tered around the agent are extracted (orange and red boxes, top left) and encoded along with the
+RGB input using ResNet encoders. The encoded information is aggregated over time by a tem-
+poral recurrent memory (GRU) that additionally encodes the semantics of the environment. The
+aggregated state of the temporal memory is used by the Actor module to select actions that move
+the agent around the environment.
+heights less than ηh. This gives us the agent’s allocentric spatial memory specifying
+which regions are free space, obstacle, and unexplored space. Based on the allocentric
+memory and the agent’s current pose, egocentric crops at two resolutions Scoarse×Scoarse
+and Sﬁne ×Sﬁne are provided to the next stages, where Scoarse and Sﬁne are measured in
+meters.
+Temporal memory While the spatial memory purely encodes geometric information, the
+agent needs to additionally store other textural and semantic cues in the environment
+over time. This is done via a temporal memory that jointly encodes all sensor inputs
+and aggregates them over time.
+The RGB and the coarse and ﬁne occupancy maps are encoded as 128-D feature
+vectors via independent pre-trained ResNet-18 [29] models, then concatenated and
+fused into a 512-D feature vector using a fully connected (FC) layer. The previous ac-
+tion and binary collision signal are encoded as learned 32-D embeddings. The encoded
+image, action, and collision features are concatenated, and then fused using an FC layer
+to obtain a 512-D feature vector at each time-step. This is temporally aggregated using
+a Gated Recurrent Unit (GRU) [17] with one hidden-layer and 512-D hidden-state.
+Actor critic model Given the encoded information from the sensors over time, the agent
+needs to decide what action to execute in the environment during exploration. We learn
+
+8
+S. Ramakrishnan et al.
+the exploration policy via the actor-critic paradigm, which consists of an actor to sample
+actions and a critic to model the value of the agent’s current state [67]. The actor and
+critic are each modeled using two fully connected layers. The actor outputs the action
+probabilities for the policy at each time-step, and the critic predicts a scalar state value.
+This policy architecture facilitates long-term information storage and effective plan-
+ning by exploiting geometric and semantic cues in the environment. Unlike traditional
+SLAM, such a learned spatio-temporal memory—popular in recent embodied percep-
+tion approaches [25,30,16,15]—allows the agent to leverage both statistical visual pat-
+terns learned from training environments as well as geometry to extrapolate what it
+learns to novel environments.
+2.4
+Policy learning algorithm
+In order to train the policy architecture, we adapt current methods [18,19,16] and divide
+the learning into two stages: (1) imitation learning, and (2) ﬁne-tuning with reinforce-
+ment learning. The imitation learning stage is intended to reduce sample complexity for
+the reinforcement learning stage by offering a better initialization of the policy.
+Imitation learning: We ﬁrst pre-train the exploration policy via imitation learning [10,23].
+We generate synthetic expert trajectories by treating the environment as a graph of con-
+nected nodes and exploiting this connectivity graph to greedily explore the environment
+(discussed more in Sec. 4.1). Given these trajectories, we minimize the cross-entropy
+error between the predicted and expert actions at each step. Additionally, we diversify
+the training trajectories by sampling actions from the agent’s policy with probability ε,
+instead of exclusively following the expert trajectories. We use inﬂection weighting to
+prevent the policy from simply repeating the previous action [70]. The perturbation ε
+is varied from εstart to εend during the course of training with a constant increase of 0.1
+after every E updates. For AVD, εstart = 0, εend = 0.3, E = 100. For MP3D, εstart = 0,
+εend = 0.5, E = 1000. These values were obtained through validation on the validation
+environments.
+Reinforcement learning: We then ﬁne-tune the policy with the RL training objective
+using Proximal Policy Optimization (PPO) [60]. The PPO surrogate objective is:
+LCLIP(θ) = ˆEt
+
+min(¯rt(θ) ˆAt, clip(¯rt(θ),1−ε,1+ε) ˆAt
+
+,
+(4)
+where θ are the policy parameters, ¯rt(θ) =
+πθ (at|st)
+πθold (at|st) is the probability ratio of the up-
+dated and old policies at time t, ˆAt is the advantage estimate, and ε is the clipping factor.
+We optimize for this objective using the Adam optimizer [36]. More implementation
+details can be found in Appendix C.
+Given this empirical study framework consisting of standardized task deﬁnitions,
+simulators, policy architecture, and learning algorithm, we can plug in different reward
+functions to train different exploration agents, as we describe next.
+
+An Exploration of Embodied Visual Exploration
+9
+3
+Taxonomy of exploration paradigms
+We now present a taxonomy for exploration algorithms in the literature. We identify
+four core paradigms (see Fig. 4):
+(1) curiosity: encourages visiting states where the agent’s uncertainty is high.
+(2) novelty: encourages visiting states that are unvisited.
+(3) coverage: encourages visiting states that reveal unseen areas in the environment.
+(4) reconstruction: encourages visiting states that lead to better prediction of un-
+seen states.
+Each paradigm can be viewed as a particular reward function in the POMDP. In
+the following, we review their key ideas and related work, and choose representative
+methods for benchmarking that capture the essence of each paradigm.
+3.1
+Curiosity
+In the curiosity paradigm, the agent is encouraged to visit states where its predictive
+model of the environment is uncertain [59,47,40,49]. See Fig. 4, top left. We focus
+on the dynamics-based formulation of curiosity, which was shown to perform well
+on large-scale scenarios [49,11]. The agent learns a forward-dynamics model F that
+predicts the effect of an action on the agent’s state, i.e, ˆst+1 = F(st,at). Then, the
+curiosity reward at each time step is:
+rt ∝||ˆst+1 −st+1||2
+2.
+(5)
+The forward-dynamics model is trained online to minimize the loss in forward-
+dynamics prediction: ||f(st,at)−st+1||2
+2. Thus, the curiosity reward encourages the
+agent to move to newer states once its forward-dynamics predictions on the past states
+are accurate. We adapt the curiosity formulation from [49] for our experiments. Instead
+of using image features as the state representation for the forward dynamics model, we
+use the GRU hidden state in Sec. 2.3 as we found it helped alleviate the partial observ-
+ability. We follow recommended practices such as using PPO for policy optimization,
+reward normalization, observation normalization, and using feature normalization in
+the CNN [11].
+Past work on curiosity-driven exploration The forward-dynamics based formulation
+of curiosity uses an inverse-dynamics prediction loss to learn features that ignore parts
+of the environment not useful for dynamics prediction [49]. Stable features kept ﬁxed
+during policy learning are found to perform better in many cases [11]. Further variants
+of curiosity aim to overcome the “noisy-TV” problem where the curiosity agent ﬁxates
+on parts of the environment where stochasticity is a function of its actions [11,12,51].
+For example, if the agent has access to a TV remote that allows it to randomly change
+channels, it does that repeatedly to accumulate rewards. Due to the inherently random
+nature of the transitions, they can never be predicted accurately and always reward the
+agent. Random Network Distillation attempts to overcome this limitation by deﬁning
+a ﬁxed random neural network as the predictive function since it is a deterministic
+function of the inputs [12]. Exploration via Disagreement attempts to resolve the issue
+
+10
+S. Ramakrishnan et al.
+Fig. 4. The four paradigms of exploration in 3D visual environments. Curiosity rewards visiting
+states that are predicted poorly by the current forward-dynamics model. Novelty rewards visiting
+less frequently visited states. Coverage rewards visiting “all possible” parts of the environment.
+Reconstruction rewards visiting states that allow better reconstruction (hallucination) of the full
+environment.
+by learning an ensemble of forward-prediction models and using their disagreement as
+intrinsic motivation rather than the prediction error [51]. Curiosity is also demonstrated
+to work on physically realistic 3D simulators with the addition of a self-aware model
+that learns to anticipate errors in the agent’s predictions [27].
+3.2
+Novelty
+While curiosity seeks hard-to-predict states, novelty seeks previously unvisited states [65,9,46,68,57].
+See Fig. 4, top right. Each s ∈S is assigned a visitation count n(s). The novelty re-
+ward is inversely proportional to the square-root of visitation frequency at the current
+state:
+rt ∝
+1
+p
+n(st)
+.
+(6)
+For our experiments, we adapt the Grid Oracle method from [57]: we discretize the 3D
+environment into a 2D grid where each grid cell is considered to be a unique state, and
+assign rewards according to Eqn. 6. We deﬁne square grid cells of width 0.3m in AVD
+and 0.5m in MP3D, and consider all points within a grid cell to correspond to that state.
+
+An Exploration of Embodied Visual Exploration
+11
+Past work on novelty-based exploration Early methods on interval estimation or count-
+based exploration deﬁne a conﬁdence interval over the optimal value function of the
+underlying Markov Decision Processes (MDP) and apply this idea to tabular RL set-
+tings [65]. More recent work extends this idea to function approximation settings by
+using the notion of pseudo-counts [9] combined with complex density models [46], or
+discretizing high-dimensional continuous spaces into discrete representations through
+hash functions [68], which facilitates a tabular RL setting. Rather than using dynamics
+prediction, episodic curiosity [57] rewards states that look dissimilar from previously
+visited ones, yielding a binary variant of Eqn. 6. We use the GridOracle from [57] as it
+was shown to explore successfully in a variety of settings.
+3.3
+Coverage
+The coverage paradigm aims to observe as many things of interest as possible—typically
+the area seen in the environment [16,15]. See Fig. 4, bottom left. Whereas novelty en-
+courages explicitly visiting all locations, coverage encourages observing all of the en-
+vironment. Note that the two are distinct: at any given location, how much and how far
+a robot can see varies depending on the surrounding 3D structures. The coverage ap-
+proach from [16] learns RL policies that maximize area coverage. The area-coverage
+reward is:
+rt ∝At −At−1,
+(7)
+where At is the area covered by the agent till time t (blue and green regions in Fig. 3).
+An agent maximizing area seen prioritizes those locations and viewing angles which
+provide high visibility of unseen parts of the environment.
+While this is shown to work well on diverse environments [16], the agent is never
+rewarded for revisiting the same regions. In our experiments, we ﬁnd that this leads
+to a speciﬁc form of reward sparsity in large environments (as we will highlight in
+Sec. 5.4). Consider the case where an agent starts exploring from the center of a very
+large building. After it explores one half of the building, there will be no learning signal
+for the agent to move back to the center in order to continue exploring the other half.
+Therefore, we incorporate ideas from the novelty reward to design a shaped version
+of coverage that addresses this limitation, which we call smooth-coverage:
+rt ∝
+1
+|At| ∑
+i∈At
+1
+√ni
+,
+(8)
+where At is the set of regions seen in the environment at time t and ni is the number
+of times a region i has been observed so far. Instead of only rewarding the agent for
+the ﬁrst time it sees a region (as in Eq. 7), we reward the agent based on the number of
+times that region was observed. This allows the agent to navigate across less frequently
+visited regions to discover unexplored parts of the environment.
+While we use area as our primary quantity of interest, this idea can more generally
+be exploited for learning to visit other interesting things such as objects (similar to the
+search task from [21]) and landmarks. See Appendix D for comparative results.
+
+12
+S. Ramakrishnan et al.
+Past work on coverage-based exploration Recent work explores using novel architec-
+tures that better optimize the coverage objective. The area coverage objective is op-
+timized through a combination of imitation and reinforcement learning to learn ex-
+ploration policies that generalize well to novel environments [16]. A new hierarchi-
+cal architecture combines classic-planning and learned controllers to successfully op-
+timize the area coverage objective in a sample-efﬁcient manner under realistic noise
+models [15]. Scene memory transformers propose an architecture based on transform-
+ers [69] that encode observations at each time-step into a feature space where self-
+attention is used to perform reasoning [21]. The model is shown to be successful on
+several tasks including area coverage and object class coverage (i.e., visiting as many
+object classes as possible). These architectural variants are orthogonal to our study since
+our primary goal is to explore the choice of reward function to facilitate exploration.
+3.4
+Reconstruction
+Reconstruction-based methods [33,53,54,61] use the objective of active observation
+completion [33] to learn exploration policies. The idea is to gather views that best facil-
+itate the prediction of unseen viewpoints in the environment. See Fig. 4, bottom right.
+The reconstruction reward scores the quality of the predicted outputs:
+rt ∝−d(V(P), ˆVt(P)),
+(9)
+where V(P) is a set of true “query” views at camera poses P in the environment, ˆVt
+is the set of view reconstructions generated by the agent after t time steps, and d is a
+distance function. Whereas curiosity rewards views that are individually surprising,
+reconstruction rewards views that bolster the agent’s correct hallucination of all
+other views.
+Prior attempts at exploration with reconstruction are limited to pixelwise reconstruc-
+tions on 360◦panoramas and CAD models, where d(·,·) is ℓ2 on pixels. To scale the
+idea to 3D environments, we propose a novel adaptation that predicts concepts present
+in unobserved views rather than pixels, i.e., a form of semantic reconstruction. This re-
+formulation requires the agent to predict whether, say, an instance of a “door” concept is
+present at some query location, rather than reconstruct the door pixelwise as in [33,54].
+We automatically discover these visual concepts from the training environments,
+which has the advantage of not relying on supervised object detectors or semantic anno-
+tations. Speciﬁcally, we sample views uniformly from training environments and cluster
+them into discrete concepts C = {ci}K
+i=1 using K-means applied to ResNet-50 features.
+Each cluster centroid is a concept and may be semantic (doors, pillars) or geometric
+(arches, corners).
+Then, we reward the agent for acquiring views that help it accurately predict the
+dominant concepts in all query views V(P) sampled from a uniform grid of locations
+in each environment. Let v(pi) ∈V(P) denote the ResNet-50 feature for the i-th query
+view. We deﬁne its true “reconstructing” concepts Ci = {c1
+i ,...,cJ
+i } ⊂C to be the J near-
+est cluster centroids to v(pi), and assign equal probability to those J concepts. The agent
+has a multilabel classiﬁer that takes a query pose pi as input—not the view v(pi)—and
+returns ˆCi, the posteriors for each concept c ∈C being present in v(pi). The distance d
+
+An Exploration of Embodied Visual Exploration
+13
+in Eqn (9) is the KL-divergence between the true concept distribution Ci and the agent’s
+inferred distribution ˆCi, summed over all pi ∈P. The reward rt thus encourages reduc-
+ing the prediction error in reconstructing the true concepts. In practice, we shape the
+reward function to be the reduction in the KL divergence over time (as opposed to the
+absolute KL divergence value) as this leads to better performance; see Appendix A.2.
+Past work on reconstruction-based exploration The original reconstruction-based ex-
+ploration approach [33] rewards exploration that permits more accurate pixelwise re-
+constructions of scenes and objects. It was shown that the resulting exploratory poli-
+cies accelerate recognition tasks. Sidekick policy learning [53] exploits full state infor-
+mation available only at training time to accelerate training and learn better policies.
+Broader transferability of exploration policies on the tasks of recognition, volume es-
+timation, and other tasks are demonstrated in [54], and the quality of pixelwise recon-
+structions are enhanced using a pix2pix [31] model. Architectural improvements based
+on a spatial memory and foveated viewpoints yield high-quality reconstructions with
+lower viewing costs [61].
+Reconstruction-based exploration approaches also relate to classical information-
+gain based exploration, where the goal is to explore in order to reduce the uncertainty
+in the agent’s model of the world [13,63,66]. The action entropy control strategy in [13]
+explores in order to maximize the information gained about the agent’s belief state when
+the certainty of the optimal action is low. In [63], the agent is encouraged to take ac-
+tions that minimize the uncertainty in pose estimation and mapping. Optimal Bayesian
+exploration is used to maximize the agent’s knowledge about a parameterized world
+model [66]. Our proposed formulation that reconstructs in a discrete concept space
+can be viewed as a form of information-gain based exploration. The high-dimensional
+image-state representation is projected to a smaller concept space, and the reward func-
+tion encourages maximizing the the information gain between the agent’s knowledge
+of the concepts present in the environment and the states visited by the agent.
+4
+Exploration evaluation framework
+Having deﬁned the taxonomy of exploration algorithms, we now deﬁne baselines and
+metrics to evaluate them.
+4.1
+Baseline methods
+Heuristic baselines: Aside from the learned paradigms introduced above, we also eval-
+uate four non-learned heuristics for exploration:
+(1) random-actions [54,44] samples from a uniform distribution over all actions.
+(2) forward-action [44] always samples the forward action.
+(3) forward-action+ samples the forward action unless a collision occurs, in which
+case, it turns left.
+(4) frontier-exploration [73] uses the egocentric map from Fig. 3 and iteratively
+visits the frontiers, i.e., the edges between free and unexplored spaces (see Appendix E).
+
+14
+S. Ramakrishnan et al.
+Training / Testing
+GT depth
+GT pose
+GT objects
+GT state
+random-actions
+- / No
+- / No
+- / No
+- / No
+forward-action(+)
+- / No
+- / No
+- / No
+- / No
+imitation-X
+Yes / Yes*
+Yes / Yes*
+Yes / No
+Yes / No
+curiosity
+Yes / Yes*
+Yes / Yes* No / No
+No / No
+novelty
+Yes / Yes*
+Yes / Yes* No / No
+Yes / No
+frontier-exploration
+- / Yes
+- / Yes
+- / No
+- / No
+coverage
+Yes / Yes*
+Yes / Yes* Yes / No
+No / No
+oracle
+No / No
+No / No
+Yes / Yes
+Yes / Yes
+Table 2. Assumptions about information availability: the information required for each method
+(including the architecture assumptions) during training/testing. In our experiments, we assume
+all information is given during training, but only sensory inputs are given for testing. * - learned
+methods may adapt to noisy inputs.
+The frontier approach is closely related to area-coverage, but depends on hand-
+crafted heuristics and may be vulnerable to noisy sensors and actuators.
+Oracle graph exploration: As an upper bound on exploration performance, we also
+include an oracle model. It cheats by exploiting the underlying graph structure in the
+environment (which reveals reachability and obstacles) to visit a sequence of sampled
+target locations via the true shortest paths. In contrast, all methods we benchmark are
+not given this graph, and must discover it through exploration. We deﬁne three oracles
+that visit (1) randomly sampled locations, (2) landmark views (see Sec. 4.2), and (3)
+objects within the environment.
+Imitation learning: We imitate the oracle trajectories to get three imitation vari-
+ants, one for each oracle above. Whereas the oracles assume full observability and there-
+fore are not viable exploration approaches, these imitation learning baselines are viable,
+assuming disjoint training data with full observability is available.
+Tab. 2 lists the assumptions on information availability made by the different ap-
+proaches. Methods requiring less information are more ﬂexible. While we assume ac-
+cess to the full environment during training, there is ongoing work [9,46,57] on relaxing
+this assumption.
+4.2
+Evaluation metrics
+A good exploration method visits interesting locations and collects information that is
+useful for a variety of downstream tasks. Different methods may be better suited for
+different tasks. For example, a method optimizing for area coverage may not interact
+sufﬁciently with objects, leading to poor performance on object-centric tasks. We mea-
+sure exploration performance with two families of metrics:
+(1) Visiting interesting things. These metrics quantify the extent to which the agent
+visits things of interest such as area [16,73,15,21], objects [21,27], and landmarks. The
+area visited metric measures the amount of area covered in m2. For the objects visited
+
+An Exploration of Embodied Visual Exploration
+15
+metric, we use the object annotations provided by both AVD and MP3D to measure
+how many objects are visited during exploration. We consider an object to be visited
+if the agent is close to it and the object is unoccluded within its ﬁeld of view. For the
+landmarks visited metric, we mine a set of “landmark” viewpoints from the environ-
+ment which contain distinctive visual components that do not appear elsewhere in that
+environment, e.g., a colorful painting or a decorated ﬁreplace.5 The exact visitation cri-
+teria for both objects and landmarks are given in Appendix B. Together, these visitation
+metrics capture the different levels of semantic and geometric reasoning that an agent
+may need to perform in the environment. To account for varying environment sizes and
+content, we normalize each metric into [0,1] by dividing by the best oracle score on
+each episode.
+(2) Downstream task transfer. These metrics directly evaluate exploration’s impact on
+downstream tasks. The setup is as follows: an exploration agent is given a time budget of
+Texp to explore the environment, after which the information gathered must be utilized to
+solve a task within the same environment. More efﬁcient exploration algorithms gather
+better information and are expected to have higher task performance.
+We consider three tasks from the literature that ask fundamental, yet diverse ques-
+tions: (i) PointNav: how to quickly navigate from point A to point B? (ii) view localiza-
+tion: where was this photo taken? and (iii) reconstruction: what can I expect to see at
+point B?
+In PointNav, the agent is respawned at the original starting point after exploration,
+and given a navigation goal (x,y,z) relative to its position [4,58]. The agent must use its
+map acquired during exploration to navigate to the goal within a maximum of Tnav time
+steps. Intuitively, for efﬁcient navigation, an exploration algorithm needs to explore po-
+tential dead ends in the environment that may cause planning failure. We use an A*
+planner that navigates using the spatial occupancy map built during exploration [28].
+While other navigation algorithms are possible, A* is a consistent and lightweight
+means to isolate the impact of the exploration models. We evaluate using the success
+rate normalized by the path length (SPL) [4].
+In view localization, the agent is presented with images sampled from distinct land-
+mark viewpoints (introduced previously in Sec. 4.2) and must localize them relative to
+its starting location [54]. This task captures the agent’s model of the overall layout, e.g.,
+“where would you need to go to see this view?”. While PointNav requires planning a
+path to a point target around obstacles, view localization requires locating a visual tar-
+
+of views localized within k mm of their ground truth pose.
+In reconstruction, the agent is presented with uniformly spread query locations, and
+must predict the set of concepts present at each location [33,54,61] (cf. Sec. 3.4). This
+can be viewed as the inverse problem of view localization: the agent has to predict views
+
+dicted concepts and the ground truth.
+5 See Appendix G for more details on how landmarks are mined.
+
+16
+S. Ramakrishnan et al.
+For each task, we deﬁne a standard pipeline that uses the exploration experience to
+solve the task in Appendix A. We do not ﬁne-tune exploration policies for downstream
+tasks since we treat them as independent evaluation metrics.
+Together, the proposed metrics capture both geometric and semantic aspects of spa-
+tial sensing. For example, the area-visited metric reﬂects 2D SLAM (occupancy) and
+the reconstruction task metric measures semantic SLAM, where the goal is to map con-
+cepts present in the environment.
+5
+Experiments
+We next present the results on various exploration metrics.
+Implementation details All policies are trained for Texp = 200/500 on AVD/MP3D for
+2000 episode batches. We sample 100/342 episodes on AVD/MP3D uniformly from all
+test environments. For navigation, we deﬁne 46/195 difﬁcult test episodes by selecting
+challenging pairs of start-goal positions on AVD/MP3D. They are selected such that
+the agent’s navigation would be inefﬁcient unless the environment was already well ex-
+plored prior to navigation (see Appendix F). More implementation details are provided
+in Appendix C.
+5.1
+Results on exploration metrics
+We compare the performance of different paradigms on visitation metrics and down-
+stream task transfer in AVD and MP3D. Since the two datasets exhibit a variety of con-
+trasting properties by design (see Sec. 2.2), we may expect to see corresponding differ-
+ences in the results. For brevity, only the best of the three oracle and imitation vari-
+ants on each metric are reported. Note that coverage here corresponds to smooth-coverage,
+which we found to consistently outperform area-coverage.
+Fig. 5 shows the results on both datasets, and Fig. 7 shows example exploration
+episodes. These results are for the ideal noise-free odometry case. We will separately
+analyze the impact of noisy odometry in the next section. We see two clear trends
+emerging:
+AVD: coverage > reconstruction > novelty > curiosity
+MP3D: novelty > coverage ≥reconstruction > curiosity
+In AVD, both coverage and reconstruction clearly outperform novelty. While
+novelty assigns equal rewards to all locations in the environment, coverage and
+reconstruction prioritize viewpoints that are useful for quickly covering area and
+concepts, respectively. This signiﬁcantly improves exploration performance in the small,
+cluttered rooms of AVD. However, we do not observe a similar effect in MP3D as
+novelty outperforms both these methods. This is due to two reasons. First, since
+the rooms in MP3D are generally open and large, the advantage of prioritizing the
+viewpoints is smaller than in AVD. Second, the reward functions of coverage and
+reconstruction are inherently sparser than novelty. The reconstruction method
+
+An Exploration of Embodied Visual Exploration
+17
+SPL
+
+Matterport3D
+# time steps
+Active Vision Dataset
+Area
+Objects
+Landmarks
+Area
+Objects
+Landmarks
+SPL
+View localization
+Navigation
+Reconstruction
+View localization
+Navigation
+Reconstruction
+Fig. 5. Exploration results: The plots compare the different paradigms and select baselines (for
+clarity) on all exploration metrics. The table shows the performance averaged over three random
+seeds on each metric at the last time step and includes all baselines. The visitation metrics are
+area-, object-, and landmark-visitation. The downstream tasks are view localization, navigation,
+and reconstruction. The best results are bolded.
+
+18
+S. Ramakrishnan et al.
+does not reward the agent for reconstructing concepts that it already reconstructed in
+the past (reduction in KL divergence is smaller). The original area-coverage method
+does not reward the agent for seeing the same area more than once. As we will show
+in an ablation in Sec. 5.4, the improved smooth-coverage method bridges the gap
+between area-coverage and novelty to a good extent.
+The performance of curiosity is worse than that of other paradigms on both
+datasets, likely due to the signiﬁcant partial observability that is characteristic of these
+visually rich 3D environments. Its performance deteriorates further on MP3D envi-
+ronments which tend to be much larger, and it even underperforms the imitation
+baseline. curiosity needs a good state representation that accounts for partial observ-
+ability to learn a good forward dynamics model that leads to better reward estimates.
+This is naturally harder in larger MP3D environments. As we will show in ablations in
+Sec. 5.4, the memory architecture that we use here is better for curiosity than using
+only image features. It is possible that incorporating better memory architectures could
+boost the performance even further.
+Good baselines are essential for measuring progress on any benchmark. Our pro-
+posed baseline imitation is signiﬁcantly better than the standard baselines random-actions,
+forward-action, and forward-action+ used in prior work [54,44,16]. While learned
+methods generally outperform these baselines, frontier-exploration outperforms
+most learned methods on MP3D. Since fronter-exploration relies on clean depth
+inputs with a perfectly registered map, it underperforms in AVD since the depth inputs
+are naturally noisy (see Sec. 2). As we will show in the next section, a similar phe-
+nomenon can also be in observed in MP3D where noisy sensor inputs deteriorate its
+performance, echoing past ﬁndings [16].
+In Fig. 5, we see that the navigation performance for all methods in MP3D are infe-
+rior to the state-of-the-art performance reported in standard navigation benchmarks on
+MP3D [44] due to the increased difﬁculty of the test episodes. Additionally, we observe
+that the trends on the navigation metric on both AVD and MP3D differ from the other
+metrics. The gaps between different methods are reduced, imitation closely com-
+petes with other paradigms, and much larger values of Texp are required to improve the
+performance in MP3D. This hints at the inherent difﬁculty of exploring well to navigate:
+efﬁcient navigation requires exploration agents to uncover potential obstacles that re-
+duce path planning efﬁciency. Notably, existing exploration methods do not incorporate
+such priors into their rewards.
+The radar plots in Fig. 6 concisely summarize the results thus far along ﬁve skills:
+Mapping, Navigation, Object discovery, Localization, and Reconstruction. The metrics
+corresponding to these skills are area visited, pointnav SPL, objects visited, view local-
+
+to [0, 1] where 0 and 1 represent the performance of random-actions and oracle,
+respectively. In each case, a method’s performance on the metric is normalized as fol-
+lows:
+skill value = method score−random-actions score
+oracle score−random-actions score .
+(10)
+As we can see in Fig. 6, coverage dominates the other paradigms on most skills,
+closely followed by reconstruction in AVD. In the larger MP3D environments, dif-
+ferent methods are stronger on different skills. For example, novelty performs best on
+
+An Exploration of Embodied Visual Exploration
+19
+        S1 - Navigation            S2 - Mapping            S3 - Object discovery  
+        S4 - Localization          S5 - Reconstruction   
+AVD
+MP3D
+Fig. 6. Exploration skills: Each exploration agent is assigned a 0-1 value for a set of ﬁve skills.
+The most general agents have larger polygon areas (see text). Best viewed in color.
+object discovery, frontier-exploration dominates on localization and reconstruc-
+tion, and both dominate on mapping. This highlights the need for diverse evaluation
+metrics for exploration.
+Fig. 7 shows qualitative examples of exploration in AVD and MP3D for the four
+paradigms. Better methods cover larger areas of the environment during exploration.
+5.2
+Impact of sensor noise on exploration
+In the previous section, we evaluated the exploration performance of various algorithms
+under noise-free odometry. Now, we evaluate the impact of sensor noise during explo-
+ration, speciﬁcally the noise arising from two sources: (1) the occupancy map, and (2)
+odometer readings. We perform our experiments in MP3D as it contains larger and more
+diverse testing environments.
+Impact of noisy occupancy estimation Noisy occupancy maps can result from mesh
+defects, noisy depth, and incorrect estimates of affordances from the height-based es-
+timation method (see Sec. 2.3) [52]. This noise occurs naturally and is not explicitly
+simulated, meaning all results reported thus far are where the methods do experience
+noisy occupancy. The noise-free case can be simulated by directly extracting occupancy
+maps from the navigability information stored in the simulator, instead of estimating it
+from visual cues. We characterize the impact of this noise through the noise robustness
+coefﬁcient (NRC), the ratio of the area visited6 by an agent with the original depth-based
+6 We select area visited because it is a simple metric that does not require additional semantic
+annotations.
+
+20
+S. Ramakrishnan et al.
+curiosity
+novelty
+coverage
+reconstruction
+t = 0
+t = 100
+t = 0
+t = 1000
+Fig. 7. Visualizing exploration behaviors: Exploration trajectories for each paradigm are vi-
+sualized from the top-down view of the environment (AVD in ﬁrst two rows, MP3D in the re-
+maining rows). Black and green locations represent unexplored and explored areas, respectively.
+The agent’s trajectory uses color changes to represent time. The behaviors are largely correlated
+with the quantitative performance of each paradigm in Sec. 5.1: better exploration methods cover
+larger parts of the environment. For example, in AVD, coverage explores efﬁciently and ob-
+serves most of the environment within 100 time-steps, closely followed by reconstruction
+and novelty (top two rows). In MP3D, novelty covers signiﬁcantly larger areas during ex-
+ploration in large environments (rows 5, 7 and 8). In fact, novelty is the only approach that
+successfully crosses the narrow corridor in the middle and explores both sides of the environment
+in row 5.
+
+An Exploration of Embodied Visual Exploration
+21
+Effect of incorrectly estimated occupancy maps on exploration
+Method
+Inferred occupancy GT occupancy NRC
+imitation
+0.452
+0.386
+1.17
+frontier-exploration
+0.579
+0.748
+0.77
+coverage
+0.522
+0.508
+1.03
+novelty
+0.622
+0.599
+1.04
+curiosity
+0.317
+0.317
+1.00
+reconstruction
+0.510
+0.503
+1.01
+Table 3. Noise robustness: We show the average area visited by each method with our original
+depth-based occupancy estimates which tend to be noisy (second column) and the ground-truth
+occupancy maps obtained from the simulator which are noise-free (third column). The area vis-
+ited has been normalized by the best oracle score on a per-episode basis. In the fourth column, we
+show the noise robustness coefﬁcient (NRC) which is the ratio of performance with the original
+and ground truth (GT) occupancy maps (higher is better).
+occupancy maps (noisy) and ground-truth occupancy maps obtained from the simulator
+(noise-free). Larger NRC indicates better adaptation to noisy test conditions.
+Tab. 3 shows the exact values of area visited with noisy and noise-free occupancy,
+and the corresponding NRC values. As we can see, learned approaches have an NRC
+close to 1.0, indicating that they perform similarly under both conditions. 7 However,
+a purely geometric approach like frontier-exploration has a much lower NRC
+(∼0.77). Since the simulation conditions in MP3D are generally noise-free and the
+noise levels are low, frontier-exploration still gets better absolute performance
+than most approaches. In contrast, the depth maps in AVD lead to persistent noise in the
+occupancy estimates, which causes frontier-exploration to do worse than other
+approaches there (see Fig. 5).
+Impact of noisy odometry Next, we measure the impact of a noisy odometer during the
+exploration evaluation phase. Noisy odometry leads to incorrect registration of local
+point clouds, estimated from the depth map to the allocentric map (see Sec. 2.3). This
+noise affects the spatial memory of the agent and effectively leads to noisy occupancy
+inputs to the exploration policy. Note that this is different from the noisy occupancy
+maps case where we measure the impact of per-frame noise in occupancy. Here, we are
+more interested in the noise occurring in the long-term map registration.
+We consider two variants: noisy training and noise-free training. Adding noise to
+odometry during training additionally affects the reward functions used for policy learn-
+ing. For curiosity, the features used for forward-dynamics prediction are noisy, since
+they include the noisy occupancy estimates. For novelty, the state visitation counts
+will be noisier since the agent is unsure of its position in the global coordinates. For
+coverage, this directly affects the measure of coverage used in the reward function
+since coverage measurements rely on accurate odometry. For reconstruction, this
+7 The NRC values may be larger than 1.0 for learned methods. This is due to domain differences
+between the inferred occupancy used in training and the GT occupancy used in testing.
+
+22
+S. Ramakrishnan et al.
+Noise level (𝜂)
+Area
+Objects
+Landmarks
+Fig. 8. The plots show exploration performance as a function of noise levels in the odometer (η)
+during testing. Note that the legend for the plots is shown in the table. The dashed lines in the
+plots denote noisy training conditions (η = 0.15). The table compares the performance of various
+paradigms and baselines with noisy testing conditions (η = 0.15), and both noise-free and noisy
+training conditions.
+affects the pose inputs pt associated with each observation obtained during exploration,
+which may lead to worse predictions.
+Following past work [16], we use a truncated Gaussian noise model whose standard
+deviation is proportional to the action magnitudes (see Tab. 1). Speciﬁcally, at each time
+step, we sample a random perturbation from a truncated Gaussian with mean 0, standard
+deviation η∆a, and a truncation width of η∆a on either sides of the mean. Here, η is
+the noise level and ∆a is the action magnitude. The agent estimates its current position
+by summing up the odometer readings over time. Therefore, the noise gets accumulated
+over time leading to increasingly large deviations in the agent’s pose estimates.
+Fig. 8 compares the four paradigms along with baselines. When trained under noise-
+free conditions, the learned methods generalize relatively well to different testing noise
+levels, despite not being exposed to noisy inputs during training. Interestingly, their
+relative trends are consistent across the different noise levels during testing. However,
+the performance of frontier-exploration deteriorates rapidly as the noise level
+increases. For noisy training conditions, we set the noise level as η = 0.15. While
+coverage remains robust to noisy training conditions, the exploration performance
+deteriorates for most learning-based methods when compared to the noise-free train-
+ing conditions. This is expected since the reward function becomes less reliable under
+noise-free training conditions. Nevertheless, the learning-based approaches outperform
+frontier-exploration at higher noise levels.
+
+An Exploration of Embodied Visual Exploration
+23
+5.3
+Scale factors that inﬂuence performance
+We now analyze how scaling factors affect exploration quality.
+How does dataset size affect learning? First we analyze how the exploration perfor-
+mance varies with the training dataset size, i.e., the number of unique training envi-
+ronments in MP3D. We select novelty and smooth-coverage as they are the top
+performers on MP3D. We additionally select area-coverage to compare its behavior
+with smooth-coverage. We train agents on 3 random subsets of {10,20,40} MP3D
+environments and measure their exploration performance at Texp = 1000 on the full
+MP3D test set.
+Fig. 9 shows the results. Interestingly, all agents achieve very good performance
+with only 10 training environments. We observe the beneﬁt of well-shaped rewards pro-
+vided by novelty and smooth-coverage, which decay exponentially based on the
+visitation/observation frequency. While their performances improve with the number
+of environments, it saturates quickly for area-coverage. There is gradual but steady
+improvement in the performance from 10 environments to the full training set, suggest-
+ing that these approaches might continue to beneﬁt from signiﬁcantly larger training
+environment sets.
+# training environments
+Fig. 9. The impact of varying the number of training environments on exploration performance.
+How does environment size affect exploration? Next we select the top ﬁve methods on
+MP3D and measure their performance as a function of testing environment size (see
+Fig. 10). First, we group test episodes based on area visited by the best oracle. Within
+each group, we report the % of episodes in which each method ranks in the top 3 out of
+5. The larger this value, the better the method is on those environments. The novelty
+and coverage approaches are robust and perform well on most environment sizes.
+The reconstruction approach also competes well, especially in larger environments.
+However, frontier-exploration struggles in large MP3D environments as they
+tend to contain mesh defects where the agent gets stuck. Please see Appendix H for
+qualitative examples.
+
+24
+S. Ramakrishnan et al.
+Fig. 10. The impact of varying the testing environment size on exploration performance.
+Active Vision Dataset
+Method
+Area
+Objects Landmarks View Local. Navigation Reconstruction
+area-coverage
+0.85±0.02 0.72±0.00 0.57±0.01
+0.43±0.02
+0.62±0.01
+0.67±0.05
+smooth-coverage 0.88±0.02 0.76±0.05 0.60±0.02
+0.41±0.02
+0.63±0.02
+0.69±0.04
+Matterport3D
+Method
+Area
+Objects Landmarks View Local. Navigation Reconstruction
+area-coverage
+0.54±0.06 0.52±0.07 0.34±0.07
+0.20±0.02
+0.66±0.03
+0.44±0.01
+smooth-coverage 0.58±0.06 0.56±0.05 0.35±0.07
+0.21±0.02
+0.67±0.01
+0.44±0.01
+Table 4. Ablation study on designing a smoother coverage reward function.
+5.4
+Ablation studies
+In the foregoing experiments, we have proposed two changes to implementations of
+prior work: (1) using a smoother variant of the area-coverage reward function pro-
+posed in [16], and (2) using the feature representation from a memory architecture for
+curiosity as opposed to image representations as done in [49,11,16]. We now evalu-
+ate the effect of these changes on exploration performance.
+How do smoother rewards affect exploration? As we discussed in Sec. 3.3, the formula-
+tion of area-coverage leads to speciﬁc forms of reward sparsity. We addressed this by
+proposing the smooth-coverage method. We now evaluate the impact of making this
+change across different metrics and datasets. In Tab. 4, we compare the two coverage
+approaches on all six metrics on AVD and MP3D. As we can see, smooth-coverage
+leads to consistent improvements across most metrics on AVD and across the visitation
+metrics in MP3D.
+How do memory-based representations inﬂuence curiosity-driven exploration? As dis-
+cussed in Sec. 5.1, curiosity requires good feature representations that account for
+partial observability in large 3D environments. Using better memory architectures for
+learning can improve the performance by maintaining longer-term state representations.
+In Fig. 11, we compare the performance between the spatio-temporal memory (spa-
+tial map + RNN) based representation that we use (curiosity-rnn) and the version
+
+An Exploration of Embodied Visual Exploration
+25
+# time steps
+Active Vision Dataset
+Matterport3D
+Fig. 11. Ablation study on feature representations for curiosity-driven exploration.
+used in [16] where pre-trained ImageNet features were used as the feature represen-
+tation (curiosity-cnn). As we can see, using the RNN feature representation leads
+to signiﬁcant improvements on all visitation metrics. In fact, curiosity-cnn fails
+to learn any meaningful behaviors in MP3D. Despite the improvement seen here, the
+overall performance of curiosity is signiﬁcantly worse than the other paradigms.
+Curiosity-driven exploration may therefore beneﬁt from having even better memory ar-
+chitectures. In addition, having a large number of parallel environments is critical for
+training curiosity-based agents [11]. This is not practical in our case where we use large-
+scale 3D environments that have signiﬁcantly higher computational and data constraints
+than simpler 2D scenarios.
+6
+Conclusions
+We considered the problem of visual exploration in 3D environments. Prior work presents
+results on varying experimental conditions, making it hard to analyze what works when.
+Motivated by this, we proposed a novel benchmark for consistently evaluating explo-
+ration algorithms under common experimental conditions: policy architecture, 3D en-
+vironments, learning algorithm, and diverse evaluation metrics. We then presented a
+comparative study of four popular exploration paradigms on this standardized bench-
+mark.
+To enable this study, we introduced new metrics and baselines, and we improved
+upon some existing approaches to scale well to 3D environments. Speciﬁcally, we ex-
+tend the ideas from reconstruction-based exploration 360◦scene exploration approaches
+to work on general 3D environments. We also introduced a new coverage reward func-
+tion that improves upon the existing area-coverage method. Our analysis provides a
+
+26
+S. Ramakrishnan et al.
+comprehensive view of the state of the art and each paradigm’s strengths and weak-
+nesses.
+To recap some of our key ﬁndings:
+– In the small and cluttered environments from Active Vision Dataset, the coverage
+and reconstruction methods are the strongest paradigms as they prioritize se-
+lecting views that maximally increase information.
+– In the large and open environments from Matterport3D, novelty and smooth-coverage
+approaches are the strongest paradigms as they have smoother reward functions
+which are easier to optimize in large environments.
+– In the diverse Matterport3D testing environments, different approaches tend to
+dominate on different skills, highlighting the need for diverse evaluation metrics.
+– The performance trends among learned approaches remain consistent in noise-free
+and noisy test conditions, whereas a purely geometric approach like frontier-exploration
+tends to deteriorate rapidly in the presence of sensor noise.
+– Our proposed smooth-coverage method improves over a prior coverage approach
+by using a smoother reward function that eases optimization and leads to consis-
+tently better performance on a variety of conditions.
+– Our proposed adaptation of reconstruction successfully explores 3D environ-
+ments and competes closely with the best methods on most settings.
+– Improved memory architectures may be the key to scaling curiosity-driven explo-
+ration to visually-rich 3D environments under extreme partial observability.
+– An easy-to-implement heuristic imitation signiﬁcantly outperform baselines typ-
+ically employed, and can serve as a better baseline for future research.
+We hope that our study serves as a useful starting point and a reliable benchmark
+for future research in embodied visual exploration. Code, data, and models are publicly
+available.

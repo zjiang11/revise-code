@@ -1,0 +1,1779 @@
+Path-based Explanation for Knowledge Graph Completion
+Heng Chang∗
+
+Huawei Technologies Co., Ltd.
+Beijing, China
+Jiangnan Ye∗
+
+Huawei Technologies Co., Ltd.
+London, United Kingdom
+Alejo Lopez-Avila
+
+Huawei Technologies Co., Ltd.
+London, United Kingdom
+Jinhua Du
+
+Huawei Technologies Co., Ltd.
+London, United Kingdom
+Jia Li†
+
+Hong Kong University of Science and
+Technology (Guangzhou)
+Guangzhou, China
+Abstract
+Graph Neural Networks (GNNs) have achieved great success in
+Knowledge Graph Completion (KGC) by modelling how entities
+and relations interact in recent years. However, the explanation of
+the predicted facts has not caught the necessary attention. Proper ex-
+planations for the results of GNN-based KGC models increase model
+transparency and help researchers develop more reliable models.
+Existing practices for explaining KGC tasks rely on instance/subgraph-
+based approaches, while in some scenarios, paths can provide more
+user-friendly and interpretable explanations. Nonetheless, the meth-
+ods for generating path-based explanations for KGs have not been
+well-explored. To address this gap, we propose Power-Link, the first
+path-based KGC explainer that explores GNN-based models. We
+design a novel simplified graph-powering technique, which enables
+the generation of path-based explanations with a fully parallelisable
+and memory-efficient training scheme. We further introduce three
+new metrics for quantitative evaluation of the explanations, to-
+gether with a qualitative human evaluation. Extensive experiments
+demonstrate that Power-Link outperforms the SOTA baselines in
+interpretability, efficiency, and scalability. The code is available at
+https://github.com/OUTHIM/power-link
+CCS Concepts
+• Computing methodologies →Reasoning about belief and
+knowledge.
+Keywords
+Graph Neural Networks, Knowledge Graph Completion, Model
+Transparency, Model Explanation
+∗The two first authors made equal contributions.
+†Corresponding author.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+© 2024 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 979-8-4007-0490-1/24/08
+https://doi.org/10.1145/3637528.3671683
+ACM Reference Format:
+Heng Chang, Jiangnan Ye, Alejo Lopez-Avila, Jinhua Du, and Jia Li. 2024.
+Path-based Explanation for Knowledge Graph Completion. In Proceedings of
+the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining
+(KDD ’24), August 25–29, 2024, Barcelona, Spain. ACM, New York, NY, USA,
+12 pages. https://doi.org/10.1145/3637528.3671683
+1
+Introduction
+Knowledge graphs (KGs) are a form of knowledge representation
+that encodes structured information about real-world entities and
+their relations as nodes and edges. Each edge connects two entities,
+forming a triple called a fact. However, real-world KGs often suffer
+from incompleteness, which limits their usefulness and reliability.
+Incompleteness refers to not all possible facts being represented
+in the KG, either because they are unknown or unobserved. To
+address these issues, knowledge graph completion (KGC) is a task
+that aims to predict missing relations in a KG, given the existing
+facts [3, 10, 14].
+GNN-based KGC models have shown effectiveness on the KGC
+task and attracted tremendous attention in recent years [17]. While
+GNNs achieve remarkable success in completing KGs, how GNNs
+predict a given triplet candidate as factual remains unclear. As
+a result, the prediction needs substantial explanations before re-
+searchers and end users bring them into practice, which falls into
+the research scope of explainable artificial intelligence (XAI) [29].
+XAI enhances the transparency of black-box machine learning
+(ML) models and has been extensively investigated on GNNs for
+node/graph-level tasks on homogeneous graphs [33]. For a given
+data instance, these GNN explanation methods either learn a mask
+to select a subgraph induced by edges [22, 32] or search for a sub-
+graph in the graph space [34] as an explanation. However, to the
+best of our knowledge, the GNN explanation of KGs, especially
+regarding the KGC task, is surprisingly few in the literature.
+Providing explanations for GNN-based KGC models is a novel
+and challenging task. Given the nature of KGs in modeling struc-
+tured real-world information, their end users often have little or
+no background in AI or ML. Therefore, the explanations need to be
+more aligned with human intuitions. Existing approaches attempt
+to explain KGs from triplet or subgraph perspectives. Still, the prob-
+lem of what constitutes a good explanation of KGs is more complex
+than on homogeneous graphs, especially in terms of satisfying the
+“stakeholders’ desiderata” [20]. In contrast to the widely adopted
+instance/subgraph-based explanations, we focus on generating the
+arXiv:2401.02290v2  [cs.LG]  18 Oct 2024
+
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Heng Chang, Jiangnan Ye, Alejo Lopez-Avila, Jinhua Du, & Jia Li
+New  York
+United States
+North America
+located_in
+?
+New York Knicks
+Subgraph Explanation
+✔
+✖
+located_in
+Path Explanation
+New  York
+North America
+United States
+?
+✔
+Figure 1: Example of the advantage that path-based explana-
+tion has over subgraph-based ones.
+explanations of GNN-based KGC models from the perspective of
+paths in this work:
+Can paths in the KG provide better explanations for
+GNN-based embedding models on the KGC task?
+Figure 1 illustrates three challenges of applying instance-based
+or subgraph-based GNN explanations from homogeneous graphs
+to KGs: (1) Interpretability: For KGs, explanations should reveal
+the connections between a pair of entities given a specific relation
+through paths on KGs. However, previous approaches produce dis-
+connected subgraphs that do not show this connected pattern (e.g.,
+left from Figure 1). These subgraphs are not suitable for human inter-
+pretation and exploration. (2) Sufficiency: Paths contain sufficient in-
+formation to explain whether a given triplet is factual. From Figure 1,
+for explaining triplet ⟨𝑁𝑒𝑤_𝑌𝑜𝑟𝑘,𝑙𝑜𝑐𝑎𝑡𝑒𝑑_𝑖𝑛, 𝑁𝑜𝑟𝑡ℎ_𝐴𝑚𝑒𝑟𝑖𝑐𝑎𝑛⟩,
+the subgraph-based explanation brings in a noisy and irrelevant fact
+⟨𝑁𝑒𝑤_𝑌𝑜𝑟𝑘,ℎ𝑎𝑠_𝑡𝑒𝑎𝑚, 𝐾𝑛𝑖𝑐𝑘𝑠⟩. The instance-based one only ex-
+tracts a related fact ⟨𝑁𝑒𝑤_𝑌𝑜𝑟𝑘,𝑚𝑜𝑠𝑡_𝑝𝑜𝑝𝑢𝑙𝑎𝑟_𝑐𝑖𝑡𝑦,𝑈𝑛𝑖𝑡𝑒𝑑_𝑆𝑡𝑎𝑡𝑒𝑠⟩
+but loses sufficient information for users to interpret. Therefore,
+neither method is suitable for KGs where concise and informa-
+tive semantics are preferred. (3) Scalability: Compared to general
+subgraphs, paths form a much smaller search space for optimal
+subgraph explanations since paths are simpler and scale linearly in
+the number of graph edges. Therefore, paths can better fit with KGs
+that usually come with massive entities. To our best knowledge,
+there is only one approach, PaGE-Link [36] that explores path-
+based solutions to the GNN explanation problem. But PaGE-Link
+focuses on heterogeneous graphs without considering the relation
+types and the scalability of the method, which makes it unsuitable
+to be directly applied to KGs. Therefore, the question of KGs is still
+underexplored.
+Given the important roles that paths play in the explanation of
+KGC tasks, we propose Power-Link to tackle the aforementioned
+challenges, which aims to enhance the interpretability, sufficiency,
+and scalability of the explanations by providing explainable paths
+for the GNN-based KGC models. To the best of our knowledge,
+this is the first work specifically designed to explain KGC tasks via
+paths. Figure 2 depicts the overall framework of Power-Link. 1) We
+first extract a k-hop subgraph around the source and target nodes
+and prune it to eliminate noisy neighbours. 2) A Triplet Edge Scorer
+Table 1: Methods and desired explanation properties of rep-
+resentative GNN and KGC explanation methods.
+Methods
+GNNExp [32]
+PGExp [22]
+SubgraphX [34]
+PaGE-Link [36]
+KE-X [39]
+Kelpie [24]
+Power-Link
+Heterogeneity
+✕
+✕
+✕
+✓
+✓
+✓
+✓
+Explains GNN
+✓
+✓
+✓
+✓
+✕
+✕
+✓
+Explains KGC
+✕
+✕
+✕
+✕
+✓
+✓
+✓
+Path-based
+✕
+✕
+✕
+✓
+✕
+✕
+✓
+Scalability
+✓
+✓
+✕
+✓
+✕
+✓
+✓
+Local Post-hoc
+✕
+✕
+✕
+✓
+✕
+✓
+✓
+(TES) is proposed to measure the importance of each edge along the
+candidate paths by leveraging the node and edge type information,
+which is specifically designed for the KG scenario. 3) PaGE-Link
+employs the shortest-path searching algorithm to emphasize paths
+in each iteration, which is computationally intensive and not ap-
+plicable to large-scale KGs. It also introduces the accumulation of
+on-path(edges on the paths) errors during the learning process. To
+alleviate this issue, we propose to replace the shortest-path search-
+ing algorithm with a specially-designed graph-Power-based method
+to amplify explainable on-path edges. Our method is highly par-
+allelisable with GPUs and consumes minimal memory resources,
+enabling easy scaling to large KGs. The graph power-based ap-
+proach also provides an interface for end users to select the desired
+path length of each explanation manually. Power-Link generates
+interpretable paths to explain the prediction of GNN-based KGC
+models in an efficient manner. 5) To better measure the performance
+of explanation methods on KGs from a quantitive perspective, we
+also propose three proper metrics, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦−, and 𝐻Δ𝑅,
+that reflect how good an explanation is in the empirical evaluation.
+The main contributions of this paper are summarised as follows:
+• Motivated by the need to explain the prediction on the KGC
+task, we propose the first path-based methods Power-Link
+for GNN-based KGC models that efficiently generate more
+human-interpretable explanations.
+• We propose a novel path-enforcing learning scheme based on
+a simplified graph-powering technique, which enjoys high
+parallelisation and low memory cost. This enables Power-
+Link to generate multiple explanatory paths precisely and
+efficiently.
+• We propose three metrics to better evaluate the performance
+of path-based explanation methods. We show the superiority
+of Power-Link in explaining GNN-based KGC models over
+SOTA baselines through extensive experiments from both
+quantitative and qualitative perspectives.
+2
+Related Work
+2.1
+Knowledge Graph Completion (KGC)
+Embedding-based KGC methods aim to embed the triplets into
+low-dimensional space such that triplets sharing similar patterns
+become closer to each other, which has achieved immense success in
+
+Path-based Explanation for Knowledge Graph Completion
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Extract 
+and Prune
+Shortest Path
+Algorithm
+Output: Explanation Paths
+?
+𝑝1
+Edges with Importance Scores
+?
+𝑝2
+𝑝3
+𝑝4
+?
+Input: Knowledge Graph and KGC model
+?
+Computational Graph 𝑮𝒄
+Entities
+Relations
+GNN‐
+KGE
+𝐻ሺ𝑌௢, 𝑌௦෡ሻ
+Score matrix 𝑴
+𝑝ଵଵ
+⋯
+𝑝ଵ௡
+⋮
+⋱
+⋮
+𝑝௡ଵ
+⋯
+𝑝௡௡
+𝐺௖
+෢
+Sampling
+𝑃𝑜𝑤𝑒𝑟𝐿𝑖𝑛𝑘
+ሺ𝑀, 𝐺௖ሻ
+ℒ௣௔௧௛ሺ𝑃𝑎𝑡ℎ௢௡ሻ
+Minimizing
+Path-Enhanced Edge Scorer
+Update 𝑴
+  Edge Scorer
+ሺℎ୧, 𝑟௝, 𝑡௞, ℎ෠, 𝑟̂, 𝑡̂ሻ
+Φ
+Figure 2: The overall framework of the proposed Power-Link. Given a KG and a trained KGC model as inputs, we aim to
+generate interpretable paths to explain why the KGC model predicts a target triplet is factual.
+the past decade. Please kindly refer to the survey [17] for a thorough
+review of the recent advances in embedding-based methods. Despite
+the success of GNN-based graph embedding models for KGC, the
+underlying mechanisms of how these embeddings facilitate KG
+completion are still unclear. Therefore, explaining KGC models
+is an important research challenge, especially under the post-hoc
+circumstance, which is the main focus of our paper. Specifically, we
+choose GNN-based KGC models as the targeting type of model to
+explain. GNNs are recently considered unnecessary for KGC due
+to their limited impact on the link prediction performance [38]. On
+the contrary, we present Power-Link to underline the significant
+impact of GNNs on the explanation of KGC.
+2.2
+GNN and KGC Explanation
+In this section, we review existing representative methods for GNN
+and KGC Explanation. For better clarity, we highlight their main
+differences and advantages by comparing them with our proposed
+Power-Link in Table 1.
+GNN explanation. Explaining the prediction of GNNs [6–8, 11,
+12, 21] is an important task for understanding and verifying their
+behaviour. A common approach is to identify a subgraph that is
+most relevant to the prediction. In this vein, GNNExplainer [32]
+and PGExplainer [22] use mutual information (MI) between the
+masked graph and the original prediction as the relevance measure
+and select edge-induced subgraphs by learning masks on graph
+edges and node features. SubgraphX [34] and GStarX [35] use game
+theory values, such as Shapley value [27] and structure-aware HN
+value [13], as the relevance measure, and select node-induced sub-
+graphs by performing Monte Carlo Tree Search (MCTS) or greedy
+search on nodes. PaGE-Link [36] argues that paths are more inter-
+pretable than subgraphs and extends the explanation task to the link
+prediction problem on heterogeneous graphs. For a review of other
+types of GNN explanations, please kindly check the surveys [18, 33].
+Among them, our work is most closely related to PaGE-Link [36], as
+we also advocate for path-based explanations for GNNs. However,
+rather than the heterogeneous graphs, we focus on a new challeng-
+ing task of providing path-based explanations for KGC. This could
+not be trivially tackled by the existing methods due to the lack of
+triplet information and the limitation of scalability.
+KGC explanation. As the scope of this paper, the explanation of
+KGC is rather less explored especially compared with the fruitful
+results on GNN explanations. Janik and Costabello [15] proposes
+ExamplE heuristics generate disconnected triplets as influential
+examples in latent space. Similarly, Zhao et al. [39] leverages in-
+formation entropy to quantify the importance of candidates by
+building a framework KE-X and generating explainable subgraphs
+accordingly. Rossi et al. [24] develops an independent framework
+Kelpie to explain the prediction of embedding-based KGC methods
+by identifying the combinations of training facts. However, these
+methods produce explanations in the form of subgraphs or triplets.
+We argue that paths provide better interpretability than unrestricted
+subgraphs/triplets. Thus path-based explanations are preferable on
+KGC tasks when the users have limited ML backgrounds.
+2.3
+Paths on Graphs
+We briefly review the methods which leverage paths on graphs as
+crucial parts of their algorithms. Paths are often used to represent
+the structure and semantics of graphs, such as Katz index [19],
+graph distance [4], SimRank [16], and PathSim [28]. They can also
+reveal the underlying relationship between a pair of nodes, and
+therefore bring more explanability to the methods. [23] propose
+a context path-based GNN that recursively embeds the paths con-
+necting nodes into the node embedding with attention mechanisms.
+In the same field, Zhu et al. [41] utilizes the idea from the neural
+bellman-ford algorithm to construct a general path-based frame-
+work NBFNet for both link prediction and KGC. Zhu et al. [40]
+further enhance the scalability of NBFNet by proposing to use A∗
+algorithm for path constructions. Chang et al. [5] propose to aug-
+ment the knowledge used in the KGC task from the counterfactual
+view and enhance the explainability of the completion results. While
+these methods can generate non-trivial path-based explanations as
+a side-product, they cannot be applied to the black-box explanation
+setting in explainable artificial intelligence (XAI), where the pre-
+trained KG embeddings are given. Therefore, we argue that paths
+are still valuable for providing interpretable explanations for KGC
+under the local post-hoc scenario.
+3
+Preliminaries
+3.1
+Knowledge Graphs (KGs)
+A KG is a collection of triples of the form:
+G = (E, R) = {(𝑒𝑖,𝑟𝑘,𝑒𝑗)} ⊂(E × R × E),
+
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Heng Chang, Jiangnan Ye, Alejo Lopez-Avila, Jinhua Du, & Jia Li
+where E denotes the set of entities (nodes) and R is the set of
+relations (edges). (𝑒𝑖,𝑒𝑗) are 𝑖-th and 𝑗-th entities and 𝑟𝑘is 𝑘-th
+relation between them. The entities are indexed by 𝑖, 𝑗, and the
+relation is indexed by 𝑘. The number and type of relations in a KG
+can vary widely depending on the domain and the source of the
+data. We also use the notation (ℎ𝑖,𝑟𝑘,𝑡𝑗) to indicate an entity pair
+with a directional relation 𝑟𝑘, where ℎ𝑖is the head entity and 𝑡𝑗is
+the tail entity.
+Throughout this paper, we use bold terms, 𝑾or 𝒆, to denote
+matrix/vector representations for weights and entities, respectively.
+And we select italic terms, 𝑤ℎor 𝛼, to denote scalars. We also use
+a binary adjacency matrix 𝑨∈{0, 1}| E|×| E| to define whether two
+entities are connected in a KG G. The (𝑖, 𝑗) entry 𝑨𝑖𝑗= 1 if (ℎ𝑖,𝑡𝑗)
+is valid for any 𝑟𝑘or otherwise 𝑨𝑖𝑗= 0.
+3.2
+GNN-Based framework for KGC
+To predict the valid but unseen triplets, the task of KGC uses known
+triplets existing in the KG G. GNN-Based framework dealing with
+KGC usually adopts an encoder-decoder framework [25], where
+GNNs perform as the encoder and the KGE score functions (e.g.,
+TransE, DistMult, and ConvE) perform as the decoder. A KG’s enti-
+ties and relations are first embedded by the GNN encoder through
+the message passing and neighbourhood aggregation procedures [37].
+Using the embeddings, the score function 𝑠, which is also referred
+to as the energy function in the energy-based learning framework,
+learns to assign a score 𝑠(ℎ𝑖,𝑟𝑗,𝑡𝑘) from either real space or com-
+plex space to each potential triplet (ℎ𝑖,𝑟𝑗,𝑡𝑘) ∈E × R × E. The
+learned scores reflect the possibility of the existence of triplets.
+Because of the message passing and neighborhood aggregation
+mechanism in GNNs, a 𝐿-layer GNN only collects messages from
+the 𝐿-hop neighbors of an entity pair 𝑒𝑖,𝑒𝑗to compute their rep-
+resentation 𝒆𝑖and 𝒆𝑗. Therefore, we constrain the search space
+of explaining the KGC model Φ(G, (ℎ,𝑟,𝑡)) with an 𝐿-Layer GNN
+encoder to the computation graph G𝑐= (E𝑐, R𝑐). G𝑐is the 𝐿-hop
+ego-graph of the predicted pair (𝑠,𝑡), i.e., the subgraph with entity
+set E𝑐= {𝑒∈E|𝑑𝑖𝑠𝑡(𝑒,𝑒𝑖) ≤𝐿or 𝑑𝑖𝑠𝑡(𝑒,𝑒𝑗) ≤𝐿}. Therefore, the
+KGC result is thus fully determined by G𝑐, i.e., Φ(G, (ℎ,𝑟,𝑡)) ≡
+Φ(G𝑐, (ℎ,𝑟,𝑡)).
+4
+Problem Formulation
+In this work, we focus on a post-hoc and instance-level KGC expla-
+nation problem. The post-hoc assumption means the model Φ(·, ·)
+is already trained and fixed, and the explanation method does not
+modify its architecture or parameters. The instance-level assump-
+tion means that the explanation method generates an explanation
+for each individual prediction of a target triplet. We use the ˆ
+ℎ𝑎𝑡
+notation to denote the target to be explained and its related ele-
+ments. The target triplet is denoted by ⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩= (ℎˆ𝑖,𝑟ˆ𝑗,ℎˆ𝑘). The
+explanation method aims to provide a rationale for why a given
+triplet is predicted as factual by the model Φ(·, ·). In a practical KG
+user case, the explanation could address questions such as why
+a person’s nationality is USA. We narrow down the scope of ex-
+planation to paths. The explanatory paths should be concise and
+informative. It should only contain nodes and edges that are most
+influential to the prediction. We formally define the explanation
+problem for GNN-based KGC models as:
+Problem 1 (Path-based KGC Explanation). We focus on the
+task of generating path-based explanations for a predicted fact be-
+tween a pair of entities 𝑒𝑖and 𝑒𝑗. Given a trained GNN-based KGC
+model Φ(·, ·), a computation graph G𝑐of ˆℎ, ˆ𝑡that extracted from the
+target KG G, we find an explanation P = { 𝜋|𝜋is a ˆℎ−ˆ𝑡path with
+maximum length 𝐿}. By proper construction of optimization on can-
+didates from 𝜋∈P, we aim to generate concise and influential paths
+as explanations for the prediction.
+To further reduce the graph complexity and accelerate the pro-
+cess of finding paths, we adopt the 𝑘-core pruning module from [36]
+to eliminate spurious neighbours and improve speed. The 𝑘-core
+of a graph is defined as the unique maximal subgraph with a min-
+imum node degree 𝑘[2], such that the 𝑘-core of G𝑐is defined as
+G𝑘𝑐= (E𝑘𝑐, R𝑘𝑐).
+5
+Proposed Method: Power-Link
+Power-Link contains three components: a Triplet Edge Scorer (TES),
+a Path-Enforcing Learning module, and a Path Generation module.
+In a path-forcing way, the TES learns to create a score matrix for
+each edge in the graph. The path generation module then selects
+explanatory paths according to the score matrix. Next, we introduce
+them in detail.
+5.1
+Triplet Edge Scorer
+In the Power-Link, we propose to learn a Triplet Edge Scorer (TES) to
+leverage the entity and relation information in the KG. TES gives a
+score to every edge in the computational graph. The score measures
+the importance of each edge in explaining the prediction of the
+target triplet. It can also be interpreted as the probability of the
+existence of each edge for the explanation. Different from [22],
+which only integrates node features to mark the edge scores, we
+consider the local meaning of each edge triplet to the explanation
+of the target triplet. To be more precise, we combine the triplet
+embedding vectors of the local edge (ℎ𝑖,𝑟𝑗,𝑡𝑘) with the embedding
+vectors of the explanation target ⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩. We use a Multi-Layer
+Perceptron(MLP) to process the combined features and generate
+the edge score. The overall formula of the TES can be defined as:
+𝑇𝐸𝑆(·) = 𝑀𝐿𝑃(𝐶𝑜𝑚𝑏𝑖𝑛𝑒(·))
+(1)
+We propose two possible strategies for combining the local edge
+triplet and the target triplet:
+Concatenation. In the first strategy, we simply concatenate the
+embedding vectors of both triplets. This strategy gives more flexi-
+bility to the scorer while resulting in more computational cost. The
+concatenation strategy is written as:
+𝐶𝑜𝑚𝑏𝑖𝑛𝑒𝑐𝑎𝑡(ℎ𝑖,𝑟𝑗,𝑡𝑘, ˆℎ, ˆ𝑟, ˆ𝑡) =
+h
+ℎ𝑖◦𝑟𝑗◦𝑡𝑘◦ˆℎ◦ˆ𝑟◦ˆ𝑡
+i
+(2)
+Euclidean. In the second strategy, we manually calculate the Eu-
+clidean norm of the difference between the corresponding head,
+relation, and tail embeddings of the edge triplet and the target
+triplet. This results in a 3-dimensional vector. This strategy can
+be more beneficial to the KGC models with energy-based score
+functions. The Euclidean strategy can be written as:
+𝐶𝑜𝑚𝑏𝑖𝑛𝑒𝑒𝑢𝑐(ℎ𝑖,𝑟𝑗,𝑡𝑘, ˆℎ, ˆ𝑟, ˆ𝑡) =
+h
+∥ℎ𝑖−ˆℎ∥, ∥𝑟𝑗−ˆ𝑟∥, ∥𝑡𝑘−ˆ𝑡∥
+i
+(3)
+
+Path-based Explanation for Knowledge Graph Completion
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+5.2
+Path-Enforcing Learning
+In order to train the edge scorer to identify explanatory edges, we
+propose a path-enforcing learning method relying on the simplified
+powering process of the score matrix. Our method is simpler, faster,
+more efficient, more customizable, and more stable compared with
+PaGE-Link[36].
+We first briefly discuss the problem we find in the learning pro-
+cess of PaGE-Link. They optimize an explanatory weighted mask
+and enhance the path-forming explanations by simultaneously forc-
+ing the on-path (edges on the paths between the target entities)
+weights to increase and the off-path (edges not on the paths be-
+tween the target entities) weights to decrease. The potential paths
+are selected using the shortest-path searching algorithm, whose
+cost matrix is designed based on the weighted mask and restrictions
+on the node degree. First, the shortest-path searching algorithm is
+not parallelisable, which is slow when scaled to large KGs. Second,
+we argue that this optimizing strategy may introduce noise at the
+early training stage. In the beginning, higher weights in the mask
+can be assigned to trivial edges because of incomplete training,
+while meaningful edges are ignored. Therefore, when applying
+shortest-path searching on the underfitting weighted mask, the
+algorithm may strengthen the meaningless paths and weaken the
+important explanatory paths. This introduces noise that can be
+propagated through epochs. We also observe that PaGE-Link often
+generates similar explanations as the GNNExplainer, which is not
+equipped with a path-enforcing training strategy. We consider this
+result from the early perturbations in the training process, which
+hinders the algorithm from finding explanatory paths.
+To alleviate the early perturbations, we replace the shortest-path
+searching with a graph-power-based algorithm that enhances paths
+of specific lengths. The algorithm strengthens all on-path edges
+during the whole training process at a low cost of computational
+time. Different from the intuition of PaGE-Link, we find it unneces-
+sary to suppress the off-path edges during training. This also gives
+us room to significantly improve the efficiency of the algorithm.
+By doing so, instead of powering the whole matrix with increasing
+sparsity, we only need to compute the parallelisable multiplication
+of a decreasing-sparsity row vector and a fixed-sparsity matrix. The
+model learns to balance the global explanatory performance and
+the forcing of paths from the initial stage of the training process
+without being affected by the early noise. Next, we explain the
+algorithm in detail.
+Path Enforcing. Intuitionally, the (𝑖𝑡ℎ,𝑘𝑡ℎ) element in the prob-
+ability adjacency matrix of power 𝑙indicates the summation of
+the probabilities of all length-𝑙paths connecting nodes (𝑒𝑖,𝑒𝑘).
+Generally, we take the target element of the powered probability
+adjacency matrix and maximise it to strengthen all the edges on
+the path between target nodes. Next, we explain the idea in detail.
+Given an extracted and pruned computational graph G𝑘𝑐= (E𝑘𝑐, R𝑘𝑐)
+with |E| = 𝑁, we let 𝑨∈R𝑁×𝑁be the adjacency matrix of the
+computational graph. Let M = 𝑇𝐸𝑆(𝑟),𝑟∈R𝑘𝑐be the probability
+matrix obtained by scoring all edges in the computational graph
+with TES. M can be considered as a weighted adjacency matrix
+M ∈R𝑁×𝑁. Let Mˆ𝑖ˆ𝑘be the edge probability of the target triplet
+⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩, indicating the value at the targeting position (ˆ𝑖, ˆ𝑘) of M.
+We write them as:
+M =
+
+𝑝11
+. . .
+𝑝1𝑁
+...
+...
+...
+𝑝𝑁1
+. . .
+𝑝𝑁𝑁
+
+,
+𝑎𝑛𝑑𝑝𝑖𝑘= M𝑖𝑘
+(4)
+We suppose that we are interested in paths of length less than 𝐿. In
+order to enhance paths of length 𝑙(1 ≤𝑙≤𝐿), instead of powering
+the whole probability matrix, we use a simplification trick. We
+only power the target (ˆ𝑖𝑡ℎ) row vector in the matrix, which we call
+the power vector 𝒖= Mˆ𝑖:, 𝒖∈R1×𝑁. This is done by multiplying
+M to 𝒖by 𝑙−1 times, yielding 𝒖(𝑙). We illustrate the product of
+the power vector and a single column in M with Eq. (5). When
+multiplying 𝒖with the 𝑘𝑡ℎcolumn of M, we are actually updating
+the 𝑘𝑡ℎvalue in 𝒖, 𝒖𝑘, with the sum of the probabilities of all paths
+in length 𝑙, connecting nodes ( ˆℎ,𝑡𝑘).
+𝒖(𝑙)
+𝑘
+= 𝒖(𝑙−1) M:𝑘
+(5)
+For better understanding, we present a simple example of 𝑙= 2, ˆ𝑖=
+3,𝑘= 4:
+𝒖(2)
+4
+= 𝑝(1)
+31 𝑝(1)
+14 + 𝑝(1)
+32 𝑝(1)
+24 · · · + 𝑝(1)
+3𝑁𝑝(1)
+𝑁4
+(6)
+where 𝑝indicates the probability of a single edge in the probabil-
+ity matrix M. The general equation of the powering process for
+updating the whole power vector 𝒖for 𝑙iterations can be written
+as:
+𝒖(𝑙) = 𝒖(1) M𝑙−1
+(7)
+We further normalize the power vector. We first divide it element-
+wisely by the number of paths between each node pair. This can
+be obtained by simply dividing the power vector by the ˆ𝑖𝑡ℎrow
+of the adjacency matrix 𝑨of power 𝑙−1. With the simplification
+trick, we only power the ˆ𝑖𝑡ℎrow vector 𝒂. Similar to Eq. (7), we
+have 𝒂(𝑙) = 𝒂(1)𝑨𝑙−1. We then elementwisely take the root of it
+by the path length 𝑙. Now we have the average probability of the
+edge in the paths between the pair of nodes in each position of the
+matrix. The normalization process can be written as:
+𝒖(𝑙)
+𝑘
+=
+𝑙
+v
+u
+u
+t𝒖(𝑙)
+𝑘
+𝒂(𝑙)
+𝑘
+, 1 ≤𝑘≤|E|
+(8)
+We take the target ˆ𝑘𝑡ℎelement 𝒖(𝑙)
+ˆ𝑘
+from the powered power vector,
+corresponding to the connection to the tail node ˆ𝑡in the target
+triplet. The element represents the average probability of the edges
+on the length 𝑙paths between the target nodes (ˆ𝑖, ˆ𝑘).
+We iterate the above process. After each round 𝑙of powering,
+we record the 𝒖(𝑙)
+ˆ𝑘. Finally, we get the average probability of all
+on-path edges of length less than or equal to 𝐿by averaging all the
+𝒖(𝑙)
+ˆ𝑘, denoted by 𝑃𝑜𝑛:
+𝑃𝑜𝑛=
+1
+𝐿−1
+𝐿
+∑︁
+𝑙=1
+𝒖(𝑙)
+ˆ𝑘;
+(9)
+We design the path loss by maximizing the on-path probability,
+which is written as:
+L𝑝𝑎𝑡ℎ= −log(𝑃𝑜𝑛)
+(10)
+
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Heng Chang, Jiangnan Ye, Alejo Lopez-Avila, Jinhua Du, & Jia Li
+Mutual Information Maximising. We use the same method in
+[32] to guide the model to choose explanatorily important edges,
+which maximizes the mutual information between the predictions
+with selected edges and the predictions with the original edges. This
+is equivalent to minimizing the prediction loss, where ⊙denotes
+the elementwise product:
+L𝑝𝑟𝑒𝑑𝑖𝑐𝑡𝑖𝑜𝑛= −log 𝑃Φ
+
+𝑌= 1 | 𝐺= (M ⊙G𝑘
+𝑐), ⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩
+
+(11)
+The Overall Loss. We combine the path loss and prediction loss
+by summation. Besides, we also add a regularisation term on the
+mask (generated by TES), which is multiplied by a weight 𝛾. The
+regularisation term plays a crucial role in further concentrating the
+TES on important edges. The overall loss is defined as:
+L𝑡𝑜𝑡𝑎𝑙= L𝑝𝑟𝑒𝑑𝑖𝑐𝑡𝑖𝑜𝑛+ L𝑝𝑎𝑡ℎ+ 𝛾∥M∥2
+(12)
+5.3
+Path Generation
+After we obtain the edge scorer 𝑇𝐸𝑆trained on the target triplet
+⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩, we perform a final computation of the edge score matrix
+M = 𝑇𝐸𝑆(𝑟),𝑟∈R. The score matrix contains the explanatory
+importance of every edge to the target triplet. We take the inverse
+values of the score matrix as the cost matrix and apply Dijkstra’s
+algorithm to obtain the shortest paths. The paths are the most
+important paths supporting the prediction of the target triplet.
+P ←𝐷𝑖𝑗𝑘𝑠𝑡𝑟𝑎( ˆℎ, ˆ𝑡, G𝑘
+𝑐, M)
+(13)
+Algorithm 1 describes the full process of Power-Link. The learn-
+ing process is highly parallelizable and can be accelerated with
+GPUs. Since the score matrix M and the adjacency matrix are usu-
+ally sparse for KGs, by utilizing the sparse matrix operations, we
+are able to enjoy even faster and memory-efficient computation.
+We also provide a complexity analysis of Power-Link and other
+methods in the Experiments section.
+6
+Experiments
+6.1
+Experimental Setup
+Datasets. We evaluate Power-Link on the task KGC on the most
+popular datasets: FB15k-237 [30] and WN18RR [9]. Statistics of
+datasets can be referred to in the Appendix. We use the standard
+splits [9, 30] for a fair comparison.
+Baselines. We compare Power-Link against three SOTA baselines.
+Two subgraph-based methods include GNNExplainer [32] and PG-
+Explainer [22]. One path-based method is PaGE-Link [36]. Note
+that GNNExplainer and PGExplainer are not designed to provide
+path-based explanations. To accommodate them to our task, we
+modify them into GNNExplainer-Link and PGExplainer-Link by
+applying Dijkstra’s Algorithm to their learned weighted masks to
+extract paths. We use these explanatory methods to explain the
+predictions of three popular types of GNN-based KGC models. The
+GNN encoders RGCN [25], WGCN [26] and CompGCN [31] are
+respectively connected by the KGE decoders TransE, DistMult and
+ConvE. This gives 9 KGC models for each method to explain.
+Implementation Details. For the sake of better generalization, we
+choose the concatenation combination strategy in our experiment
+for TES. We follow the common setting of only explaining edges that
+the KGC model considers to exist. We call these edges explainable
+edges. For the FB15K237 dataset, we consider the edges that the
+Algorithm 1 The overall algorithm for our proposed Power-Link.
+Input: The KG G with nodes E, edges R and adjacency matrix 𝑨, GNN-
+based KGC model 𝜙trained on G, the parameteriser𝑇𝐸𝑆that estimates
+the importance of each edge for the explanation, a target triplet ⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩
+to be explained and the label ˆ𝑦, number of epochs 𝑇for training the
+explanation mask, the maximum length 𝐿of the explanation paths.
+Output: A set of paths P that explains the prediction.
+1: Extract the computation graph G𝑐= E𝑐, R𝑐;
+2: Prune the computation graph G𝑐for the k-core G𝑘𝑐;
+3: 𝑒𝑝𝑜𝑐ℎ= 1, 𝑃𝑜𝑛= 0;
+4: while 𝑒𝑝𝑜𝑐ℎ<= 𝑇do
+5:
+𝑙= 1
+6:
+Calculate the score matrix M = 𝑇𝐸𝑆(𝑟),𝑟∈R𝑘𝑐;
+7:
+Obtain the position (ˆ𝑖, ˆ𝑘) of the target triplet in M
+8:
+Initialize the power vector 𝒖= Mˆ𝑖:
+9:
+for 𝑙< 𝐿−1 do
+10:
+Compute the power of the power vector 𝒖(𝑙) = 𝒖(𝑙−1) M;
+11:
+Compute the average edge probability by Eq.(8);
+12:
+Accumulate the target on-path probability 𝑃𝑜𝑛= 𝑃𝑜𝑛+ 𝒖(𝑙)
+ˆ𝑘
+13:
+end for
+14:
+Average the on-path probability 𝑃𝑜𝑛= 𝑃𝑜𝑛
+𝐿−1
+15:
+Compute the total loss by Eq.(12);
+16:
+Update 𝑇𝐸𝑆through backpropagation;
+17: end while
+18: return P ←𝐷𝑖𝑗𝑘𝑠𝑡𝑟𝑎( ˆℎ, ˆ𝑡, G𝑘𝑐, M).
+KGC model assigns a score larger than 0.5 as explainable edges.
+We randomly sampled 500 explainable edges from the test set. The
+WN18RR dataset is much sparser and contains fewer samples in
+the test set. Just a few edges are scored higher than 0.5. Thus,
+we consider edges that have scores ranking at one as explainable
+edges and randomly sampled 200 target triplets. To ensure a fair
+comparison, target triplets to be explained from the same KGC
+model are identical for all explanation methods. We assume that
+longer paths contain less meaningful information for explanation
+and also increase the computational cost. Therefore, we choose a
+power order of 3 for the Power-Link throughout the experiments,
+which yields an enhancement on the explanatory paths of length
+less than or equal to 3. A more detailed experiment setup can be
+found in the Appendix.
+6.2
+Evaluation Metrics
+Motivated by [1], we evaluate the learned explanation masks with
+𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦−, and 𝑆𝑝𝑎𝑟𝑠𝑖𝑡𝑦. As the ranking difference is
+often considered important in KG-related tasks, we compare the
+quality of the explanation paths by calculating the times that the
+ranking of the target triplet drops after we delete the edges on
+the paths. This is denoted as 𝐻Δ𝑅. The detailed definitions of the
+metrics are introduced below:
+Fidelity+ (F+). Given a target triplet ⟨ˆℎ, ˆ𝑟, ˆ𝑡⟩and the computational
+graph G𝑐, the explanatory subgraph G𝑠is obtained by imposing
+the corresponding explanation mask on the computational graph,
+denoted by G𝑠= M · G𝑐. Let ˆ𝑦G be the output triplet score of the
+GNN-based KGC model propagating on G, e.g. ˆ𝑦G = Φ( ˆℎ, ˆ𝑟, ˆ𝑡, G).
+𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+ measures the soft score difference between the prediction
+on the computational graph G𝑐and the prediction on the computa-
+tional graph excluding the explanatory subgraph G𝑐\𝑠. For 𝑁test
+
+Path-based Explanation for Knowledge Graph Completion
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Table 2: GNN-based KGC explanation results. ↑indicates larger is better and ↓means smaller is better. The best results are
+marked as bold. / indicates the metric is too insignificant to measure the explanation.
+Method
+Model
+FB15k-237
+WN18RR
+F+↑
+F-↓
+Sparsity↑
+HΔR:1↑
+HΔR:3↑
+HΔR:5↑
+F+↑
+F-↓
+Sparsity↑
+HΔR:1↑
+HΔR:3↑
+HΔR:5↑
+GNNExp-Link
+RGCN + TransE
+0.479
+0.418
+0.523
+0.064
+0.176
+0.226
+0.219
+0.147
+0.561
+0.170
+0.245
+0.265
+RGCN + DistMult
+0.196
+0.182
+0.525
+0.238
+0.342
+0.380
+0.010
+0.018
+0.561
+0.160
+0.220
+0.270
+RGCN + ConvE
+0.201
+0.172
+0.524
+0.172
+0.284
+0.334
+0.079
+0.073
+0.561
+0.105
+0.130
+0.135
+WGCN + TransE
+0.019
+0.001
+0.562
+0.378
+0.506
+0.592
+0.124
+0.001
+0.556
+0.675
+0.710
+0.715
+WGCN + DistMult
+0.003
+0.002
+0.562
+0.558
+0.696
+0.772
+0.001
+0.001
+0.562
+0.125
+0.290
+0.345
+WGCN + ConvE
+0.001
+0.001
+0.562
+0.376
+0.596
+0.682
+0.004
+0.001
+0.562
+0.180
+0.365
+0.450
+CompGCN + TransE
+0.002
+0.003
+0.562
+0.014
+0.034
+0.044
+0.003
+0.003
+0.563
+/
+/
+/
+CompGCN + DistMult
+0.041
+0.041
+0.561
+0.108
+0.164
+0.208
+0.101
+0.082
+0.558
+/
+/
+/
+CompGCN + ConvE
+0.083
+0.083
+0.525
+0.064
+0.122
+0.152
+0.031
+0.025
+0.559
+/
+/
+/
+PGExp-Link
+RGCN + TransE
+0.408
+0.488
+0.533
+0.064
+0.178
+0.222
+0.168
+0.193
+0.522
+0.170
+0.240
+0.265
+RGCN + DistMult
+0.173
+0.199
+0.564
+0.240
+0.340
+0.380
+0.010
+0.014
+0.549
+0.160
+0.225
+0.260
+RGCN + ConvE
+0.199
+0.171
+0.467
+0.178
+0.278
+0.330
+0.076
+0.076
+0.502
+0.105
+0.120
+0.130
+WGCN + TransE
+0.756
+0.760
+0.526
+0.346
+0.538
+0.614
+0.189
+0.188
+0.479
+0.540
+0.650
+0.675
+WGCN + DistMult
+0.686
+0.686
+0.488
+0.588
+0.746
+0.830
+0.037
+0.037
+0.453
+0.275
+0.465
+0.530
+WGCN + ConvE
+0.835
+0.836
+0.548
+0.450
+0.678
+0.744
+0.327
+0.326
+0.529
+0.295
+0.460
+0.530
+CompGCN + TransE
+0.002
+0.002
+0.487
+0.014
+0.038
+0.046
+0.002
+0.004
+0.508
+/
+/
+/
+CompGCN + DistMult
+0.042
+0.042
+0.499
+0.094
+0.162
+0.208
+0.087
+0.096
+0.529
+/
+/
+/
+CompGCN + ConvE
+0.082
+0.082
+0.501
+0.066
+0.114
+0.134
+0.028
+0.027
+0.491
+/
+/
+/
+PaGE-Link
+RGCN + TransE
+0.496
+0.400
+0.626
+0.066
+0.170
+0.236
+0.190
+0.179
+0.737
+0.170
+0.240
+0.265
+RGCN + DistMult
+0.212
+0.178
+0.653
+0.220
+0.364
+0.430
+0.010
+0.018
+0.713
+0.165
+0.225
+0.270
+RGCN + ConvE
+0.232
+0.175
+0.662
+0.180
+0.308
+0.378
+0.008
+0.088
+0.713
+0.100
+0.125
+0.135
+WGCN + TransE
+0.030
+0.767
+0.660
+0.340
+0.540
+0.636
+0.166
+0.221
+0.709
+0.555
+0.675
+0.690
+WGCN + DistMult
+0.686
+0.683
+0.644
+0.588
+0.746
+0.832
+0.036
+0.037
+0.719
+0.275
+0.455
+0.525
+WGCN + ConvE
+0.491
+0.490
+0.664
+0.374
+0.687
+0.788
+0.325
+0.327
+0.715
+0.290
+0.460
+0.525
+CompGCN + TransE
+0.001
+0.004
+0.638
+0.014
+0.040
+0.046
+0.001
+0.004
+0.721
+/
+/
+/
+CompGCN + DistMult
+0.040
+0.042
+0.672
+0.092
+0.176
+0.218
+0.046
+0.116
+0.714
+/
+/
+/
+CompGCN + ConvE
+0.096
+0.074
+0.649
+0.068
+0.118
+0.164
+0.030
+0.028
+0.718
+/
+/
+/
+Power-Link
+RGCN + TransE
+0.699
+0.088
+0.531
+0.074
+0.174
+0.234
+0.420
+0.071
+0.816
+0.170
+0.245
+0.260
+RGCN + DistMult
+0.377
+0.186
+0.784
+0.234
+0.354
+0.432
+0.024
+0.035
+0.399
+0.165
+0.230
+0.265
+RGCN + ConvE
+0.435
+0.111
+0.832
+0.190
+0.326
+0.396
+0.085
+0.063
+0.547
+0.105
+0.130
+0.120
+WGCN + TransE
+0.775
+0.150
+0.753
+0.376
+0.582
+0.648
+0.120
+0.232
+0.938
+0.550
+0.655
+0.680
+WGCN + DistMult
+0.646
+0.294
+0.672
+0.629
+0.772
+0.836
+0.036
+0.062
+0.734
+0.275
+0.460
+0.535
+WGCN + ConvE
+0.416
+0.287
+0.720
+0.474
+0.646
+0.762
+0.324
+0.184
+0.625
+0.300
+0.470
+0.525
+CompGCN + TransE
+0.0025
+0.0026
+0.7247
+0.014
+0.04
+0.056
+0.004
+0.003
+0.872
+/
+/
+/
+CompGCN + DistMult
+0.043
+0.025
+0.506
+0.092
+0.170
+0.220
+0.135
+0.015
+0.763
+/
+/
+/
+CompGCN + ConvE
+0.137
+0.050
+0.794
+0.068
+0.130
+0.154
+0.041
+0.025
+0.942
+/
+/
+/
+Limitless
+Chile
+Argentina
+Philippines
+Contraband
+Limitless
+Brandenstein
+production
+_design
+Silkwood
+female
+Argentina
+release_in
+GNNExplainer
+PaGE-Link
+Limitless
+Chile
+Argentina
+Brandenstein
+female
+Power-Link
+PGExplainer
+Limitless
+Brandenstein
+production
+_design
+Silkwood
+female
+Argentina
+release_in
+production
+_design
+production
+_design
+production
+_design
+Figure 3: The explanations (green and blue arrows) by different explainers for the prediction ⟨𝐿𝑖𝑚𝑖𝑡𝑙𝑒𝑠𝑠,𝑟𝑒𝑙𝑒𝑎𝑠𝑒_𝑖𝑛,𝐴𝑟𝑔𝑒𝑛𝑡𝑖𝑛𝑎⟩
+(dashed red). Power-Link explains the fact by the 𝑟𝑒𝑙𝑒𝑎𝑠𝑒_𝑖𝑛relationship, whereas baseline explanations are less interpretable.
+triplets, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+ can be written as:
+𝐹+ = 1
+𝑁
+𝑁
+∑︁
+𝑖=1
+ˆ𝑦G𝑐
+𝑖
+−ˆ𝑦G𝑐\𝑠
+𝑖
+
+(14)
+A good explanation should capture all the meaningful contributions
+to the prediction while ignoring the parts that are invaluable. Thus,
+a high 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+ score can be an indication of a good explanation.
+Fidelity- (F-). Under the same settings as 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦+, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦−
+measures the soft score difference of the prediction on the compu-
+tational graph G𝑐and the prediction on the explanatory subgraph
+G𝑠.For 𝑁test triplets, 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦−can be written as:
+𝐹−= 1
+𝑁
+𝑁
+∑︁
+𝑖=1
+ˆ𝑦𝐺𝑠
+𝑖
+−ˆ𝑦G𝑐
+𝑖
+
+(15)
+
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+Heng Chang, Jiangnan Ye, Alejo Lopez-Avila, Jinhua Du, & Jia Li
+A good explanation should capture all the meaningful parts of the
+prediction. The prediction score on the explanatory graph should be
+close to that on the computational graph. Therefore, a low 𝐹𝑖𝑑𝑒𝑙𝑖𝑡𝑦−
+score can be an indication of a good explanation.
+0
+500
+1000
+1500
+2000
+2500
+0
+20000
+40000
+60000
+80000
+100000
+120000
+140000
+160000
+GPU Memory (MB)
+Number of Edges in the Target Graph
+GPU Memory Usage During the Explaining Process
+Figure 4: The GPU memory usage of Power-Link during the
+explaining process against the number of edges in each graph.
+500 samples are explained. For better illustration, we only
+record the memory usage of the explaining module. The
+memory occupied by the KGC model is ignored.
+Sparsity. As the Fidelity score is often positively correlated with
+Sparsity, we consider Sparsity as one of our evaluation metrics. In
+our experiment, we measured the soft sparsity of the explanatory
+mask. For a good explanation, the explanatory mask should be
+highly condensed on the meaningful edges, therefore rendering
+high sparsity.
+HΔR. Given a test triplet (ℎ,𝑟,𝑡), the computational graph G𝑐and
+the explanatory path set P, we extract a test graph G𝑡by removing
+edges on the explanatory paths from the computational graph,
+denoted by G𝑡= {E𝑐, R𝑡}, R𝑡∉P. We let the GNN-based KGC
+model propagate on both the test graph and the computational
+graph. This gives two output scores of the same test triplet denoted
+by ˆ𝑦𝐺𝑐= Φ(ℎ,𝑟,𝑡, G𝑐) and ˆ𝑦𝐺𝑡= Φ(ℎ,𝑟,𝑡, G𝑡). 𝐻Δ𝑅measures
+the hit rate when the ranking of ˆ𝑦𝐺𝑡is smaller than ˆ𝑦𝐺𝑐. The hit
+indicates the ranking of the target triplet drops after we remove the
+explanatory paths. A good path-based explanation should include
+only important and meaningful paths and thus cause confidence
+drops to the model if we remove these paths, yielding a high hit
+rate. For 𝑁test triplets, 𝐻Δ𝑅can be written as:
+𝐻Δ𝑅(ℎ,𝑟,𝑡, P) = 1 −1
+𝑁
+𝑁
+∑︁
+𝑖=1
+1
+
+ˆ𝑦𝐺𝑡
+𝑖
+> ˆ𝑦𝐺𝑐
+𝑖
+
+(16)
+We aim to measure 𝐻Δ𝑅against different numbers of explanatory
+paths removed from the computational graph. We denote 𝐻Δ𝑅with
+𝑚paths removed as 𝐻Δ𝑅: 𝑚.
+7
+Results and Analysis
+7.1
+KGC Explanation Results
+Table 2 summarises the explanation results of Power-Link over
+three comparable baselines. We can have the following observa-
+tions: (1) Our proposed Power-Link achieves consistently better
+performance over all baselines on the two representative datasets.
+This indicates the effectiveness of the Power-Link in generating
+Table 3: Runtime comparison between PaGE-Link and Power-
+Link. We use the two methods to explain 500 samples pre-
+dicted by WGCN-ConvE from FB15K237. The models are run
+on a single V100-32G GPU. Avg. indicates the average number
+per graph.
+Method
+Avg. nodes
+Avg. edges
+Avg. runtime
+Total runtime
+PaGE-Link
+2335
+51649
+7.99 s
+68m19s
+Power-Link
+2.369 s
+21m28s
+Table 4: Ablation study on the path-enforcing module. (-MI)
+indicates the model is explained with the mutual information
+loss only. The asterisk * indicates the results from Table 2.
+Model
+F+
+F-
+Sparsity
+HΔR:1
+HΔR:3
+HΔR:5
+RGCN-DistMult-MI
+0.356
+0.168
+0.834
+0.173
+0.308
+0.396
+WGCN-DistMult-MI
+0.325
+0.397
+0.640
+0.599
+0.683
+0.739
+CompGCN-DistMult-MI
+0.0411
+0.0299
+0.6556
+0.072
+0.126
+0.194
+*RGCN-DistMult
+0.377
+0.186
+0.784
+0.234
+0.354
+0.432
+*WGCN-DistMult
+0.646
+0.294
+0.672
+0.629
+0.772
+0.836
+*CompGCN-DistMult
+0.043
+0.025
+0.506
+0.092
+0.170
+0.220
+good explanations for the KGC task. The superiority is more obvi-
+ous on the FB15K237 KG, which is denser and more complicated.
+This reveals that the Power-Link can be more effective at explaining
+complex KGs than sparse KGs. (2) Both path-based methods PaGE-
+Link and Power-Link perform better than the two subgraph-based
+methods based on the path-oriented metrics. This aligns with the
+expected impact of the path-enforcing learning scheme. (3) The
+different choices of score functions exhibit similar trends in all
+methods. This indicates the stability of our Power-Link regarding
+score function designs. (4) RGCN-based and WGCN-based mod-
+els achieve higher scores in all our metrics than CompGCN-based
+ones. We assume that it is generally easier to explain the GNNs
+that strengthen the edge differences. This may be a future inspi-
+ration for designing explainability-reinforced GNNs for KGC. (5)
+The explanation of WN18RR is harder than FB15k-237, as we can
+observe that the results on WN18RR are consistently lower. We
+assume that this is mainly because of the smaller and sparser graph
+of WN18RR. As a result, the meaningful paths are shorter and fewer,
+which makes it harder to form interpretable explanations.
+7.2
+Ablation Studies
+We conduct ablation studies using the KGC models trained on the
+FB15K-237 dataset to verify the impact of the design components
+in our proposed method.
+The path-enforcing module. As shown in Table 4, we observed
+an obvious drop in path explanation performance when the path-
+enforcing module was removed. This is as expected since there is
+no strengthening on the impact of paths when explanations are
+generated without the path-enforcing. We expect the gap to be
+larger for denser graphs.
+The combination method in TES. Table 5 shows that using the
+Euclidean combination method yields better explanation perfor-
+mance than Concatenation on RGCN-based KGC models. The supe-
+riority is more obvious for RGCN-TransE, which uses the energy-
+based loss function during KGC training. On the contrary, Euclidean
+downgrades the performance on WGCN-based KGC models.
+
+Path-based Explanation for Knowledge Graph Completion
+KDD ’24, August 25–29, 2024, Barcelona, Spain
+The mutual information loss. We test the impact of mutual
+information loss(MIL) in explaining the WGCN-Distmult model.
+Table 6 shows that without the mutual information loss, there is
+a significant drop in the explanation performance. The MIL is the
+key component that enables the explanation method to adjust the
+weighted mask of the KG according to the prediction of the KGC
+model. Without MIL, the path-enforcing module only strengthens
+the edges on the paths between the head and tail nodes without
+considering their impacts on the model’s prediction.
+The order of powering. Table 7 presents the explanation perfor-
+mance of Power-Link when we change the order of powering in
+the path-enforcing module. Interestingly, we find that increasing
+the powering order brings better performance and vice versa. We
+believe that increasing the powering order expands the range of
+length of the paths that the module strengthens. This can enable the
+generation of more explanatory paths that contain more important
+nodes. Even though, it is worth noting that longer paths may be
+less meaningful to the users, and higher powering order requires
+more computational power.
+Comparison with PaGE-Link on heterogeneous graphs. Since
+the path-enforcing learning module in Power-Link can also be
+applied to heterogeneous graphs, for a better comparison, we re-
+produce the experiments in PaGE-Link with our proposed learning
+module. In both AugCitation and UserItemAttr datasets, Power-
+Link achieves an improvement of 0.05 on the AUC score and is
+around 1.5 times faster. The result aligns with previous experi-
+ments, showing that Power-Link is more precise and efficient. The
+specific statistics can be found in the Appendix Table 12.
+Table 5: Ablation study on the combination methods in TES.
+The asterisk * indicates the results from Table 2.
+Model
+F+
+F-
+Sparsity
+HΔR:1
+HΔR:3
+HΔR:5
+RGCN-TransE-euc
+0.711
+0.204
+0.906
+0.480
+0.640
+0.717
+RGCN-DistMult-euc
+0.266
+0.133
+0.763
+0.334
+0.455
+0.468
+RGCN-ConvE-euc
+0.189
+0.206
+0.936
+0.444
+0.542
+0.590
+WGCN-TransE-euc
+0.761
+0.444
+0.648
+0.382
+0.538
+0.656
+WGCN-DistMult-euc
+0.628
+0.375
+0.580
+0.594
+0.737
+0.822
+WGCN-ConvE-euc
+0.794
+0.377
+0.581
+0.416
+0.650
+0.726
+*RGCN + TransE-concat
+0.699
+0.088
+0.531
+0.074
+0.174
+0.234
+*RGCN + DistMult-concat
+0.377
+0.186
+0.784
+0.234
+0.354
+0.432
+*RGCN + ConvE-concat
+0.435
+0.111
+0.832
+0.190
+0.326
+0.396
+*WGCN + TransE-concat
+0.775
+0.150
+0.753
+0.376
+0.582
+0.648
+*WGCN + DistMult-concat
+0.646
+0.294
+0.672
+0.629
+0.772
+0.836
+*WGCN + ConvE-concat
+0.416
+0.287
+0.720
+0.474
+0.646
+0.762
+Table 6: Ablation study on the mutual information loss. (-PS)
+indicates that only path-searching loss is used during the
+explanation(without mutual information loss). The asterisk
+* indicates the results from Table 2.
+Model
+F+
+F-
+Sparsity
+HΔR:1
+HΔR:3
+HΔR:5
+WGCN-DistMult-PS
+0.013
+0.021
+0.938
+0.168
+0.220
+0.238
+*WGCN-DistMult
+0.646
+0.294
+0.672
+0.629
+0.772
+0.836
+7.3
+Visualization and Performance Analysis
+Visualization of explanations. Figure 3 depicts the explanations
+for the predicted fact ⟨𝐿𝑖𝑚𝑖𝑡𝑙𝑒𝑠𝑠,𝑟𝑒𝑙𝑒𝑎𝑠𝑒_𝑖𝑛,𝐴𝑟𝑔𝑒𝑛𝑡𝑖𝑛𝑎⟩by different
+Table 7: Ablation study on the powering order. The asterisk *
+indicates the results from Table 2.
+Model
+Order
+F+
+F-
+Sparsity
+HΔR:1
+HΔR:3
+HΔR:5
+RGCN-DistMult
+4
+0.367
+0.172
+0.803
+0.224
+0.376
+0.440
+RGCN-DistMult
+2
+0.172
+0.175
+0.954
+0.200
+0.296
+0.350
+*RGCN-DistMult
+3
+0.377
+0.186
+0.784
+0.234
+0.354
+0.432
+explainers. We can find that only Power-Link explains why the KGC
+result is factual by the most reasonable relationship 𝑟𝑒𝑙𝑒𝑎𝑠𝑒_𝑖𝑛
+along both of the generated paths. All other baseline explainer
+includes noisy edges (i.e., 𝐵𝑟𝑎𝑛𝑑𝑒𝑛𝑠𝑡𝑒𝑖𝑛,𝑔𝑒𝑛𝑑𝑒𝑟, 𝑓𝑒𝑚𝑎𝑙𝑒) that are
+rather irrelevant to the fact. We also find that PaGE-Link generates
+the same explanation paths as the GNNExplainer though the latter
+is not path-enforced. We attribute this to the noise introduced at
+the early training stage of PaGE-Link.
+Runtime comparison. We compare the runtime of Power-Link
+and PaGE-Link in Table 3. Power-Link is 3.18 times faster in total
+runtime and 3.37 times faster in average runtime per graph than
+PaGE-Link. This shows that the parallelisability of Power-Link
+significantly enhances the speed of the explaining process.
+GPU memory usage. In Figure 4, we illustrate the GPU memory
+usage during the explaining process against the number of edges.
+We can observe that the memory usage(in MB) is linearly related
+to the edge number, with a slope of around 0.01. When explaining
+a graph of up to 140k edges, Power-Link only takes up around 2GB
+GPU memory. This proves the excellent scalability of Power-Link.
+Human evaluation. We conduct a human evaluation to test the
+ability of the explaining methods to improve the transparency and
+interoperability of the KGC models. We randomly selected 100 sam-
+ples from the predictions of the WGCN-ConvE model on FB15K237.
+We design a user interface with a layout similar to Figure 3. The
+participants include AI researchers in NLP and recommendation
+systems with limited knowledge of KG and GNNs. They are asked
+to select the best explanation among the given 4, where multiple
+choices are allowed. 300 evaluations are collected, among which
+64.7% consider Power-Link as the best, 55.0% support PaGE-Link,
+58.7% support PGExp-Link and 56.7% support GNNExp-Link. The
+human evaluation further shows the superiority of Power-Link
+over other baseline methods.
+8
+Conclusion
+In this paper, we propose Power-Link that generates explanatory
+paths via a novel simplified graph-powering technique. Based on
+GNNs, Power-Link is the first path-based explainer for KGC tasks.
+Our approach sheds light on the direction of model transparency on
+widely used KGs, especially given the practical importance of KGs
+in industrial deployment. Extensive experiments demonstrate both
+quantitatively and qualitatively that Power-Link outperforms SOTA
+explainers in terms of interpretability, efficiency, and scalability.
+We hope our work can inspire future research to design better
+GNN-based frameworks that enhance the explainability of KGC
+models.

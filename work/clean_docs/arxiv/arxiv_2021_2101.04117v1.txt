@@ -1,0 +1,798 @@
+A Bayesian neural network predicts the dissolution of compact planetary systems
+Miles Cranmera,†, Daniel Tamayoa, Hanno Reinb,c, Peter Battagliad, Samuel Haddene,
+Philip J. Armitagef,g, Shirley Hog,a,h, and David N. Spergelg,a
+aPrinceton University, Princeton, New Jersey, USA
+bUniversity of Toronto at Scarborough, Toronto, Ontario, Canada
+cUniversity of Toronto, Toronto, Ontario, Canada
+dDeepMind, London, UK
+eCenter for Astrophysics | Harvard & Smithsonian, Cambridge, Massachusetts, USA
+fStony Brook University, Stony Brook, New York, USA
+gFlatiron Institute, New York, New York, USA
+hCarnegie Mellon University, Pittsburgh, Pennsylvania, USA
+
+Abstract
+Despite over three hundred years of eﬀort, no solutions exist for predicting when a general planetary conﬁg-
+uration will become unstable. We introduce a deep learning architecture to push forward this problem for
+compact systems. While current machine learning algorithms in this area rely on scientist-derived instability
+metrics, our new technique learns its own metrics from scratch, enabled by a novel internal structure inspired
+from dynamics theory. Our Bayesian neural network model can accurately predict not only if, but also when a
+compact planetary system with three or more planets will go unstable. Our model, trained directly from short
+N-body time series of raw orbital elements, is more than two orders of magnitude more accurate at predicting
+instability times than analytical estimators, while also reducing the bias of existing machine learning algo-
+rithms by nearly a factor of three. Despite being trained on compact resonant and near-resonant three-planet
+conﬁgurations, the model demonstrates robust generalization to both non-resonant and higher multiplicity
+conﬁgurations, in the latter case outperforming models ﬁt to that speciﬁc set of integrations. The model
+computes instability estimates up to ﬁve orders of magnitude faster than a numerical integrator, and unlike
+previous eﬀorts provides conﬁdence intervals on its predictions. Our inference model is publicly available in
+the SPOCK∗package, with training code open-sourced‡.
+1
+Introduction
+The ﬁnal growth of terrestrial bodies in current theories of planet
+formation occurs in a phase of giant impacts (1). During this stage, the
+number of planets slowly declines as bodies collide and merge (2, 3).
+Close planetary encounters and the wide dynamic range exhibited by
+the times between consecutive collisions computationally limit current
+numerical eﬀorts to model this process. Two theoretical roadblocks
+impede the development of a more eﬃcient iterative map for modeling
+planet formation. First, one must predict a distribution of instability
+times from a given initial orbital conﬁguration. Second, one must
+predict a distribution of post-collision orbital architectures (e.g., 4)
+subject to mass, energy and angular momentum constraints. Towards
+this end, we focus on the long-standing former question of instability
+time prediction.
+In the compact dynamical conﬁgurations that characterize the
+planet formation process, the simpler two-planet case is understood
+analytically. In this limit, instabilities are driven by the interactions
+between nearby mean-motion resonances (MMRs), i.e., integer com-
+mensurabilities between the orbital periods of the planets like the 3:2
+MMR between Pluto and Neptune (5–8). While the general higher-
+multiplicity case is not yet understood, two important results guide
+our analysis and provide an important test for any model.
+First,
+when planets are initialized on circular orbits, chaos is driven by the
+overlap of 3-body MMRs between trios of adjacent planets (9), and
+theoretical estimates of the timescale required for the orbits to reach
+∗https://github.com/dtamayo/spock
+‡ https://github.com/MilesCranmer/bnn_chaos_model
+orbit-crossing conﬁgurations accurately match numerical integrations
+(10). As we show below, such analytical estimates perform poorly in
+the generic eccentric case where the eﬀects of 2-body MMRs are
+dominant (10, 11). However, analytical and empirical studies agree
+that while the dynamical behavior changes strongly from the two to
+three-planet case (3, 12–18), three-planet systems are the simplest
+prototype for predictions at higher multiplicities in compact systems
+(10, 11).
+We recently presented a machine learning model, dubbed the Sta-
+bility of Planetary Orbital Conﬁgurations Klassiﬁer, or SPOCK,
+trained to classify the stability of compact planetary systems over
+timescales of 109 orbits (11). This represented a long-term eﬀort to
+exploit the substantial but incomplete current analytical understanding
+(5, 6, 8, 19, 20) to engineer summary metrics that captured these sys-
+tems’ chaotic dynamics; these features were then used by the machine
+learning model to classify whether the input conﬁguration would be
+stable over 109 orbits.
+While simple binary stability classiﬁcation is eﬀective for con-
+straining physical and orbital parameters consistent with long-term
+stability (21), other applications like modeling terrestrial planet for-
+mation require the prediction of continuous instability times. Ad-
+ditionally, several ﬁelds in which it is challenging to ﬁnd eﬀective
+hand-picked features—such as computer vision, speech recognition,
+and text translation—have been revolutionized by neural networks in
+the last decade (notable early breakthroughs include 22–24). Rather
+than relying on domain expert input, these ﬂexible models learn
+data-driven features that can often signiﬁcantly outperform human-
+engineered approaches. A key theme with deep learning models is
+1
+arXiv:2101.04117v1  [astro-ph.EP]  11 Jan 2021
+
+that their structure resembles the hand-designed algorithm, but with
+added ﬂexibility parametrized by neural networks (for discussion, see
+25). For example, modern computer vision models consist of learned
+convolutional ﬁlters which take the place of hand-designed ﬁlters in
+classic algorithms (26).
+Pursuing a deep learning approach, we present a neural network
+that, trained only on short-time series of the orbits in compact plane-
+tary systems, not only improves on long-term predictions of previous
+models based on engineered features (11, 27), but also signiﬁcantly
+reduces the model bias and improves generalization beyond the train-
+ing set. We design our model as a Bayesian neural network, which
+naturally incorporates conﬁdence intervals into its instability time pre-
+dictions, accounting both for model uncertainty as well as the intrinsic
+uncertainty due to the chaotic dynamics. Finally, unlike previous ma-
+chine learning models based on decision trees (11, 27), our model
+is diﬀerentiable. That is, we can extract from the model estimates
+of the derivatives of the predicted instability times with respect to
+the parameters deﬁning the orbital conﬁguration in question. Such
+gradient information can signiﬁcantly speed up parameter estimation
+using Hamiltonian Monte Carlo techniques (28).
+2
+Model
+2.1
+Dataset generation
+We focus on the regime leading to typical compact multi-planet sys-
+tems observed to date, with mass ratios with the central star ranging
+from 10−7 (roughly the ratio of the Moon-mass embryos thought to
+initially characterize the giant impact phase, relative to the Sun) to
+10−4 (roughly Neptune’s mass relative to the Sun). As detailed in
+the appendix, we place planets on nearly coplanar orbits, with ad-
+jacent planets spaced within 30 mutual Hill radii§ of one another
+(e.g., 29). Orbital eccentricities in observed systems are often poorly
+constrained, so we consider the range from initially circular to orbit-
+crossing values.
+We train our model on the set of 113,543 publicly available, com-
+pact three-planet conﬁgurations in and near strong resonances from
+(11). In particular, this “resonant” dataset initializes one pair of plan-
+ets in or near a strong MMR, while the third planet’s orbital parameters
+are chosen randomly. This choice focuses the training set on the nar-
+row resonant regions of phase space where the dynamical behavior
+changes most strongly, and we later test the model’s generalization to
+non-resonant systems in section 3.
+Each initial condition was integrated for 109 orbits of the innermost
+planet using the WHFast integrator (30) in the REBOUND N-body
+package (31). If at any point two planets came within a distance of one
+another given by the sum of their Hill radii, the simulation was stopped
+and the instability time was recorded. Because gravity is scale invari-
+ant, the instability time 𝑡inst is most usefully non-dimensionalized by
+the innermost orbital period 𝑃orb. Given the large dynamic range in
+timescales over which instabilities can occur, we deﬁne the dimen-
+sionless log instability time 𝑇≡log10(𝑡inst/𝑃orb). Conﬁgurations
+with instability times longer than 109 orbits (𝑇> 9) were labeled as
+stable, and integration was stopped.
+2.2
+Network architecture
+To predict systems’ instability times, we perform a computationally
+cheap numerical integration of the ﬁrst 104 orbits, and use this time
+§The mutual Hill radius 𝑅𝐻is a relevant length scale within which the gravity of the
+planets dominates that of the star 𝑅𝐻≈𝑎1(𝜇1 + 𝜇2)1/3, where 𝑎1 is the inner planet’s
+semi-major axis, and 𝜇1 and 𝜇2 are each planet’s mass ratio relative to the star.
+series to make long-term predictions. Each of the three planets’ 3D
+positions and velocities correspond to six standard orbital elements
+(the appendix), which we record at 𝑛𝑡= 100 equally spaced outputs
+across the short integration. In addition we pass the three constant
+mass ratios for each planet relative to the star, as well as the time
+value, for a combined input matrix of real values 𝑋∈R3+19𝑛𝑡for a
+given conﬁguration.
+Because the dynamics of compact multi-planet systems are chaotic,
+instability times for a given initial orbital conﬁguration are eﬀectively
+non-deterministic. Nevertheless, numerical experiments (32, 33) have
+shown that instability times for unstable, compact multi-planetary sys-
+tems settle to well deﬁned, approximately log-normal distributions.
+Thus, rather than predicting a single instability time for a given orbital
+conﬁguration, our model maps from an input initial orbital conﬁgu-
+ration to a predicted log-normal distribution of instability times, i.e.,
+a Gaussian distribution of 𝑇with mean 𝜇and variance 𝜎2.
+This
+gives the network the ﬂexibility to both model the fundamental uncer-
+tainties imposed by the chaotic dynamics, and to incorporate model
+uncertainty into its predictions by assigning larger widths to conﬁgu-
+rations it is less sure about.
+In our initial eﬀorts, we experimented with various combinations
+of convolutional neural networks (see reviews by 34–36), long short-
+term memory networks (37), 1D scattering transforms (38), regular
+multi-layer perceptrons (MLP, see 25) and gaussian processes (39).
+All of these models underperformed or tended to overﬁt the data.
+The fundamental challenge for making such predictions is the sharp
+transitions in dynamical behavior at MMRs, where instability times
+can change by several orders of magnitude (40) over sub-percent
+changes in planetary orbital periods, i.e., in the original space of
+orbital elements. We found substantially improved performance by
+structurally splitting the problem into three components: 1) Find a
+transformation from the sharply punctuated space of orbital elements
+to new variables. 2) Calculate statistical summaries of the time series
+in these transformed variables. 3) Use these summary features to
+predict a log-normal distribution over instability times for the input
+orbital conﬁguration, parametrized by mean 𝜇and variance 𝜎2. This
+is illustrated in ﬁg. 1.
+We model steps 1 and 3 with neural networks 𝑓1 and 𝑓2, respec-
+tively. In step 2, we choose to use a well-motivated but non-standard
+pooling operation, and calculate both the mean and variance for each
+transformed time series (deep neural networks traditionally use one of
+either sum, mean, or max pooling). This structure was motivated by
+the hand-engineered approach of (11), whose features are means and
+variances of theoretically-motivated instability metrics. In this case,
+we give the machine learning model additional ﬂexibility to learn its
+own instability metrics. This design process is analogous to how the
+invention of convolutional neural networks was motivated by creat-
+ing similar structures to hand-engineered algorithms which convolve
+ﬁlters over an image.
+2.3
+Likelihood
+Our model is parametrized by 𝑚neural network weights 𝜃≡
+(𝜽1, 𝜽2), 𝜃∈R𝑚(𝜽1 for 𝑓1 and 𝜽2 for 𝑓2). Deﬁning the training
+set 𝐷as the collection of input orbital conﬁgurations and their asso-
+ciated N-body instability times, we seek the most likely set of model
+parameters given the data, i.e., we maximize 𝑃(𝜃|𝐷), which is in turn
+proportional to 𝑃(𝐷|𝜃)𝑃(𝜃).
+Our model predicts a log-normal distribution of instability times for
+any input orbital conﬁguration. For a given set of network weights 𝜃,
+the likelihood 𝑃(𝐷|𝜃) is then simply the product of the probabilities
+that each training set example’s output 𝑇𝑖is drawn from the associated
+2
+
+Time
+Numerical
+Integration:
+System goes
+unstable at
+distant time  T
+Short time
+integration recorded
+Time
+1 2    3 ...
+j
+Single scalar
+Orbital elements
+over time:
+...
+Neural Network 1
+( f1 )
+1 2    3 ...
+j
+Learned features
+over time:
+...
+Compute average and
+variance over time
+for each learned feature
+...
+...
+Neural Network 2
+( f2 )
+Time
+Figure 1: Schematic of our model. The model numerically integrates 10,000 orbits for a compact 3-planet system (top) and records orbital
+elements at 100 times. Neural network 𝑓1 creates learned summary features from these elements at each time. Neural network 𝑓2 takes the
+average and variance of these features as input and estimates a distribution over possible instability times.
+3
+
+Gaussian N (𝜇𝑖, 𝜎2
+𝑖) predicted by the model. As discussed above,
+this choice is motivated by the numerical result that the distribution
+in 𝑇is normal, for diﬀerent conﬁgurations with a wide range of mean
+instability times (33).
+Note that we have 4 < 𝑇≤9 as a constraint for unstable simu-
+lations: 𝑇< 4 simulations are not included in the training set, and
+𝑇> 9 integrations were terminated at 𝑇= 9 and have an unknown
+𝑇. Thus, we build a truncated normal distribution with a cutoﬀat
+𝑇= 4, and the cumulative probability of the Gaussian above 𝑇= 9
+being counted towards a classiﬁcation of stability. A mathematical
+derivation of this likelihood is given in the appendix.
+𝑃(𝜃) is a prior on the neural network’s parameters.
+The per-
+parameter prior here is unimportant: what matters is the prior induced
+on the output of the model, and we use an uninformative Gaussian prior
+on parameters to induce an uninformative prior on the output. See
+(41) for a detailed discussion of priors in Bayesian deep learning.
+2.4
+Bayesian neural network implementation
+By having our model predict a distribution of instability times with a
+ﬁnite width, we account for intrinsic uncertainty (sometimes referred
+to as “aleatoric” uncertainty). However, we also wish to include ex-
+trapolation uncertainty (or “epistemic” uncertainty) for systems that
+diﬀer from those found in the training set. To do this we marginal-
+ize over potential model parameters, with what is referred to as a
+“Bayesian Neural Network” (BNN). This is a neural network whose
+parameters are distributions rather than point values, and is trained
+with Bayesian inference. These models naturally fold in extrapolation
+uncertainty via marginalization.
+This concept is familiar in traditional statistical inference, where
+one can marginalize out the internal nuisance parameters of a model
+using Markov Chain Monte Carlo (MCMC) techniques.
+The fact
+that neural networks typically have millions of parameters renders
+MCMC computationally prohibitive, and various practical simpliﬁca-
+tions are adopted for implementing a BNN. The most common strategy
+is Monte Carlo dropout (42, 43) which treats the neural network’s pa-
+rameters as independent Bernoulli random variables, and has been
+used in several astronomical applications (44–47).
+A selection of
+other techniques includes Bayes by Backprop (48), Bayesian Layers
+(49), variants of normalizing ﬂows (e.g.,
+50), Bayes by Hypernet
+(51, 52), and many other strategies. One recently-proposed strategy,
+named “MultiSWAG” (53, 54) learns a distribution over the posterior
+of weights that best ﬁt the training set, without a diagonal covariance
+assumption, and is much closer to standard MCMC inference. We
+experimented with a selection of common techniques: Monte Carlo
+dropout, Bayes by Backprop, and MultiSWAG, and found that “Mul-
+tiSWAG” produced the best accuracy and uncertainty estimations on
+the validation dataset.
+To move beyond a single best-ﬁt set of parameters 𝜃, SWAG, or
+“Stochastic Weight Averaging Gaussian” (53, 55), instead ﬁts a Gaus-
+sian to a mode of the posterior over 𝜃, assuming a low-rank covariance
+matrix. This was extended in (54) to “MultiSWAG,” which repeats
+this process for several modes of the weight posterior, to help ﬁll out
+the highly degenerate parameter space. This technique is summarized
+below:
+1. Train 𝑓1 and 𝑓2 simultaneously via stochastic gradient descent
+until the parameters settle into a minimum of the weight posterior.
+2. Increase the learning rate and continue training. This causes
+the optimizer to take a random walk in parameter space near
+the minima, which is assumed to look like a high-dimensional
+Gaussian.
+3. Accumulate the average parameters along this random walk as
+well as a low-rank approximation of the covariance matrix.
+4. The average parameters not only provide better generalization
+performance (stochastic weight averaging or SWA), but we have
+additionally ﬁt a Gaussian to a mode of the parameter posterior.
+We can thus sample weights from this Gaussian to marginalize
+over parameters. This is SWAG (53).
+5. The next step is to repeat this process from a diﬀerent random
+initialization of the parameters. This will ﬁnd another mode of
+the parameter posterior.
+6. Fit ∼30 diﬀerent modes of the parameter space. We can then
+sample weights from multiple modes of the parameter posterior,
+which gives us a more rigorous uncertainty estimates. This is
+MultiSWAG (54).
+Training a neural network through stochastic gradient descent is
+approximately the same as Bayesian sampling of the weights (56, 57),
+so this aforementioned process allows one to learn a Bayesian posterior
+over the weights of a neural network 𝑃MultiSWAG(𝜃).
+Once we have learned 𝑃MultiSWAG, we can draw from it to sample
+a set of network weights 𝜃. This model then predicts a log-normal
+distribution of instability times with mean 𝜇and variance 𝜎2 for the
+given input orbital conﬁguration, from which we can ﬁnally sample a
+log instability time T. We can write a forward model for this prediction
+as follows:
+(𝜽1, 𝜽2) ∼𝑃MultiSWAG(𝜃),
+(1)
+y𝑡= 𝑓1(x𝑡; 𝜽1)
+for all
+x𝑡≡𝑋: ,𝑡,
+(2)
+z ∼(E𝑡[y𝑡], Var𝑡[y𝑡]),
+(3)
+(𝜇, 𝜎2) = 𝑓2(z; 𝜽2),
+(4)
+𝑇instability = 10𝑇
+for
+𝑇∼N (𝜇, 𝜎2),
+(5)
+where 𝑡is a time step from 1 to 100. Here, we have labeled y𝑡as
+the learned transformed variables for a single time step of the system
+(brown cells in ﬁg. 1), and z as the average and variance of these trans-
+formed variables over time. To account for statistical errors due to our
+ﬁnite number of time series samples, we sample the z from normal
+distributions with frequentist estimates of the variance in the sample
+mean and variance: Var𝑡[y𝑡]
+𝑛𝑡
+and 2Var𝑡[y𝑡]2
+(𝑛𝑡−1)
+, respectively. A Bayesian
+graphical model for this is shown in the appendix. Repeatedly sam-
+pling in this way provides a predicted distribution of T given the input
+orbital conﬁguration, marginalized over the posterior distribution of
+network weights 𝜃.
+We split our data into 60/20/20% train/validation/test, train our
+model on 60% of our ≈100, 000 training examples of resonant and
+near resonant systems, and validate it on half of the remaining data to
+tune the hyperparameters. Hyperparameters for our model are given
+in the supplementary material, and we also release the code to train
+and evaluate our model.
+With this trained model, we then explore its performance on the
+remaining 20% holdout data from the resonant dataset, as well as
+other datasets described below.
+3
+Results
+3.1
+Resonant test dataset
+For a given orbital conﬁguration, our probabilistic model produces
+one sample of 𝑇. If a given sample is above 𝑇= 9, we treat the
+4
+
+sample as a “stable” prediction. Since we are unable to make speciﬁc
+time predictions above the maximum integration time in our training
+dataset of 𝑇= 9, we resample from a user-deﬁned prior 𝑃(𝑇|𝑇≥9)
+for each occurrence. For the purposes of this study, we assume a
+simple analytic form for this prior, though followup work on this prior
+is ongoing (see supplementary).
+For all results, we sample 10,000 predicted values of the posterior
+over 𝑇per planetary system. We compare our predictions against
+several alternatives which are explained below. Since the models we
+compare against can only produce point estimates while our model
+predicts a distribution, we take the median of our model’s predicted
+posterior over 𝑇.
+This is used for plotting points, as well as for
+computing root-mean-square prediction errors.
+We ﬁrst compute the N-body versus predicted (median) 𝑇value
+over the holdout test dataset of ≈20, 000 examples not seen during
+training, which can be seen in the bottom middle panel of ﬁg. 2. We
+reiterate that the N-body instability times measured for the various
+orbital conﬁgurations in our training set are not ‘true’ instability times,
+but rather represent single draws from the diﬀerent planetary systems’
+respective instability time distributions, established by their chaotic
+dynamics. To estimate a theoretical limit (bottom right panel of ﬁg. 2)
+we use the results from (33), who ﬁnd that the T values measured
+by N-body integrations (x-axis of ﬁg. 2) should be approximately
+normally distributed around the mean instability time predicted by an
+ideal model. We use a random standard deviation drawn from the
+values measured empirically for compact systems by (33), which they
+ﬁnd are sharply peaked around ≈0.43 dex, independent of whether or
+not the system is near MMRs, and valid across a wide range of mean
+instability times. We plot this representative intrinsic width of 0.43
+dex as dotted lines on all panels for comparison.
+While we defer a detailed comparison to previous work to the
+following section, we measure a root mean square error (RMSE) of
+1.02 dex for our model on the holdout test set. We note that while
+the RMSE is an intuitive metric for comparing models, it does not
+provide a full picture for a model that is trained on a diﬀerent loss
+function to predict both 𝜇and 𝜎2, A model that can predict its own 𝜎2
+will sacriﬁce worse 𝜇accuracy in challenging regions of parameter
+space to better predict it on more easily predictable conﬁgurations.
+For comparison, if we weight the RMSE by the predicted signal-
+to-noise ratio (SNR), 𝜇2/𝜎2, the model achieves 0.87 dex, within a
+factor of ≈2 of the theoretical limit. These uncertainties provide
+conﬁdence estimates in the predicted values, and can indicate to a
+user when to invest in a computationally costly direct integration.
+We apply transparency to our predictions in ﬁg. 2 according to the
+model-predicted SNR, highlighting that the poorest predictions were
+typically deemed uncertain by the model.
+Finally we quantitatively test whether the model-predicted uncer-
+tainties 𝜎accurately capture the spread of N-body times around the
+predicted mean values 𝜇. For each test conﬁguration, we predict 𝜇,
+subtract it from its respective 𝑇measured by N-body integration, and
+divide by the predicted 𝜎. If this distribution approximates a Gaussian
+distribution of zero mean and unit variance, the model’s uncertainty
+estimates are accurate. We ﬁnd that a Komolgorov-Smirnov test can-
+not conﬁdently distinguish our predictions from this ideal Gaussian
+(p-value of 0.056), and plot the two distributions in ﬁg. 8 of the
+supplementary material.
+3.2
+Comparison to Previous Work
+Guided by the dynamical intuition that short-timescale instabilities
+are driven by the interaction of MMRs (5, 8, 11), we chose to train our
+model on systems with particular period ratios and orbital elements
+Resonant
+Model
+RMSE
+Classif.
+accur.
+Bias†
+(4, 5)
+Bias
+(8, 9)
+Obertas et al. (2017)
+2.12
+0.628
+1.04
+-1.71
+Petit et al. (2020)
+3.22
+0.530
+3.99
+0.54
+Tamayo et al. (2020)
+1.48
+0.946
+2.07
+-0.62
+Modiﬁed∗Tamayo+20
+0.99
+0.946
+0.65
+-0.60
+Ours
+1.02
+0.952
+0.29
+-0.38
+Ours, SNR-weighted
+0.87
+0.971
+0.18
+-0.25
+Theoretical limit
+0.43
+0.992
+0.05
+-0.04
+Random
+Obertas et al. (2017)
+2.41
+0.721
+2.15
+-0.93
+Petit et al. (2020)
+3.09
+0.517
+4.17
+0.50
+Tamayo et al. (2020)
+1.24
+0.949
+1.16
+-0.59
+Modiﬁed∗Tamayo+20
+1.14
+0.945
+0.79
+-0.70
+Ours
+1.20
+0.939
+0.40
+-0.51
+Ours, SNR-weighted
+1.09
+0.959
+0.23
+-0.49
+Theoretical limit
+0.44
+0.989
+0.06
+-0.04
+(dex)
+(AUC)
+(dex)
+(dex)
+†Average diﬀerence between predicted minus true 𝑇in given range
+∗Modiﬁed and retrained for regression.
+Table 1: Statistical summaries of each estimator applied to a holdout
+test portion of the resonant dataset, and all of the random dataset.
+in the narrow ranges near such resonances where the dynamical be-
+havior changes sharply (40). It is therefore important to test how well
+such a model generalizes to a more uniform coverage of parameter
+space, given that most observed orbital architectures are not in MMRs
+(possibly because such conﬁgurations typically have short lifetimes
+and have been eliminated). Additionally, previous work has typically
+ignored the sharp variations near MMRs to ﬁt overall trends in insta-
+bility times (40), so a test on resonant systems would not provide a
+fair comparison.
+For this generalization test and comparison, we use the ‘random’
+dataset of (11), 25,000 three-planet systems with the same mass ra-
+tio and inclination distributions as above, and eccentricities drawn
+log-uniformly from ≈10−3 to orbit-crossing. Rather than drawing
+near-integer period ratios as in our resonant training set, the spacing
+between adjacent planets is drawn uniformly between [3.5, 30] mutual
+Hill radii (see 11).
+We ﬁnd that our model exhibits only a minor loss in performance
+(1.20 vs 1.02 dex RMSE) generalizing to this uniform distribution
+of orbital conﬁgurations table 1.
+This supports the assertion that
+instabilities in compact systems within 109 orbits are dominantly
+driven by the MMRs we focused on in our training sample (11).
+To compare our results to the extensive set of past eﬀorts, we divide
+previous approaches into three broad groups.
+First, many authors have run N-body integrations along low-
+dimensional cuts through the parameter space of compact orbital con-
+ﬁgurations, and ﬁt simple functional forms to the resulting trends in
+instability times. For example, several studies have highlighted the
+steep dependence on interplanetary separation, while ﬁxing orbits to
+be coplanar and initially circular, and planets to be equal mass and
+equally separated from one another (12, 14, 16, 17, 40). We compare
+the performance of the ﬁt from such a study (40), using ﬁve equally
+spaced Earth-mass planets (mass ratio ≈3 × 10−6) on our random
+5
+
+The model of Obertas et al. (2017)
+The model of Petit et al. (2020)
+Tamayo et al. (2020), retrained for regression
+Our model
+Our model, applied to the resonant dataset
+Theoretical limit
+Figure 2: Density plots showing the predicted versus true instability times for various models on the random dataset. All predictions outside of
+𝑇∈[4, 9] are moved to the edge of the range. For the plot showing the predictions of our model, transparency shows relative model-predicted
+SNR. The theoretical limit, using the numerical experiments of (33), is given in the lower-right plot. The 0.43 dex RMSE average from this is
+used to give the dotted contours in all plots.
+test set in the top left panel of ﬁg. 2, with a resulting RMSE of 2.41.
+Followup studies have incorporated the eﬀect of ﬁnite inclinations
+and eccentricities (13, 15, 58, 59), but consider equal initial eccen-
+tricities, planetary masses, etc. in order to ﬁt simple models. We
+conclude that while such controlled experiments yield insight into the
+underlying dynamics (9, 15, 60), instability times depend sensitively
+on masses and several orbital parameters, rendering empirical ﬁts to
+low-dimensional cuts in the parameter space of limited applicability.
+In the following section we perform the converse generalization test,
+where we ask our model to instead predict on the N-body simulations
+used for the ﬁt by (40), and ﬁnd good agreement.
+Second, previous authors have developed analytical instability time
+estimates from ﬁrst principles. These have been most successful in
+the limit of initially circular orbits, where three-body MMRs have
+been identiﬁed as the dominant driver of chaos (9). Recent work (10)
+has extended this theory to provide accurate instability time estimates.
+We will compare the predictions of our model to this limit of initially
+circular orbits in the next section. Here we simply emphasize the point
+by (10) that such predictions perform poorly at ﬁnite eccentricities
+(top middle panel of ﬁg. 2), likely due to the dominant eﬀects of
+stronger two-body MMRs. The fact that the analytic model predicts
+the vast majority of systems to be stable implies that most of our test
+conﬁgurations would be stable on circular orbits, but that ﬁnite orbital
+eccentricities strongly modulate instability times.
+The ﬁnal approach is to make predictions across the high-
+dimensional space of orbital conﬁgurations using machine learning
+(11, 27). We consider two variants of (11) adapted for regression.
+The ﬁrst, labeled ‘Tamayo et al. (2020)’, is to simply use an identical
+model as (11), but map the probability estimates of stability past 109
+orbits through an inverse cumulative distribution of a log-normal with
+an optimized constant standard deviation. The second, labeled ‘Mod-
+iﬁed Tamayo+20’, the model is an XGBoost (61) regression model
+(rather than classiﬁcation) retrained on the same features as used in
+(11).
+We ﬁnd that our model achieves similar performance to the Modi-
+ﬁed Tamayo+20 variant (top right panel of ﬁg. 2, table 1), though the
+latter exhibits signiﬁcant bias. We quantify this bias for each model in
+the range 𝑇∈(4, 5) and 𝑇∈(8, 9). As is evident in table 1 as well as
+ﬁg. 2, the model introduced in this work exhibits signiﬁcantly reduced
+bias compared to other models. Including SNR weighting further
+reduces bias. Bias is a measure of the generalizability of a model
+to out-of-distribution data (see chapter 7 of 62), so is an important
+metric for understanding how these predictive models will extrapolate
+to new data. Our model achieves predictions that are more than two
+orders of magnitude more accurate than the analytic models in each
+case: e.g., 102.41/1.09 ≈162× when comparing our SNR-weighted
+model with (40) on the random dataset.
+Finally, we can make a comparison to the original classiﬁcation
+model of (11) by using our regression model as a form of classiﬁer.
+We count the fraction of samples above 𝑇= 9 as the probability a
+given system is stable, and measure the performance of the classiﬁer
+with the area under the receiver operating characteristic curve (AUC
+6
+
+ROC) for a range of threshold probabilities for stability (table 1).
+3.3
+5-planet generalization with comparison
+As a second generalization test of our model, we compare its per-
+formance on the limiting case considered by (40). This case of ﬁve
+equally spaced, Earth-mass planets on initially circular and coplanar
+orbits diﬀers signiﬁcantly from our training set of resonant and near
+resonant, eccentric and inclined conﬁgurations of three planets with
+unequal masses. This dataset contains 17500 simulations numerically
+integrated for 1010 orbits (40). This generalization to a limiting set of
+higher multiplicity conﬁgurations provides a stringent test of whether
+the model has learned features of the dynamics or whether it is naively
+interpolating across the distribution of orbital conﬁgurations present
+in our training dataset.
+To extend our three-planet predictions to higher multiplicity sys-
+tems, we perform the same short integration for all planets, but pass
+time series for each adjacent trio of planets to the model separately.
+The model samples a single instability time for each adjacent trio,
+and the minimum across this set is adopted as the instability time for
+the system, as an estimate of the time for the ﬁrst trio to go unstable.
+This procedure is then repeated, and we record the median and conﬁ-
+dence intervals of the resultant distribution in 𝑇. Such a reduction of
+compact multi-planet systems to sets of adjacent trios has been pro-
+posed on theoretical (9, 10) as well as empirical (11) grounds. This
+is motivated by the fact that the perturbative eﬀects of planets on one
+another fall oﬀexponentially with separation (9, 10), so non-adjacent
+interactions can largely be ignored.
+The predictions can be seen in ﬁg. 3, and are remarkably accu-
+rate despite our model never seeing a system with ﬁve planets during
+training. We overplot the analytical result of (10) in magenta devel-
+oped from ﬁrst principles for such cases with initially circular orbits,
+including a manual correction for ﬁve-planet systems. Our model
+captures the same overall trend, but additionally identiﬁes the various
+dips, which correspond to locations of diﬀerent MMRs (40).
+We
+emphasize that our model was trained on the general eccentric case
+where the magenta model of (10) does not apply (ﬁg. 2), yet the gener-
+alization to this limiting case is excellent. In addition to matching the
+overall trend of (10), our model captures the additional instability time
+modulations at MMRs, as can be seen more clearly in the residuals in
+ﬁg. 5 of the appendix. Additionally, our new model generalizes much
+better than the predictions of the modiﬁed regression model based on
+(11) based on manually engineered features (gold).
+3.4
+Interpretation
+In industry machine learning, one is focused on making predictions as
+accurate as possible, even at the expense of a more interpretable model.
+However, in physics, we are fundamentally interested in understanding
+problems from ﬁrst principles.
+Obtaining such an explicit interpretation of our model will be dif-
+ﬁcult. However, as a ﬁrst step we consider the feature importances
+of our model: what orbital elements is it using to make predictions,
+and does this align with expectations? To do this feature analysis, we
+exploit the diﬀerentiability of our model with respect to its input. We
+calculate the gradient of the predicted 𝜇value our model with respect
+to the input instantaneous orbital elements; this is also referred to as
+a “saliency map” (25). This gives us a multi-dimensional array over
+feature, simulation, time step, and model, representing how much the
+predicted 𝜇value will change should that feature be inﬁnitesimally in-
+creased. We compute the variance of the gradients over time and each
+simulation, and then average these variances over sampled network
+weights 𝜃. This gives us a coarse representation of the importance of
+each feature. We show this visually in ﬁg. 4.
+To compare these importances to other work, (11) argue empirically
+that the short-timescale instabilities we probe here in compact systems
+are driven speciﬁcally by the interactions between MMRs. A classical
+result of celestial mechanics is that in the absence of such MMRs, the
+long-term dynamics keeps the semi-major axes ﬁxed. Variations in
+the semi-major axes during the short integrations thus act as a proxy
+for the importance of nearby MMRs (27), and we see that indeed, the
+semi-major axes exhibit the highest feature importance in our model
+ﬁg. 4. The fact that the model ascribes comparable feature importance
+to any given orbital element for each of the three planets also suggests
+a physically-reasonable model.
+We note that there is a small but nonzero signiﬁcance of the “Time”
+instantaneous feature.
+This can be interpreted as being important
+because the model takes the ﬁrst 104 orbits as input, and can predict
+instability for the system as low as 104.1. Thus, the orbital parameters
+given at 104 orbits may be more important than the orbital parameters
+at 100 orbits for predicting such unstable systems, and thus the time
+feature is used. The time feature would be less important for a system
+that goes unstable near 109 orbits, as the relative importance of the
+system’s parameters at 104 orbits is comparable to that at 100 orbit.
+Because we chose to structure our model to take means and vari-
+ances of the times series of the learned transformed variables ﬁg. 7,
+it may be possible to extract explicit interpretations of our model via
+symbolic regression. Given that our approach is structurally similar to
+that of a graph neural network (63), the frameworks of (64–66) would
+be particularly applicable. This would be done by ﬁnding analytic
+forms for 𝑓1, representing each of the transformed variables, and then
+ﬁnding an analytic form for 𝑓2, to compute the instability time given
+the transformed variables. This type of explicit analysis of the model
+will be considered in future work.
+4
+Conclusion
+We have described a probabilistic machine learning model—a
+Bayesian neural network—that can accurately predict a distribution
+over possible instability times for a given compact multi-planet ex-
+oplanet system. Our model is trained on the raw orbital parameters
+of a multi-planet system over a short integration, and learns its own
+instability metrics. This is contrasted by previous machine learning
+approaches which have given their models hand-designed instability
+metrics based on specialized domain knowledge.
+Our model is more than two orders of magnitude more accurate
+at predicting instability times than analytical estimators, while also
+reducing the bias of existing learned models by nearly a factor of three.
+We also demonstrate that our model generalizes robustly to ﬁve-planet
+conﬁgurations eﬀectively drawn from a one-dimensional cut through
+the broad parameter space used to train the model. This improves on
+the estimates of analytic and other learned models, despite our model
+only being trained on compact three-planet systems.
+Our model’s computational speedup over N-body integrations by
+a factor of up to 105 enables a broad range of applications, such as
+using stability constraints to rule out unphysical conﬁgurations and
+constrain orbital parameters (21), and to develop eﬃcient terrestrial
+planet formation models. Towards this end, our model will be made
+publicly available through the SPOCK¶ package, with training code
+also available in a separate repo‖.
+Acknowledgements.
+¶https://github.com/dtamayo/spock
+‖https://github.com/MilesCranmer/bnn_chaos_model
+7
+
+Figure 3: The median instability time predictions of our model for the ﬁve-planet systems used in (40). These systems have ﬁxed interplanetary
+separation between each body, which is labeled on the x-axis. Errorbars ﬁll out the 68% conﬁdence interval. The predictions from (10) and
+(11) are overplotted. Residuals are shown in the supplementary material.
+3
+1
+2
+t
+1
+i1
+i3
+2
+i2
+3
+1
+3
+2
+e1
+e3
+e2
+m1
+m2
+m3
+a2
+a1
+a3
+0.00
+0.05
+0.10
+0.15
+0.20
+0.25
+Feature importance
+Figure 4: Feature importances in the model, calculated as the root-
+mean-square of the gradients of the model’s output with respect to the
+input features, and normalized.
+Miles Cranmer would like to thank Andrew Gordon Wilson and
+Dan Foreman-Mackey for advice on Bayesian deep learning tech-
+niques, and Andrew Gordon Wilson, Dan Foreman-Mackey, and Se-
+bastian Wagner-Carena for comments on a draft of this paper. Philip
+Armitage, Shirley Ho, and David Spergel’s work is supported by the
+Simons Foundation. This work made use of several Python software
+packages: numpy (67), scipy (68), sklearn (69), jupyter (70),
+matplotlib (71), pandas (72), torch (73), pytorch-lightning
+(74), and tensorflow (75).

@@ -1,0 +1,736 @@
+Using probabilistic programs as proposals
+Marco F. Cusumano-Towner
+Probabilistic Computing Project
+Massachusetts Institute of Technology
+
+Vikash K. Mansinghka
+Probabilistic Computing Project
+Massachusetts Institute of Technology
+
+Abstract
+Monte Carlo inference has asymptotic guarantees, but can be slow when using generic proposals.
+Handcrafted proposals that rely on user knowledge about the posterior distribution can be
+efﬁcient, but are difﬁcult to derive and implement. This paper proposes to let users express
+their posterior knowledge in the form of proposal programs, which are samplers written in
+probabilistic programming languages. One strategy for writing good proposal programs is to
+combine domain-speciﬁc heuristic algorithms with neural network models. The heuristics iden-
+tify high probability regions, and the neural networks model the posterior uncertainty around the
+outputs of the algorithm. Proposal programs can be used as proposal distributions in importance
+sampling and Metropolis-Hastings samplers without sacriﬁcing asymptotic consistency, and can
+be optimized ofﬂine using inference compilation. Support for optimizing and using proposal
+programs is easily implemented in a sampling-based probabilistic programming runtime. The
+paper illustrates the proposed technique with a proposal program that combines RANSAC and
+neural networks to accelerate inference in a Bayesian linear regression with outliers model.
+1
+Introduction
+Monte Carlo approaches to approximate inference include importance sampling, Markov chain Monte Carlo,
+and sequential Monte Carlo [1]. It is easy to construct Monte Carlo inference algorithms that have asymptotic
+guarantees, but constructing Monte Carlo inference algorithms that are accurate in practice often requires
+knowledge of the posterior distribution. Recent work in amortized inference [2–5] aims to acquire this knowledge
+by training neural networks on ofﬂine problem instances and generalizing to problem instances encountered
+at run-time. We propose to use probabilistic programming languages as a medium for users to encode their
+domain-speciﬁc knowledge about the posterior, and to learn parameters of the program ofﬂine using an amortized
+inference approach to ﬁll in gaps in this knowledge. In our setting, the model in which inference is being performed
+may or may not be itself represented by a probabilistic program.
+This paper makes three contributions: First, we introduce proposal programs, which are probabilistic programs
+that represent proposal distributions. Proposal programs can use internal random choices, and report estimates
+of their proposal probabilities instead of true proposal probabilities. We show that proposal programs can be
+used in place of regular proposal distributions within importance sampling and Metropolis-Hastings algorithms
+without sacriﬁcing asymptotic consistency of these algorithms. Second, we give a stochastic gradient descent
+algorithm for ofﬂine learning of proposal program parameters. Third, we propose a class of proposal programs
+based on combination of domain-speciﬁc heuristic randomized algorithms for identifying high-probability regions
+of the target distribution with neural networks that model the uncertainty in the target distribution around the
+outputs of the algorithm. We also discuss how to implement proposal programs in a sampling-based probabilistic
+programming runtime, and give example proposal programs written in Gen.jl [6], a probabilistic language
+embedded in Julia [7].
+2
+Notation
+Consider a target distribution π(z) on latent variable(s) z, and let ˜π(z) := cπ(z) be the unnormalized target
+distribution where c > 0 is a normalizing constant. Let x denote the problem instance—this may include the
+arXiv:1801.03612v2  [cs.AI]  13 Jan 2018
+
+observed data, or any other context relevant to deﬁning the inference problem. In importance sampling, we
+sample many values z from a proposal distribution p(z; x) that is parameterized by x, and evaluate the importance
+weight ˜π(z)/p(z; x) for each sample, producing a weighted collection of samples that can be used to estimate
+expectations under π. In Markov chain Monte Carlo, we use one or more proposal distribution(s) pi(z; x) to
+construct a Markov chain that converges asymptotically to π(z), and use iterates of one or more such chains
+to estimate expectations under π. Proposal distributions may be combined in cycles or mixtures [8], and each
+proposal distributions may only update a subset of the variables in z, leaving the remaining variables ﬁxed.
+3
+Monte Carlo inference with proposal programs
+A proposal program is a probabilistic program P that takes input x and makes random choices, where each
+random choice is given an address i ∈A, where A is some countable set, and where some subset O ⊆A of the
+addresses are the output choices. Random choices that are not output are choices are called internal choices. We
+assume that all output choices are realized in all possible executions of the program. We assume that all random
+choices are discrete—a rigorous treatment of continuous random choices is left for future work. A trace of a
+probabilistic program is a mapping τ : A →V from the address of a random choices to its value where A ⊆A,
+and where V is the set of all possible values for a random choice. A function z : O →V from output addresses O
+to values is called an output trace. Let τ|O : O →V denote the output trace constructed by restricting a trace τ
+to addresses O. Let τ ∼=O z if τ(i) = z(i) for all i ∈O (i.e. if the trace τ agrees with an output trace z on the
+values of the output choices). Let p(τ(i); τ<i, x) denote the probability of choice with address i taking value τ(i)
+given the state of the program at that point in its execution as determined by the values τ<i of previous random
+choices. The probability of a trace τ on input x is deﬁned as:
+p(τ; x) :=
+Y
+i∈A
+p(τ(i); τ<i, x)
+(1)
+We assume that it is possible to execute the program P, possibly with some output random choices ﬁxed to given
+values, and to compute the probabilities p(τ(i); τ<i, x) for output random choices i ∈O. Let τ ∼p(·; x) denote
+a trace generated by executing the program on input x and let τ ∼p(·; x, z) denote a trace generated by sampling
+the program on input x, but where output choices i ∈O are ﬁxed to values given in an output trace z instead
+of being sampled (τ(i) = z(i)). Note that internal random choices can occur before or after output choices
+in program execution, and internal random choices may depend on the value of output random choices. We
+require that for all x and z the program satisﬁes p(τ; x, z) > 0 =⇒p(τ; x) > 0. That is, any trace that can be
+generated by executing the program with output choices ﬁxed to z must also be possible under standard program
+execution. Let the product of probabilities of each output choice in a trace given the previous choices be denoted:
+pO(τ; x) := Q
+i∈O p(τ(i); τ<i, x) and similarly for the internal choices pI(τ; x) := Q
+i∈A\O p(τ(i); τ<i, x). The
+marginal probability of an output trace z is called the proposal probability, and is given by:
+p(z; x) :=
+X
+τ:τ∼
+=Oz
+p(τ; x)
+(2)
+Probabilistic program
+P
+All addresses of possible random choices
+A
+Addresses of realized random choices in an execution
+A ⊆A
+Possible values for random choices
+V
+Trace (record of random choices in an execution)
+τ : A →V
+Output random choices
+O ⊆A
+Inputs to program
+x
+Output trace
+z : O →V
+Output trace generated by restricting a trace τ to outputs
+τ|O : O →V
+Sampling a trace by executing program on input x
+τ ∼p(·; x)
+Sampling a trace with constrained output trace
+τ ∼p(·; x, z)
+Proposal probability
+p(z; x)
+Figure 1: Notation for proposal programs
+In order to use the marginal distribution p(z; x) on outputs of a proposal program as a proposal distribution within
+a standard importance sampling (IS) algorithm for a target distribution π(z), we require the ability to sample
+from the proposal distribution and evaluate the proposal probability p(z; x). The proposal probability is needed to
+compute the importance weight ˜π(z)/p(z; x). To use the proposal program inside standard Metropolis-Hastings
+2
+
+procedure SIMULATE(P, x)
+τ ∼p(·; x) ▷Execute P
+z ←τ|O ▷Extract output trace
+ξ ←p(z; x) ▷Compute proposal probability
+return (z, ξ)
+end procedure
+procedure ASSESS(P, x, z)
+ξ ←p(z; x) ▷Compute proposal probability
+return ξ
+end procedure
+(a) Idealized proposal program interface
+procedure SIMULATE(P, x, K)
+k ∼Uniform(1, . . . , K)
+τk ∼p(·; x) ▷Execute P
+z ←τk|O ▷Extract output trace
+for i ∈{1 . . . K} \ {k} do
+▷Execute P with output choices ﬁxed to z
+τi ∼p(·; x, z)
+end for
+▷Estimate proposal probability
+ˆξ ←1
+K
+PK
+i=1 pO(τi; x)
+return
+
+z, ˆξ
+
+end procedure
+procedure ASSESS(P, x, z, K)
+for i ←1 . . . K do
+▷Execute P with output choices ﬁxed to z
+τi ∼p(·; x, z)
+end for
+▷Estimate proposal probability
+ˆξ ←1
+K
+PK
+i=1 pO(τi; x)
+return ˆξ
+end procedure
+(b) Approximate proposal program interface
+Figure 2: An interface that is sufﬁcient for using proposal programs P in importance sampling (IS) and Metropolis-
+Hastings (MH). (a) shows an ideal implementation of the interface that is intractable in the general case. (b)
+shows an approximate implementation of the interface that returns estimates in place of proposal probabilities.
+Theorem 1 and Theorem 2 show that IS and MH remain asymptotically consistent even with the approximate
+implementation in (b).
+(MH), we require the ability to sample z′ from the proposal and evaluate the forward proposal probability p(z′; x)
+for the resulting sample (where x may contain the previous iterate zt−1), as well as the ability to compute the
+reverse proposal probability p(zt−1; x′) (the probability that the proposal generates the reverse move, where x′
+may contain the proposed iterate z′). The forward and reverse proposal probabilities are needed to compute the
+acceptance probability:
+min
+
+1, ˜π(z′)p(zt−1; x′)
+˜π(zt−1)p(z′; x)
+
+(3)
+Figure 2a shows an interface for proposal programs that, together with the ability to evaluate ˜π(z), is sufﬁcient
+for implementing IS and MH. The SIMULATE procedure executes the proposal program, and returns the output
+trace z and the proposal probability p(z; x). The ASSESS procedure takes an output trace z and returns p(z; x).
+However, evaluating p(z; x) is intractable in the general case because Equation (2) contains a number of terms that
+is exponential in the number of internal random choices. Therefore, we propose an approximate implementation
+of the interface, shown in Figure 2b. The approximate SIMULATE procedure executes the proposal program, and
+returns the output trace z and a speciﬁc estimate ˆξ of the proposal probability p(z; x). The approximate ASSESS
+procedure takes an output trace z and returns a speciﬁc estimate ˆξ of p(z; x). Algorithm 1 shows an IS algorithm
+that uses the approximate SIMULATE procedure of Figure 2b, and Algorithm 2 shows a MH transition operator that
+uses the approximate SIMULATE and ASSESS procedures. The remainder of the section shows that substituting the
+approximate procedures in Figure 2b in place of the idealized procedures in Figure 2a within IS and MH preserves
+the asymptotic consistency of both algorithms.
+Theorem 1. If π(z) is a target distribution, P is a proposal program such that π(z) > 0 =⇒p(z; x) > 0 for
+all x, f is a function where Ez∼π[f(z)] = µ < ∞, then ˆµN
+a.s.
+→µ where ˆµN is the importance sampling estimate
+returned by Algorithm 1 using the approximate SIMULATE procedure of Figure 2b.
+See Appendix A.1 for the proof, which is based on an auxiliary variable construction. Algorithm 2 shows a
+Metropolis-Hastings transition operator that uses the SIMULATE and ASSESS procedures of Figure 2b.
+Theorem 2. The transition operator of Algorithm 2 using the approximate SIMULATE and ASSESS procedures of
+Figure 2b admits π(x) as a stationary distribution.
+3
+
+Algorithm 1 Importance sampling using a proposal program
+Require: Target distribution π(z); unnormalized target distribution ˜π(z) = cπ(z) for some c > 0; test function
+f(z); proposal program P; proposal arguments x; integers N, K ≥1.
+for i ←1, . . . , N do
+(z(i), ˆξ(i)) ∼SIMULATE(P, x, K)
+w(i) ←˜π(z(i))/ˆξ(i)
+end for
+ˆµN ←
+PN
+i=1 w(i)f(z(i))
+PN
+i=1 w(i)
+return ˆµN
+Algorithm 2 Metropolis-Hastings transition using a proposal program
+Require: Unnormalized distribution ˜π(z); proposal program P; integer K ≥1; previous iterate zt−1.
+(z′, ˆξ′) ∼SIMULATE(P, zt−1, K)
+ˆξt−1 ∼ASSESS(P, zt−1, z′, K)
+α ←˜π(z′)ˆξt−1
+˜π(zt−1)ˆξ′
+r ∼Uniform(0, 1)
+if r ≤α then
+zt ←z′
+else
+zt ←zt−1
+end if
+See Appendix A.2 for the proof. Note that this transition operator may be composed with other transition operators
+to construct an ergodic Markov chain. The non-asymptotic accuracies of Algorithm 1 and Algorithm 2 depend on
+the choice of K, the number of executions of the program used within each invocation of SIMULATE or ASSESS.
+As K →∞, the algorithms behave like the corresponding IS and MH algorithms using the exact proposal
+probabilities. For ﬁnite K = 1, the deviation of these algorithms from the K →∞limit depends on the details of
+the proposal program. If z is independent of y or if y is deterministic, K = 1 provides exact proposal probabilities.
+We expect that small K may be sufﬁcient for proposal programs which have low mutual information between the
+internal trace and the output trace. A detailed analysis of how performance depends on K is left for future work.
+The procedures in Figure 2b can be easily implemented in a sampling-based probabilistic programming runtime
+that records a probability for each random choice in a trace or ‘random database’ [9]. We implemented such a
+runtime for Gen.jl [6], a probabilistic programming language embedded in Julia [7]. In Gen.jl, a probabilistic
+
+4
+Learning proposal program parameters
+This section describes a technique to learn the parameters of a proposal program during an ofﬂine ‘inference
+compilation’ phase, prior to use in importance sampling or Metropolis-Hastings. Let π(z; x) denote a family of
+target distributions indexed by the problem instance x. We consider a proposal program P parameterized by θ,
+with distribution on traces denoted p(τ; x, θ). We assume that it is possible to sample from a training distribution
+on the arguments x of the proposal program and the outputs trace z of the proposal program, denoted r(x, z),
+where r(z|x) > 0 ⇐⇒π(z; x) > 0. We factor the training distribution into a distribution on arguments r(x),
+and a desired distribution on outputs given arguments r(z|x). If the model π in which we are doing inference is a
+generative model where π(z, x) is a joint distribution on latent variables z and data (observation) x, then we can
+deﬁne π(z; x) := π(z|x), and r(x, z) := π(z, x), so that the argument distribution is π(x) and the desired output
+distribution is the posterior π(z|x). For this choice of r, sampling from the training distribution is achieved by
+ancestral sampling of the latents and observations from the generative model. A different training distribution
+based on gold-standard SMC sampling instead of joint generative simulation was previously used in [4]. Given
+r(x, z), we seek to ﬁnd θ that solve the following optimization problem, where DKL denotes the Kullback-Leibler
+4
+
+(KL) divergence:
+min
+θ
+Ex∼r(·) [DKL(r(z|x)||p(z; x, θ))]
+(4)
+This is equivalent to the maximizing the expected conditional log likelihood of the training data:
+max
+θ
+J(θ) = max
+θ
+Ez,x∼r(·,·) [log p(z; x, θ)]
+(5)
+Because the proposal program may use internal random choices, it may not be possible to evaluate log p(z; x, θ),
+making direct optimization of J(θ) difﬁcult. Therefore, we instead maximize a lower bound JK(θ) on J(θ):
+JK(θ) := Ex,z∼r(·,·)
+h
+E
+τ1:K
+i.i.d.
+∼p(·;x,θ,z)
+h
+log ˆξ(τ1:K, x, θ)
+ii
+≤J(θ)
+(6)
+where ˆξ(τ1:K, x, θ) :=
+1
+K
+PK
+k=1 pO(τk; x, θ). We maximize JK(θ) using stochastic gradient ascent. For some
+j ∈{1, . . . , K}, let ˆξ(τ−j, x, θ) :=
+1
+K−1
+PK
+k̸=j pO(τk; x, θ). Let Wk := pO(τk; x, θ)/(PK
+j=1 pO(τj; x, θ)).
+Also, deﬁne functions h and g:
+g(x, τ1:K, θ) :=
+K
+X
+k=1
+
+log ˆξ(τ1:K, x, θ) −log ˆξ(τ−k, x, θ))
+
+∇θ log pI(τk; x, θ)
+(7)
+h(x, τ1:K, θ, W1:K) :=
+K
+X
+k=1
+Wk∇θ log ˆξ(τ1:K, x, θ)
+(8)
+We then use the following unbiased estimator of the gradient ∇θJK(θ) based on the ‘per-sample’ baseline of [11]:
+g(x, τ1:K, θ) + h(x, τ1:K, θ) for x, z ∼r(·, ·) and τ1:K
+i.i.d.
+∼p(·; x, θ, z)
+The ﬁrst term accounts for the effect of θ on the internal random choices and the second term accounts for the
+direct effect of θ on the output random choices. The resulting algorithm is shown below:
+Algorithm 3 Ofﬂine optimization of proposal program
+Require: Training distribution r(x, z); proposal program P; integer K ≥1, initial parameters θ0, mini-batch
+size M.
+t ←0
+while not converged do
+t ←t + 1
+for m ←1, . . . , M do
+x(m), z(m) ∼r(·, ·)
+▷Sample from training distribution
+for k ←1, . . . , K do
+τ (m)
+k
+∼p(·; x(m), θt−1, z(m))
+▷Execute P with output choices ﬁxed to z(m)
+end for
+∆θ(m) ←g(x(m), τ (m)
+1:K , θt−1) + h(x(m), τ (m)
+1:K , θt−1)
+end for
+θt ←θt−1 + ρt 1
+M
+PM
+m=1 ∆θ(m)
+end while
+return θt
+Algorithm 3 can be easily implemented on top of a sampling-based probabilistic programming runtime that
+includes reverse-mode automatic differentiation. The runtime must provide (1) the log probability of output
+random choices log pO(τ; x, θ) and its gradient ∇θ log pO(τ; x, θ) and (2) the gradient of the log probability of
+internal random choices, ∇θ log pI(τ; x, θ). The gradient ∇θ log ˆξ(τ1:K, x, θ) appearing in h(x, τ1:K, θ) can be
+computed from the collection of ∇θ log pO(τk; x, θ) for each k.
+Note that the log probability of internal random choices log pI(τ; x, θ) is not required (but its gradient is). Recall
+that the log probability of the internal random choices is the sum of the log probability of each internal random
+choice in the internal trace. For internal random choices that do not depend deterministically on θ, the log
+probability contribution does not depend on θ. Therefore, it sufﬁces for the runtime to only instrument the internal
+random choices that deterministically depend on θ. This permits use of black box code within the proposal
+program, which can reduce the overhead introduced by the probabilistic runtime in performance-critical sections
+of the proposal, and is important for our proposed methodology for using proposal programs in Section 5. We
+5
+
+x
+θ
+λ
+v
+w
+z
+Heuristic algorithm
+Figure 3: Proposed high-level data ﬂow for a proposal program based on a heuristic randomized algorithm. x is
+the input to the program, θ are the parameters of the program to be optimized, λ are the parameters of the heuristic
+algorithm that are difﬁcult to set manually, and z is the output of the proposal program. The internal random
+choices u of the proposal program include λ and any internal random choices v made by the heuristic algorithm,
+which need not be instrumented by the probabilistic runtime.
+implemented Algorithm 3 on top of the Gen.jl runtime [6]. In Gen.jl, the user annotates random choices in a
+probabilistic program with a unique identiﬁer. The user is free to use randomness in a probabilistic program
+without annotating it. In our implementation of Algorithm 3 we only accumulate the gradient ∇θ log pI(τ; x, θ)
+taking into account random choices that were annotated, relying on the user to ensure that there is no deterministic
+dependency of un-annotated random choices on θ. In future work, automatic dependency analysis based on the
+approach of [12] could remove this reliance on the user.
+5
+Application: Proposals based on randomized mode-ﬁnding algorithms
+Because Algorithm 3 minimizes the KL divergence from the posterior (or its proxy) to the proposal distribution,
+optimization will tend to force the proposal to have sufﬁcient variability to cover the posterior mass, which
+provides a degree of robustness even when the heuristic is brittle. On problem instances where the heuristic gives
+wrong answers, the proposal variability should increase. On problem instances where the heuristic produces values
+near the posterior modes, the proposal variability should attempt to match the variability of each posterior mode.
+Proposal programs permit the inference programmer to express their knowledge about the target distribution in the
+form of a sampling program. Consider the case when the user possesses a heuristic randomized algorithm that ﬁnds
+areas of high probability of the target distribution. Although such an algorithm contains some knowledge about
+the target distribution, the algorithm in isolation is not useful for performing sound probabilistic inference—it
+does not necessarily attempt to represent the variability with the mode(s) of the target distribution, and its support
+may not even include the posterior support. The heuristic may also be brittle—it have parameters that need to be
+tuned for it to work on a particular problem instance, or it may fail completely on some problem instances.
+To construct robust and sound probabilistic inference algorithms that can take advantage of heuristic randomized
+algorithms, we construct proposal programs that use the heuristic algorithm as a subroutine, and use the proposal
+program in importance sampling (Algorithm 1) or MCMC (Algorithm 2). Let x denote the problem instance (e.g.
+the observed data or context variables); and let λ, v, and w denote the parameters, internal random choices, and
+output of the algorithm, respectively. To construct the proposal program from the heuristic algorithm, we:
+1. Make the parameters that are difﬁcult to set manually into random choices λ whose distribution may
+depend on x (other parameters can be hardcoded or can have a hardcoded dependency on x).
+2. Add random choices z that are equal to the output v of the heuristic algorithm plus some amount of noise,
+such that the support of z given any w and x includes the support of the posterior π(z). The choices z
+are the output choices of the proposal program.
+3. Parametrize the distribution of λ given x and the distribution of z given x and w using the output of
+neural network(s) with parameters θ. The networks take as input x and generate parameter values λ for
+the heuristic algorithm, as well as the amount of noise used to add to the output w of the algorithm.
+Figure 3 shows the high-level data ﬂow of the resulting proposal program. We optimize the parameters θ during
+an ofﬂine inference compilation phase using Algorithm 3. Note that the internal random choices of the heuristic
+algorithm (v) do not depend deterministically on θ. Therefore, to use Algorithm 3, the heuristic algorithm need
+not be instrumented by the probabilistic runtime, and can be fast black-box code.
+6
+
+6
+Example: Proposal program combining RANSAC with a neural network
+1
+function ransac(xs, ys, params::RANSACParams)
+2
+best_num_inliers::Int = -1
+3
+best_slope::Float64 = NaN
+4
+best_intercept::Float64 = NaN
+5
+for i=1:params.num_iters
+6
+7
+# Select a random pair of points
+8
+rand_ind = StatsBase.sample(1:length(xs), 2, replace=false)
+9
+subset_xs = xs[rand_ind]
+10
+subset_ys = ys[rand_ind]
+11
+12
+# Estimate slope and intercept using least squares
+13
+A = hcat(subset_xs, ones(length(subset_xs)))
+14
+slope, intercept = A\subset_ys
+15
+16
+# Count the number of inliers for this (slope, intercept) hypothesis
+17
+ypred = intercept + slope * xs
+18
+inliers = abs.(ys - ypred) .< params.epsilon
+19
+num_inliers = sum(inliers)
+20
+21
+if num_inliers > best_num_inliers
+22
+best_slope, best_intercept = slope, intercept
+23
+best_num_inliers = num_inliers
+24
+end
+25
+end
+26
+27
+# return the hypothesis that resulted in the most inliers
+28
+(best_slope, best_intercept)
+29
+end
+Figure 4: A Julia implementation of a RANSAC-based heuristic algorithm for generating hypotheses (lines
+parameterized by a slope and intercept) that explain a given data set of x-y coordinates.
+We illustrate Algorithm 1 and approach of Section 5, on a Bayesian linear regression with outliers inference
+problem. The data set is a set of x-y pairs {(xi, yi)}N
+i=1, the latent variables z consist of the parameters of the line
+(α1, α2) and binary variables oi indicating whether each data point i is an outlier or not. The generative model
+π(z, y), which is conditioned on the x-coordinates x, is deﬁned below:
+α1 ∼Normal(0, 1) (slope)
+α2 ∼Normal(0, 2) (intercept)
+oi ∼Bernoulli(0.1) for i = 1 . . . N (outlier or inlier)
+yi|α1, α2, xi, oi ∼
+
+Normal(α1xi + α2, 1)
+: oi = 0 (inlier)
+Normal(α1xi + α2, 5.8)
+: oi = 1 (outlier)
+The unnormalized target distribution ˜π(z) is the joint probability π(z, y).
+Random sample consensus (RANSAC, [13]) is an iterative algorithm that can quickly ﬁnd lines near the posterior
+modes of the posterior on this problem, using deterministic least-squares algorithm within each iteration. Figure 4
+shows a Julia implementation of a RANSAC algorithm for our linear-regression with outliers problem. However,
+the output distribution of the algorithm is an atomic set that does not sufﬁciently support the posterior distribution
+on lines, which is deﬁned on R2. Also, the algorithm contains a parameter epsilon that needs to be roughly
+calibrated to the inlier variability in a particular data set, and it is not clear how many iterations of the algorithm to
+run.
+To make use of RANSAC for robust and sound probabilistic inference, we wrote a proposal program in Gen.jl
+following the methodology proposed in Section 5, optimized the unknown parameters of the resulting proposal
+programs using Algorithm 3, and employed the optimized proposal programs within importance sampling
+(Algorithm 1). The proposal program, shown in Figure 5, (1) generates the parameter epsilon and the number of
+iterations of the RANSAC algorithm from distributions whose parameters are part of θ, then (2) runs RANSAC,
+and (3) adds Cauchy-distributed noise to the resulting line parameters (slope and intercept), where the variability
+of the noise is determined by the output of a neural network whose parameters are part of θ, and ﬁnally (4) samples
+7
+
+1
+
+2
+3
+# Generate parameters for RANSAC using learned parameters
+4
+
+5
+exp(params.eps_beta)), "epsilon")
+6
+
+7
+ransac_params = RANSACParams(num_iters, epsilon)
+8
+9
+# Run RANSAC (uses many un-annotated random choices)
+10
+slope_guess, intercept_guess = ransac(xs, ys, ransac_params)
+11
+12
+# Predict output variability using learned neural network
+13
+nn_hidden = ewise(sigmoid, params.h_weights * vcat(xs, ys) + params.h_biases)
+14
+nn_out = params.out_weights * nn_hidden + params.out_biases
+15
+slope_scale, intercept_scale = (exp(nn_out[1]), exp(nn_out[2]))
+16
+17
+# Add noise
+18
+
+19
+
+20
+21
+# Generate outlier statuses from conditional distribution
+22
+for (i, (x, y)) in enumerate(zip(xs, ys))
+23
+p_outlier = conditional_outlier(x, y, slope, intercept)
+24
+
+25
+end
+26
+end
+Figure 5: Proposal program in Gen.jl that uses RANSAC and a neural network to predict the line, followed
+by conditional sampling for the outlier variables. The output choices O are "slope", "intercept", and
+"outlier-1", "outlier-2", etc. In Gen.jl, the set of output choices O is deﬁned when querying the program
+using the methods of Figure 2b, not in the program text itself.
+the outlier binary variables from their conditional distributions given the line. Note that the random choices inside
+the ransac function are not annotated—the RANSAC procedure is executed as regular Julia code by Gen.jl’s
+probabilistic runtime without incurring any overhead.
+For comparison, we also implemented a proposal program (Figure 6) that does not use RANSAC, but instead
+generates the slope and intercept of the line from a distribution that depends on a neural network. We optimized
+both proposal programs using a modiﬁed version of Algorithm 3 that uses ADAM [14] instead of standard SGD.
+We used the generative model π(z, y) as the training distribution, and we used K = 100 during training and
+minibatches of size 8, and 3000 iterations. The results are shown and discussed in Figure 7.
+7
+Related work
+Some probabilistic programming systems support combining automated and custom inference strategies [15].
+However, custom proposal distributions in [15] require user implementation of a density-evaluation function
+for the proposal (mirroring the interface of Figure 2a). Other probabilistic programming systems support the
+speciﬁcation of ‘guide programs’ for use in importance sampling, sequential Monte Carlo, or variational inference
+[4, 16]. However, guide programs follow the control ﬂow of a model program, or are restricted to using the same
+set of random choices. We focus on using general probabilistic programs to deﬁne proposal distributions, whether
+in the context of probabilistic programs for the model or not.
+The Monte Carlo algorithms presented here derive their theoretical justiﬁcation from auxiliary-variable construc-
+tions similar to those of pseudo-marginal MCMC [17] and random-weight particle ﬁlter [18]. In particular, our
+Metropolis-Hastings algorithm can be seen as an application of the general auxiliary-variable MCMC formalism
+of [19] to the setting where proposals are deﬁned as probabilistic programs.
+Recent work in ‘amortized’ or ‘compiled’ inference has studied techniques for ofﬂine optimizing of proposal
+distributions in importance sampling or sequential Monte Carlo [2–5]. Others have applied similar approaches to
+optimize proposal distributions for use in MCMC [10, 20]. However, the focus of these efforts is optimizing over
+neurally-parameterized distributions that inherit their structure from the generative model being targeted, do not
+contain their own internal random choices, and are therefore not suited to use with heuristic randomized algorithms.
+8
+
+1
+
+2
+3
+# Generate randomness
+4
+dim = 2
+5
+latent = mvnormal(zeros(dim), eye(dim))
+6
+7
+# Construct feature vector
+8
+features = vcat(latent, xs, ys)
+9
+10
+# Use neural network to predict parameters of line distribution
+11
+hidden = ewise(sigmoid, params.hidden_weights * features + params.hidden_biases)
+12
+output = params.output_weights * hidden + params.output_biases
+13
+slope_mu = output[1]
+14
+intercept_mu = output[2]
+15
+slope_var = exp(output[3])
+16
+intercept_var = exp(output[4])
+17
+18
+# Generate line
+19
+
+20
+
+21
+22
+# Generate outlier statuses from conditional distribution
+23
+for (i, (x, y)) in enumerate(zip(xs, ys))
+24
+p_outlier = conditional_outlier(x, y, slope, intercept)
+25
+
+26
+end
+27
+end
+Figure 6: Proposal program in Gen.jl that a neural network to predict the line, followed by conditional sampling
+for the outlier variables
+10
+5
+0
+5
+10
+10.0
+7.5
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+401.7 samples/sec.
+(a) IS (prior)
+10
+5
+0
+5
+10
+10.0
+7.5
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+407.5 samples/sec.
+(b) IS (RANSAC+NN)
+10
+5
+0
+5
+10
+10.0
+7.5
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+317.9 samples/sec.
+(c) IS (NN)
+0
+1000
+2000
+3000
+SGD iterations
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+Proposal Error
+RANSAC+NN
+NN
+Prior
+(d) Training objective
+Figure 7: (a) shows a dataset (points), and approximate posterior samples (lines) from an importance sam-
+pling algorithm using a prior proposal. (b) shows samples produced by Algorithm 1 using a proposal program
+(RANSAC+NN, Figure 5) that combines RANSAC with a neural network. (c) shows samples produced Algo-
+rithm 1 using a proposal program (NN, Figure 6) based on a neural network. Six particles (N = 6) were used
+for both proposals. Signiﬁcantly more accurate samples are obtained with comparable throughput using the
+RANSAC+NN proposal program. (d) shows the estimated approximation error of the three proposals as the
+parameters of proposals are tuned ofﬂine using ADAM. Error is quantiﬁed using the expected KL divergence
+from the target distribution to the proposal distribution up to an unknown constant that does not depend on the
+proposal distribution, where the expectation is taken under datasets sampled from the model.
+In contrast, we seek to allow the user to easily express and compute with custom proposal distributions that are
+deﬁned as arbitrary probabilistic programs that are independent of any possible structure in the probabilistic model
+being targeted, and may include ‘internal’ random choices not present in the target model.
+There has been much recent work in probabilistic machine learning on training generative latent variable models
+using using stochastic gradient descent [21, 22, 11]. Our procedure for optimizing proposal programs is an
+application of the Monte Carlo variational objective approach of [11] to the setting where the generative model is
+itself a proposal distribution in a different probabilistic model. The observation that random variables can permit
+9
+
+optimization of probabilistic computations that utilize black-box randomized code has been previously observed
+and used in reinforcement learning [23, 12].
+8
+Discussion
+This paper formalized proposal programs, discussed how to implement proposal programs in a sampling-based
+probabilistic runtime, showed how to use proposal programs within importance sampling and Metropolis-Hastings,
+how to optimize proposal programs ofﬂine, and suggested an application of the formalism to using randomized
+heuristics to accelerate Monte Carlo inference. Several directions for future work seem promising.
+First, we note that the efﬁciency of Monte Carlo inference with proposal programs depends on the number of
+internal replicates K used within the proposed SIMULATE and ASSESS procedures. It is important to better
+characterize how the efﬁciency depends on K. Also, the proposed SIMULATE and ASSESS procedures make
+use of forward execution of the proposal program to generate traces that are used for estimating the proposal
+probability. Following the ‘probabilistic module’ formalism [24], other distributions on traces that attempt to
+approximate the conditional distribution on traces given output choices can be used instead for more accurate
+proposal probability estimates (and therefore more efﬁcient Monte Carlo inference for a ﬁxed proposal program).
+These distributions, which constitute nested inference samplers, should be able to make use of existing inference
+machinery in probabilistic programming languages that was originally developed for inference in model programs.
+It also seems promising to explore proposal programs that combine neural networks and domain-speciﬁc heuristic
+algorithms in different ways. For example, a proposal program may contain a switch statement that decides
+whether to propose using a heuristic (as in Section 5) or according to a pure-neural network proposal (as shown in
+Figure 6), where the probability of taking the two different paths can itself be predicted from the problem instance
+using a neural network. The proposal program formalism also suggests that other approaches for inference in
+probabilistic programs such as symbolic integration [25] could ﬁnd applications in estimating or computing
+proposal probabilities. Finally, a rigorous theoretical analysis of importance sampling, Metropolis-Hastings, and
+ofﬂine optimization with proposal programs that contain continuous random variables would be useful.

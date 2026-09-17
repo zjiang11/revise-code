@@ -1,0 +1,1039 @@
+Particle Gibbs for Bayesian Additive Regression Trees
+Balaji Lakshminarayanan
+Daniel M. Roy
+Yee Whye Teh
+Gatsby Unit
+University College London
+Department of Statistical Sciences
+University of Toronto
+Department of Statistics
+University of Oxford
+Abstract
+Additive regression trees are ﬂexible non-
+parametric models and popular oﬀ-the-shelf
+tools for real-world non-linear regression. In
+application domains, such as bioinformat-
+ics, where there is also demand for proba-
+bilistic predictions with measures of uncer-
+tainty, the Bayesian additive regression trees
+(BART) model, introduced by Chipman et al.
+(2010), is increasingly popular. As data sets
+have grown in size, however, the standard
+Metropolis–Hastings algorithms used to per-
+form inference in BART are proving inade-
+quate.
+In particular, these Markov chains
+make local changes to the trees and suﬀer
+from slow mixing when the data are high-
+dimensional or the best-ﬁtting trees are more
+than a few layers deep. We present a novel
+sampler for BART based on the Particle Gibbs
+(PG) algorithm (Andrieu et al., 2010) and
+a top-down particle ﬁltering algorithm for
+Bayesian decision trees (Lakshminarayanan
+et al., 2013).
+Rather than making local
+changes to individual trees, the PG sampler
+proposes a complete tree to ﬁt the residual.
+Experiments show that the PG sampler out-
+performs existing samplers in many settings.
+1
+Introduction
+Ensembles of regression trees are at the heart of many
+state-of-the-art approaches for nonparametric regres-
+sion (Caruana and Niculescu-Mizil, 2006), and can be
+broadly classiﬁed into two families: randomized inde-
+pendent regression trees, wherein the trees are grown
+independently and predictions are averaged to reduce
+This document is identical in content to, and should be
+cited as: B. Lakshminarayanan, D. M. Roy, and Y. W. Teh,
+Particle Gibbs for Bayesian Additive Regression Trees, in
+Proceedings of the 18th International Conference on Artiﬁ-
+cial Intelligence and Statistics (AISTATS) 2015, San Diego,
+CA, USA. JMLR: W&CP volume 38.
+variance, and additive regression trees, wherein each
+tree ﬁts the residual not explained by the remainder of
+the trees. In the former category are bagged decision
+trees (Breiman, 1996), random forests (Breiman, 2001),
+extremely randomized trees (Geurts et al., 2006), and
+many others, while additive regression trees can be
+further categorized into those that are ﬁt in a serial
+fashion, like gradient boosted regression trees (Fried-
+man, 2001), and those ﬁt in an iterative fashion, like
+Bayesian additive regression trees (BART) (Chipman
+et al., 2010) and additive groves (Sorokina et al., 2007).
+Among additive approaches, BART is extremely pop-
+ular and has been successfully applied to a wide vari-
+ety of problems including protein-DNA binding, credit
+risk modeling, automatic phishing/spam detection, and
+drug discovery (Chipman et al., 2010). Additive re-
+gression trees must be regularized to avoid overﬁtting
+(Friedman, 2002): in BART, over-ﬁtting is controlled
+by a prior distribution preferring simpler tree struc-
+tures and non-extreme predictions at leaves. At the
+same time, the posterior distribution underlying BART
+delivers a variety of inferential quantities beyond predic-
+tions, including credible intervals for those predictions
+as well as a measures of variable importance. At the
+same time, BART has been shown to achieve predictive
+performance comparable to random forests, boosted
+regression trees, support vector machines, and neural
+networks (Chipman et al., 2010).
+The standard inference algorithm for BART is an iter-
+ative Bayesian backﬁtting Markov Chain Monte Carlo
+(MCMC) algorithm (Hastie et al., 2000). In particular,
+the MCMC algorithm introduced by Chipman et al.
+(2010) proposes local changes to individual trees. This
+sampler can be computationally expensive for large
+datasets, and so recent work on scaling BART to large
+datasets (Pratola et al., 2013) considers using only a
+subset of the moves proposed by Chipman et al. (2010).
+However, this smaller collection of moves has been ob-
+served to lead to poor mixing (Pratola, 2013) which
+in turn produces an inaccurate approximation to the
+posterior distribution. While a poorly mixing Markov
+chain might produce a reasonable prediction in terms
+arXiv:1502.04622v1  [stat.ML]  16 Feb 2015
+
+Particle Gibbs for Bayesian Additive Regression Trees
+of mean squared error, BART is often used in scenarios
+where its users rely on posterior quantities, and so there
+is a need for computationally eﬃcient samplers that
+mix well across a range of hyper-parameter settings.
+In this work, we describe a novel sampler for BART
+based on (1) the Particle Gibbs (PG) framework pro-
+posed by Andrieu et al. (2010) and (2) the top-down
+sequential Monte Carlo algorithm for Bayesian deci-
+sion trees proposed by Lakshminarayanan et al. (2013).
+Loosely speaking, PG is the particle version of the
+Gibbs sampler where proposals from the exact condi-
+tional distributions are replaced by conditional ver-
+sions of a sequential Monte Carlo (SMC) algorithm.
+The complete sampler follows the Bayesian backﬁtting
+MCMC framework for BART proposed by Chipman
+et al. (2010); the key diﬀerence is that trees are sam-
+pled using PG instead of the local proposals used by
+Chipman et al. (2010).
+Our sampler, which we re-
+fer to as PG-BART, approximately samples complete
+trees from the conditional distribution over a tree ﬁt-
+ting the residual. As the experiments bear out, the
+PG-BART sampler explores the posterior distribution
+more eﬃciently than samplers based on local moves.
+Of course, one could easily consider non-local moves in
+a Metropolis–Hastings (MH) scheme by proposing com-
+plete trees from the tree prior, however these moves
+would be rejected, leading to slow mixing, in high-
+dimensional and large data settings. The PG-BART
+sampler succeeds not only because non-local moves are
+considered, but because those non-local moves have
+high posterior probability. Another advantage of the
+PG sampler is that it only requires one to be able to
+sample from the prior and does not require evaluation
+of tree prior in the acceptance ratio unlike (local) MH—
+hence PG can be computationally eﬃcient in situations
+where the tree prior is expensive (or impossible) to
+compute, but relatively easier to sample from.
+The paper is organized as follows: in section 2, we
+review the BART model; in section 3, we review the
+MCMC framework proposed by Chipman et al. (2010)
+and describe the PG sampler in detail. In section 4,
+we present experiments that compare the PG sampler
+to existing samplers for BART.
+2
+Model and notation
+In this section, we brieﬂy review decision trees and
+the BART model. We refer the reader to the paper
+of Chipman et al. (2010) for further details about the
+model. Our notation closely follows their’s, but also
+The tree prior term cancels out in the MH acceptance
+ratio if complete trees are sampled. However, sampling
+complete trees from the tree prior would lead to very low
+acceptance rates as discussed earlier.
+borrows from Lakshminarayanan et al. (2013).
+2.1
+Problem setup
+We assume that the training data consist of N i.i.d. sam-
+ples X = {xn}N
+n=1, where xn ∈RD, along with corre-
+sponding labels Y = {yn}N
+n=1, where yn ∈R. We focus
+only on the regression task in this paper, although the
+PG sampler can also be used for classiﬁcation by build-
+ing on the work of Chipman et al. (2010) and Zhang
+and H¨ardle (2010).
+2.2
+Decision tree
+For our purposes, a decision tree is a hierarchical binary
+partitioning of the input space with axis-aligned splits.
+The structure of the decision tree is a ﬁnite, rooted,
+strictly binary tree T, i.e., a ﬁnite collection of nodes
+such that 1) every node η has exactly one parent node,
+except for a distinguished root node ϵ which has no
+parent, and 2) every node η is the parent of exactly
+zero or two children nodes, called the left child η0 and
+the right child η1. Denote the leaves of T (those nodes
+without children) by leaves(T). Each node of the tree
+η ∈T is associated with a block Bη ⊂RD of the input
+space as follows: At the root, we have Bϵ = RD, while
+each internal node η ∈T \ leaves(T) with two children
+represents a split of its parent’s block into two halves,
+with κη ∈{1, . . . , D} denoting the dimension of the
+split, and τη denoting the location of the split.
+In
+particular,
+Bη0 = Bη ∩{z ∈RD : zκη ≤τη} and
+Bη1 = Bη ∩{z ∈RD : zκη > τη}.
+(1)
+We call the tuple T = (T, κ, τ) a decision tree. Note
+that the blocks associated with the leaves of the tree
+form a partition of RD.
+A decision tree used for regression is referred to as
+a regression tree. In a regression tree, each leaf node
+η ∈leaves(T) is associated with a real-valued parameter
+µη ∈R. Let µ = {µη}η∈leaves(T) denote the collection
+of all parameters. Given a tree T and a data point
+x, let leafT (x) be the unique leaf node η ∈leaves(T)
+such that x ∈Bη, and let g( · ; T , µ) be the response
+function associated with T and µ, given by
+g(x; T , µ) := µleafT (x).
+(2)
+2.3
+Likelihood speciﬁcation for BART
+BART is a sum-of-trees model, i.e., BART assumes that
+the label y for an input x is generated by an additive
+combination of m regression trees. More precisely,
+y =
+m
+X
+j=1
+g(x; Tj, µj) + e,
+(3)
+
+Balaji Lakshminarayanan, Daniel M. Roy, Yee Whye Teh
+where e ∼N(0, σ2) is an independent Gaussian noise
+term with zero mean and variance σ2.
+Hence, the
+likelihood for a training instance is
+ℓ(y|{Tj, µj}m
+j=1, σ2, x) = N
+ y|
+m
+X
+j=1
+g(x; Tj, µj), σ2
+,
+and the likelihood for the entire training dataset is
+ℓ(Y |{Tj, µj}m
+j=1, σ2, X) =
+Y
+n
+ℓ(yn|{Tj, µj}m
+j=1, σ2, xn).
+2.4
+Prior speciﬁcation for BART
+The parameters of the BART model are the noise
+variance σ2 and the regression trees (Tj, µj) for j =
+1, . . . , m. The conditional independencies in the prior
+are captured by the factorization
+p({Tj, µj}m
+j=1, σ2|X) = p(σ2)
+m
+Y
+j=1
+p(µj|Tj)p(Tj|X).
+The prior over decision trees p(Tj = {Tj, κj, τj}|X)
+can be described by the following generative process
+(Chipman et al., 2010; Lakshminarayanan et al., 2013):
+Starting with a tree comprised only of a root node ϵ,
+the tree is grown by deciding once for every node η
+whether to 1) stop and make η a leaf, or 2) split, making
+η an internal node, and add η0 and η1 as children. The
+same stop/split decision is made for the children, and
+their children, and so on. Let ρη be a binary indicator
+variable for the event that η is split. Then every node
+η is split independently with probability
+p(ρη = 1) =
+αs
+(1 + depth(η))βs
+× 1[valid split exists below η in X], (4)
+where the indicator 1[...] forces the probability to be
+zero when every possible split of η is invalid, i.e., one
+of the children nodes contains no training data. Infor-
+mally, the hyperparameters αs ∈(0, 1) and βs ∈[0, ∞)
+control the depth and number of nodes in the tree.
+Higher values of αs lead to deeper trees while higher
+values of βs lead to shallower trees.
+In the event that a node η is split, the dimension κη
+and location τη of the split are assumed to be drawn
+independently from a uniform distribution over the set
+of all valid splits of η. The decision tree prior is thus
+p(T |X) =
+Y
+η∈T\leaves(T)
+p(ρη = 1) U(κη) U(τη|κη)
+×
+Y
+η∈leaves(T)
+p(ρη = 0),
+(5)
+Note that p(ρη = 1) depends on X and the split dimen-
+sions and locations at the ancestors of η in T due to the
+indicator function for valid splits. We elide this dependence
+to keep the notation simple.
+where U(·) denotes the probability mass function of the
+uniform distribution over dimensions that contain at
+least one valid split, and U(·|κη) denotes the probability
+density function of the uniform distribution over valid
+split locations along dimension κη in block Bη.
+Given a decision tree T , the parameters associated with
+its leaves are independent and identically distributed
+normal random variables, and so
+p(µ|T ) =
+Y
+η∈leaves(T)
+N(µη|mµ, σ2
+µ).
+(6)
+The mean mµ and variance σ2
+µ hyperparameters are
+set indirectly: Chipman et al. (2010) shift and rescale
+the labels Y such that ymin = −0.5 and ymax = 0.5,
+and set mµ = 0 and σµ = 0.5/k√m, where k > 0 is
+an hyperparameter. This adjustment has the eﬀect
+of keeping individual node parameters µη small; the
+higher the values of k and m, the greater the shrinkage
+towards the mean mµ.
+The prior p(σ2) over the noise variance is an inverse
+gamma distribution. The hyperparameters ν and q
+indirectly control the shape and rate of the inverse
+gamma prior over σ2. Chipman et al. (2010) compute
+an overestimate of the noise variance bσ2, e.g., using the
+least-squares variance or the unconditional variance of
+Y , and, for a given shape parameter ν, set the rate
+such that Pr(σ ≤bσ) = q, i.e., the qth quantile of the
+prior over σ is located at bσ.
+Chipman et al. (2010) recommend the default values:
+ν = 3, q = 0.9, k = 2, m = 200 and αs = 0.95, βs =
+2.0. Unless otherwise speciﬁed, we use this default
+hyperparameter setting in our experiments.
+2.5
+Sequential generative process for trees
+Lakshminarayanan et al. (2013) present a sequential
+generative process for the tree prior p(T |X), where
+a tree T is generated by starting from an empty tree
+T(0) and sampling a sequence T(1), T(2), . . . of partial
+trees. This sequential representation is used as the
+scaﬀolding for their SMC algorithm.
+Due to space
+limitations, we can only brieﬂy review the sequential
+process.
+The interested reader should refer to the
+paper by Lakshminarayanan et al. (2013): Let T(t) =
+T(t), κ(t), τ(t), E(t) denote the partial tree at stage t,
+where E(t) denotes the ordered set containing the list
+of nodes eligible for expansion at stage t. At stage t,
+the generative process samples T(t) from Prt(· | T(t−1))
+as follows: the ﬁrst element of E, say η, is popped and
+is stochastically assigned to be an internal node or a
+leaf node with probability given by (4). If η is chosen
+Note that T(t) denotes partial tree at stage t, whereas
+Tj denotes the jth tree in the ensemble.
+
+Particle Gibbs for Bayesian Additive Regression Trees
+ϵ
+(a) T(0): E(0) = {ϵ}
+ϵ : x1 > 0.5
+0
+1
+(b) T(1): E(1) = {0, 1}
+ϵ : x1 > 0.5
+0
+1
+(c) T(2): E(2) = {1}
+ϵ : x1 > 0.5
+0
+1 : x2 > 0.3
+10
+11
+(d) T(3): E(3) = {10, 11}
+ϵ : x1 > 0.5
+0
+1 : x2 > 0.3
+10
+11
+(e) T(6): E(6) = {}
+Figure 1: Sequential generative process for decision trees: Nodes eligible for expansion are denoted by the ordered set E
+and shaded in gray. At iteration 0, we start with the empty tree and E = {ϵ}. At iteration 1, we pop ϵ from E and assign
+it to be an internal node with split dimension κϵ = 1 and split location τϵ = 0.5 and append the child nodes 0 and 1 to E.
+At iteration 2, we pop 0 from E and set it to a leaf node. At iteration 3, we pop 1 from E and set it to an internal node,
+split dimension κ1 = 2 and threshold τ1 = 0.3 and append the child nodes 10 and 11 to E. At iterations 4 and 5 (not
+shown), we pop nodes 10 and 11 respectively and assign them to be leaf nodes. At iteration 6, E = {} and the process
+terminates. By arranging the random variables ρ and κ, τ (if applicable) for each node in the order of expansion, the tree
+can be encoded as a sequence.
+to be an internal node, we sample the split dimension
+κη and split location τη uniformly among the valid
+splits, and append η0 and η1 to E. Thus, the tree is
+expanded in a breadth-wise fashion and each node is
+visited just once. The process terminates when E is
+empty. Figure 1 presents a cartoon of the sequential
+generative process.
+3
+Posterior inference for BART
+In this section, we brieﬂy review the MCMC framework
+proposed in (Chipman et al., 2010), discuss limitations
+of existing samplers and then present our PG sampler.
+3.1
+MCMC for BART
+Given the likelihood and the prior, our goal is to com-
+pute the posterior distribution
+p({Tj, µj}m
+j=1, σ2|Y, X) ∝
+ℓ(Y |{Tj, µj}m
+j=1, σ2, X) p({Tj, µj}m
+j=1, σ2|X). (7)
+Chipman et al. (2010) proposed a Bayesian backﬁtting
+MCMC to sample from the BART posterior. At a
+high level, the Bayesian backﬁtting MCMC is a Gibbs
+sampler that loops through the trees, sampling each
+tree Tj and associated parameters µj conditioned on
+σ2 and the remaining trees and their associated param-
+eters {Tj′, µj′}j′̸=j, and samples σ2 conditioned on all
+the trees and parameters {Tj, µj}m
+j=1. Let T (i)
+j
+, µ(i)
+j ,
+and σ2(i) respectively denote the values of Tj, µj and
+σ2 at the ith MCMC iteration. Sampling σ2 condi-
+tioned on {Tj, µj}m
+j=1 is straightforward due to conju-
+gacy. To sample Tj, µj conditioned on the other trees
+Lakshminarayanan et al. (2013) discuss a more general
+version where more than one node may be expanded in
+an iteration. We restrict our attention in this paper to
+node-wise expansion: one node is expanded per iteration
+and the nodes are expanded in a breadth-wise fashion.
+{Tj′, µj′}j′̸=j, we ﬁrst sample Tj|{Tj′, µj′}j′̸=j, σ2 and
+then sample µj|Tj, {Tj′, µj′}j′̸=j, σ2. (Note that µj is
+integrated out while sampling Tj.) More precisely, we
+compute the residual
+Rj = Y −Pm
+j′=1,j′̸=j g(X; Tj′, µj′).
+(8)
+Using the residual R(i)
+j
+as the target, Chipman et al.
+(2010) sample T (i)
+j
+by proposing local changes to T (i−1)
+j
+.
+Finally, µj is sampled from a Gaussian distribution
+conditioned on Tj, {Tj′, µj′}j′̸=j, σ2. The procedure is
+summarized in Algorithm 1.
+3.2
+Existing samplers for BART
+To sample Tj, Chipman et al. (2010) use the MCMC al-
+gorithm proposed by Chipman et al. (1998). This algo-
+rithm, which we refer to as CGM. CGM is a Metropolis-
+within-Gibbs sampler that randomly chooses one of the
+following four moves: grow (which randomly chooses a
+leaf node and splits it further into left and right chil-
+dren), prune (which randomly chooses an internal node
+where both the children are leaf nodes and prunes the
+two leaf nodes, thereby making the internal node a leaf
+node), change (which changes the decision rule at a
+randomly chosen internal node), swap (which swaps
+the decision rules at a parent-child pair where both the
+parent and child are internal nodes). There are two
+issues with the CGM sampler: (1) the CGM sampler
+makes local changes to the tree, which is known to af-
+fect mixing when computing the posterior over a single
+decision tree (Wu et al., 2007). Chipman et al. (2010)
+claim that the default hyper-parameter values encour-
+age shallower trees and hence mixing is not aﬀected
+signiﬁcantly. However, if one wishes to use BART on
+large datasets where individual trees are likely to be
+deeper, the CGM sampler might suﬀer from mixing is-
+sues. (2) The change and swap moves in CGM sampler
+are computationally expensive for large datasets that
+
+Balaji Lakshminarayanan, Daniel M. Roy, Yee Whye Teh
+Algorithm 1 Bayesian backﬁtting MCMC for posterior inference in BART
+1: Inputs: Training data (X, Y ), BART hyperparameters (ν, q, k, m, αs, βs)
+2: Initialization: For all j, set T (0)
+j
+= {T(0)
+j
+= {ϵ}, τ (0)
+j
+= κ(0)
+j
+= ∅} and sample µ(0)
+j
+3: for i = 1 : max iter do
+4:
+Sample σ2(i)|T (i−1)
+1:m
+, µ(i−1)
+1:m
+▷sample from inverse gamma distribution
+5:
+for j = 1 : m do
+6:
+Compute residual R(i)
+j
+▷using (8)
+7:
+Sample T (i)
+j
+|R(i)
+j , σ2(i), T (i−1)
+j
+▷using CGM, GrowPrune or PG
+8:
+Sample µ(i)
+j |R(i)
+j , σ2(i), T (i)
+j
+▷sample from Gaussian distribution
+involve deep trees (since they involve re-computation of
+all likelihoods in the subtree below the top-most node
+aﬀected by the proposal). For computational eﬃciency,
+Pratola et al. (2013) propose using only the grow and
+prune moves; we will call this the GrowPrune sampler.
+However, as we illustrate in section 4, the GrowPrune
+sampler can ineﬃciently explore the posterior in scenar-
+ios where there are multiple possible trees that explain
+the observations equally well. In the next section, we
+present a novel sampler that addresses both of these
+concerns.
+3.3
+PG sampler for BART
+Recall that Chipman et al. (2010) sample T (i)
+j
+using
+R(i)
+j
+as the target by proposing local changes to T (i−1)
+j
+.
+It is natural to ask if it is possible to sample a com-
+plete tree T (i)
+j
+rather than just local changes. Indeed,
+this is possible by marrying the sequential representa-
+tion of the tree proposed by Lakshminarayanan et al.
+(2013) (see section 2.5) with the Particle Markov Chain
+Monte Carlo (PMCMC) framework (Andrieu et al.,
+2010) where an SMC algorithm (particle ﬁlter) is used
+as a high-dimensional proposal for MCMC. The PG
+sampler is implemented using the so-called conditional
+SMC algorithm (instead of the Metropolis-Hastings
+samplers described in Section 3.2) in line 7 of Algo-
+rithm 1. At a high level, the conditional SMC algorithm
+is similar to the SMC algorithm proposed by Lakshmi-
+narayanan et al. (2013), except that one of the particles
+is clamped to the current tree T (i−1)
+j
+.
+Before describing the PG sampler, we derive the con-
+ditional posterior Tj|{Tj′, µj′}j′̸=j, σ2, Y, X. Let N(η)
+denote the set of data point indices n ∈{1, . . . , N}
+such that xn ∈Bη. Slightly abusing the notation, let
+RN(η) denote the vector containing residuals of data
+points in node η. Given R := Y −P
+j′̸=j g(X; Tj′, µj′),
+it is easy to see that the conditional posterior over
+Tj, µj is given by
+p(Tj, µj|{Tj′, µj′}j′̸=j, σ2, Y, X)
+∝p(Tj|X)
+Y
+η∈leaves(Tj)
+Y
+n∈N(η)
+N(Rn|µη, σ2)N(µη|mµ, σ2
+µ).
+Let π(Tj) denote the conditional posterior over Tj. Inte-
+grating out µ and using (5) for p(Tj|X), the conditional
+posterior π(Tj) is
+π(Tj) = p(Tj|{Tj′, µj′}j′̸=j, σ2, Y, X)
+∝p(Tj|X)
+Y
+η∈leaves(Tj)
+p(RN(η)|σ2, mµ, σ2
+µ),
+(9)
+where p(RN(η)|σ2, mµ, σ2
+µ) denotes the marginal likeli-
+hood at a node η, given by
+p(RN(η)|σ2, mµ, σ2
+µ)
+=
+Z
+µη
+Y
+n∈N(η)
+N(Rn|µη, σ2)N(µη|mµ, σ2
+µ)dµη.
+(10)
+The goal is to sample from the (conditional) posterior
+distribution π(Tj). Lakshminarayanan et al. (2013)
+presented a top-down particle ﬁltering algorithm that
+approximates the posterior over decision trees. Since
+this SMC algorithm can sample complete trees, it is
+tempting to substitute an exact sample from π(Tj) with
+an approximate sample from the particle ﬁlter. How-
+ever, Andrieu et al. (2010) observed that this naive
+approximation does not leave the joint posterior dis-
+tribution (7) invariant, and so they proposed instead
+to generate a sample using a modiﬁed version of the
+SMC algorithm, which they called the conditional-SMC
+algorithm, and demonstrated that this leaves the joint
+distribution (7) invariant. (We refer the reader to the
+paper by Andrieu et al. (2010) for further details about
+the PMCMC framework.)
+By building oﬀthe top-
+down particle ﬁlter for decision trees, we can deﬁne a
+conditional-SMC algorithm for sampling from π(Tj).
+The conditional-SMC algorithm is an MH kernel with
+π(Tj) as its stationary distribution. To reduce clutter,
+let T ∗denote the old tree and T denote the tree we
+wish we to sample. The conditional-SMC algorithm
+samples T from a C-particle approximation of π(T ),
+which can be written as PC
+c=1 w(c)δT (c) where T (c)
+denotes the cth tree (particle) and the weights sum to
+1, that is, P
+c w(c) = 1.
+
+Particle Gibbs for Bayesian Additive Regression Trees
+SMC proposal: Each particle T (c) is the end product
+of a sequence of partial trees T(0)(c), T(1)(c), T(2)(c), . . . ,
+and the weight w(c) reﬂects how well the cth tree ex-
+plains the residual R. One of the particles, say the
+ﬁrst particle, without loss of generality, is clamped to
+the old tree T ∗at all stages of the particle ﬁlter, i.e.,
+T(t)(1) = T ∗
+(t). At stage t, the remaining C −1 parti-
+cles are sampled from the sequential generative process
+Prt(· | T(t−1)(c)) described in section 2.5. Unlike state
+space models where the length of the latent state se-
+quence is ﬁxed, the sampled decision tree sequences
+may be of diﬀerent length and could potentially be
+deeper than the old tree T ∗. Hence, whenever E(t) = ∅,
+we set Pr(t)(T(t)|T(t−1)) = δT(t−1), i.e., T(t) = T(t−1).
+SMC weight update: Since the prior is used as the
+proposal, the particle weight w(t)(c) is multiplicatively
+updated with the ratio of the marginal likelihood of
+T(t)(c) to the marginal likelihood of T(t−1)(c).
+The
+marginal likelihood associated with a (partial) tree T
+is a product of the marginal likelihoods associated with
+the leaf nodes of T deﬁned in (10). Like Lakshmi-
+narayanan et al. (2013), we treat the eligible nodes E(t)
+as leaf nodes while computing the marginal likelihood
+for a partial tree T(t). Plugging in (10), the SMC weight
+update is given by (11) in Algorithm 2.
+Resampling: The resampling step in the conditional-
+SMC algorithm is slightly diﬀerent from the typical
+SMC resampling step. Recall that the ﬁrst particle is
+always clamped to the old tree. The remaining C −1
+particles are resampled such that the probability of
+choosing particle c is proportional to its weight w(t)(c).
+We used multinomial resampling in our experiments,
+although other resampling strategies are possible.
+When none of the trees contain eligible nodes, the
+conditional-SMC algorithm stops and returns a sam-
+ple from the particle approximation. Without loss of
+generality, we assume that the Cth particle is returned.
+The PG sampler is summarized in Algorithm 2.
+The computational complexity of the conditional-SMC
+algorithm in Algorithm 2 is similar to that of the top-
+down algorithm (Lakshminarayanan et al., 2013, §3.2).
+Even though the PG sampler has a higher per-iteration
+complexity in general compared to GrowPrune and
+CGM samplers, it can mix faster since it can propose
+a completely diﬀerent tree that explains the data. The
+GrowPrune sampler requires many iterations to explore
+multiple modes (since a prune operation is likely to
+be rejected around a mode). The CGM sampler can
+change the decisions at internal nodes; however, it is
+ineﬃcient since a change in an internal node that leaves
+any of the nodes in the subtree below empty will be
+rejected. We demonstrate the competitive performance
+of PG in the experimental section.
+4
+Experimental evaluation
+In this section, we present experimental comparisons
+between the PG sampler and existing samplers for
+BART. Since the main contribution of this work is a
+diﬀerent inference algorithm for an existing model, we
+just compare the eﬃciency of the inference algorithms
+and do not compare to other models. BART has been
+shown to demonstrate excellent prediction performance
+compared to other popular black-box non-linear re-
+gression approaches; we refer the interested reader to
+Chipman et al. (2010).
+We implemented all the samplers in Python and ran
+experiments on the same desktop machine so that the
+timing results are comparable.
+The scripts can be
+downloaded from the authors’ webpages. We set the
+number of particles C = 10 for computational eﬃciency
+and max-stages = 5000, following Lakshminarayanan
+et al. (2013), although the algorithm always terminated
+much earlier.
+4.1
+Hypercube-D dataset
+We investigate the performance of the samplers on a
+dataset where there are multiple trees that explain the
+residual (conditioned on other trees). This problem is
+equivalent to posterior inference over a decision tree
+where the labels are equal to the residual. Hence, we
+generate a synthetic dataset where multiple trees are
+consistent with the observed labels. Intuitively, a local
+sampler can be expected to mix reasonably well when
+the true posterior consists of shallow trees; however,
+a local sampler will lead to an ineﬃcient exploration
+when the posterior consists of deep trees. Since the
+depth of trees in the true posterior is at the heart of the
+mixing issue, we create synthetic datasets where the
+depth of trees in the true posterior can be controlled.
+We generate the hypercube-D dataset as follows: for
+each of the 2D vertices of [−1, 1]D, we sample 10 data
+points. The x location of a data point is generated as
+x = v + ϵ where v is the vertex location and ϵ is a ran-
+dom oﬀset generated as ϵ ∼N(0, 0.12ID). Each vertex
+is associated with a diﬀerent function value and the
+function values are generated from N(0, 32). Finally
+the observed label is generated as y = f + e where
+f denotes the true function value at the vertex and
+e ∼N(0, 0.012). Figure 2 shows a sample hypercube-
+2 dataset. As D increases, the number of trees that
+explains the observations increases.
+We ﬁx m = 1, αs = 0.95 and set remaining BART
+hyperparameters to the default values. Since the true
+tree has 2D leaves, we set βs such that the expected
+The values of βs for D
+=
+2, 3, 4, 5 and 7 are
+1.0, 0.5, 0.4, 0.3 and 0.25 respectively.
+
+Balaji Lakshminarayanan, Daniel M. Roy, Yee Whye Teh
+Algorithm 2 Conditional-SMC algorithm used in the PG-BART sampler
+1: Inputs: Training data: features X, ‘target’ R
+▷R denotes residual in BART
+2:
+Number of particles C
+3:
+Old tree T ∗(along with the partial tree sequence T ∗
+(0), T ∗
+(1), T ∗
+(2), . . . )
+4: Initialize: For c = 1 : C, set T(0)(c) = E(0)(c) = {ϵ} and τ(0)(c) = κ(0)(c) = ∅
+5:
+For c = 1 : C, set weights w(0)(c) = p(RN(ϵ)|σ2, mµ, σ2
+µ) and W(0) = P
+c w(0)(c)
+6: for t = 1 : max-stages do
+7:
+Set T(t)(1) = T ∗
+(t)
+▷clamp the ﬁrst particle to the partial tree of T ∗at stage t
+8:
+for c = 2 : C do
+9:
+Sample T(t)(c) from Pr(t)(· | T(t−1)(c)) where T(t)(c) := (T(t)(c), κ(t)(c), τ(t)(c), E(t)(c))
+▷section 2.5
+10:
+for c = 1 : C do
+11:
+▷If E(t−1)(c) is non-empty, let η denote the node popped from E(t−1)(c).
+12:
+Update weights:
+w(t)(c) =
+
+
+
+
+
+w(t−1)(c)
+if E(t−1)(c) is empty or η is stopped,
+w(t−1)(c)
+Q
+η′=η0,η1 p(RN(η′)|σ2, mµ, σ2
+µ)
+p(RN(η)|σ2, mµ, σ2µ)
+if η is split.
+(11)
+13:
+Compute normalization: W(t) = P
+c w(t)(c)
+14:
+Normalize weights: (∀c) w(t)(c) = w(t)(c)/W(t)
+15:
+Set j1 = 1 and for c = 2 : C, resample indices jc from P
+c′ w(t)(c′)δc′
+▷resample all particles except the
+ﬁrst
+16:
+(∀c) T(t)(c) ←T(t)(jc); w(t)(c) ←W(t)/C
+17:
+if (∀c) E(t)(c) = ∅then exit for loop
+return T(t)(C) = (T(t)(C), κ(t)(C), τ(t)(C)) ▷return a sample from the approximation P
+c′ w(t)(c′)δT(t)(c′) to
+line 7 of Algorithm 1
+−1.5
+−1.0
+−0.5
+0.0
+0.5
+1.0
+1.5
+x1
+−1.5
+−1.0
+−0.5
+0.0
+0.5
+1.0
+1.5
+x2
+-3.193
+2.640
+1.278
+-5.742
+Figure 2: Hypercube-2 dataset: see main text for details.
+number of leaves is roughly 2D. We run 2000 iterations
+of MCMC. Figure 3 illustrates the posterior trace plots
+for D = 4. (See supplemental material for additional
+posterior trace plots.) We observe that PG converges
+much faster to the posterior in terms of number of leaves
+as well as the test MSE. We observe that GrowPrune
+sampler tends to overestimate the number of leaves; the
+low value of train MSE indicates that the GrowPrune
+sampler is stuck close to a mode and is unable to explore
+the true posterior. Pratola (2013) has reported similar
+behavior of GrowPrune sampler on a diﬀerent dataset
+as well.
+0
+500 1000 1500 2000
+−103
+−102
+−101
+log-likelihood
+0
+500 1000 1500 2000
+0
+10
+20
+30
+40
+50
+60
+Mean # leaves
+0
+500 1000 1500 2000
+0
+100
+101
+102
+Training MSE
+CGM-MCMC
+Grow Prune
+PG
+0
+500 1000 1500 2000
+0
+1
+2
+3
+4
+5
+6
+7
+Precision σ−2
+0
+500 1000 1500 2000
+0
+100
+101
+102
+Test MSE
+0
+500 1000 1500 2000
+−101
+−100
+0
+Test log p(y|x)
+Figure 3: Results on Hypercube-4 dataset.
+We compare the algorithms by computing eﬀective sam-
+ple size (ESS). ESS is a measure of how well the chain
+mixes and is frequently used to assess performance of
+MCMC algorithms; we compute ESS using R-CODA
+(Plummer et al., 2006). We discard the ﬁrst 1000 itera-
+tions as burn-in and use the remaining 1000 iterations
+to compute ESS. Since the per iteration cost of gener-
+ating a sample diﬀers across samplers, we additionally
+report ESS per unit time. The ESS (computed using
+log-likelihood values) and ESS per second (ESS/s) val-
+
+Particle Gibbs for Bayesian Additive Regression Trees
+D
+CGM
+GrowPrune
+PG
+2
+751.66
+473.57
+259.11
+3
+762.96
+285.2
+666.71
+4
+14.01
+11.76
+686.79
+5
+2.92
+1.35
+667.27
+7
+1.16
+1.78
+422.96
+Table 1: Comparison of ESS for CGM, GrowPrune and
+PG samplers on Hypercube-D dataset.
+D
+CGM
+GrowPrune
+PG
+2
+157.67
+114.81
+7.69
+3
+93.01
+26.94
+11.025
+4
+0.961
+0.569
+5.394
+5
+0.130
+0.071
+1.673
+7
+0.027
+0.039
+0.273
+Table 2: Comparison of ESS/s (ESS per second) for CGM,
+GrowPrune and PG samplers on Hypercube-D dataset.
+ues are shown in Tables 1 and 2 respectively. When the
+true tree is shallow (D = 2 and D = 3), we observe that
+CGM sampler mixes well and is computationally eﬃ-
+cient. However, as the depth of the true tree increases
+(D = 4, 5, 7), PG achieves much higher ESS and ESS/s
+compared to CGM and GrowPrune samplers.
+4.2
+Real world datasets
+In this experiment, we study the eﬀect of the data
+dimensionality on mixing. Even when the trees are
+shallow, the number of trees consistent with the labels
+increases as the data dimensionality increases. Using
+the default BART prior (which promotes shallower
+trees), we compare the performance of the samplers on
+real world datasets of varying dimensionality.
+We consider the CaliforniaHouses, YearPredictionMSD
+and CTslices datasets used by Johnson and Zhang
+(2013). For each dataset, there are three training sets,
+each of which contains 2000 data points, and a single
+test set. The dataset characteristics are summarized
+in Table 3.
+Dataset
+Ntrain
+Ntest
+D
+CaliforniaHouses
+2000
+5000
+6
+YearPredictionMSD
+2000
+51630
+90
+CTslices
+2000
+24564
+384
+Table 3: Characteristics of datasets.
+We run each sampler using the three training datasets
+and report average ESS and ESS/s. All three samplers
+achieve very similar MSE to those reported by Johnson
+and Zhang (2013). The average number of leaves in the
+posterior trees was found to be small and very similar
+for all the samplers. Tables 4 and 5 respectively present
+results comparing ESS and ESS/s of the diﬀerent sam-
+plers. As the data dimensionality increases, we observe
+that PG outperforms existing samplers.
+Dataset
+CGM
+GrowPrune
+PG
+CaliforniaHouses
+18.956
+34.849
+76.819
+YearPredictionMSD
+29.215
+21.656
+76.766
+CTslices
+2.511
+5.025
+11.838
+Table 4: Comparison of ESS for CGM, GrowPrune and
+PG samplers on real world datasets.
+Dataset
+CGM
+GrowPrune
+PG
+×10−3
+×10−3
+×10−3
+CaliforniaHouses
+1.967
+48.799
+16.743
+YearPredictionMSD
+2.018
+7.029
+14.070
+CTslices
+0.080
+0.615
+2.115
+Table 5: Comparison of ESS/s for CGM, GrowPrune and
+PG samplers on real world datasets.
+5
+Discussion
+We have presented a novel PG sampler for BART. Un-
+like existing samplers which make local moves, PG can
+propose complete trees. Experimental results conﬁrm
+that PG dramatically increases mixing when the true
+posterior consists of deep trees or when the data di-
+mensionality is high. While we have presented PG only
+for the BART model, it is applicable to extensions of
+BART that use a diﬀerent likelihood model as well. PG
+can also be used along with other priors for decision
+trees, e.g., those of Denison et al. (1998), Wu et al.
+(2007) and Lakshminarayanan et al. (2014). Backward
+simulation (Lindsten and Sch¨on, 2013) and ancestral
+sampling (Lindsten et al., 2012) have been shown to sig-
+niﬁcantly improve mixing of PG for state-space models.
+Extending these ideas to PG-BART is a challenging
+and interesting future direction.

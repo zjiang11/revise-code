@@ -1,0 +1,691 @@
+The Exact Closest String Problem as a
+Constraint Satisfaction Problem
+Tom Kelsey∗
+University of St Andrews
+St Andrews, KY16 9SX United Kingdom
+
+Lars Kotthoff
+University of St Andrews
+St Andrews, KY16 9SX United Kingdom
+
+Abstract
+We report (to our knowledge) the ﬁrst evaluation of Constraint Satisfaction as a computational
+framework for solving closest string problems. We show that careful consideration of symbol occur-
+rences can provide search heuristics that provide several orders of magnitude speedup at and above
+the optimal distance. We also report (to our knowledge) the ﬁrst analysis and evaluation – using any
+technique – of the computational difﬁculties involved in the identiﬁcation of all closest strings for a
+given input set. We describe algorithms for web-scale distributed solution of closest string problems,
+both purely based on AI backtrack search and also hybrid numeric-AI methods.
+1
+Introduction
+The closest string problem (CSP) takes as input a set of strings of equal length over a ﬁxed alphabet.
+A solution is a string with the smallest possible maximum Hamming distance from any input string.
+(Strictly speaking, distance with respect to any suitable metric can be minimised; the Hamming distance
+is the standard edit distance metric used for this class of problems.) CSP has applications in coding and
+information theories (in these ﬁelds the problem is also known as minimum radius), but when the input
+strings consist of nucleotide sequences over the letters A, C, G and T, (or of mRNA sequences over the
+letters A, C, G and U, or of amino acid sequences over an alphabet of size 20) the CSP has important
+applications in computational biology (where the problem class is also known as centre string). Examples
+include the identiﬁcation of consensus patterns in a set of unaligned DNA sequences known to bind a
+common protein [12], ﬁnding conserved secondary structure motifs in unaligned RNA sequences [19],
+discovering motifs in ranked lists of DNA sequences [6], ﬁnding DNA regulatory motifs within unaligned
+noncoding sequences [22], the identiﬁcation of sister chromatids by DNA template strand sequences [8],
+and DNA motif representation with nucleotide dependency [2]. Our aim is to provide theoretical and
+practical results – together with empirical supporting evidence – that lead to improved CSP solution for
+biological problems, so in this paper the base alphabet Σ will always consist of four symbols.
+A Constraint Satisfaction Problems (CSP) consists of a set of constraints involving variables taking
+discrete values. A solution to a CSP is an assignment of values to variables such that no constraint is
+violated. CSP solvers are used for many important classes of problems for which solutions must take
+discrete values, but, to our knowledge, the closest string problem has not been modelled and solved as
+a CSP. The research question under consideration, therefore, is “Is CSP a useful framework for solving
+CSP instances?”
+In this paper we investigate approaches to developing and solving such models. We demonstrate that
+a careful choice of search heuristic can give several orders of magnitude speedup in general. We show
+that CSP modelling and solution are effective tools for the related problem of obtaining all closest strings.
+We consider the distribution of closest string problems across a cloud (or grid, or cluster) of computing
+nodes, and identify two potential super-linear speedups that can be achieved in practice. Finally we
+∗To whom all correspondence should be addressed.
+1
+arXiv:1005.0089v1  [cs.AI]  1 May 2010
+
+The CSP as a CSP
+Kelsey, Kotthoff
+identify the strengths and weaknesses of existing numeric approaches, and suggest hybrid discrete and
+numeric methods that combine the best features of CSP search and numeric search for solutions.
+In the rest of this introduction we discuss existing methods for the CSP with respect to theoretical
+complexity results, give brief overviews of Constraint Satisfaction theory and the Minion CSP solver,
+and formally deﬁne the theoretical concepts upon which the research is based. In Section 2 we model
+closest string problems as CSPs, compare search heuristics, and provide results for the all closest string
+problem. We describe distributed algorithms in Section 3, both for pure CSP models and heuristics, and
+for hybrid CSP-numeric methods. In Section 4 we discuss the relative strengths and limitations of CSP
+as a framework for closest string identiﬁcation, and identify future avenues of research.
+1.1
+Computational Complexity and Existing Methods
+CSP has been shown to be NP-complete for binary strings [9] and for alphabets of arbitrary size [14].
+Intuitively there are |Σ| choices for each of the L positions in any candidate closest string where Σ is the
+alphabet, and for any algorithm that fails to check each of this exponential number of cases one could
+devise a CSP for which the algorithm returns an incorrect result.
+Approximate solutions to within (4/3+ε) of the minimal d can be obtained in polynomial time [14,
+16], with several practically useful implementations available, notably those based on genetic algorithms
+[13]. However, in this paper we are concerned with ﬁrst ﬁnding exact solutions, and then (given that we
+know the minimal distance d) ﬁnding all closest strings that are within d of S. Clearly, an approximate
+method will not, in general, identify the minimal d, and therefore can not be used as a basis for ﬁnding
+all solutions.
+Excellent exact results – provided that close bounds have already been identiﬁed – have been obtained
+by modelling the CSP as an Integer Programming Problem [17], and solving the resulting instances using
+numerical branch and bound methods [15]. This form of search differs from the backtrack search used
+by CSP solvers by having a much less organised search pattern. This is often advantageous, but can be a
+hindrance when searching for all solutions: IP branch and bound is optimised for optimisation, as it were,
+rather than exhaustive search for all candidates for a constant objective function. If the IP formulation
+suggested in [17] is used, then the feasible region deliberately excludes optimal solutions in order to
+reduce the numbers of variables, in which case no search for all solutions can be made.
+A linear time algorithm exists for solutions to the CSP for ﬁxed distance d [11]. The exponential
+complexity is now in the coefﬁcient, as the method is O(NL + Nddd) where the problem has N strings
+of length L.
+1.2
+Constraint Satisfaction Problems
+Deﬁnition. A Constraint Satisfaction Problem ϒ is a set of constraints C acting on a ﬁnite set of vari-
+ables ∆:= {A1,A2,...,An}, each of which has a ﬁnite domain of possible values Di := D(Ai) ⊆Λ. A
+solution to ϒ is an instantiation of all of the variables in ∆such that no constraint in C is violated.
+The class of CSPs is NP-complete as it is a generalisation of propositional satisﬁability (SAT). The
+Handbook of Constraint Programming [21] provides full details of CSP theory and techniques. A key
+observation is that different models (i.e. choices of variables, values and constraints) for the same prob-
+lem (or class of problems) will often give markedly different results when the instances are solved, but,
+as with numeric Linear, Mixed-Integer and Quadratic Programming, there is no general way to decide in
+advance which candidate models and heuristics will lead to faster search.
+A typical solver operates by building a search tree in which the nodes are assignments of values
+to variables, and the edges lead to assignment choices for the next variable. If a constraint is violated
+at any node, then search backtracks. If a leaf is reached, then all constraints are satisﬁed, and the full
+2
+
+The CSP as a CSP
+Kelsey, Kotthoff
+set of assignments provides a solution. These search trees are obviously exponential, and in the worst-
+case scenario every node may have to constructed. However, large-scale pruning of the search tree
+can occur by judicious use of consistency methods. The idea is to do a small amount of extra work
+that (hopefully) identiﬁes variable-value assignments that are already logically ruled out by the current
+choice of assignment, meaning that those branches of the search tree need not be explored. While there
+are no guarantees that this extra work is anything other than an overhead, in practice enough search is
+pruned to give efﬁcient solutions for otherwise intractable problems. Taking a speciﬁc example from
+the empirical evaluation reported later in this paper, an all closest string problem for a ﬁxed distance
+involving strings of length 25 with a 4-symbol alphabet will require at most 425 ≈1.1 × 1015 nodes to
+be searched. An efﬁcient solver will search only 3 or 4 ×109 nodes, with the remainder being ruled out
+by efﬁcient propagation of the logical results of the assignments during search. Moreover, an efﬁcient
+solver will search around 300,000 of the remaining nodes per CPU second. It is this efﬁcient reduction
+in search space that allows CSP practitioners to solve otherwise intractable problems.
+Heuristics exist for choices of variable-value pair for the next node, and as before these may have
+no effect on the number of nodes visited. Again, in general, variable and value orderings designed for
+speciﬁc problem classes can lead to several orders of magnitude reduction in the number of nodes needed
+to ﬁnd a solution. Standard choices for variable orderings include random, smallest domain, largest
+domain, most-constrained (i.e. chooses avariable that appears in a maximal number of constraints),
+least-constrained, etc. Results will vary with the problem class and model under consideration. Taking
+another speciﬁc example from experiments in this paper involving closest string problems, enforcing
+singleton singleton arc consistency – a limited depth procedure that aims to prune entire branches near
+the root, see [1] for a full analysis – at the root node of a search tree can be a huge loss. It can take three
+times longer to reach the ﬁrst closest string at a given distance than it takes to ﬁnd all closest strings.
+In summary, the solution performance for instances of a class of CSPs will depend crucially on
+choices of model, consistency, search order and the solver used. Moreover, empirical evaluation is often
+the only way to decide which of these choices is better for a given set of circumstances.
+1.2.1
+The Minion CSP solver
+The constraint solver Minion [10] uses the memory architecture of modern computers to speed up the
+backtrack process compared to other solvers. Minion has an extensive set of constraints, together with
+efﬁcient propagators that enforce consistency levels very rapidly. Minion has been used to solve open
+problems in combinatoric algebra [5], ﬁnding billions of solutions in a search space of size 10100 in a
+matter of hours. Minion is used as the solver for this investigation as it offers both fast and scalable
+constraint solving, which are important factors when solving closest string problems. Moreover, the user
+can easily specify bespoke variable orderings, and less easily specify value orderings.
+1.3
+Formal Deﬁnitions and Results
+Before proceeding to the technical Sections, we ﬁrst formalise Hamming Distances and Diameters, and
+closest strings:
+Deﬁnition. Let S1 and S2 be strings of length L over an alphabet Σ. Let D be the binary string of length
+L such that
+D(i) =
+ 1
+S1(i) ̸= S2(i)
+0
+otherwise
+The Hamming Distance hd(S1,S2) is deﬁned as the sum from i = 1 to L of the D(i).
+3
+
+The CSP as a CSP
+Kelsey, Kotthoff
+Deﬁnition. Let S = {S1,S2,...,SN} be a set of strings of length L over an alphabet Σ. A Closest String
+to S is deﬁned as any string CS of length L over Σ such that
+hd(CS,Si) ≤d
+∀i ∈{1,2,...,N}
+with d being the minimal such distance for S. The Hamming diameter HD of S is deﬁned as
+HD(S) = max(hd(Si,Sj))
+∀i, j ∈{1,2,...,N}.
+A solution to a closest string problem involving the strings in S is therefore a string CS and a minimal
+distance d such that each member of S is within d of CS. The Hamming distance is an edit distance
+that quantiﬁes the number of substitutions from Σ required to turn one string into another. It is easy to
+show that Hamming distance is a metric, satisfying the triangle inequality. It is clear that the Hamming
+Diameter is an upper bound for the distance of a closest string: a candidate closest string at a greater
+distance can be replaced by any member of S, reducing the maximal distance to HD(S). We can obtain
+a lower bound for the distance of a closest string by observing that the distance can not be less than half
+the Hamming Diameter:
+Lemma 1. Let S = {S1,S2,...,SN} be a set of strings of length L over an alphabet Σ. A closest string
+CS to S must be within ⌈HD(S)/2⌉of S.
+Proof. Let Si and Sj be two strings from S for which the Hamming Diameter is achieved, and let Sk be
+any other string of length L over Σ. By the triangle inequality H(S) = hd(Si,Sj) ≤hd(Si,Sk)+hd(Sj,Sk).
+If (without loss of generality) hd(Si,Sk) < ⌈HD(S)/2⌉then hd(Sj,Sk) ≥⌈HD(S)/2⌉. Hence any distance
+less than ⌈HD(S)/2⌉can not be a maximal distance from Sk to any string in S.
+Search space reduction can be achieved by noting that any value not appearing in position j of any
+of the strings in S need not appear in a closest string solution. It should be noted that this only applies
+when searching for the ﬁrst optimal solution. When searching for all solutions, any symbol from Σ can,
+in principle, appear at any position in CS.
+Lemma 2. Let S = {S1,S2,...,SN} be deﬁned as in Lemma 1. Let Σj for j ∈1,2,...,L denote the subset
+of Σ obtained by selecting every symbol that appears in position j of a string in S. Then any symbol in
+position j of a closest string to S must also be in Σ j.
+Proof. Suppose symbol s in Σ\Σj appears in position j of a solution CS. Let CS∗be the string consisting
+of CS with s replaced by a symbol from Σ j at position j. Then CS∗is strictly closer to those strings in S
+with that symbol at that position, and distance to all other strings is unchanged. Hence if the current d is
+optimal for CS, it remains optimal for CS∗.
+The ﬁnal deﬁnition needed for this investigation encapsulates frequencies of symbol appearances per
+string position, and will be used in Section 2.1 to direct backtrack search for closest strings.
+Deﬁnition. Let S = {S1,S2,...,SN} be a set of strings of length L over an alphabet Σ. A Position Weight
+Matrix (PWM) for S is an |Σ| × L matrix with entries PMSS(i, j) deﬁned as the frequency of symbol i
+appearing at position j in S.
+An example Position Weight Matrix is given in Figure 1.
+4
+
+The CSP as a CSP
+Kelsey, Kotthoff
+Figure 1: Five strings of length 8 are shown above, with their PWM shown below.
+2
+Closest String as a Constraint Satisfaction Problem
+Using the terminology from Sections 1.2 and 1.3, we now construct a CSP instance from a given closest
+string problem. For the purposes of this paper, the alphabet Σ consists of the numbers 1, 2 ,3 and 4,
+representing A, C, G and T respectively. Clearly this artiﬁcial restriction can easily be relaxed in order
+to model arbitrary alphabets.
+Given S, a set of N strings of length L over alphabet Σ, we ﬁrst compute the Hamming Diameter
+HD(S) and use this to provide a lower bound, dmin, for the optimal distance d, as shown in Lemma 1.
+ϒ(S,dmin,HD(S)) denotes the CSP instance in which the set of variables is ∆:= ∆1 ∪∆2 ∪∆3 ∪∆4, where
+1. ∆1 is the array [CS1,CS2,...,CSL] of variables representing the closest string, each such variable
+having domain 1 through 4
+2. ∆2 is an N ×L array of binary variables used to calculate Hamming Distances from ∆1 to the input
+strings S
+3. ∆3 is the array [D1,D2,...,DN] of variables representing the distance of each string in S to the
+current CS candidate, each such variable having domain dmin through HD(S)
+4. ∆4 is the single distance variable d with domain dmin through HD(S).
+The constraints are:
+1. ∆2(i, j) = 0 iff Si(j) = ∆1(j)
+2. ∆3(k) is the sum of row k of ∆2
+3. ∆4 is the maximum value appearing in ∆3
+5
+
+The CSP as a CSP
+Kelsey, Kotthoff
+4. ∆4 is minimised: if a solution is found with ∆4 = d, search for another solution with ∆4 = d −1
+(unless d = dmin).
+∆1 are the search variables: nodes of the search tree consist of values assigned to these variables. ∆4 is
+the objective function (or cost function). A returned solution is ∆1 ∪∆4, a closest string together with
+the optimal distance. Solving ϒ(S,dmin,HD(S)) is guaranteed to return a solution, although it is not
+impossible that all 4L nodes are visited for every current minimal d. Restricting the domains of ∆3 will
+save computational effort when a solution is found with d = dmin and will have no effect otherwise.
+Restricting the domains of the ∆1 variables in line with lemma 2 also reduces the search space, although
+the restrictions can not apply when searching for all solutions.
+To ﬁnd all closest strings ϒ(S,dmin,HD(S)) is solved to obtainCS and dopt. By restricting the domains
+of ∆3 to dmin through dopt and removing the optimisation constraint we obtain a new CSP ϒ∗(S,dmin,d)
+which can be solved for all solutions. The search undertaken to ﬁnd the ﬁrst solution CS need not be
+repeated: constraints can be added that rule out those parts of the search tree already processed. It should
+also be noted that CS and d need not be obtained using the Constraint Satisfaction approach: any method
+that returns an optimal solution can be used to create an all closest strings CSP.
+2.1
+Position Weight Matrix Variable and Value Ordering
+We now use results from computational biology to devise a bespoke variable and value ordering schema
+for ϒ(S,dmin). By precalculating a Position Weight Matrix for S as deﬁned in Section 1.3 we can order the
+search variables by maximum frequency. For each variable, we order the values assigned during search
+by decreasing relative frequency. Tie breaks are either random or by least index. In the example given as
+Figure 1 the variable ordering by position 1 through 8 would be 1: position 4 (having 5 occurrences), 2 –
+5: positions 2, 3, 6, and 8 in any order (each having 4 occurrences), 6–8: positions 1 and 7 in any order
+(having the least highest frequency of 3). The value ordering for position 5 in the ﬁgure would be 1: A
+(most frequent), 2–3: T and C in any order, 4: G (least frequent). By Lemma 2, when seeking a single
+solution it is safe to exclude values that don’t appear at a given position from their respective variable
+domains before search. Hence in for the example in Figure 1 the value ordering would be values typeset
+in blue followed by values typeset in red, with black values excluded.
+The idea behind this search heuristic is that search starts close to (in the sense of maximum likeli-
+hood) an optimal solution. Only if no such solution is found does search progress to less likely (but not
+impossible) parts of the search tree .
+2.2
+Comparison of Search Heuristics
+In this Section we test the hypothesis that PMS-based search heuristics reduce the search needed for
+solutions to ϒ(S,dmin) CSP instances when compared to a standard heuristic. Figure 2 illustrates the
+results from 200 closest string problems. Each problem was run ﬁrst with smallest domain variable
+ordering and ascending value ordering (Minion defaults), and then with PWM-based variable and value
+ordering as described in Section 2.1.
+For exact solutions – upper panel of Figure 2 – we observe an improvement of PWM over SDF in
+almost all cases. The speedup is as high as several orders of magnitude in some cases. The difference is
+statistically signiﬁcant at the 0.001 level. These results are as expected: the PWM reﬂects the maximum
+likelihood of a closest string, so a search that respects these likelihoods will nearly always be highly
+efﬁcient, but will visit very many non-essential nodes on the few occasions that the maximum likelihood
+does not lead to a closest string. A key observation is that the magnitude of speedup increases with
+increasing string length, which is highly encouraging since the complexity of closest sting is exponential
+in string length.
+6
+
+The CSP as a CSP
+Kelsey, Kotthoff
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+0.5
+1.0
+2.0
+5.0
+10.0
+20.0
+50.0
+100.0
+200.0
+number of strings
+speedup
+length = 10
+0.0279955 s
+length = 15
+0.055491 s
+length = 20
+1.132327 s
+length = 25
+54.410228 s
+length = 30
+1346.360321 s
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+3
+4
+5
+6
+0.0001
+0.1000
+100.0000
+100000.0000
+number of strings
+speedup
+length = 10
+0.000001 s
+length = 15
+0.0039995 s
+length = 20
+0.1934705 s
+length = 25
+17.266875 s
+length = 30
+325.193563 s
+Figure 2: Empirical data from 200 instances of 3, 4, 5 and 6 strings of lengths 10, 15, 20, 25 and 30.
+For each combination of parameters, 10 random instances were generated with results summarised in the
+boxes which show median values (thick line), 25th–75th percentiles (boxed) and 0th–100th percentiles
+(dashed lines). In the top panel we compare the exact optimal solution times. In the lower panel we show
+the times taken to obtain an optimal result, omitting the time needed to certiﬁcate that result. In both
+ﬁgures the y axis shows the speedup of Position Weight Matrix over Smallest Domain First ordering on
+a logarithmic scale, and the times given below the string lengths are the median CPU time taken over
+all strings of that length. The experiments were conducted on a dual quad-core 2.66 GHz Intel X-5430
+processor with 16 GB of RAM.
+7
+
+The CSP as a CSP
+Kelsey, Kotthoff
+If we only consider the search effort needed to ﬁnd an optimal solution (not taking into account the
+work needed to provide a certiﬁcate of optimality by ruling out closer strings at lower distance) then
+the speedup of PWM over smallest domain is at the level of orders of magnitude in the general case –
+Figure 2, lower panel. This indicates that heuristics are less important when searching exhaustively at a
+lower than optimal distance: most of the practical complexity of closest string search is associated with
+providing certiﬁcates of optimality, rather than identifying close strings which turn out to be optimal.
+0.0001
+0.0100
+1.0000
+100.0000
+10000.0000
+1.0
+1.2
+1.4
+1.6
+1.8
+time [s]
+times optimal distance
+Figure 3: Convergence towards optimal Hamming distance. The upper line is the maximum relative
+distance, the lower line the minimum and the middle line the mean of the 200 experiments performed.
+The y axis denotes multiples of the optimal Hamming distance, the x axis denotes CPU time for the
+PWM heuristic on a logarithmic scale. The experiments were conducted on a dual quad-core 2.66 GHz
+Intel X-5430 processor with 8 GB of RAM.
+Figure 3 shows that we achieve a good approximation very quickly, in line with existing results that
+guarantee approximation to four thirds of optimality in polynomial time [14, 16]. This motivates the hy-
+brid symbolic-numeric methods detailed in Section 3.4: practitioners can use CSP to obtain good bounds
+quickly, then use either numeric methods or AI search methods – or indeed both using a distributed
+architecture – to explore the remaining search space for an exact solution plus certiﬁcate of optimality.
+Taken together the results indicate that:
+1. CSP search with PWM variable-value ordering will (in general) efﬁciently ﬁnd candidate solutions
+to closest string problems with decreasing maximum distance d
+2. CSP search with any sensible search ordering can be used to exhaustively rule out the distance
+below the optimal d
+3. our empirical evidence is in line with previously reported results: an approximate solution to
+closest string can be computed in polynomial time, but computation of the necessary certiﬁcates
+of optimality remains intractable in the general case
+4. sequential, single-processor CSP search for problems having more strings of greater length (and
+possibly a larger alphabet) will become intractable due to the inherent NP-completeness of closest
+string.
+8
+
+The CSP as a CSP
+Kelsey, Kotthoff
+Figure 4: Empirical data from 6 instances of 5 randomly generated strings of length 25. SDF and PWM
+indicate smallest domain and position weight heuristics respectively. All timings were calculated using
+a dual quad-core 2.66 GHz Intel X-5430 processor with 16 GB of RAM.
+2.3
+All Closest Strings
+To our knowledge, no study has investigated the problem of ﬁnding all closest strings for a given set S.
+This may be due to the additional computational complexity involved: it is hard enough to ﬁnd single ex-
+act closest strings without performing a systematic search for all such strings having the same maximum
+distance from S. It may also be the case that the problem is not interesting: the important information
+in a CSP solution being the distance returned, with the closest string being merely an exemplar at that
+distance. It seems likely, however, that knowledge of how much self similarity an input set has – rather
+than just the degree of self similarity – could be useful information in sequence analysis.
+Despite this uncertainty, we wish to investigate the effect that modelling has on the set of all solutions.
+In our CSP model described in Section 2 we reduce the search space for a ﬁrst solution by forbidding any
+variable to take a value that is not present at that position in one of the input strings. Similar restrictions
+were made by Meneses et al. when formulating CSP as an Integer Programming problem [17]. The
+questions are:
+1. Are many otherwise closest strings ruled out by these restrictions?
+2. How much extra computational effort is required to identify each and every closest string?
+In Figure 4 we show the results of sample calculations for six instances of 5 randomly generated
+strings of length 25 . We see that in all cases (columns headed PWM Restricted Domains) it is relatively
+easy using Minion to identify all closest strings if we restrict search to those alphabet symbols that have
+non-zero values in the position weight matrix for the instance. We also ﬁnd that search using PMW
+ordering heuristics performs marginally better than straightforward smallest domain heuristics.
+When the variable-value assignments that have been ruled out because the value does not appear
+at the variable’s position in any element of S are added back to the domains of the search variables,
+we can perform full search for all closest strings (Figure 4, columns headed by Unrestricted Domains).
+The percentage of new closest strings found ranges from 0% to 22%, but increase in search required is
+typically two orders of magnitude. It should be noted however that:
+1. Minion is searching far fewer than the 425 possible search nodes for each instance, the majority be-
+ing pruned by efﬁcient propagation of the logical consequences of the variable-value assignments
+9
+
+The CSP as a CSP
+Kelsey, Kotthoff
+implicit at each node, and
+2. Minion is searching 250,000 – 300,000 nodes per second in addition to the work involved in
+identifying search sub-trees that need not be explored.
+3
+Distributed and Hybrid Computing Strategies
+Input : A CSP ϒ, a cutoff period Tmax and a branching factor K
+Output: Either the ﬁrst solution, or a guarantee that there are no solutions
+while not Solved?(ϒ) do
+Send ϒ to a node
+Run solver with input ϒ for 0 ≤t ≤Tmax
+if Solved?(ϒ) then
+Return solution
+else
+ϒ ←ϒ with new constraints ruling out search already performed
+Split ϒ into K subproblems ϒ1,ϒ2,...,ϒK
+do in parallel
+for 1 ≤k ≤K do
+Solve(ϒk, Tmax,K)
+end
+end
+end
+end
+Algorithm 1: A recursive distributed algorithm to solve any CSP
+3.1
+Distributed CSP
+Given the inherently exponential increase in search effort involved in providing a certiﬁcate for an opti-
+mal closest string distance by ruling out any closest strings with with lower distance, the exact solution
+of large-scale problems is not expected to be tractable using purely sequential search. In this Section we
+describe algorithms that distribute search across multiple compute nodes. These algorithms will solve
+closest string problems either on a cluster (a local group of homogeneous nodes), a grid (a more loosely
+coupled, heterogeneous and geographically dispersed set of nodes), or a cloud (a set of an unknown
+number of nodes in unknown locations, each having unknown architecture and resource). Generally
+speaking, a cluster is more controllable but smaller than a cloud, with a grid being either the best or
+worst of both worlds, depending on one’s point of view. For our purposes we do not require any com-
+munication across nodes (although computational efﬁciencies could be obtained if that were the case),
+and can therefore treat the three distributed paradigms as a single approach. The only disadvantage to
+using a cloud is that empirical evaluation is often impossible since the times reported in virtual machines
+are not reliable. This is because clocks of virtual machines can be slowed down or sped up by the VM
+management software. We therefore prototype our computational methodology on a cluster, and, when
+satisﬁed that it is efﬁcient, deploy using a cloud to take advantage of the very large number of nodes
+available.
+Algorithm 1 gives the basic structure of our distributed search. The predicate Solved? returns true
+whenever the input CSP ﬁnds the ﬁrst solution or ﬁnishes searching the entire tree without ﬁnding a
+10
+
+The CSP as a CSP
+Kelsey, Kotthoff
+solution. It returns false if either the computation has timed out, or the node has suddenly stopped
+working for some reason. If all solutions to the input CSP are required, then we modify Algorithm 1 so
+that all solutions found so far are returned whenever the Solved? predicate fails.
+It should be stressed that Algorithm 1 is not a contribution to the results of this paper. The algorithm
+has been implemented, tested, optimised and deployed on clusters, grids and clouds. It has been – and is
+being – used to attack CSP instances requiring an estimated 200 CPU years for exact solution [4].
+3.1.1
+Distributed CSPs Using Minion
+In common with Integer Programming problems, CSPs distribute naturally across multiple compute
+nodes [7]. Signiﬁcant research has been invested in the distribution of CSPs across multiple computers [3,
+25, 18]. In particular the area of balancing the load among the nodes is an area of active research [20].
+Instead of the more sophisticated approaches, we choose a simple technique that does not impose
+any constraints on the problem to be solved and is targeted towards very large problems. Our algorithm
+closely follows Algorithm 1 – we run Minion with a time out and when this time out is reached, we
+split the remaining search space into two parts. The subproblems are inserted into a FIFO queue and
+processed by the computational nodes, splitting them again if necessary.
+One of the drawbacks of our approach is that it does not parallelise small problems well. For n
+compute nodes, we only achieve full capacity utilisation after log2 n splits, i.e. after timeout × log2 n
+seconds. We do not consider this to be a limiting factor however because the split timeout can be adapted
+dynamically to at ﬁrst quickly split the problem and when full utilisation has been achieved increase it.
+For the large problems we have focused on when implementing this technique, requiring days or even
+years of CPU time, this is not a limiting factor.
+The main advantage of our way of distributing problems over other approaches is that we explicitly
+keep the split subproblems in ﬁles. This means that at any point we can stop, suspend, resume, move
+or cancel the computation and lose a maximum of timeout×n seconds of work, much less in practice.
+Apart from contributing to the robustness of the overall system, we can also easily move subproblems
+that cannot be solved using the available computational resources, for example because of memory lim-
+itations, to nodes with a higher speciﬁcation that are not always available to us.
+In the absence of global symmetry breaking constraints that can affect different parts of the search
+tree, it is easy to subdivide a typical CSP into several non-overlapping sub-problems. Although there is
+an inherent latency in sending problem instances to, and receiving solutions from, either a grid or a cloud,
+for large enough problems a speedup linear in the number of compute nodes is achieved. Recent results
+using a computational grid indicate that a super-linear speedup can be achieved using Minion, whenever
+a root node consistency check reduces the search tree [4]. There is no guarantee of this, however, since
+root consistency checks are heuristics that will at times provide no beneﬁt for the extra work involved.
+Cloud computing is becoming an important computational paradigm, and the Minion developers have
+produced robust, fault-tolerant, methods for distributing Minion instances across different underlying ar-
+chitectures, including clouds. By leveraging existing technologies, in particular the Condor distributed
+computing framework [23], we can distribute problems across hundreds of CPUs and combine clus-
+ter, grid and cloud architectures for web-scale computing. This enables us to tackle problems which
+have previously been thought to be unsolvable because of the amount of computation required to ﬁnd a
+solution.
+3.2
+Distributed Closest String
+Algorithm 2 describes our approach to the distributed solution of closest string problems formalised as
+Constraint Satisfaction problems. We ﬁrst run Minion on the original problem with the PWM ordering
+11
+
+The CSP as a CSP
+Kelsey, Kotthoff
+Input : ϒ(S,dmin,HD(S)), Tmax and K
+Output: A closest string to S with its maximum Hamming distance to S
+for 0 ≤t ≤Tmax do
+Runϒ(S,dmin,HD(S)) in Minion
+if Solved?(ϒ(S,dmin,HD(S))) then
+Return CS and d, and halt all computation
+else dhigh ←the best d found so far
+ϒ(S,dmin,HD(S)) ←ϒ(S,dmin,dhigh) plus constraints ruling out search already
+performed
+end
+end
+do in parallel
+for dmin ≤dlow < dhigh do
+DistSolve(ϒ∗(S,dmin,dlow), Tmax, K)
+if Solved?(ϒ∗(S,dmin,dlow)) then
+Return CS and d = dlow, and halt all computation
+else Update all (sub-)instances with new lower bound dlow +1
+end
+end
+for 2 ≤k ≤K +1 do
+DistSolve(ϒk(S,dmin,dlow), Tmax, K)
+if Solved?(ϒk(S,dmin,dhigh)) with dnew < dhigh then
+if dnew = dhigh −1 then Return CS and d = dnew, and halt all computation
+else Update all (sub-)instances with upper bound dhigh = dnew
+end
+end
+end
+if not Solved?( ϒk(S,dmin,dhigh) ∀k) ∧not Solved?(any ﬁxed dlow instance) then
+Return current dhigh as d, and the string found that achieved distance dhigh as CS
+end
+Algorithm 2: Solve the CSP ϒ(S,dmin,HD(S)) by distributing search for high and low distances
+heuristic as a single process. Our empirical evaluation in Section 2.2 indicates that nearly always this
+process will highly efﬁciently lower the upper bound for the problem. Once we have a reasonable upper
+bound, we start searching for the optimal distance both above and below. From above, we carry on
+optimising as before, but we use the recursive DistSolve algorithm to distribute. From below we create
+instances each having a ﬁxed distance, the idea being to exhaustively rule out any closest strings at these
+distances. These instances are run on the computational nodes at the same time as the optimisation sub-
+problems. If at any stage we obtain a candidate closest string at a distance for which all lower distances
+have been ruled out, then this is our solution. This can happen both from above and below.
+As mentioned in Section 3.1.1, we expect a super-linear speedup by performing a root node consis-
+tency check for each sub-instance. By keeping track of the best distance obtained so far during search
+from above, and of any lower distances for which no solution has been found, we expect to obtain a
+further super-linear speedup in the majority of instances. A large part of the search tree is pruned by
+updating all instances (either waiting for input to a node, or currently being processed by a node) with
+improved distance bounds as they become available.
+12
+
+The CSP as a CSP
+Kelsey, Kotthoff
+3.3
+Preliminary Evaluation of Distributed Closest String
+For a ﬁrst evaluation, we ran the algorithm on 6 random strings of lengths 25, 26, 27, 28, 29 and 30. We
+chose a time limit of 1 hour to reduce communication overheads. The problems with strings of length
+25, 26 and 27 were solved to completion within this limit.
+The remaining three instances were split after one hour and distributed across multiple machines. As
+suggested by Figure 3, the solutions converged towards the optimal distance extremely quickly. For only
+one of the instances was a better Hamming distance found in one of the sub-instances. The remaining
+sub-instances proved the optimality of the previously found solution.
+These tests demonstrate the practical applicability of our distributed approach. We have not per-
+formed a large-scale evaluation, nor have we obtained evidence for the super-linear speedups associated
+with bounds updates and an increased number of consistency checks at the root of sub-instances. Our
+experience with the distributed solution of other classes of CSP suggests that our system will scale
+seamlessly to grids or clouds containing an essentially unlimited number of compute nodes: there is no
+communication across nodes, a node failure can be recovered from with no extra search needed (the
+search tree already explored is reported whenever search is interrupted for any reason), and the order in
+which sub-instances are solved can be tuned.
+3.4
+Hybrid Methods
+Input : ϒ0(S,dmin,HD(S))
+TOL, a limit for the gap between the highest and lowest computed distances
+Output: A closest string to S with its maximum Hamming distance to S
+Seek closer distance bounds for ϒ0(S,dmin,HD(S)) using CSP alone;
+while |dhigh −dlow| < TOL do
+Run Algorithm 2 on ϒ0(S,dmin,HD(S))
+Output dlow and dhigh when updated
+end
+Once bounds are close enough, send to numeric IP or linear time search;
+if TOL > 1∧|dhigh −dlow| ≤TOL then
+Formulate the remaining problem as an Integer Programming problem
+Search for solution using numeric branch and bound
+end
+if |dhigh −dlow| = TOL = 1 then
+Formulate the remaining problem as a ﬁxed d instance
+Search for solution using linear time methods
+end
+Algorithm 3: Solve the CSP ϒ(S,dmin,HD(S)) using hybrid CSP and numerical methods
+The empirical results obtained so far suggest that CSP formulation with PWM ordering is an effec-
+tive approach for ruling out high distances: Minion will often ﬁnd a ﬁrst solution very quickly, given the
+search space involved. However, at least for the approach suggested in this paper, CSP formulation re-
+quires much more time to provide a certiﬁcate that an optimal solution is indeed optimal. As discussed in
+Section 1.1, efﬁcient methods have been reported in the literature for when the upper and lower distance
+bounds are close [17], and for problems where the distance is ﬁxed [11]. In this Section we propose a
+hybrid approach that aims to take advantage of the best methods available. Algorithm 3 takes a closest
+string instance and partially solves it using Algorithm 1. If the upper and lower bounds come to within a
+13
+
+The CSP as a CSP
+Kelsey, Kotthoff
+pre-deﬁned tolerance, then numeric branch and bound methods are used to solve an Integer Programming
+formulation of the problem not yet solved by Minion. If the distance under consideration ever becomes
+ﬁxed, then the linear time methods set out in [11] can be applied.
+It should be stressed that these three methods (CSP, IP branch and bound, and linear time) need
+not be exclusive: once tolerance achieving bounds are found by Minion, the distributed Minion search
+can continue, and the CSP and numeric methods are then competing to ﬁnd the ﬁrst solution. This of
+course pre-supposes that computational resource is not a problem, but that is why we are using web-scale
+facilities in the ﬁrst place.
+4
+Discussion
+We have performed (to our knowledge) the ﬁrst evaluation of Constraint Satisfaction as a computational
+framework for solving closest string problems. We have shown that careful consideration of symbol
+occurrences can provide search heuristics that give, in general, several orders of magnitude speedup
+when computing approximate solutions. We have also shown that CSP is less effective when searching
+for certiﬁcates of distance optimality. This result motivated our detailed description of algorithms for
+web-scale distributed CSP computation, and also our design of hybrid distributed algorithms that can
+take advantage of the strengths of both numeric and CSP computational techniques.
+We have also performed (to our knowledge) the ﬁrst analysis of the computational difﬁculties in-
+volved in the identiﬁcation of all closest strings for a given input set, irrespective of the computational
+framework used. Our results for all closest strings motivate the question of which deﬁnition of self-
+similarity is suitable for the computational biology setting. In terms of information theory the all closest
+strings problem can not exclude alphabet symbols and still be correct. However, when seeking to quan-
+tify the self-similarity of DNA sequences it may be perfectly justiﬁable to exclude closest strings that can
+have no symbol in common with the sequences in question at a given point. If this were to be the case,
+then the computational efﬁciency of the search for all closest strings would be greatly increased (Figure
+4).
+We have designed, implemented and deployed a computational methodology for distributed search
+for closest string solutions. This contribution provides a practically useful means of attacking the NP-
+complete instances by division into smaller sub-problems. Our system is guaranteed never to perform the
+same search twice, will recover seamlessly from any unforseen loss of compute nodes, and is extendable
+to web-scale clouds.
+The limitations of this study are that we have not been able to compare numeric solutions to CSP
+solutions directly, (nor assess the hybrid numeric-CSP algorithm described in the paper), and that we have
+not attacked real world problems in a distributed setting, instead solving randomly-generated instances.
+We have outlined the possibility of super-linear speedups for distributed search, but present no supporting
+evidence as our distributed implementation has as yet been tested solely for accuracy, scalability and
+robustness.
+4.1
+Future Work
+Possible future avenues of research include
+• Performing full-scale cloud searches for solutions to real-world closest string problems (rather
+than concentrating on randomly-generated problem instances as for this paper)
+• The provision of a fully distributed IP branch and bound solver for use in Algorithm 3
+14
+
+The CSP as a CSP
+Kelsey, Kotthoff
+• Experimentation with the directed graph CSP formulation described by Meneses et al. [17] to
+improve their IP formulation as an alternative CSP model for closest strings
+• Investigating other NP-hard string sequence problems such as closest substring, farthest string and
+n-mismatch – an obvious candidate is consensus string, which differs from closest string only in
+that the objective is to minimise the sum of the distances, rather than minimise the maximum
+individual distance
+• Search for more complicated metrics than Hamming distance that better capture the concepts of
+difference and similarity for nucleotide sequences – recent results involving Markov models [24]
+suggest that judicious choice of metric has profound implications for both the theory and practice
+of identifying self-similarity amongst sequences.
+4.2

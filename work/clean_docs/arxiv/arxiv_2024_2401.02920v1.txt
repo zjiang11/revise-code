@@ -1,0 +1,1792 @@
+2024 IEEE International Symposium on High-Performance Computer Architecture (HPCA)
+Analytically-Driven Resource Management for
+Cloud-Native Microservices
+Yanqi Zhang†, Zhuangzhuang Zhou†, Sameh Elnikety‡, Christina Delimitrou††
+Cornell University†, Microsoft Research‡, MIT††
+
+Abstract—Resource management for cloud-native microser-
+vices has attracted a lot of recent attention. Previous work
+has shown that machine learning (ML)-driven approaches out-
+perform traditional techniques, such as autoscaling, in terms
+of both SLA maintenance and resource efficiency. However,
+ML-driven approaches also face challenges including lengthy
+data collection processes and limited scalability. We present
+Ursa, a lightweight resource management system for cloud-
+native microservices that addresses these challenges. Ursa uses an
+analytical model that decomposes the end-to-end SLA into per-
+service SLA, and maps per-service SLA to individual resource
+allocations per microservice tier. To speed up the exploration
+process and avoid prolonged SLA violations, Ursa explores each
+microservice individually, and swiftly stops exploration if latency
+exceeds its SLA.
+We evaluate Ursa on a set of representative and end-to-end
+microservice topologies, including a social network, media service
+and video processing pipeline, each consisting of multiple classes
+and priorities of requests with different SLAs, and compare
+it against two representative ML-driven systems, Sinan and
+Firm. Compared to these ML-driven approaches, Ursa provides
+significant advantages: It shortens the data collection process by
+more than 128×, and its control plane is 43× faster than ML-
+driven approaches. At the same time, Ursa does not sacrifice
+resource efficiency or SLAs. During online deployment, Ursa
+reduces the SLA violation rate by 9.0% up to 49.9%, and
+reduces CPU allocation by up to 86.2% compared to ML-driven
+approaches.
+I. INTRODUCTION
+Production cloud services, such as Twitter and Netflix, are
+increasingly built as graphs of microservices [61], [6], [36],
+[35], [33], and deployed with cloud-native frameworks like
+Kubernetes [12], [4], [8], [1]. Despite the benefits of modular-
+ity and elasticity, resource management for microservices that
+must meet SLA constraints, e.g., end-to-end latency, is chal-
+lenging, due to the diverse resource requirement of individual
+microservices and their inter-service dependencies [34], [36].
+Resource management for microservices has been the topic
+of recent studies, and machine learning (ML) models, espe-
+cially deep neural networks (DNN), have become a popular
+choice to address the complexity of microservice topologies.
+Previous studies have either used ML to predict important
+performance metrics, such as latency and load [68], [34], [22],
+[64], [49], or to directly adjust resource allocation [54], and
+demonstrate that ML-driven approaches outperform traditional
+techniques, such as autoscaling [18], in performance and
+resource efficiency.
+However, ML-driven approaches still face key challenges
+limiting their adoption [25], [26], [28], [27], [31], [29], [30].
+First, ML-driven approaches typically require a lengthy ex-
+ploration process to collect tens of thousands of data points to
+train the models, and therefore can not track changes in user
+behavior or handle the frequent updates to the microservice
+logic. Second, these ML models are on the critical path for
+every resource management decision, limiting the speed and
+scalability of resource management. Third, previous studies
+are evaluated using conventional benchmarks that use remote
+procedure calls (RPC) as the only method of inter-service
+communication and include only lightweight text processing
+in the business logic [36], [58], [70]. Modern cloud-native
+applications increasingly use both RPCs and message queues
+(MQ) [48], such as Kafka [3] and Redis streams [17], handle
+different request classes, such as image processing and ML
+workloads [57], [50], [55], and support different request pri-
+orities. Different request classes or priorities exhibit different
+latencies and therefore have different SLAs, making resource
+management more challenging.
+To address these challenges, we propose Ursa, a lightweight
+resource management framework for cloud-native microser-
+vices. As a first step, we conduct a case study to understand
+how latency anomalies due to poor resource provisioning
+propagate through different communication methods. We show
+that backpressure is only significant for RPCs and is most pro-
+nounced in the parent service of the culprit tier (bottlenecked
+microservice). Given this, we design a method to determine the
+resource utilization threshold for each microservice that pre-
+vents backpressure in the application topology. By enforcing
+that the system operates in a backpressure-free zone, microser-
+vices in a topology can be treated as independent, reducing the
+number of factors the resource manager much consider from
+O(N 2), where each pairwise microservice dependency must
+be accounted for, to O(N), where the latency of individual
+microservices only depends on their own resource allocations.
+This greatly simplifies resource management, as most prior
+work resorts to complex ML models due to the need to capture
+the impact that microservice dependencies have on end-to-end
+performance.
+Moreover, in a backpressure-free system, we develop a
+performance model based on mixed integer programming
+(MIP) which decomposes end-to-end latency SLA constraints
+into per-service latency constraints, and maps them to resource
+allocation thresholds for individual microservices. The model
+also supports specifying different SLAs for different request
+classes and priorities. To speed up the resource exploration,
+arXiv:2401.02920v1  [cs.DC]  5 Jan 2024
+
+Ursa explores each microservice individually, and swiftly
+stops exploration when latency exceeds SLA or the resource
+utilization reaches its backpressure-free threshold.
+To better reflect modern microservices, we re-implemented
+several DeathstarBench applications [36] using Dapr [5], a
+popular microservice framework developed and used by major
+cloud providers. The re-implemented benchmarks use both
+RPCs and message queues (MQs), and implement different
+request classes and priorities, executing more diverse business
+logic than before. We compare Ursa to two representative ML-
+driven systems, Sinan [68] and Firm [54] as well as traditional
+autoscaling. Ursa reduces the required exploration time by
+more than 128×, making it more practical to track frequent
+changes to microservice logic. During online deployment,
+Ursa’s control plane is 43× faster than prior work, and Ursa
+reduces the SLA violation rate by 9.0% to 49.9%, and the CPU
+allocation by up to 86.2% compared to ML-driven approaches.
+II. RELATED WORK
+Microservices. Microservices have emerged as the dominant
+paradigm for interactive cloud services over the past few
+years. Unlike traditional monolithic architectures that contain
+the entire functionality of an application in a single binary,
+microservice architectures are graphical structures composed
+of tens or hundreds of single-purpose, loosely-coupled mi-
+croservices, scaled independently, and in some cases imple-
+mented in different programming languages. The popularity
+of microservices is justified by several reasons, including flex-
+ible development, rapid iteration and fine-grained elasticity.
+The emergence of microservices has also prompted efforts
+to benchmark and characterize them. Representative bench-
+marks include DeathstarBench [36] and ticket reservation [70],
+which implement several end-to-end user-facing applications.
+These benchmarks use RPCs and http RESTful API as
+the only inter-service communication methods, and mostly
+perform lightweight text processing in the business logic.
+More recently, Luo et al. [48] characterized microservices
+running on AliCloud and showed that MQs are common in
+practice, accounting for 23% of all communication methods,
+and the performance of microservices is most sensitive to CPU
+interference. Related work [69], [55], [50], [57] also shows
+that cloud-native applications implement a variety of business
+logic, including ML workloads, webserving, image and video
+processing, etc.
+Resource management. A large body of work has focused
+on using ML to adjust resource allocation for microservices.
+These systems use ML to predict important performance
+metrics, such as latency and load or diagnose performance
+issues [68], [34], [22], [64], [49] or to directly adjust re-
+source allocations [54], [68]. They demonstrate that ML-
+driven approaches outperform traditional approaches, such as
+autoscaling [18] and queuing based mechanisms [67], in terms
+of performance and resource efficiency. However, ML-driven,
+especially deep learning driven approaches also suffer from
+demand of large training dataset, difficulties in adapting to
+changing application logic and user workload, and limited
+control plane scalability. In addition to using ML, Zhou et
+al. [69] reduce request failure rate in WeChat microservices
+with overload control, Yang et al. [67] propose to identify
+bottleneck services in multi-phase applications by monitoring
+the queueing status, Suresh et al. [60] adopt deadline-based
+scheduling to improve tail latency in multi-tier workloads,
+and Sriraman et al. [59] present an auto-tuning framework for
+microservice concurrency, and show the impact of threading
+decisions on application performance and responsiveness.
+Improving resource efficiency in cloud platforms in general
+is an important research area, and recent work [20], [32], [37],
+[39], [42], [43], [53], [62], [24], [44], [52], [28] has proposed
+several directions for how cluster scheduling frameworks can
+improve resource usage. Resource central [23] uses a set of
+ML models to predict VM performance metrics, such as CPU
+utilization and VM lifetime, Autopilot [56] uses an ensemble
+of models to tune container configurations, Ambati et al. [19]
+propose providing SLOs for resource harvesting VMs, and
+Narayanan et al. [51] propose to efficiently solve large-scale
+resource allocation problems by partitioning them to smaller
+problems. However, these proposals are mainly applicable
+to single VMs or containers, rather than microservices with
+directed acyclic graph (DAG) topologies.
+III. BACKPRESSURE EFFECT
+Backpressure is one of the major challenges in microservice
+resource management, and it refers to the phenomenon of
+the resource allocation of one service affecting the latency
+of upstream services, in addition to its own. In the presence
+of backpressure, modeling microservice latency requires mod-
+eling O(N 2) dependencies, in the worst case, for a topology
+with N microservices, as each microservice’s latency can be
+affected by the resources of its downstream services. Many mi-
+croservice resource management frameworks use a centralized
+performance model that requires global information about all
+microservices to account for their inter-service dependencies,
+at the cost of scalability [68], [34], [22]. To achieve scalable
+resource management for microservices, we first conduct a
+case study to understand how backpressure propagates through
+different communication methods, including RPCs and MQs.
+We study three types of chains connected by nested RPCs,
+event-driven RPCs, and message queues (MQs), respectively.
+Nested RPCs, as shown in Figure 1(a), are a synchronous
+system where, upon receiving the client request (R0), the up-
+stream service forwards the request to the downstream service
+(S0) via RPC, blocks until the response is received (R1), and
+then returns the result to the client. Event-driven RPCs [66],
+as shown in Fig. 1(b), are more asynchronous in that upon
+receipt of a client request, the upstream service dispatches the
+request to another thread and returns immediately (S0), while
+the dispatched thread contacts the downstream service via RPC
+and waits for the response (R1). It is noteworthy that event-
+driven RPCs are still not fully asynchronous, as they involve
+a two-step process. Upon receiving a user request, the event
+handling thread works asynchronously, by yielding immedi-
+ately after creating a daemon thread that further processes the
+
+R0
+S0
+R1
+Client
+Upstream
+Downstream
+R0
+S0
+R1
+R0
+S0
+MQ
+(a) Nested RPC
+(b) Event-driven RPC
+(c) Message queue
+Fig. 1: Inter-service communication methods.
+1 2 3 4 5 6 7 8 910
+1
+2
+3
+4
+5
+Tier
+Nested RPC
+1 2 3 4 5 6 7 8 910
+Time(m)
+Event-driven RPC
+1 2 3 4 5 6 7 8 910
+Message queue
+100
+101
+102
+103
+Fig. 2: Backpressure effects in a service chain.
+request. However, the daemon thread talks to the downstream
+service synchronously and informs the event thread when it
+receives the response. This interaction involves maintaining
+synchronous connections between upstream and downstream
+services. Message queues, on the other hand, are completely
+asynchronous. Unlike RPCs, MQs, such as Kafka [3] and
+Redis streams [17], mostly use a publish-subscribe paradigm,
+where publishers publish messages to topics hosted by the
+MQ and subscribers consume messages by subscribing to the
+topics. As shown in Figure 1(c), the upstream service does
+not directly contact the downstream service, but instead sends
+the client request to the MQ, and the downstream service gets
+new requests by polling the MQ.
+Characterizing backpressure.
+We implement the RPC
+service chains with gRPC [9] and the MQ with Redis
+streams [17]. Each chain is configured to include 5 tiers, with
+each tier implementing a CPU-intensive loop as the request
+handler. We record the per-tier response time (S0−R0), which
+in the cases of MQ is the service latency, and in the case
+of RPC is the service latency excluding the duration waiting
+for the downstream response. We measure the tier’s response
+time because it is closely related to the resource allocation
+of the tier itself. We stress test each service chain for 10
+minutes, injecting performance anomalies into the leaf tier
+(tier 5) by throttling its CPU limit between minutes 3 and
+6. The resulting backpressure behavior is shown in Figure 2,
+where each column on the x-axis represents a one minute
+interval, each row on the y-axis corresponds to a tier (tier 1
+is client-facing), and the color of each cell highlights the per-
+Workload
+Generator
+Proxy
+RPC
+Tested
+Service
+RPC
+Fig. 3: Backpressure profiling engine architecture.
+tier 99th response time during that minute. For both nested
+and event-driven RPCs, significant backpressure is observed,
+especially for tier 4, the parent of the throttled leaf tier, and the
+backpressure rapidly diminishes up the call chain and becomes
+negligible above tier 3. In contrast, MQ shows no backpressure
+behavior, even on tier 4.
+Determining conditions for negligible backpressure. Back-
+pressure complicates resource management because the la-
+tency of a service also depends on the resources of its
+downstream services, in addition to its own. To simplify
+resource management, a natural approach is to determine safe
+CPU utilization thresholds to avoid backpressure in the system,
+as the performance of microservices is most sensitive to
+CPU utilization [48], [36]. The approach generalizes to other
+resources as well, for microservices with different resource
+profiles. To this end, we use a profiling engine with the 3-
+tier architecture shown in Figure 3, where the proxy acts as
+the parent service and simply forwards the request to the
+tested service via RPC. The engine gradually increases the
+CPU limit of the tested service, and monitors the latency of
+the proxy and the CPU utilization of the tested service, until
+the latency of the proxy converges. The convergence of proxy
+latency is determined by comparing the latency recorded under
+the last two CPU limits with Welch’s t-test [65], a classical
+
+0
+1
+2
+3
+0
+500
+1000
+1500
+Latency (ms)
+post service
+proxy 99th
+CPU util
+threshold
+0
+1
+2
+0
+100
+200
+300
+400
+timeline-read service
+proxy 99th
+CPU util
+threshold
+0
+20
+40
+60
+0
+20
+40
+60
+80
+CPU utilization
+CPU limit
+Fig. 4: Identifying backpressure-free CPU thresholds in a service mesh. We incrementally decrease the amount of resources
+allocated to the tested microservice, until we observe an increase in the latency of the proxy. Given the proxy’s lack of
+computation activity, this increase signals the presence of backpressure. We use this threshold as the utilization the tested
+service should not exceed to avoid introducing backpressure to its parent tiers.
+hypothesis testing method for identifying whether the means
+of the two sets of samples are equal. The CPU utilization just
+before the convergence of the proxy latency is then recorded
+as the threshold for not triggering backpressure. In order to
+account for complex invocation patterns, such as multiple
+upstream services sending requests to a downstream service
+concurrently, the workload generator synthesizes aggregate
+loads from different upstream services, so that the measured
+backpressure-free threshold is valid under fan-in/out patterns.
+Figure 4 shows the profiling process for two microservices
+in a social network application similar to [36]: the post service,
+responsible for querying the contents of user post, and the
+timeline-read service, responsible for querying the post IDs in
+user timelines. The x-axis corresponds to the CPU limit of the
+tested service. The left and right y-axis correspond to latency
+and CPU utilization, respectively. The blue and green lines
+show the average 99th percentile latency of the proxy and
+the tested service under different CPU limits, and the error
+bars represent the standard deviation. The red line indicates
+the CPU utilization of the tested service. The orange line
+highlights the point where the proxy latency converges, and
+the corresponding CPU utilization is recorded as the threshold,
+46.2% for post service and 60.0% for timeline-read service.
+When significant backpressure is observed, the 99th percentile
+latencies of the proxy and the tested service have already
+increased by more than 5× and 10×.
+Main insights. The study produces the following insights.
+1) Backpressure complicates resource management because
+the latency of a service depends on resources of its
+downstream services, in addition to its own. Backpressure
+is common in RPCs but negligible in MQs.
+2) Backpressure diminishes along the invocation chain. Of
+all the upstream services of the culprit, the parent service
+shows the most significant increase in latency.
+3) The backpressure-free resource utilization threshold of
+a service can be profiled by monitoring the latency of
+an upstream proxy. By operating within the thresholds,
+backpressure can be avoided in the microservice system.
+4) By eliminating backpressure, the number of factors re-
+quired to model microservice latency becomes O(N) with
+N services, because a microservice’s latency is only a
+function of its own resources. Otherwise the number is
+O(N 2) in the worst case, as a microservice’s latency may
+depend on resources of its downstream services.
+IV. PERFORMANCE MODEL
+When the system has negligible backpressure, the latency
+distribution of a microservice becomes mainly a function of
+its own resources. We now build a performance model for
+mapping microservice SLAs to resources. First, we decompose
+the end-to-end latency constraint for each request type to a
+set of per-microservice latency constraints. Second, we map
+each per-microservice latency constraints to resources for that
+service. In this section we describe the performance model we
+use, based on mixed-integer programming.
+Decomposing end-to-end latency. Without loss of generality,
+we consider the end-to-end latency of a chain that handles
+a single type of requests, which is the basic structure of
+microservice DAGs and to which other topologies can be
+transformed. For examples, a tree consists of multiple chains
+from the root to the leaf services, and similarly, fan-in and fan-
+out topologies can be decomposed to multiple chains from the
+source to the sink services. If a service is accessed multiple
+times by an upstream service, we consider the cumulative
+latency of all accesses as the latency of that service.
+Theorem 1: Consider a chain of microservices S1 to Sn,
+and their response time distributions t1 to tn, where ti(xi) is
+
+the xth
+i
+percentile latency of microservice Si, xi ∈[0, 100].
+Similarly, we define te to be the end-to-end latency distribu-
+tion, and te(xe) to be the xth
+e
+percentile end-to-end latency,
+xe ∈[0, 100]. Then,
+te(xe) ≤
+n
+X
+i=1
+ti(xi), if 100 −xe ≥
+n
+X
+i=1
+100 −xi
+(1)
+The theorem holds true regardless of the joint distribution
+of microservice latencies (i.e., if services are independent or
+correlated), and it denotes that the sum of per-microservice
+latencies provides an upper bound for the end-to-end latency
+at an arbitrary percentile, as long the sum of residuals of
+per-microservice percentiles is no greater than the residual
+of the end-to-end percentile. The proof can be found in the
+supplementary material.
+Theorem 1 proposes a method to guarantee the end-to-end
+latency SLA by examining the latency of individual microser-
+vices. For example, in a chain consisting of two microservices
+S1 and S2, with the SLA defined as the end-to-end 99th
+percentile latency, Theorem 1 suggests that the actual end-
+to-end 99th percentile is less than the sum of xth
+1
+percentile
+latency of S1 and xth
+2
+percentile latency of S2, as long as
+100 −x1 + 100 −x2 ≤1, and in other words, (x1, x2) can
+be (99.1, 99.9), (99.5, 99.5), (99.7, 99.3), etc. Since all such
+combinations of xi are upper bounds of the actual end-to-
+end latency, the end-to-end SLA must be satisfied as long as
+the corresponding sum of the per microservice latencies for
+one combination is less than the end-to-end SLA target. More
+generally, given the end-to-end latency SLA of xth
+e percentile
+latency needing to be less than T in a chain of length n, the
+end-to-end SLA is satisfied if
+∃[x1...xn] s.t.
+n
+X
+i=1
+ti(xi) ≤T & 100 −xe ≥
+n
+X
+i=1
+100 −xi
+(2)
+Mapping per-microservice latency to resources.
+To opti-
+mize resource allocation, the per-microservice latency distribu-
+tions ti need to be associated with resources, to derive a model
+that maps SLAs to resources. In addition, the model should be
+able to handle multiple classes or priorities of requests instead
+of a single class as in Theorem 1.
+In cloud-native frameworks, such as Kubernetes [12], [4],
+[8], dynamic resource tuning is typically achieved by the
+changing the number of replicas, or container instances, each
+with a predefined resource configuration (CPU and memory).
+Therefore, we use load per replica (LPR) as the metric to
+relate resources to latency, where load is measured in requests
+per second (RPS). Considering a service Si that handles c
+classes or priorities of requests (v1 to vc), the load per replica
+yi can be represented as a vector [a1
+i ...ac
+i], where ac
+i is the load
+for request class vc. If the load per replica vector yi is used
+as the resource allocation threshold and the total load to Si
+is [A1
+i ...Ac
+i], the resources consumed by Si can be calculated
+using Equation 3, where ui is the resource consumption per
+replica.
+ri(yi) = max
+1≤j≤c⌈Aj
+i
+aj
+i
+⌉· ui
+(3)
+On the other hand, since the latency distribution of request
+vj in Si is a function of LPR yi, the xth
+i
+percentile latency
+of vj can be denoted as tj
+i(yi, xi). Then the ti(xi) items in
+Equation 2 can be replaced by tj
+i(yi, xi), transforming the
+latency constraint to a resource allocation constraint. While
+tj
+i(yi, xi) can be fitted with profiling data, the resource-latency
+function can be an arbitrary non-increasing function that is
+not necessarily convex, which makes it hard to use convex
+optimization models. Instead, we can discretize the variables
+and use the function in Mixed Integer Programming (MIP),
+which can be efficiently solved by modern optimization solvers
+using heuristics, such as branch-and-bound algorithm [47].
+Specifically, we discretize the percentile variable xi and LPR
+yi, and represent the latency distributions under different LPRs
+as a matrix Dj
+i , where each element of Dj
+i is the latency
+that corresponds to a certain percentile for a given LPR. For
+example, assuming that Si is profiled under m different LPRs
+Yi = [y1
+i ...ym
+i ] and the latency distribution is discretized into
+h different predefined percentiles P = [p1...ph], Dj
+i will be
+a m × h matrix where Dj
+i [α, β] is the latency at percentile
+pβ under LPR yα
+i . As a result of the discretization, the LPR
+variable yi can be represented by a one-hot vector δi of length
+m, indicating which LPR is chosen as the resource allocation
+threshold. Similarly, the percentile variable can be presented
+by one-hot vector γj
+i of length h, indicating which percentile
+contributes to thesum of per-microservice latencies for request
+class or priority vj. With the two one-hot decision variables,
+the latency of request class or priority vj in microservice Si
+can be expressed as δT
+i Dj
+i γj
+i , and the resource consumption
+can be expressed as δT
+i Ri, in which Ri is a 1-D vector
+corresponding to resource consumption under the profiled
+LPRs, computed with Equation 3.
+Resource optimization model.
+Given that we can provide
+an upper bound on the end-to-end latency using the sum of
+per-microservice latencies and map per-microservice latencies
+to resource allocation thresholds, we can now design an
+optimization model that calculates the most efficient resource
+allocation threshold for each microservice, such that they
+all meet their respective per-microservice SLAs. Specifically,
+the inputs to the model include the load of the application,
+SLAs for different request classes and priorities, and per-
+microservice latency distributions under different LPR thresh-
+olds. The output of the model is the most efficient per-
+microservice LPR threshold that satisfies SLAs. With the
+described notations summarized in Table I, we derive the
+following solvable mixed-integer programming (MIP) model
+that yields optimal resource configurations given a set of end-
+to-end constraints: for each request class or priority vj, the
+xth
+j
+percentile latency should be less than Tj.
+
+Description
+δi
+Resource (LPR) one-hot vector
+γj
+i
+Latency percentile one-hot vector
+Ri
+Resource consumption under different LPRs
+P
+Discretized percentile values
+Dj
+i
+Latency distribution matrix
+Tj
+End-to-end SLA target
+xj
+End-to-end SLA target percentile
+1
+1-D vector whose elements are all 1
+TABLE I: Notations in the MIP formulation.
+minimize
+Pn
+i=1 δT
+i Ri,
+subject to
+P
+i δT
+i Dj
+i γj
+i ≤Tj, ∀j
+(1)
+P
+i 100 −P T γj
+i ≤100 −xj, ∀j (2)
+1T δi = 1, ∀i
+(3)
+1T γj
+i = 1, ∀i, j
+(4)
+variables
+δi (0 ≤δi ≤1 & δi ∈Z)
+γj
+i (0 ≤γj
+i ≤1 & γj
+i ∈Z)
+MIP1
+The objective of MIP 1 is to minimize the total resource
+consumption, while meeting the end-to-end SLA. Constraint 1
+specifies that for each request class or priority, the sum of per-
+microservice latencies must be smaller than the SLA target,
+and constraint 2 specifies that the sum of per-microservice
+latencies in the constraint 1 is an upper bound of the actual
+end-to-end latency. The rest of the constraints enforce the deci-
+sion variables to be one-hot vectors. For each microservice, the
+LPR one-hot vector δi produced by MIP 1 corresponds to the
+most efficient resource allocation threshold among all profiled
+LPRs, which allows resource allocation of each microservice
+to be decided independently, by simply checking the load of
+the microservice.
+Mitigating latency overestimation.
+The quality of the
+solution of MIP 1 is related to the tightness of the upper
+bound given by Theorem 1, as a loose upper bound well above
+the actual latency can lead to overprovisioning of resources.
+An intuitive way to tighten the upper bound is to record the
+ratio of the upper bound to the actual value and use that
+ratio to refine the SLA constraint in MIP 1. For example,
+if the overestimation ratio of request class or priority vj is
+αj and its expectation is E(αj), constraint 1 in MIP 1 can
+be refined to P
+i δT
+i Dj
+i γj
+i ≤E(αj)Tj. With a fixed resource
+allocation denoted by δ∗
+i , for microservice Si, ∀i, the upper
+bound on the latency of request class or priority vj can
+be solved using MIP 2. The objective value is the tightest
+upper bound, because any percentile combination satisfying
+constraint 1 in MIP 2 establishes a upper bound on latency,
+and the objective is the smallest among all these upper bounds.
+Thus, the overestimation ratio αj is the ratio of the objective
+over the actual latency, and E(αj) is the average of αj with
+different resource allocations.
+minimize
+P
+i δ∗T
+i Dj
+i γj
+i ,
+subject to
+P
+i 100 −P T γj
+i ≤100 −xj, ∀j
+(1)
+1T γj
+i = 1, ∀i, j
+(2)
+variables
+γj
+i (0 ≤γj
+i ≤1 & γj
+i ∈Z)
+MIP2
+In practice, instead of using the expected overestimation
+ratio to tighten the bound, one can choose other metrics, such
+as the overestimation ratio at a high percentile, to tradeoff the
+potential resource efficiency and the risk of SLA violation. We
+leave this exploration to future work.
+Discussion. In Ursa, we use this performance model to find
+the most efficient resource allocation given per-microservice
+latency SLA constraints, however, the model can be extended
+to other cases with minor modifications. For example, the
+model can handle end-to-end latency minimization under re-
+source constraints, by replacing the objective of MIP 1 with the
+sum of per-microservice latencies, and using the total available
+resources as a constraint.
+In addition, the model can handle SLAs defined in terms
+of request failure rates. The failure rate of an end-to-end
+request is no greater than the sum of request failure rates
+of the microservices it goes through, and each microservice’s
+request failure rate is related to its resources, since insufficient
+resources will cause requests to time out and fail. The sum of
+per-microservice failure rates can then be used as a constraint
+to strengthen MIP 1. The model can also support dynamic
+request paths by adding recorded paths to the model during
+deployment. In the case of a microservice being accessed
+multiple times in a dynamic path, the model can be simplified
+by considering the total time spent in each microservice. We
+plan to investigate these potential use cases in future work.
+Algorithm 1: LPR threshold profiling algorithm.
+Input: Initial replica R, SLA violation threshold Fsla,
+backpressure-free threshold CPUbp, profiling time T;
+Output: Mapping from LPR to latency distributions;
+Variable: Replica r, replica tuning step step, Load L,
+SLA violation frequency fsla, CPU utilization cpu,
+latency distribution dlat;
+Initialize r ←R, map ←{};
+while r > 0 do
+wait(T);
+if cpu ≥CPUbp —— fsla ≥Fsla then
+terminate;
+else
+map[ L
+r ] = dlat, r = r −step;
+end
+end
+return map
+Allocation space exploration.
+The task of allocation space
+exploration is to collect input data for the MIP model, in-
+cluding the potential resource allocation thresholds and the
+
+Gateway
+Client
+Microservice
+Tracing Module
+Tracing
+Framework
+1
+Resource
+Controller
+4
+2
+LPR Profiling
+Exploration
+Controller
+Optimization Engine
+3
+Anomaly Detector
+5
+Re-explore
+Re-compute
+Perf Metrics
+Latency Dist
+Exploration Data
+LPR Threshold
+Micoservices
+Deployment 
+Anomalies
+Load
+Ursa Framework 
+Fig. 5: System architecture of Ursa.
+corresponding latency distributions for each microservice.
+Exploration should include the most efficient resource allo-
+cation threshold for each microservice and converge fast, by
+terminating swiftly if the latency exceeds the SLA. To achieve
+this goal, we explore each microservice individually with the
+LPR threshold profiling algorithm shown in Algorithm 1, by
+replaying the workload trace on the profiled microservice. Dur-
+ing profiling, we gradually reduce the replicas of the profiled
+microservice to increase the load on each replica and record
+the corresponding latency distributions. Profiling is terminated
+when SLA violations are observed. Additionally, profiling is
+also terminated when the CPU utilization of the microservice
+exceeds the service’s backpressure-free threshold to preserve
+the independence assumption used by the performance model.
+V. DESIGN AND IMPLEMENTATION
+We now present the design and implementation of Ursa,
+a resource management framework based on the proposed
+performance model and allocation space exploration mech-
+anism. Ursa is built on top of Kubernetes [12], a popular
+container orchestration framework adopted by major cloud
+providers [2], [4], [8], [1], and leverages Kubernetes’s APIs
+to dynamically allocate resources by tuning the number of
+replicas per microservice. Ursa requires the user to provide
+the topology and the end-to-end SLAs of the microservice
+application, including request paths, percentiles, and target
+latencies.
+Ursa aims to make allocation decisions fast and scalable.
+Ursa simplifies resource management decisions to threshold-
+based scaling by implementing the performance model from
+Section IV. In addition, Ursa collects input data for the
+performance model via the exploration process used to identify
+the relation between resources and per-microservice SLAs.
+The components of Ursa are shown in Figure 5, and the
+functionality of each component is described below.
+1. The tracing framework is implemented with Prometh-
+eus [15], a time-series database for metrics monitoring. It
+collects the CPU and memory usage data, as well as the
+request counts and latency distributions of each service which
+are used to calculated statistics required by the MIP model.
+2. The exploration controller implements the allocation
+space exploration mechanism. It first determines the backpres-
+sure free CPU utilization thresholds for each RPC-connected
+microservice individually (Section III). Then, it explores fea-
+sible resource allocation thresholds of each microservice indi-
+vidually using Algorithm 1. The complete exploration of all
+microservices is required for a new application and must be
+completed before Ursa begins to manage the application. In the
+case of continuous development of individual microservices,
+only the updated microservices require re-exploration.
+3. The optimization engine then determines the resource
+allocation threshold for each microservice using the per-
+formance model in Section IV, using exploration data and
+user load information collected by the tracing framework.
+The optimization engine is implemented with Gurobi [10].
+During the initial deployment phase, the optimization engine
+is invoked with current user load information to generate the
+optimal scaling thresholds of each microservice. Subsequently,
+the optimization engine may need to be invoked again if the
+
+mix of user requests changes significantly or when the business
+logic of microservices is updated.
+4. Using the load per replica (LPR) threshold calculated by
+the optimization engine, the resource controller dynamically
+adjusts the number of replicas as the load changes, ensuring
+that for any class or priority of request, the average load on
+each replica does not exceed the threshold. Specifically, the
+resource controller determines whether the average load in
+one replica exceeds the threshold using Welch’s t-test [65] to
+accommodate the noise of load fluctuations. Specifically, the
+resource controller compares the actual load of the microser-
+vice, with the recorded load used as the scaling threshold, and
+considers the threshold to be exceeded if the t-test rejects the
+hypothesis that the mean of the actual load is less than the
+mean of the recorded load.
+5. During deployment, the anomaly detector periodically
+checks for anomalies in load and latency, and triggers recal-
+culation of resource allocation thresholds or re-exploration,
+if necessary. Load anomalies refer to drastic changes in the
+ratio of different classes or priorities of requests that may
+lead to resource over-provisioning, in which case resource
+allocation thresholds are recalculated to improve resource
+efficiency. The anomaly detector identifies changes in request
+ratios by monitoring the request ratio deviation of each
+microservice, which measures the difference between the load
+of the microservice and the load per replica threshold for
+scheduling. The metric is denoted by maxi li
+ti
+P
+i ti
+P
+i li , where li
+and ti are the total load and per-replica load threshold for the
+ith request class or priority. When the request ratio deviation
+exceeds a user-defined threshold, the anomaly detector asks the
+optimization engine to recalculate the thresholds and update
+the resource controllers. If the re-calculated thresholds still
+fail to mitigate the request ratio deviation, indicating that
+the load pattern is not covered by previous exploration, the
+anomaly detector asks the exploration controller to re-explore
+the affected microservice.
+On the other hand, latency anomalies refer to SLA vio-
+lations, which indicate that the latency distribution recorded
+during exploration needs to be updated. Similar to load anoma-
+lies, users can specify an end-to-end SLA violation threshold
+that triggers the re-exploration process if the SLA violation
+exceeds the threshold during deployment.
+VI. MICROSERVICE BENCHMARKS
+Conventional microservice benchmarks [36], [58], [70] have
+several limitations. First, conventional benchmarks use RPCs
+as the only method for inter-service communication, whereas
+MQs are becoming increasingly common in practice [48].
+Second, the business logic of conventional benchmarks in-
+volves only lightweight text processing, whereas a modern
+microservice handles different user request classes performing
+tasks, such as image processing and ML workloads [57], [50],
+[55], and even different request priorities, making resource
+management more challenging. To address these limitations,
+we implement three benchmark applications using Dapr [5],
+a popular microservice framework developed and used by
+Client
+Gateway
+Translate
+Post
+Sentiment
+Analysis
+Timeline
+Store
+Post
+Store
+Gateway
+Business Logic
+Database
+User
+Frontend
+Recommend
+Image
+Store
+Social
+Graph
+Timeline
+Read
+Timeline
+Update
+Social
+Store
+Object
+Detection
+Message Queue
+RPC
+Fig. 6: Social network microservice topology.
+Client
+Gateway
+Trending
+Date
+Scale
+Video
+Store
+Info
+Store
+Frontend
+Date
+Store
+Thumbnail
+User
+Rating
+Rating
+Store
+Message Queue
+RPC
+Info
+Gateway
+Business Logic
+Database
+Fig. 7: Media service topology.
+major cloud providers, as described below. For all the ap-
+plications, we implement the business logic in Golang and
+Python, and use gRPC [9] for RPCs, Redis streams [17] for
+message queues and Redis [16] for data stores. We incorporate
+MQ into our approach because it is an increasingly popular
+communication framework for microservices.
+In our benchmarks, the interactive functionalities demanding
+immediate response, such as reading timelines from the social
+network, are implemented with RPC. Conversely, functional-
+ities that do not require immediate response, such as labeling
+objects in user-uploaded images, are implemented with mes-
+sage queues.
+Social network.
+The social network application is a re-
+implementation of the DeathStarBench [36] application. In
+addition to the original features including uploading text posts
+and reading timelines, the re-implemented version includes
+several new features, including uploading images, sentiment
+analysis of texts, and object detection of images. Sentiment
+analysis and object detection are implemented with machine
+learning models from Hugging Face [11], and are connected
+to other services via MQs.
+Media service. The media service is also a re-implementation
+of the corresponding DeathStarBench application. In addition
+to the original features including reviewing and rating videos,
+the re-implemented version additionally allows users to upload
+and download actual videos, and includes video-processing
+tasks, such as transcoding to different resolutions and gener-
+ating thumbnails via FFmpeg [7]. The video transcoding and
+
+Client
+Gateway
+Video
+Store
+Frame
+Extraction
+Message Queue
+RPC
+Gateway
+Business Logic
+Database
+Metadata
+Extraction
+Face
+Recognition
+Image
+Store
+Fig. 8: Video processing pipeline.
+thumbnail services are connected to other services via MQs.
+Video processing pipeline.
+Video processing pipeline con-
+sists of three stages: The first stage extracts video metadata,
+the second stage takes snapshots from the video at fixed
+intervals, and the third stage performs face recognition on
+the video snapshots. The first two stages use FFmpeg, the
+third stage uses OpenCV [14], and stages are connected
+with MQs. The application handles two request priorities.
+High-priority requests are always processed immediately when
+worker threads are available, while low-priority requests are
+processed only when there is no high-priority request waiting
+in the queue.
+Previous work typically handles a single SLA and only man-
+ages synchronous requests. For example, Sinan [68] handles a
+single SLA of 500ms for the 99th percentile latency of upload-
+post, read-timeline, and update-timeline in social network.
+However, different request classes have diverse latencies. For
+example, in social network, it takes tens of milliseconds to
+upload a post, hundreds of milliseconds to update timelines,
+and a few seconds to perform object detection. To reflect
+these latency ranges, we assign an SLA per request class and
+priority. We stress test the applications with high user loads
+and use the latency before saturation as the SLA. The SLAs
+of the social network, media service, and video processing
+pipeline are listed in Table II, III, IV, respectively. The SLAs
+are mostly defined as the 99th percentile, except for the low-
+priority requests in the video processing pipeline, which is
+defined as the 50th percentile latency.
+Request type
+99th latency (ms)
+upload-post/comment
+75
+read-timeline
+250
+update-timeline
+500
+upload-image
+200
+download-image
+75
+sentiment-analysis
+500
+object-detect
+10000
+TABLE II: SLA requirements of the social network.
+VII. EVALUATION
+We aim to answer the following questions:
+1) What is the overhead of Ursa’s exploration process?
+(Section VII-C)
+Request type
+99th latency (ms)
+upload-video
+2000
+download-video
+1500
+get-info
+250
+rate-video
+400
+transcode-video
+40000
+generate-thumbnail
+2000
+TABLE III: SLA requirements of the media service.
+Request type
+Percentile
+Latency (ms)
+high-priority
+99th
+20000
+low-priority
+50th
+4000
+TABLE IV: SLA requirements of the video processing
+pipeline.
+2) How accurate is Ursa’s performance model in capturing
+end-to-end latency (Section VII-D)?
+3) How effective is Ursa in reducing resource usage and
+maintaining SLAs? (Section VII-E)
+4) What is the latency required for Ursa to make resource
+allocation decisions? (Section VII-F)
+5) Is Ursa able to adapt to business logic changes of mi-
+croservices? (Section VII-G)
+A. Experimental Setup
+We use the benchmarks in Section VI and use Locust [13]
+to generate input load following a Poisson arrival process.
+The applications are deployed on a local Kubernetes cluster
+consisting of 8 machines, each with 40-88 CPUs and 126-188
+GB of memory each, with a NIC bandwidth of 10 Gbps. To
+reduce interference between containers colocated on the same
+server, we set the CPU management policy of Kubernetes
+to the static policy [45], which allows each container to
+access exclusive CPUs, as long as it is configured with an
+integer number of CPUs. The CPU configuration of each
+microservice’s container is determined by monitoring the CPU
+usage of the container at low RPS and rounding it to the
+nearest integer, and similarly, the memory configuration is set
+to the maximum profiled memory usage to avoid OOM errors.
+During online deployment, we adjust the resource allocation
+for each microservice by adjusting the number of replicas.
+B. Competing Approaches
+We compare Ursa to the following systems.
+Sinan. Sinan [68] is a model-based ML-driven microservice
+management framework. It uses a CNN and boosted trees
+model, to predict the end-to-end latency of a microservice
+topology given a certain resource allocation, as well as the
+probability that a resource allocation will lead to an SLA
+violation later into the future, taking into account the system’s
+inertia in building up queues. Sinan is implemented as a
+centralized scheduler that periodically queries the model with
+different resource allocations, and chooses the one using the
+
+least amount of resources, while meeting the end-to-end SLA.
+The training data for the models are collected with a process
+designed to explore unseen resource allocations and to keep
+the ratio of violating to meeting SLAs at 1 : 1, so that the
+trained models are not biased towards either predicting SLA
+violation or SLA satisfaction. We train Sinan with 10,000
+samples, per the paper’s recommendation.
+Firm.
+Firm [54] is a model-free, ML-driven framework
+for microservice resource management. Unlike Sinan that
+trains models to predict latency, Firm assigns a reinforcement
+learning agent to each service that directly adjusts the resource
+allocation for the service, given its resource usage and end-
+to-end SLA status. The reward for each agent is designed to
+be the weighted sum of the reduced resource usage and the
+SLA violation status after applying the resource allocation
+decision. The agents are trained by injecting performance
+anomalies during online deployment. Similarly to Sinan, we
+also use 10,000 training samples for Firm to allow accuracy
+to converge.
+For both Sinan and Firm, we modified the systems to handle
+asynchronous events and queues, since the original systems
+were designed exclusively for RPCs.
+Autoscaling. Autoscaling [18] is a widely adopted resource
+management method. The autoscaling controller relies on
+manually configured resource utilization thresholds based on
+expert knowledge to dynamically adjust resource allocation.
+In our evaluation, we experiment with two configurations for
+autoscaling. The first configuration uses the default setting
+of AWS step scaling [18], which increases resources when
+CPU utilization exceeds 60%, and reduces resources when
+the CPU utilization is below 30%. This configuration is
+optimistic in terms of resource usage, but comes at the expense
+of SLA maintenance. The second configuration is manually
+tuned to preserve the SLAs of tested applications, but uses
+more resources. In the rest of the paper, we name the first
+configuration Auto-a, and the second configuration Auto-b.
+C. Exploration Overhead
+We now compare the exploration overheads of Ursa, Sinan
+and Firm. During exploration, the combination of user requests
+for each application is the same across the three approaches.
+Specifically, for the social network application, the ratios of
+post, comment, download-image and read-timeline are ap-
+proximately 1:75:15:25, adopted from [68], [46], [38]. For
+the media service application, the ratios of upload-video,
+get-info, download-video, and rate-video are approximately
+1:100:25:25. For the video processing pipeline, we experiment
+with four different ratios of high and low priority requests,
+including 5:95, 25:75, 50:50, and 75:25. Across all approaches,
+the sampling frequency is set to once per minute.
+We run Ursa’s exploration process for each microservice
+individually, as described in Algorithm 1. Since CPU and
+memory are the two major resources on cloud platforms,
+where CPU directly affects latency and memory is configured
+to avoid OOM error, during Ursa’s exploration we configure
+the initial replica of each microservice by providing it with
+adequate CPUs to keep the microservice’s latency low. Each
+microservice is profiled using Algorithm 1, and in each
+iteration we reduce the number of replicas by 1 and collect 10
+samples, until the frequency of SLA violations exceeds 10%,
+or the CPU utilization exceeds the backpressure-free threshold.
+For Sinan and Firm, we run their data collection algorithm and
+online training process separately and collect 10k samples for
+each application, matching the order of magnitude in Sinan
+for DeathStarBench [68].
+Table V summarizes the number of samples collected during
+exploration and the required exploration time. For Ursa, the
+exploration time is decided by the longest time required to
+profile a single microservice, as each microservice can be
+profiled individually, and the number of samples is the sum
+of samples collected for all microservices. Compared to the
+ML-driven approaches, Ursa reduces the required sample size
+by a factor of 16.7 up to 25.6, and the exploration time by
+a factor of 128.2 up to 208.4. The high online exploration
+overheads of ML-driven approaches result from the nature of
+deep neural networks, which require a large amount of data
+to generalize, due to their large parameter space. In contrast,
+Ursa’s analytical model inherently contains fewer parameters
+than DNNs. The model calculates end-to-end latency as the
+sum of per-microservice latencies, and foresees end-to-end
+SLA violations when the latency of individual microservices
+increases rapidly. Notably, despite the small required sample
+size, Ursa still maintains SLA and achieves high efficiency
+during deployment, as shown in Section VII-E.
+App
+Systems
+Samples
+Time(h)
+Social
+Ursa
+440
+1.2
+Sinan/Firm
+10000
+166.7
+Media
+Ursa
+390
+0.8
+Sinan/Firm
+10000
+166.7
+Video
+Ursa
+600
+0.8
+Sinan/Firm
+10000
+166.7
+TABLE V: Exploration overheads with Ursa compared to two
+ML-driven frameworks, Sinan and Firm.
+D. Model Accuracy
+The performance model (Section IV) estimates the end-to-
+end latency by multiplying the latency’s upper bound with the
+expected overestimation rate. To evaluate the estimation accu-
+racy, we record the per-microservice and end-to-end latency
+distributions every 5 min for a total of 150 min during online
+exploration with dynamically changing resource allocations,
+and calculate the estimated latency for each type of request.
+Figure 9 shows the measured and estimated latency of four
+representative request types in Social Network, including post,
+update-timeline, object-detection, and sentiment-analysis. The
+blue line indicates the measured 99th percentile latency and
+the red line indicates the estimated 99th percentile latency. For
+each class of requests, the estimated latency closely follows
+
+0
+50
+100
+150
+0
+20
+40
+60
+80
+P99 latency (ms)
+post
+0
+50
+100
+150
+0
+100
+200
+300
+400
+500
+update-timeline
+0
+50
+100
+150
+0
+2000
+4000
+6000
+8000
+10000
+P99 latency (ms)
+object-detect
+0
+50
+100
+150
+0
+100
+200
+300
+400
+500
+sentiment-analysis
+Time (m)
+Measured
+Estimated
+Fig. 9: Social network–Estimated vs. measured latency.
+0
+50
+100
+150
+0
+10
+20
+30
+40
+P99 latency (s)
+high-priority
+0
+50
+100
+150
+0
+1
+2
+3
+4
+P50 latency (s)
+low-priority
+Time (m)
+Measured
+Estimated
+Fig. 10: Estimated vs. measured latency for the video process-
+ing pipeline.
+the measured latency, with the average ratio of estimated to
+measured latency ranging from 0.97 to 1.05. Additionally,
+Figure 10 shows the measured and estimated latency of the
+video processing pipeline which includes two request priori-
+ties, with SLAs defined at the 50th and 99th percentiles, for
+low and high priority requests, respectively. For both priorities,
+the estimated latency is close to the measured latency, with the
+average ratio of estimated to measured latency being 0.96 and
+1.00 for low and high priority requests, respectively.
+E. Performance Comparison
+We now compare resource usage and SLA violations during
+deployment between Ursa and prior work, with Ursa and ML-
+driven systems using exploration data from Section VII-C. In
+addition to the three previous applications, we also show the
+results for the vanilla social network which implements the
+same functionality as the original benchmark, by disabling the
+newly added ML services, to highlight the challenges that stem
+from resource need heterogeneity across microservices.
+For each application, we experiment with three user loads;
+constant load, dynamic load, and skewed load. Constant load
+refers to Poisson arrival processes with constant RPS. Dynamic
+load has time-varying RPS, including diurnal patterns where
+the RPS first gradually increases and then gradually decreases,
+and burst patterns, where the RPS increases sharply by 50%
+to 125%. The ratio of different types of requests for constant
+and dynamic loads is the same as in online exploration. In
+skewed load, the ratio of request types differs from that in
+the online exploration. For social network and media service,
+we experiment with two other request combinations, the first
+doubling the frequency of update requests, and the second
+halving the frequency of update requests. For the video
+processing pipeline, the ratios of high-priority to low-priority
+requests include 40:60 and 60:40, which do not exist in online
+exploration. For Ursa specifically, the skewed load stresses the
+case where the request mix changes, and the LPR thresholds
+needs recalculated using available exploration data that do not
+include the current request mix. For each type of load, Ursa
+calculates the optimal load-per-replica thresholds once, at the
+beginning of the experiment.
+Figure 11 shows the SLA violation rate, and Figure 12
+shows the average CPU allocation, or the total amount of CPU
+resources allocated to the microservice. Compared to ML-
+driven systems, Ursa significantly reduces SLA violation rates,
+achieving 0.1% to 8.5% SLA violation rates under constant
+and dynamic loads, and 0.5% to 2.0% SLA violation rates
+under skewed load, whereas ML-driven systems incur 9.1% to
+29.2% SLA violation rates under constant and dynamic loads,
+and 14.2% to 51.9% SLA violation rates under skewed load.
+ML-driven systems cause higher SLA violation rates for the
+new social network than for vanilla social network, because the
+latency of ML microservices is less stable and more challeng-
+ing for resource management, compared to lightweight text
+processing. In terms of resources, Ursa reduces CPU allocation
+by 2.3% to 86.2% for constant and dynamic loads. For skewed
+loads, Ursa uses an average of 8.2% more CPUs, but the
+ML-driven systems result in SLA violation rates significantly
+higher than Ursa. As for autoscaling, Auto-a, which uses the
+default setting of AWS step scaling, uses the least resources
+but results in SLA violation rates of over 40%. Auto-b, the
+manually tuned configuration, maintains SLAs most of the
+time, with SLA violation rates only 0.9% to 6.1% higher
+than Ursa. Despite the low SLA violation rates, Auto-b uses
+significantly more resources than Ursa, allocating 43.9% to
+148.0% more CPUs under constant and dynamic loads, and
+13.6% to 57.0% more CPUs allocation under skewed loads.
+Ursa may use more resources under skewed loads because it
+prioritizes maintaining SLAs and makes conservative decisions
+with the available exploration data. As a conceptual example,
+assume a microservice handles two classes of requests, and
+its total load is (4, 6), where each element of the vector is the
+load of one class of requests. If the microservice’s exploration
+data only includes one feasible LPR threshold (3, 2), Ursa
+will provision 3 replicas for the microservice to ensure that
+the load of any request class is below the threshold, while in
+reality the actual per-replica load will be (1.3, 2), which is
+below the (3, 2) threshold. Figure 13 shows the load and CPU
+allocation for four representative microservices in the social
+
+0
+20
+40
+60
+0.0
+1.6
+2.0
+18.8
+17.1
+20.0
+14.9
+14.3
+46.2
+41.9
+56.1
+42.0
+1.2
+5.3
+4.0
+Vanilla Social network
+Ursa
+Sinan
+Firm
+Auto-a
+Auto-b
+0
+20
+40
+60
+80
+1.9
+4.5
+2.0
+21.1
+26.8
+42.0
+22.6
+24.9
+51.9
+57.5
+63.8
+66.0
+4.4
+10.6
+8.0
+Social network
+0
+20
+40
+60
+80
+3.3
+8.5
+0.5
+28.5
+22.4
+26.0
+30.8
+29.2
+34.6
+59.3
+66.3
+62.0
+9.3
+10.6
+6.0
+Media service
+const
+dynamic
+skewed
+0
+20
+40
+60
+0.8
+6.4
+0.5
+16.7
+15.1
+14.2
+25.0
+25.9
+26.2
+49.2
+42.3
+50.8
+1.7
+7.7
+2.5
+Video processing pipeline
+SLA violation rate(%)
+Fig. 11: SLA violation rate across load patterns for the original (Vanilla) and reimplemented Social Network application, the
+Media service, and the Video Processing pipeline, with Ursa, Sinan, Firm, and the empirical Automscaling system.
+network under a diurnal load when managed with Ursa, where
+the left Y-axis represents the RPS of load and the right Y-axis
+represents the CPU allocation. For each microservice, Ursa is
+able to scale out and scale in promptly as the load increases
+and decreases.
+Ursa outperforms ML-driven systems with much lower
+exploration overheads, because Ursa’s analytical model accu-
+rately decomposes the end-to-end latency to per-microservice
+latencies, which can be mapped directly to per-microservice
+resource allocation. However, the ML-driven techniques need
+to learn the relation between resource allocation and SLA
+from scratch in a much larger parameter space, requiring more
+data and leading to lower accuracy. Specifically, Sinan’s SLA
+violation predictor can only achieve 80% to 85% accuracy
+due to the presence of multiple request classes with different
+SLAs, resulting in more SLA violations and higher resource
+usage. On the other hand, in addition to the issue of large
+parameter space, Firm does not always prioritize preserving
+SLAs because its agent’s reward function is a weighted sum
+of the SLA violation rate and the resource utilization, which
+makes Firm prioritize resource savings over SLA if the savings
+are significant, resulting in more violations.
+Discussion. We previously compared the resource consump-
+tion of the evaluated systems. Another metric of interest in
+cloud native environments is throughput per dollar, i.e., the
+user request throughput achievable with the same cost budget.
+Since all systems are evaluated under the same workload
+patterns, the improvement in Ursa’s throughput per dollar is
+the inverse of its resource savings. For example, compared
+to ML-driven systems, Ursa reduces CPU allocation by 2.3%
+to 86.2% for constant and dynamic loads, which represents
+an improvement in throughput per dollar of 1.02× to 7.24×.
+Ursa’s improvement is even more pronounced when consider-
+ing goodput per dollar, i.e., the user request throughput that
+meets SLA under the same cost budget, since Ursa signifi-
+cantly reduces SLA violations compared to other systems.
+F. Control Plane Latency
+The latency of resource allocation decisions is directly
+related to responsiveness of resource management systems.
+
+0
+25
+50
+75
+40
+31
+59
+54
+45
+42
+39
+32
+39
+28
+23
+37
+59
+53
+67
+Vanilla Social network
+Ursa
+Sinan
+Firm
+Auto-a
+Auto-b
+0
+100
+200
+92
+76
+128
+127
+94
+111
+113
+97
+114
+72
+63
+109
+165
+146
+201
+Social network
+0
+100
+200
+116
+73
+93
+129
+84
+78
+144
+96
+116
+57
+45
+49
+170
+137
+140
+Media service
+const
+dynamic
+skewed
+0
+50
+100
+150
+200
+131
+50
+156
+152
+96
+151
+138
+89
+133
+86
+82
+108
+192
+124
+197
+Video processing pipeline
+CPU Cores
+Fig. 12: Average CPU allocation across load patterns for the original (Vanilla) and reimplemented Social Network application,
+the Media service, and the Video Processing pipeline, with Ursa, Sinan, Firm, and the empirical Automscaling system.
+Resource allocation decisions are fast in Ursa because the
+critical path only includes the resource controller, which
+calculates the number of replicas, based on the load-per-replica
+thresholds, while inference of ML requires over thousands
+of floating-point operations. There are also situations where
+the model needs to be updated to account for changes in
+service business logic or load combinations. In such cases,
+Ursa needs to recompute the optimization models, and ML-
+driven approaches also need to be retrained. Table VI shows
+the average control plane latency (in milliseconds) across the
+different approaches, in the case of deployment and model
+update. In the comparison, the control planes are always
+allocated 4 CPUs. Autoscaling is undoubtedly the fastest,
+as it involves only a single threshold check. In terms of
+deployment, Ursa is on average 691.6× faster than Sinan with
+its centralized ML model, and 43.4× faster than Firm, which
+uses per-service RL agents. In terms of model updates, Sinan’s
+retraining time is linear with the size of the dataset, and takes
+minutes even on a dedicated GPU. Firm can adapt to load
+changes gradually by updating the RL agent online, but is
+still slower than Ursa by 4.4× even for a single iteration. The
+RL agent may require thousands of iterations to update its
+weights and fully learn new resource patterns, whereas Ursa
+only needs to solve the optimization problem once to fully
+adapt to the changes.
+Ursa
+Sinan
+Firm
+Autoscaling
+Deploy
+0.5
+345.8
+21.7
+0.1
+Update
+271.7
+N/A
+1.2 ×103
+0.1
+TABLE VI: Average control plane latency in milliseconds
+across Ursa, Sinan, Firm, and Autoscaling for the initial
+application deployment, as well as when retraining of the
+model is required, due to a change in application logic.
+G. Adapting to Service Changes
+A basic premise of microservices is that they enable fre-
+quent logic updates without the high overhead of redeploying
+the entire service mesh. We now conduct a case study to
+
+0
+10
+20
+30
+40
+50
+60
+0
+200
+400
+600
+800
+1000
+Frontend Service
+0
+10
+20
+30
+0
+10
+20
+30
+40
+50
+60
+0.0
+0.2
+0.4
+0.6
+0.8
+Object Detection Service
+0
+10
+20
+30
+40
+50
+0
+10
+20
+30
+40
+50
+60
+0
+200
+400
+600
+800
+Post Service
+0
+10
+20
+30
+0
+10
+20
+30
+40
+50
+60
+0
+2
+4
+6
+8
+10
+Sentiment Analysis Service
+0
+10
+20
+30
+Time (m)
+RPS
+CPU Cores
+RPS
+CPUs
+Fig. 13: Ursa’s CPU allocation under a diurnal load. We show the RPS and CPU allocations for individual, representative
+microservices.
+demonstrate Ursa’s ability to adapt to such business logic
+updates. Specifically, we modify the object-detection service
+in the social network application, and change the model from
+DETR [21] which combines Transformer [63] and Resnet [40]
+for object detection, to the more lightweight Mobilenet [41].
+The exploration controller performs a partial online explo-
+ration to profile only the modified object-detect service. It
+collects a total of 75 samples in 1.25 hours, during which
+4 SLA violations are triggered, resulting in an SLA violation
+rate of 5.3%. Then the optimization engine recalculates the
+LPR threshold of each service. We deploy the modified social
+network application under various RPS, and Figure 14 shows
+the distribution of the 99th percentile latency of the end-to-end
+object-detect requests for the original and the updated Social
+network service mesh. Object-detect requests go through the
+frontend service, image store, post service, and the object-
+detect service. The red line represents the SLA and the blue
+line represents the cumulative distribution function, with SLA
+violation rates of 0.62% and 0.50% for the original and
+updated microservice, respectively, showing Ursa’s ability to
+quickly adjust to changes in the application logic.
+H. Summary
+Compared to ML-driven approaches, Ursa reduces the re-
+quired exploration time by more than 128×, making it practi-
+cal to track frequent changes in service business logic and user
+loads. Ursa also achieves better performance, maintaining low
+SLA violation rates of 0.1% to 8.5% during deployment, 9.0%
+to 49.9% lower than ML-driven approaches, and reducing
+0
+2
+4
+6
+8
+10
+12
+Latency (s)
+0
+20
+40
+60
+80
+100
+CDF (%)
+Original
+SLA
+Updated
+Fig. 14: 99th latency distribution of object-detect.
+resource allocation by up to 86.2%. Ursa also outperforms
+traditional autoscaling, both the default setting of AWS step
+scaling, and a conservative, manually tuned configuration. In
+addition, Ursa’s control plane is faster than ML, enabling
+faster and more scalable management decisions. Finally, we
+demonstrate that Ursa is able to adapt to service changes and
+maintain SLAs while incurring low exploration overheads.
+VIII. CONCLUSION
+We present Ursa, a lightweight resource management frame-
+work for microservices. Ursa uses an analytical model to
+decompose the end-to-end SLA into per-microservice SLAs,
+and maps them to resource allocations. During exploration,
+Ursa profiles each microservice individually and swiftly stops
+exploration in the case of SLA violations to shorten the
+exploration process. Using benchmarks implemented with
+
+popular microservice frameworks, we demonstrate that Ursa
+outperforms ML-driven approaches and traditional autoscal-
+ing in both SLA maintenance and resource efficiency, with
+significantly lower exploration overheads.

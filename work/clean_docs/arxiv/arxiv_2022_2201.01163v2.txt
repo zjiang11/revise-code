@@ -1,0 +1,1080 @@
+ANALYZING MICRO-FOUNDED GENERAL EQUILIB-
+RIUM MODELS WITH MANY AGENTS USING DEEP RE-
+INFORCEMENT LEARNING
+Michael Curry∗
+University of Maryland
+
+Alexander Trott, Soham Phade, Yu Bai, Stephan Zheng
+Salesforce
+Palo Alto, CA
+
+ABSTRACT
+Real economies can be modeled as a sequential imperfect-information game with
+many heterogeneous agents, such as consumers, ﬁrms, and governments. Dynamic
+general equilibrium (DGE) models are often used for macroeconomic analysis
+in this setting. However, ﬁnding general equilibria is challenging using existing
+theoretical or computational methods, especially when using microfoundations to
+model individual agents. Here, we show how to use deep multi-agent reinforcement
+learning (MARL) to ﬁnd ϵ-meta-equilibria over agent types in microfounded DGE
+models. Whereas standard MARL fails to learn non-trivial solutions, our structured
+learning curricula enable stable convergence to meaningful solutions. Concep-
+tually, our approach is more ﬂexible and does not need unrealistic assumptions,
+e.g., continuous market clearing, that are commonly used for analytical tractability.
+Furthermore, our end-to-end GPU implementation enables fast real-time conver-
+gence with a large number of RL economic agents. We showcase our approach in
+open and closed real-business-cycle (RBC) models with 100 worker-consumers,
+10 ﬁrms, and a social planner who taxes and redistributes. We validate the learned
+solutions are ϵ-meta-equilibria through best-response analyses, show that they
+align with economic intuitions, and show our approach can learn a spectrum of
+qualitatively distinct ϵ-meta-equilibria in open RBC models. As such, we show
+that hardware-accelerated MARL is a promising framework for modeling the
+complexity of economies based on microfoundations.
+1
+INTRODUCTION
+Real-world economies can be modeled as general-sum sequential imperfect-information games
+with many heterogeneous agents (Mas-Colell et al., 1995), such as consumer-workers, ﬁrms, and
+governments (or other social planners). Dynamic general equilibrium models (DGE) are workhorse
+models that describe the economic incentives, interactions, and constraints of these agents, which are
+often assumed to be rational.1 In particular, we are interested in DGE models with a large number
+of heterogeneous, strategic agents, based on appropriate microfoundations Archibald et al. (1970);
+Smets and Wouters (2007).
+By ﬁnding the strategic equilibria in such games, one can study macroeconomic outcomes, such as
+productivity, equality, and growth (Heer and Maussner, 2009). However, at this scale and game-
+theoretic complexity, existing theoretical and computational methods often struggle to ﬁnd the
+∗Research conducted while Michael Curry was an intern at Salesforce.
+1One can also model more human-like behavior through instances of bounded rationality, e.g., agents that
+act suboptimally or whose affordances or objectives encode cognitive biases or limits (Kahneman, 2003). In this
+work, we focus on rational agents, but our framework can be generalized to using boundedly rational agents.
+1
+arXiv:2201.01163v2  [cs.GT]  24 Feb 2022
+
+strategic equilibria Nisan et al. (2007); Bai et al. (2021). For a detailed exposition on DGE models
+and solution methods related to our work, see Section 2. We emphasize that we focus on the
+methodological challenge of ﬁnding equilibria, rather than the question of what constitute appropriate
+microfoundations.
+In this work, we focus on reinforcement learning as a powerful and ﬂexible methodological framework
+to analyze DGE models with many agents. We propose using deep multi-agent reinforcement learning
+(MARL) Sutton and Barto (2018) as a constructive solution to explicitly ﬁnd their (approximate)
+equilibria. Using MARL provides many beneﬁts: 1) large-scale deep RL has proven capable of
+ﬁnding (near-)optimal behavioral policies in complex multi-agent games in various domains Vinyals
+et al. (2019a); OpenAI (2018); Silver et al. (2017); 2) RL is ﬂexible: it has few analytical requirements
+on the structure of the game, e.g., it can optimize policies for any scalar objective, e.g., consumer
+utility function or social welfare, which does not need to be differentiable; and 3) it can optimize
+rich behavioral models, e.g., deep neural networks, that can imitate complex human behaviors, e.g.,
+given multi-agent behavioral data Zheng et al. (2016); Zhan et al. (2018). As such, deep MARL holds
+promise as a framework to model macroeconomic outcomes based on microfoundations.
+Economic Interactions Pose Learning Challenges.
+Although RL offers many conceptual beneﬁts
+for economic modeling, training each agent in a DGE model independently using RL often fails
+due to economic interactions. This is because economic interactions introduce mechanism design
+problems between agents. For example, ﬁrms choose how to set prices when interacting with a
+population of consumers. Furthermore, a consumer’s purchasing power changes when ﬁrms change
+wages or governments change taxes.
+As such, economic interactions imply that the actions of one economic agent can dramatically change
+the reward function and constraints (constituting a mechanism) of other agents. Because RL agents
+learn through exploration, agents sample (sub)-optimal policies during training, which may overly
+distort the rewards or constraints of other RL agents. As a result, RL agents that learn independently
+(and do not account for the learning process of other agents) often fail to learn non-trivial behaviors
+in DGE models. This non-stationary learning dynamic becomes especially challenging for DGE
+models with a large number of heterogeneous RL agents.
+Moreover, which equilibrium agents converge to (“equilibrium selection”) may depend on, e.g., the
+1) world dynamics, 2) initial conditions and policies, 3) learning algorithm, and 4) policy model class.
+Our framework allows us to study how these factors relate to which equilibria can be found.
+1.1
+OUR CONTRIBUTIONS
+To address these challenges, we show how to effectively apply MARL to macroeconomic analysis:
+1. To enable stable convergence of MARL with many agents, we generalize the MARL cur-
+riculum learning method from Zheng et al. (2020) to structured curricula that train multiple
+agent types across multiple phases. This approach yields non-trivial solutions more stably
+compared to using independent training of RL agents, which often fails. We also show that
+an RL social planner can improve social welfare vs ﬁxed baselines.
+2. We show that our MARL approach can explicitly ﬁnd local ϵ-equilibrium strategies for the
+meta-game over agent types, without approximating the DGE model. Previous solutions only
+could do so implicitly or for approximations of the DGE dynamics. Here, the meta-game
+equilibrium is a set of agent policies such that no agent type can unilaterally improve its
+reward by more than ϵ (its best-response). Furthermore, we learn a spectrum of solutions in
+open RBC economies,
+3. Our approach yields new economic insights. Our approach is more ﬂexible and can ﬁnd
+stable solutions in a variation of real-business-cycle (RBC) models (Pierre Danthine and
+Donaldson, 1993), a family of DGE models. We ﬁnd solutions in closed and open RBC
+economies, the latter has a price-taking export market. After training, the behavior of our
+agents shows sensible economic behavior – for example, negative correlations of prices
+with consumption, and positive correlation of wages with hours worked, over a range of
+possible outcomes. Within each outcome, ﬁrms and consumers display different strategies in
+response to their conditions – for example, ﬁrms with capital-intensive production functions
+invest in more capital.
+2
+
+Enabling Economic Analysis with Many RL Agents.
+We are particularly interested in DGE
+models with a large number of heterogeneous strategic agents. To enable MARL at this scale, we
+ran both simulation and RL training on a GPU using the WarpDrive framework (Lan et al., 2021).
+WarpDrive accelerates MARL by orders of magnitude, e.g., by avoiding copying data unnecessarily
+between CPU and GPU. In effect, this enables MARL to converge in hours (rather than days). Such
+system design and implementation choices are key to enable richer economic analysis, without
+resorting to approximations like representative agents Kirman (1992); Hartley and Hartley (2002) or
+mean-ﬁeld methods Yang et al. (2018). In contrast, prior computational work often was limited to
+training a small number of independent, strategic agents.
+Using hardware acceleration to train machine learning models at larger scales has repeatedly resulted
+in qualitatively new capabilities in machine learning, including some of the most spectacular results
+in language modeling Brown et al. (2020) and computer vision Krizhevsky et al. (2012) in the
+past decade. An essential part of each of those breakthroughs was optimizing system design and
+implementation. While we don’t claim to match the impact of these results, we want to emphasize
+that we see improved engineering to enable economic modeling at greater complexity and scale as
+a key contribution. In the context of economic modeling, being able to learn and analyze across a
+spectrum of possible outcomes and solutions is key for policymaking Haldane and Turrell (2019).
+Code.
+The code for this paper will be publicly available for reproducibility.
+2
+PRIOR WORK
+We now discuss how our MARL approach contrasts with or complements prior work.
+2.1
+THE ECONOMICS OF DGE MODELS
+DGE models study the behaviors of and interactions between consumers, ﬁrms, and perhaps a
+government. The markets for goods, labor, and capital are often assumed to be competitive, with
+prices set to clear the markets at each time step. Typically, consumers may work, save, and consume,
+and balance these choices to maximize their total time-discounted future utility. In other words, their
+decisions represent the solution to a Bellman equation. There are DGE models without Smets and
+Wouters (2007) or with Kaplan et al. (2018) heterogeneity among agents.
+Variations of DGE models also consider open economies with trade and ﬂows with a (large) external
+economy; accordingly, closed economies lack such an external connection. Typically, they have
+the same structure of market-clearing for wages, prices, and capital, but also allow consumers to
+invest in foreign capital Mendoza (1991); De Groot et al. (2019). We consider both closed and open
+economies: we choose to model the open case by giving ﬁrms access to an export market with an
+inelastic price for goods.
+2.2
+MACROECONOMIC MODELING AND MICROFOUNDATIONS
+Microfoundations.
+Lucas and Sargent (1981) argued for an approach to macroeconomic modeling
+based on microfoundations Smets and Wouters (2007). Broadly construed, microfoundations analyze
+macroeconomics through models with individual self-interested strategic agents; macroeconomic
+outcomes are then the aggregation of their behaviors. In particular, microfoundations address the
+Lucas critique, which points out the issue of basing macroeconomic policy on historical data. That is,
+historically observed aggregate patterns of behavioral responses to changes in economic policy may
+not extrapolate to the future, as individuals continuously adapt their behavior to the new policy.
+Conceptual Limitations of Prior DGE models.
+Stiglitz (2018) discusses several limitations of
+previous DGE models, including the use of inappropriate microfoundations. For instance, agents are
+often assumed to be rational, have stylized decreasing marginal utilities, and maximize their expected
+value in the presence of uncertainty (the rational expectations assumption), in the face of perfectly
+clearing markets. However, modern DGEs often lack agent models based on behavioral economics,
+for example. We emphasize that our use of MARL is agnostic to the speciﬁcations of the individual
+agents, which may be rational or boundedly rational.
+3
+
+Moreover, while DGE models are based on microeconomic theory for individuals, they often do not
+actually model the large number of agents as individuals. Rather, many models use representative
+agents as a proxy for the aggregate behavior of, e.g., all consumers. These and other simplifying, but
+restrictive assumptions make it possible to ﬁnd analytic solutions, but lead to unrealistic outcomes,
+e.g., no trading. Moreover, the use of representative agents does not lead to uniqueness and stability
+of equilibria Kirman (1992), a popular desideratum.
+Challenges of Solving DGE Models.
+Existing analytical and computational methods often struggle
+to ﬁnd explicit DGE equilibria, as DGE models are typically highly nonlinear. More generally,
+enumerating and selecting equilibria in general-sum games is an unsolved challenge (Bai et al., 2021).
+Analytical work often simpliﬁes the DGE model’s dynamics Lucas and Sargent (1981), e.g., through
+linearization. However, a linearized DGE model may have fewer or different equilibria compared to
+the full DGE model, and a linearized solution may prefer one equilibrium arbitrarily when many are
+possible. Furthermore, linearization may only be a good approximation around steady-state equilibria
+and not be valid in the presence of large shocks, e.g., when agents change their behavior dramatically
+in time (Stiglitz, 2018; Boneva et al., 2016; Atolia et al., 2010).
+Formal methods, e.g., backwards induction and other dynamic programming methods, often don’t
+yield explicit solutions and only implicitly characterize optimal policies (Stokey et al., 1989). For
+example, in taxation, one can analyze the distortion in consumer savings or capital, the asymptotic
+behavior of optimal taxes in the far future, or the tax rate on the highest-skill agent (Golosov et al.,
+2011; Acemoglu et al., 2010). However, these methods generally cannot ﬁnd the full tax policy
+explicitly or only describe part of it.
+Computational Methods and Agent-Based Models.
+A related body of work has studied agent-
+based models (ABM) Bonabeau (2002); Sinitskaya and Tesfatsion (2015); Haldane and Turrell (2019).
+ABMs may include a much larger range of heterogeneous agents (compared to typical DGE models),
+with possibly similar microfoundations, but whose affordances and dynamics are often highly stylized.
+Through repeated simulation, ABMs typically study the emergent (macroeconomic) phenomena given
+simple behavioral rules for the agents, across a range of parameters. However, these studies mostly
+do not address questions of ﬁnding the equilibria and optimal behaviors. Moreover, computational
+methods more generally still pose technical and conceptual challenges for economic analysis Judd
+(1997). Libraries exist to use numerical methods, e.g. to ﬁnd ﬁxed-point solutions Holden (2017);
+Mendoza and Villalvazo (2020). However, it can be hard to distill simple or explainable economic
+principles from numerically-found optimal behaviors and simulations.
+2.3
+REINFORCEMENT LEARNING AND ECONOMICS
+Modeling Economic Agents using RL.
+In the economics literature, Haldane and Turrell (2019)
+observed that RL is a natural ﬁt for economic modeling. Rational economic agents maximize
+their total discounted future reward, which is equivalent to the deﬁnition of an RL agent. Their
+optimal behavioral policy (or simply “policy”) are characterized by the Bellman equation. The
+economics literature traditionally solves such Bellman equations with methods that are only usable in
+fully-known environments, e.g., value or policy function iteration Coleman (1990); Judd (1992)
+In contrast, in the machine learning literature, many gradient-based RL techniques, e.g., REINFORCE
+Williams (1992), implement a form of approximate dynamic programming without requiring explicit
+knowledge of every environment state transition. Instead, they only require access to a simulation
+of the environment and learn through trial-and-error and continuous feedback loops, making them
+compatible with a larger range of modeling assumptions. Moreover, RL is compatible with modeling
+policies using deep neural networks, which can model a large class of functions and asymptotically
+are universal function approximators. Deep neural network policies can learn nonlinear predictive
+patterns over high-dimensional state-action spaces, while deep value functions can model complex
+reward function landscapes over long time horizons.
+Combining these features has led to signiﬁcant successes. Notably, deep RL has achieved superhuman
+performance in high-dimensional, sequential games (Silver et al., 2017), including in multi-agent
+settings Vinyals et al. (2019b); OpenAI (2018). These results suggest deep MARL can learn
+(approximate) strategic equilibria in complex settings. Pertinent to our setting, we do not have
+4
+
+to approximate non-linear DGE dynamics, as deep RL has been successful in highly nonlinear
+environments (Tassa et al., 2018).
+Economic Analysis using RL.
+A small but growing number of works have explored the use of RL
+for economic analysis, although deep RL is still not commonly used in economics. To our knowledge,
+our work is the ﬁrst application of deep multi-agent RL to DGE models where all agents learn.
+The AI Economist used two-level RL to design optimal taxes to improve social welfare in spatiotem-
+poral simulations, where both agents and governments use RL policies (Zheng et al., 2020). Two-level
+RL also yields interpretable economic and public health policies in pandemic simulations (Trott et al.,
+2021). Danassis et al. (2021) studies harvesters who work in a common ﬁshery and a centralized
+price setter, and demonstrate that an RL price setter can outperform prices found through market
+equilibrium on a number of metrics, including social welfare, fairness, and sustainability. Radovic
+et al. (2021) simulate oil company investments while transitioning away from hydrocarbons; they
+ﬁnd that good policies for oil companies involve rapidly investing in renewable energy.
+Other contemporary work includes Chen et al. (2021), which studies monetary policy with a single
+representative household RL agent, and Hill et al. (2021), which learns the value function of consumers
+in RBC models. These works are more limited, compared to ours. First, they use RL for one agent
+type only, while the other agents (e.g., ﬁrms) use simple and ﬁxed policies. Second, they assume
+markets always clear at each time step, i.e., prices are manually set to ensure supply and demand are
+balanced. However, this is an unrealistic assumption and causes slow simulations, requiring solving a
+nonlinear optimization problem at each timestep.
+Perhaps most similar to our work is Sinitskaya and Tesfatsion (2015), which studies an economy with
+homogeneous consumer-workers and price- and wage-setting ﬁrms (but no government). Here, a few
+consumers and ﬁrms learn using tabular Q-learning. Even in this small-scale setting, they observe
+that learning dynamics can collapse to trivial solutions with no production or consumption, similarly
+to our work. Furthermore, they partially enforce market clearing by matching supply and demand for
+labor and goods in a double auction, but do not enforce constraints on labor availability requirements
+to produce demanded goods. In contrast, we do not enforce market clearing constraints at all, simply
+rationing goods if there are not enough. Moreover, in our DGE model, consumers and ﬁrms are
+heterogeneous, e.g., ﬁrms have different production functions and produce distinct goods.
+Finding Equilibria in Games using Machine Learning.
+Several streams of work have explored
+using ML techniques to ﬁnd equilibria in games. Leibo et al. (2017) studied meta-game equilbria in
+sequential social dilemmas, showing that RL policies can be segmented into those who effectively
+cooperate or defect. In the domain of imperfect-information games, counterfactual regret minimiza-
+tion has yielded superhuman poker bots (Brown and Sandholm, 2018). Empirical game-theoretic
+analysis studies equilibria through agent simulations (Wellman, 2006), but is limited to games with
+interchangable agents with identical affordances (Tuyls et al., 2018) and does not easily scale to
+settings with heterogeneous agents.
+In extensions of deep RL, higher-order gradients (Foerster et al., 2017) and ﬁrst-order gradient
+adjustments (Balduzzi et al., 2018) have been studied to promote convergence to non-trivial equilibria.
+However, these methods make strong assumptions on what agents know, e.g., that agents can see
+the policy weights of other agents and/or know the full reward function, and may even change the
+equilibria of the game.
+2.4
+THEORETICAL ANALYSIS
+Different Equilibrium Types.
+DGE models may support many forms of equilibria. First, assuming
+all agents act simultaneously, one may analyze (repeated) Nash equilibria, where no rational agent
+is incentivized to deviate unilaterally. There may also be asymmetric Stackelberg-like equilibria,
+where a leader (e.g., the government) acts ﬁrst (e.g., sets taxes), and the followers (e.g., consumers
+and ﬁrms) respond Zheng et al. (2020). Generally, ﬁnding all equilibria of any type in general-sum,
+sequential, imperfect-information games with many agents is an open challenge (Bai et al., 2021). For
+instance, with 2 or more (heterogeneous) followers, ﬁnding the Stackelberg best-response to a ﬁxed
+leader requires ﬁnding multi-agent equilibria for the followers. This is computationally expensive
+and there is no known provably convergent algorithm.
+5
+
+Figure 1: RBC model with consumers, ﬁrms, and governments. Arrows represent money ﬂow.
+Consumer-workers earn wages through work and consume goods from ﬁrms. They also strategically
+choose which ﬁrm to work for and which basket of goods to buy, but this is not explicitly visualized.
+Firms produce goods, pay wages, and set a price for their goods. They also invest a ﬁxed fraction
+of proﬁts to increase capital. The government taxes labor income and ﬁrm proﬁts, and redistribute
+the tax revenue through subsidies to the consumer-workers. Firms can also sell goods to an external
+export market, which acts as a price-taker that is willing to consume goods at any price.
+Instead, we use MARL to converge to a stable solution and analyze best-responses to evaluate to
+what extent it is an equilibrium. Several works have studied the use of RL techniques in such settings
+(Wang et al., 2019; Trejo et al., 2016; Kamra et al., 2018; Bai et al., 2021), although do not consider
+the complexity of DGE models.
+Theoretical Guarantees for Convergence and Bounds on Approximate Equilibria.
+Guarantees
+of convergence for model-free policy optimization are difﬁcult to come by. Some theorems only
+apply to tabular policies (as in Srinivasan et al. (2018), and where convergence to Nash is not even
+guaranteed due to a non-sublinear regret bound). Other cases also apply only to very limited families
+of games, as in Zhang et al. (2019), which deals only with zero-sum linear-quadratic games. We study
+general-sum games with a large number of agents with neural network behavioral policies. All three
+of these properties mean that convergence guarantees to an equilibrium are beyond the reach of theory.
+To test whether a learned strategy proﬁle is at an ϵ-Nash-equilibrium, one can attempt to compute a
+best-response for each agent and measure ϵ. However, the non-convexity and dimensionality of neural
+network loss landscapes means that there are no perfect best-response oracles in practice. In our work,
+we use single-agent RL and gradient-based optimization to see whether individual agents can improve
+their utility unilaterally and hence measure ϵ. Although the found solutions and best-responses align
+with economic intuitions, it is beyond the scope of this work to establish theoretical guarantees on RL
+as a best-response oracle, e.g., deriving upper bounds on ϵ.
+3
+REAL-BUSINESS-CYCLE MODELS
+RBCs are a representative DGE model in which consumers earn income from labor and buy goods,
+ﬁrms produce goods using capital and labor, and the government taxes income and proﬁts (Pierre
+Danthine and Donaldson, 1993), see Figure 1. RBC models are stylized and may not fully describe
+reality (Summers et al., 1986). However, RBC models are a suitable environment to validate the
+use of RL, as they feature heterogenous agents with nonlinear economic interactions, making it
+challenging to ﬁnd equilibria. Below, we describe the RBC dynamics.
+At a high level, our model includes worker-consumers, price-and-wage setting ﬁrms, and a government
+who sets tax rates and redistributes. A key point about our model is that we do not assume as part of
+the environment that prices and wages are set so that markets clear at each time step – that is, goods
+may be overdemanded and ﬁrms are free to set prices and wages lower or higher than would balance
+supply and demand. These assumptions are an essential part of the techniques used to derive analytic
+solutions – avoiding this modeling choice requires using other techniques.
+Agent Types.
+Formally, our RBC model can be seen as a Markov Game (MG) (Littman, 1994) with
+multiple agent types and partial observability. An MG has ﬁnite-length episodes with T timesteps,
+where each timestep represents a quarter of 3 months. At each timestep t, we simulate
+6
+
+• ﬁrms and their goods who use the labor of the worker-consumers to each produce a different
+good, indexed by i ∈I,
+• consumers, indexed by j ∈J, who work and consume goods, and
+• a government who sets a tax rate on income from labor and on revenue from selling goods.
+Each agent iteratively receives an observation oi,t of the world state st, executes an action ai,t
+sampled from its policy πi, and receives a reward ri,t. The environment state s consists formally
+of all agent states and a general world state. At each timestep t, all agent simultaneously execute
+actions. However, some actions only apply to the next timestep t + 1. For example, the government
+sets taxes that will apply at the next timestep t + 1. These tax rates are observable by the ﬁrms and
+consumer-workers at timestep t; hence, they can condition their behavioral policy in response to
+the government policy. Similarly, at timestep t, ﬁrms set prices and wages that will be part of the
+global state at the next t + 1. This setup is akin to, though not exactly corresponding to, a Stackelberg
+leader-follower structure, where, for example, the government (leader) moves ﬁrst, and the ﬁrms and
+consumer (followers) and move second (von Stackelberg et al., 2010). This typically gives a strategic
+advantage to the followers: they have more information to condition their policy on.
+Consumer-Workers.
+Individual people both consume and work; we will refer to them as con-
+sumer-workers. At each timestep t, person j works lj,t hours and consumes ci,j,t units of good i.
+Each person chooses to work for a speciﬁc ﬁrm i at each timestep. Consumer-workers also (attempt
+to) consume ˆci,j,t. Each ﬁrm’s good has a price pi (set by the ﬁrms, described below), and the
+government also sets an income tax rate. However, consumers cannot borrow or outspend their
+budget: if the cost of attempted consumption exceeds the budget, then we scale consumption so that
+P
+i piˆct,i,j = Bj.
+Moreover, the realized consumption depends on the available inventory of goods (yi,t, described
+below). The total demand for good i is ˆci,t = P
+j ˆci,j,t. If there is not enough supply, we ration
+goods proportionally:
+ci,j,t = min
+
+1, yi,t
+ˆci,t
+
+ˆci,j,t.
+(1)
+Consuming and working change a consumer’s budget Bj,t. Consumer j has labor income zj,t =
+P
+i li,j,twi,t; each ﬁrm pays a wage wi,t. The cost of consumption is P
+i pi,t · ci,j,t Moreover, with
+tax rate τt, workers pay income tax τt · zj,t; the total tax revenue Rt (which also includes taxes on the
+ﬁrms, described below) is redistributed evenly back to workers. In all, consumer budgets change as:
+Bt+1,j = Bj,t + (1 −τt)zj,t + Rt
+|J| −
+X
+i
+pi,t · ci,j,t.
+(2)
+Each consumer optimizes its behavioral policy to maximize utility:
+max
+πj Ec,l∼πj
+"X
+t
+γt
+c
+X
+i
+u(ci,j,t, li,j,t, θj)
+#
+,
+u(c, l, θ) = (c + 1)1−η −1
+1 −η
+−θ
+2lt,
+(3)
+where γc is the consumer’s discount factor. The utility function is a sum of isoelastic utility over
+consumption and a linear disutility of work with coefﬁcient θj that can vary between workers.
+Firms.
+At each timestep t, a ﬁrm receives labor from workers, produces goods, sells goods, and
+may invest in capital. At each timestep t, it sets a price pt+1,i for its good and chooses a wage wt+1,i
+to pay, both effective at the next timestep t + 1. If a ﬁrm invests ∆ki,t in capital, its capital increases
+as ki,t+1 = ki,t + ∆ki,t. Using its capital ki,t and total labor Li,t = P
+j li,j,t (hours worked), a ﬁrm
+i produces Y units of good i, modeled using the production function:
+Y i,t = Aik1−α
+i,t Lα
+i,t,
+(4)
+where 0 ≤α ≤1 sets the importance of capital relative to labor. Also, consumers buy Ci,t =
+P
+j ci,j,t units of good i. Accordingly, inventories change as yt+1,i = yi,t + Y i,t −Ci,t. Inventories
+are always positive, as only actually produced goods can be consumed. The ﬁrms receive a proﬁt (or
+loss) P, pay taxes on their proﬁt, and experience a change in their budget B:
+P i,t = pi,tCi,t −wi,tLi,t −∆ki,t, Bt+1,i = Bi,t + (1 −σt)P i,t,
+(5)
+7
+
+where σ is the corporate tax rate. The government receives σtP i,t. Firms may borrow and temporarily
+be in debt (negative budget), but should have non-negative budget at the end of an episode (no-Ponzi
+condition). This may allow ﬁrms to invest more, which may lead to higher future economic growth.
+Each ﬁrm optimizes its behavioral policy to maximize proﬁts as in Equation 5:
+max
+πi Ep,w,∆k∼πi
+"X
+t
+γt
+fP (pj,t, wj,t, ∆kj,t)
+#
+,
+(6)
+where γf is the ﬁrm’s discount factor. The ﬁrm gets a negative penalty if it violates no-Ponzi.
+Government.
+The government, or social planner, indexed by p, sets corporate and income tax rates,
+and receives total tax revenue Rt = σt
+P
+j zj,t + τt
+P
+i P i,t. As a modeling choice, this revenue is
+redistributed evenly across consumer-workers; as such, the government’s budget is always 0. The
+government optimizes its policy πp to maximize social welfare:
+max
+πp Eτ,σ∼πp
+"X
+t
+γt
+pswf (τt, σt, st)
+#
+,
+(7)
+where swf (st) is the social welfare at timestep t, and γp is the government’s discount factor. In this
+work, we consider two deﬁnitions of social welfare (although many other deﬁnitions are possible): 1)
+total consumer utility (after redistribution), or 2) total consumer utility and total ﬁrm proﬁt.
+Open and Closed Economies via Export Markets.
+We consider both open and closed economies.
+In the open economy, ﬁrms can also sell goods to an external market which acts as a price-taker:
+their demand does not depend on the price of a good. Operationally, export happens after worker-
+consumers consume. The export market has a minimum price pexport and a cap qexport. If the price of
+good i is greater than the minimum price (pi,t > pexport) then the additional export consumption is
+ct,export = min(qexport, yi,t −Ci,t), at price pi,t, i.e., the exported quantity is insensitive to the price.
+From a learning perspective, the export market prevents ﬁrms from seeing extremely low total demand
+for their good, e.g., when prices are exorbitantly high and consumers do not want or cannot consume
+the good. In such cases, an on-policy learner that represents a ﬁrm may get stuck in a suboptimal
+solution with extremely high prices and no production as consumers cease to consume in response.
+4
+KEY SIMULATION IMPLEMENTATION DETAILS
+In general, experimental outcomes can depend signiﬁcantly on the implementation details; we outline
+several key implementation details hereafter. In addition, all simulation and training settings can be
+found in Table 1 and Table 2.
+Budget Constraints.
+We implement budget constraints on the consumers by proportionally scaling
+down the resulting consumption of all goods to ﬁt within a consumer’s budget. Thus, the consumer
+actions really represent attempted consumption – if the budget is small or stock is limited, the actual
+consumption enjoyed by the consumer may be lower. Firm budgets are allowed to go negative
+(borrowing money). However, because the ﬁrm’s goal is to maximize proﬁt, they are incentivized to
+take actions will will be proﬁtable, increasing their budget.
+Scaling of Observables.
+The scales of rewards and state variables can vary widely in our simulation,
+even within time steps in a single episode. If the scales of loss functions or input features are very
+large or small, learning becomes difﬁcult. We directly scale rewards and some state features by
+constant factors. For certain state features which have very large ranges (item stocks and budgets) we
+encode each digit of the input as a separate dimension of the state vector.
+GPU Implementation
+We followed the WarpDrive framework (Lan et al., 2021) to simulate the
+DGE model and run MARL on a single GPU. We implemented the DGE dynamics as a CUDA
+kernel to leverage the parallelization capabilities of the GPU and increase the speed at which we
+can collect samples. We assigned one thread per agent (consumer, ﬁrm, or government); the threads
+communicate and share data using block-level shared memory. Multiple environment replicas run in
+8
+
+Parameter
+Symbol
+Values
+Labor disutility
+θ
+0.01
+Pareto quantile function scale parameter
+-
+4.0
+Initial ﬁrm endowment
+B
+2200000
+Export market minimum price
+-
+500
+Export market maximum quantity
+-
+100
+Production function values
+α
+0.2, 0.4, 0.6, 0.8
+Initial capital
+K
+5000 or 10000
+First round wages
+w
+0
+First round prices
+p
+1000
+Initial inventory
+y
+0
+Table 1: Simulation Parameters.
+Parameter
+Values
+Learning Rate
+0.001
+Learning Rate (Government)
+0.0005
+Optimizer
+Adam
+Initial entropy
+0.5
+Minimum entropy annealing coefﬁcient
+0.1
+Entropy annealing decay rate
+10000
+Batch Size
+128
+Max gradient norm
+2.0
+PPO clipping parameter
+0.1 or 0.2
+PPO updates
+2 or 4
+Consumer reward scaling factor
+5
+Firm reward scaling factor
+30000
+Government reward scaling factor
+1000
+Table 2: Training Hyperparameters.
+multiple blocks, allowing us to reduce variance by training on large mini-batches of rollout data. We
+use PyCUDA (Kl¨ockner et al., 2012) to manage CUDA memory and compile kernels. The policy
+network weights and rollout data (states, actions, and rewards) are stored in PyTorch tensors; the
+CUDA kernel reads and modiﬁes these tensors using pointers to the GPU memory, thereby working
+with a single source of data and avoiding slow data copying.
+Implementation Details.
+Furthermore, we outline several key implementation details.
+• For consumers, consumption choices range from 0 to 10 units for each good and work
+choices from 0 to 1040 hours in increments of 260.
+• Consumers have a CRRA utility function with parameter 0.1, and a disutility of work of
+0.01.
+• For ﬁrms, price choices range from 0 to 2500 in units of 500; wage choices from 0 to 44 in
+units of 11.
+• The 10 ﬁrms are split into two groups, receiving either 5000 or 10000 units of capital. Within
+these groups, ﬁrms receive a production exponent ranging from 0.2 to 0.8 in increments of
+0.2. Thus each ﬁrm has a different production “technology”.
+• Firms invest 10% of their available budget (if positive) in each round to increase their capital
+stock.
+• Government taxation choices range from 0 to 100% in units of 20%, for both income tax
+and corporate tax rates.
+• The government can either value only consumers when calculating its welfare (“consumer-
+only”) or value welfare of both consumers and ﬁrms (“total”), with ﬁrm welfare down-
+weighted by a factor of 0.0025 (to be commensurate with consumers).
+• We set the minimum price at which ﬁrms are willing to export to be either 500 or 1000, and
+the quota for each ﬁrm’s good to a variety of values: 10, 50, 100, or 1000.
+• For consumers, consumption choices range from 0 to 10 units for each good and work
+choices from 0 to 1040 hours in increments of 260.
+9
+
+Agent Observations.
+The environment state s consists formally of all agent states and a general
+world state. Each agent observes can observe their own information and the global state:
+sglobal =
+ t, {yi,t}i , {pi,t}i , {wi,t}i , {oi,t}i
+
+.
+(8)
+Here yi,t is the available supply of good i, pi,t is the price, wi,t is the wage. The extra information
+oi,t includes whether good i was overdemanded at the previous timestep and tax information.
+In addition, consumer-workers observe private information about their own state: (Bi,t, θ) A ﬁrm
+i also observes its private information: (Bi,t, ki,t, (0, . . . , 1, . . . , 0) , α), including a one-hot vector
+encoding its identity and its production function shape parameter α. The government only sees the
+global state.
+5
+REINFORCEMENT LEARNING ALGORITHM FOR A SINGLE AGENT
+Firms and governments use 3-layer fully-connected neural network policies π (a|s), each layer using
+128-dim features, that map states to action distributions. Consumer policies are similar, using separate
+heads for each action type, i.e., the joint action distribution is factorized and depends on a shared
+neural network feature ϕt(st): π(a1, a2, . . . |s) = π(a1|ϕ, s)π(a2|ϕ, s) . . . (omitting t and st for
+clarity). Any correlation between actions is modeled implicitly through ϕt.
+There is a single policy network for each agent type, shared across the many agents of that type.
+To distinguish between agents when selecting actions, agent-speciﬁc features (parameters like the
+disutility of work, production parameters, and for ﬁrms, simply a one-hot representation of the ﬁrm)
+are included as part of the policy input state. Thus, despite a shared policy for each agent type,
+we model some degree of heterogeneity among agents. We also learn a value function V (ϕt) for
+variance reduction purposes. We compare policies trained using policy gradients (Williams, 1992) or
+PPO Schulman et al. (2017).
+RL parameter updates
+We now describe the RL parameter updates for any given agent type.
+Given a sampled trajectory of states, actions, and rewards st, at, rt for t from 0 to the end time step
+T, we have the empirical return Gt = PT −t
+k=0 γkrt+k+1, the total discounted future rewards from
+time step t. The goal of the value function network is to accurately predict Gt from a given state st.
+We use a Huber loss function ℓto ﬁt the value network, ℓ(Vβ(st) −Gt), and the value weights are
+updated as βt+1 = βt −η∇β
+PT
+t=0 ℓ(Vβ(st) −Gt), where η is the step size for gradient descent.
+Given the value function network’s predictions, we can then deﬁne the advantages At = Gt −V (st)
+and their centered and standardized versions ˆAt = (At −Eπ [A]) /std(A).
+For the policy gradient approach, the optimization objective for the policy is:
+max
+θ
+Eπθ [At] + αH(πθ),
+(9)
+where H(π) = Eπ [−log π] is the entropy of π, α is the weight for entropy regularization (which
+may be annealed over time), and πθ is the policy with parameters θ. The true policy gradient for the
+ﬁrst term is Eπθ [At∇θ log πθ], which we estimate using sampled trajectories. For a single sampled
+trajectory, the full policy weight update is:
+θt+1 = θt −∇θ
+ T
+X
+t=0
+ˆAt log πθ(at|st) + αH(πθ(·|st))
+!
+,
+(10)
+where H(π(·|st)) is the entropy of the action distribution at a particular state. In practice, we sample
+multiple trajectories and compute a mini-batch mean estimate of the true policy gradient. In addition,
+we use proximal policy optimization (PPO), a more stable version of the policy gradient which uses a
+surrogate importance-weighted advantage function AP P O in the policy objective:
+AP P O = min
+ πθ(at|st)
+πold(at|st)
+ˆAt, clip
+ πθ(at|st)
+πold(at|st)
+
+ˆAt
+
+,
+(11)
+which uses the current πθ and policy before the last update πold. Extreme values of the importance
+weights πθ/πold are clipped for stability. Moreover, in practice, using the standardized advantages ˆAt
+10
+
+Algorithm 1 A single training step at time step t.
+πc, vc ←consumer policy and value network
+πf, vf ←ﬁrm policy and value network, prices and wages masked according to t
+πg, vg ←masked government policy and value network, tax rates masked according to t
+θ(t): disutility of work parameter, annealed over training steps
+w(t): entropy parameter, annealed over training steps according to max(exp(
+−t
+decay rate), 0.1)
+sc, ac, rc, sf, af, rf, sg, ag, rg ←EnvironmentSimulate(πc, πf, πg, θ(t))
+πc, vc ←PPOUpdate(πc, vc, sc, ac, rc, w(t))
+if t > tstart ﬁrm then
+πf, vf ←PPOUpdate(πf, vf, sf, af, rf, w(t −tstart ﬁrm))
+end if
+if t > tstart government then
+πg, vg ←PPOUpdate(πg, vg, sg, ag, rg, w(t −tstart government)
+end if
+Figure 2: Structured learning curricula. Colored bars show how annealing activates over time.
+Consumers are always training, use a decaying entropy regularization, and increasingly experience
+their labor disutility. Firms start with ﬁxed prices and wages, and are slowly allowed to change these.
+Once the full price and wage range is available, ﬁrms start to train. Similarly, tax rates start at zero
+and are slowly allowed to change. Once the full tax range is available, the government starts to train.
+and clipping gradients to bound their ℓ2 norm also improve stability. Both simulation and RL ran on a
+GPU using the WarpDrive approach (Lan et al., 2021), see Section 4, while our PPO implementation
+followed Kostrikov (2018). We show pseudo-code for a single simulation and training step in
+Algorithm 1.
+6
+STABLE MULTI-AGENT REINFORCEMENT LEARNING THROUGH
+STRUCTURED CURRICULA
+A key idea of our approach is the use of structured multi-agent curricula to stabilize learning, where
+each individual agent uses standard RL. These curricula consist of staged training, annealing of
+allowed actions, and annealing of penalty coefﬁcients, see Figure 2. This method extends the approach
+used by Zheng et al. (2020).
+Intuition for Structured Curricula.
+We deﬁne curricula based on these observations about our
+multi-agent learning problem: 1) during exploration, many actions may reduce utility, while few
+actions increase utility, 2) high prices or tax rates can eliminate all gains in utility, even though the
+consumer-worker did not change its policy, 3) for stable learning, agents should not adapt their policy
+too quickly when experiencing large negative (changes in) utility, and 4) in a Stackelberg game, the
+followers (e.g., consumers, ﬁrms) should get enough time to learn their best response to the leader’s
+policy (e.g., the government). We now operationalize these intuitions below.
+11
+
+0K
+50K
+100K
+150K
+Training episode
+0
+1
+2
+3
+4
+5
+6
+Consumer Reward
+0K
+50K
+100K
+150K
+Training episode
+-100K
+-50K
+0K
+50K
+100K
+150K
+Firm Reward
+0K
+50K
+100K
+150K
+Training episode
+1000
+1200
+1400
+1600
+1800
+2000
+2200
+2400
+Average Price ($)
+0K
+50K
+100K
+150K
+Training episode
+6
+8
+10
+12
+14
+16
+18
+20
+Average Wage ($/hour)
+Figure 3:
+Training progress with structured curricula in an open RBC model. Curves show
+averages across 3 repetitions with different random seeds. In each plot, the blue (black) vertical line
+shows when the ﬁrms (government) start training, see Figure 2. Left two plots: Consumer and ﬁrm
+rewards during training. All runs converged to qualitatively similar outcomes. We’ve conﬁrmed these
+solutions form an approximate equilibrium under an approximate best-response analysis, see Figure
+4. Once ﬁrms start training, their reward (proﬁts) signiﬁcantly increases. When the government starts
+training, ﬁrms get even higher reward, as the social welfare deﬁnition includes the ﬁrms’ proﬁts.
+Right two plots: Average wages and prices across ﬁrms during training. Firms increase prices
+rapidly and lower wages once they start training. This comes at the expense of consumer reward
+(utility). As such, this setting represents an economy in which ﬁrms have signiﬁcant economic power.
+Staged Learning and Action Space Annealing.
+All policies are randomly initialized. We ﬁrst
+allow consumers to train, without updating the policies of other agents. Initially, ﬁrm and government
+actions are completely ﬁxed; prices and wages start at non-zero levels. We then anneal the range
+of ﬁrm actions without training the randomly initialized policy. This allows consumers to learn to
+best respond to the full scope of prices and wages, without ﬁrms strategically responding. Once ﬁrm
+action annealing is complete, we allow the ﬁrm to train jointly with the consumers. We then perform
+the same process, gradually allowing the government to increase its corporate and income tax rates,
+so that ﬁrms and consumers can react to a wide range of tax rates. Once the annealing process is
+complete, we allow the government to train to maximize welfare.
+Penalty Coefﬁcient Annealing.
+In addition to the action annealing, we anneal two penalty co-
+efﬁcients. First, we slowly increase the consumers’ disutility of work over time, which avoids
+disincentivizing work early in the training process. Second, as each agent starts training, we assign a
+high value (0.5) for the entropy coefﬁcient in their policy gradient loss, and gradually anneal it down
+over time to a minimum of 0.1. This ensures that when the ﬁrm or government policies start training,
+their “opponent” policies are able to learn against them without being too quickly exploited.
+Many Local Equilibria and Convergence.
+We expect that there are many possible solutions in
+our game that our approach may converge to. Establishing convergence is difﬁcult in general-sum
+games – the best results make use of regret-minimizing algorithms for the agents and only establish
+convergence to coarse-correlated equilibria (Daskalakis et al., 2021). In our case, convergence is
+hard to guarantee and may be only local since we use deep neural networks and can’t ensure global
+optimality of our policy parameters. We don’t have theoretical bounds on the magnitude of ϵ for an
+ϵ-Nash equilibrium, although empirically, the degree of possible improvement seems small across RL
+approximate best-response analysis.
+Our training curricula are designed to avoid trivial solutions where the economy shuts down, but it
+may also introduce bias into which non-trivial solutions are reached. However, we observe a spectrum
+of qualitatively different outcomes, so we see our approach as a way to explore more solutions than
+are possible with simpliﬁed, e.g., linearized, models.
+7
+ANALYZING LEARNED STRATEGIC BEHAVIORS IN RBC MODELS
+We show that our approach is sound and ﬁnds spectra of meaningful solutions of RBC models. We
+analyze to what extent these solutions are RBC equilibria using an approximate best-response analysis
+12
+
+Approximate Best-Response Improvements
+Figure 4: In each plot, the agent types (consumer, ﬁrm, and government) refer to cases when only that
+agent type is training. Left: best-response reward improvements during training. The stacked
+bar chart shows the original mean rewards (blue) and improvement after approximate best-response
+training (purple). For ﬁrms and governments, the mean rewards are measured in units of 104 and 103,
+respectively. We compare the best-response improvement in the middle and at the end of training.
+The improvement from best-response is signiﬁcant in the middle and much less at the end, indicating
+that training is closer to an equilibrium at the end. Right: outcome shifts under best-responses.
+We plot ﬁrm against consumer rewards on an absolute scale at training convergence for several runs.
+We then ﬁnd best-responses by further training each agent type separately. Each arrow shows the shift
+in (consumer reward, ﬁrm reward) after best-response: blue for consumers best responding, red for
+ﬁrms, and green for government. In the ﬁgure, we display only those arrows when rewards change by
+more than 1%. At convergence, rewards for any agent type typically do not change signiﬁcantly in
+this best-response analysis. This holds generally for the approximate equilibria reported in this work.
+Figure 5: Mean rewards under ﬁxed and RL taxes. For ﬁrms and governments, the mean rewards
+are measured in units of 104 and 103, respectively. The mean rewards for the consumers increase
+with tax rates, whereas they decrease for the ﬁrms. RL taxes can improve the mean reward for both
+types. For instance, RL tax policies increase social welfare (green) by almost 15% over the best ﬁxed
+tax policy.
+and analyze the economic relationships that emerge from the learned solutions. We study variations
+of our RBC model with 100 consumers and 10 ﬁrms. For all simulation parameter settings, see Table
+1. We repeated all experiments with 3 random seeds.
+Structured Curricula during Training.
+Figure 3 shows a representative result of training using
+our structured curricula. Although all RL agents aim to improve their objective, some agents may see
+13
+
+Consumer
+Firm
+Government
+Reward improvement under best-response
+< 3%
+< 10%
+< 1%
+Table 3: Reward improvement under best-response. Best-responses are measured at the end of
+training as a fraction of the reward improvement during training, over 10 random seeds. These results
+represent worst-cases: due to the stochastic nature of RL, outcomes can differ signiﬁcantly across
+individual runs. In fact, we observed that besides a few anomalies, overall the improvements were in
+fact less than 0.2% for consumers, 5% for ﬁrms, and 0.1% for the government.
+Learned Solutions in Closed RBC Models
+0.5
+1.0
+1.5
+2.0
+2.5
+Mean Consumer Reward
+-3K
+-2K
+-1K
+0K
+1K
+Mean Firm Reward
+0.2
+0.4
+0.6
+Mean Income Tax Rate (%)
+20
+40
+60
+80
+100
+120
+140
+160
+180
+Mean Government Reward
+0
+50
+100
+150
+200
+250
+Mean Hours Worked
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+Mean Offered Wage
+1200
+1400
+1600
+1800
+2000
+Mean Price
+0.00
+0.05
+0.10
+0.15
+0.20
+0.25
+0.30
+0.35
+Mean Consumption
+Figure 6:
+Outcomes at convergence for the same experiments in Figure 4, under the closed
+economy. Each point represents an approximate equilibrium, veriﬁed by an approximate best-
+response analysis. Points of the same color and shape correspond to the same run. In this closed
+economy, training often converges to solutions with low consumer reward and little production. In
+particular, social welfare (government reward) does not increase with higher tax rates, average labor
+does not change with wages, and consumption is unchanged with price. An exception is a solution
+with signiﬁcantly higher social welfare, labor, and consumption. This suggests multiple equilibria do
+exist, but non-trivial equilibria are harder to learn in the closed economy.
+rewards decrease as the system converges, e.g., the consumers in Figure 3. Empirically, we found
+that training collapses to trivial solutions much more often without curricula.
+Best-responses and Local Equilibrium Analysis
+We abstract the RBC as a normal-form meta-
+game between three players representing the agent types, i.e., the consumers, ﬁrms, and government.
+We test whether a set of learned policies is an ϵ-Nash equilibrium for the meta-game by evaluating
+whether or not they are approximate best-responses. Recall that agents of the same type share policy
+weights, but use agent-speciﬁc inputs to their policy, hence this still models heterogeneity between
+agents.
+To ﬁnd an approximate best-response, we train each agent type separately for a signiﬁcant number
+of RL iterations, holding other agent types ﬁxed, and see to what extent this improves their reward.
+This measurement provides a lower bound on the ϵ for each local equilibrium. In general, we ﬁnd
+empirically that best-responses improve rewards much more at the start compared to the end of
+training, see Figure 4. The best-response method found at most small improvements in agent rewards,
+at the end of training, see Table 3. This suggests that the use of RL for a single agent type is a
+practical method that yields meaningful results.
+For practical reasons, as we consider settings with a large number of agents (e.g., 100 consumers),
+we limit our analysis to evaluating meta-game best-responses. The meta-game is deﬁned over agent
+types, and is different from the game over individual agents. In the meta-game, a meta-agent consist
+of the agents of a single type and a meta-action consists of the policy prescribing actions for all
+agents of that type. In particular, a meta-game best-response (where the best-response is over the
+choice of policy shared by all agents of a given type) may not be an individual agent’s best-response.
+A meta-game best-response may feature competition-coordination dynamics between agents of the
+same type and may introduce both beneﬁcial or adverse effects for some individual agents. For
+instance, there may be free-riders that beneﬁt from the collective performance while not putting in
+effort themselves. On the other hand, aggregate demand between competing consumers for a limited
+14
+
+Learned Solutions in Open RBC Models
+1
+2
+3
+4
+Mean Consumer Reward
+120K
+125K
+130K
+135K
+140K
+145K
+150K
+Mean Firm Reward
+r^2 = 0.25, p=0.10
+0.02
+0.04
+0.06
+Mean Income Tax Rate (%)
+3000
+3200
+3400
+3600
+3800
+4000
+Mean Government Reward
+r^2 = 0.06, p=0.46
+400
+500
+600
+700
+800
+Mean Hours Worked
+7.5
+8.0
+8.5
+9.0
+9.5
+10.0
+10.5
+Mean Offered Wage
+r^2 = 0.19, p=0.15
+2100
+2150
+2200
+2250
+Mean Price
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+Mean Consumption
+r^2 = 0.73, p=0.00
+Figure 7:
+Outcomes at convergence for the same experiments in Figure 4, under the open
+economy. Each point represents an approximate equilibrium, veriﬁed by an approximate best-
+response analysis. Points of the same color and shape correspond to the same run. We learn multiple
+distinct, non-trivial solutions in an open economy. Blue lines show linear regressions to the data.
+Consumer and ﬁrm rewards are positively correlated (r2 = 0.25), e.g., if consumers earn more, they
+can consume more, yielding higher proﬁts. Higher prices decrease mean consumption (r2 = 0.73),
+lower wages decrease mean hours worked (r2 = 0.19), and there is no strong signal that higher taxes
+improve social welfare (r2 = 0.06).
+supply of goods may mean consumers on average lose utility. We empirically observed the latter case:
+overall consumer utility sometimes decreased during the best-response analysis for the consumers.
+Comparing with Baseline Government Tax Policies.
+To show that our approach is sound, we
+show that RL tax policies lead to improved social welfare, compared to several manually-deﬁned
+ﬁxed tax-rate policies. In lieu of other potential baseline tax policy methods, which are not directly
+compatible with our approach due to discretization, the lack of market clearing, and other features
+of our model, these ﬁxed tax policies provide a useful baseline. Here, social welfare is deﬁned as a
+weighted sum of ﬁrm and consumer rewards, as deﬁned in Section 4. As observed in Figure 7, RL
+policies generate a social welfare ranging from 3000 to 4000, depending on the solution (as noted
+above, multiple solutions could be reached). Compared to that, the best social welfare achieved using
+ﬁxed tax rates was 3160. Figure 4 shows the social welfare achieved under various ﬁxed tax-rates,
+ranging from 20% to 80%. We note that social welfare improves by almost 15% for the best solution
+under RL tax policy over the best ﬁxed tax-rate policy. This shows that the RL policy can adjust taxes
+across different rounds to improve average social welfare.
+Analyzing Learned Solutions
+Figure 6 visualizes and describes the learned solutions in open
+and closed RBC economies (with and without an export market). In both cases, we ﬁnd multiple
+qualitatively different solutions. In particular, learning mostly converges to mostly low-welfare
+solutions in the closed economy, due to very low wages resulting in little labor, production, and
+consumption. We stress that we describe these observations at the level of correlations. The RBC
+dynamics lead to circular interactions, e.g., a change in wages can cause future changes in wages due
+to changing consumer and hence changing ﬁrm behavior. As such, disentangling cause and effect is
+beyond the scope of this work.
+Relationships between Aggregate Economic Variables.
+Figure 7 shows intuitive economic rela-
+tionships between various aggregate economic quantities. For example, hours worked increase with
+wage, and consumption decreases with increasing price. Such relationships do not exist in the closed
+economy shown in Figure 6, because in most cases, the economy is stuck in a “bad” equilibrium with
+very little work, production, or consumption. In such a setting, many agent actions, e.g., setting tax
+rates, increasing wages or prices, simply do not have any effect, e.g., increasing labor.
+Analyzing Open RBC Solutions.
+The open RBC model admits a wide spectrum of qualitatively
+distinct solutions with distinct outcomes (e.g., consumer utility, hours worked, prices, and taxes),
+and trends that align with economic intuitions. To study the differences between outcomes, Figure
+8 shows two rollouts sampled from different converged solutions, revealing qualitative similarities
+along with some distinct behaviors.
+15
+
+Figure 8: Two rollouts from an open RBC model. We show actions and states for two representa-
+tive runs, in blue and green respectively. Despite differences in strategies, there are many qualitatively
+similar features. We observe that ﬁrms have different strategies: some set prices high and rely on
+exporting goods (for example, ﬁrm 3); others set prices lower and also sell to consumers (for example,
+ﬁrm 0). Consumers respond sensibly, only consuming when prices are low and mainly working when
+wages are not 0. (Note that hours worked may be very low for some ﬁrms but are not necessarily 0.)
+The ﬁrst 5 ﬁrms have a lower level of starting capital. Within each group, the production exponent
+for labor ranges from 0.2 (higher tech, more reliance on capital) to 0.8 (lower tech, more reliance
+on labor). Firms 0 and 5 have the lowest parameter of 0.2; ﬁrms 4 and 9 have the highest parameter
+of 0.8. The differences in initial ﬁrm endowments as well as evolution during the episode lead to
+different ﬁnal capital levels.
+• In these examples, ﬁrms can proﬁt by either focusing on consumers or the export market;
+they tend to set prices high at ﬁrst and sell mainly to the export market. Some ﬁrms then
+lower prices halfway through the episode and begin selling to consumers.
+• The consumers tend to work in intense “bursts”, and only consume when prices are lower at
+the end. Note that each ﬁrm receives a non-zero number of hours of labor.
+16
+
+• Lower-technology ﬁrms, i.e., ﬁrms 3, 4, 8, and 9, whose production functions rely more on
+labor, consistently set high prices and lower wages towards the end, independent of their
+capital.
+• Higher-technology ﬁrms lower prices over time and keep wages high. This is intuitive, as
+high technology ﬁrms can produce more efﬁciently and hence face lower labor costs per
+unit of production.
+• The ﬁrms start with different endowments of capital and invest a ﬁxed percentage of their
+proﬁts over time, with higher tech ﬁrms being more proﬁtable and thus able to sustain higher
+investment in capital.
+8
+DISCUSSION
+Economic models often assume the existence of a small number of representative agents whose
+behavior is simple and analytically tractable. Economists have long understood that these assumptions
+are unrealistic, and that it could be desirable to deﬁne models with more complexity and heterogeneity.
+Yet once the models are no longer analytically tractable, ﬁnding solutions requires new computational
+tools.
+In this work, we showed how to adapt multi-agent RL to enable meaningful economic analysis of
+general equilibrium models. By using these algorithmic and computational tools, it is possible to
+weaken modeling assumptions and increase the scale of economic simulations and analysis.
+On the other hand, there are also limitations to this approach. Daskalakis et al. (2009) showed that
+computing equilibria for general-sum games is hard in terms of computational complexity, even for
+simple matrix games. There are no theoretical guarantees yet that our framework can ﬁnd all equilibria
+in sequential economic games. However, our best-response analysis suggests our framework does
+discover meaningful local equilibria.
+Thus, our hardware-accelerated MARL approach enables economic analysis with a large number of
+agents allows analyzing complex economic problems in a practical way, while theoretical guarantees
+are to be developed further. Hence, our current framework is at least an exploratory tool for ﬁnding
+qualitatively different solutions, e.g., by varying initial conditions, environment parameters, or
+conditioning sampling, and provides exciting avenues for future research.

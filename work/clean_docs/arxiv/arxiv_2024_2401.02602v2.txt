@@ -1,0 +1,2561 @@
+Neural Causal Abstractions
+Kevin Xia and Elias Bareinboim
+Causal Artificial Intelligence Lab
+Columbia University
+
+Abstract
+The abilities of humans to understand the world in terms of
+cause and effect relationships, as well as to compress informa-
+tion into abstract concepts, are two hallmark features of human
+intelligence. These two topics have been studied in tandem
+in the literature under the rubric of causal abstractions theory.
+In practice, it remains an open problem how to best leverage
+abstraction theory in real-world causal inference tasks, where
+the true mechanisms are unknown and only limited data is
+available. In this paper, we develop a new family of causal
+abstractions by clustering variables and their domains. This ap-
+proach refines and generalizes previous notions of abstractions
+to better accommodate individual causal distributions that are
+spawned by Pearl’s causal hierarchy. We show that such ab-
+stractions are learnable in practical settings through Neural
+Causal Models (Xia et al. 2021), enabling the use of the deep
+learning toolkit to solve various challenging causal inference
+tasks – identification, estimation, sampling – at different levels
+of granularity. Finally, we integrate these results with repre-
+sentation learning to create more flexible abstractions, moving
+these results closer to practical applications. Our experiments
+support the theory and illustrate how to scale causal inferences
+to high-dimensional settings involving image data.
+1
+Introduction
+Humans understand the world around them through the use
+of abstract notions. Biologists can study the function of the
+liver without understanding the interactions between its sub-
+atomic particles studied by physicists. Economists find it
+more practical to consider macro-level behavior through con-
+cepts like aggregate supply and demand rather than studying
+the purchasing behavior of individuals. At home, we choose
+to interpret the object in the television as a dog or a car as op-
+posed to a collection of photons or pixels. Humans are highly
+capable of learning through interacting with the environment
+and understanding cause and effect between different con-
+cepts. Understanding causality is considered a hallmark of
+human intelligence and allows humans to plan a course of
+action, determine blame and responsibility, and generalize
+across environments. It follows that the ability to abstract
+concepts and study them causally is a key ability expected
+from modern intelligent systems.
+AI systems are built on a foundation of generative mod-
+els, which are representations of the underlying processes
+from which data is collected. Standard generative models
+simply model some joint density of a set of variables of
+interest, while causal generative models further model dis-
+tributions involving causal interventions and counterfactual
+relations. In this paper, we study the problem of learning a
+causal generative model from data, which can be useful for
+many purposes such as sampling novel causally-consistent
+data points (i.e. from interventional or counterfactual distri-
+butions). One major challenge is that data is often provided
+in complex low level forms (e.g., pixels), while it would be
+more useful in applications to focus on higher level concepts
+(e.g., dog or car). We would therefore like to learn a more ab-
+stract causal generative model at a higher level of granularity,
+while guaranteeing that the queries from the coarser model
+match the ground truth.
+To formalize this problem, we build on the semantics of
+a class of generative models called structural causal models
+(SCMs) (Pearl 2000). An SCM M∗describes a collection of
+mechanisms and distribution over unobserved factors. Each
+SCM induces three qualitatively different sets of distributions
+related to the human concepts of “seeing” (called observa-
+tional), “doing” (interventional), and “imagining” (counter-
+factual), collectively known as the Ladder of Causation or the
+Pearl Causal Hierarchy (PCH) (Pearl and Mackenzie 2018;
+Bareinboim et al. 2022). The PCH is a containment hierar-
+chy in which each of these distribution sets can be put into
+increasingly refined layers, where observational distributions
+go in layer 1 (L1), interventional in layer 2 (L2), and counter-
+factual in layer 3 (L3). In typical tasks of causal inference, the
+goal is to obtain a quantity from a higher layer when given
+data only from lower layers (e.g. inferring interventional
+quantities from observational data). Still, it is understood
+that this is generally impossible without additional assump-
+tions since higher layers are underdetermined by lower layers
+(Bareinboim et al. 2022; Ibeling and Icard 2020).
+Generative models can often be implemented in practice as
+neural networks. Deep learning models have achieved promis-
+ing success in a variety of applications such as computer vi-
+sion (Krizhevsky, Sutskever, and Hinton 2012), speech recog-
+nition (Graves and Jaitly 2014), and game playing (Mnih
+et al. 2013). Many of these successes are attributed to rep-
+resentation learning (Bengio, Courville, and Vincent 2013),
+in which the learned representation can be thought of as an
+abstraction of the data. Further, there has also been grow-
+ing interest in the idea of incorporating causality into deep
+1
+arXiv:2401.02602v2  [cs.LG]  23 Feb 2024
+
+models1. Prior work introduced one such model, the Neural
+Causal Model (NCM), which incorporates the same causal
+assumptions encoded in a causal diagram to identify and es-
+timate interventional and counterfactual distributions (Xia
+et al. 2021; Xia, Pan, and Bareinboim 2023). 2 Despite the
+soundness of this approach in theory, current NCM-based
+methods face challenges when applied to complex real-world
+settings for various reasons: (1) optimization is difficult when
+scaled to high dimensions, (2) unprocessed data can come in
+complicated forms (e.g. images, text, etc.), and (3) the causal
+diagram is difficult to fully specify in some high-dimensional
+settings. In this paper, we address these challenges by study-
+ing how representation learning and causal reasoning are
+related to each other and by building on this understanding to
+develop a neural framework for causal abstraction learning.
+Existing works that study causal abstractions set a solid
+foundation by defining various mathematical notions of ab-
+stractions (Rubenstein et al. 2017; Beckers and Halpern 2019;
+Beckers, Eberhardt, and Halpern 2019; Geiger, Potts, and
+Icard 2023; Massidda et al. 2023). In App. B, we explain
+some of the foundational results and discuss their drawbacks.
+In particular, we note that existing definitions are declara-
+tive; that is, if the lower and higher level models are given,
+one can use the definition to decide whether the higher level
+model is indeed an abstraction of the lower level one. How-
+ever, neither models are available in practice, and one would
+want to use limited lower level data to learn a higher level
+causal abstraction. We will expand on the current generation
+of causal abstractions in two ways. First, given that the true
+SCM is almost never available in practice, nor entirely learn-
+able from data, we introduce a relaxed notion of abstractions
+that applies on the layers of the PCH. Second, we develop
+algorithms to systematically learn abstractions in practice
+given some structural information about the data, which can
+then be used for downstream inferential tasks such as causal
+identification, estimation, or sampling.
+The general problem tackled by this paper is summarized
+in Fig. 1. The ground truth model ML (left) is defined over
+low level variables VL (e.g., pixels), while it may be prac-
+tical to work in their high level abstract counterparts VH
+(e.g., dog or car). ML induces distributions from the three
+layers of the PCH (i.e. L∗
+1, L∗
+2, L∗
+3), defined over VL. In
+this work, we introduce a new type of abstraction func-
+tion τ that maps distributions over VL to ones over VH
+(i.e. τ(L∗
+1), τ(L∗
+2), τ(L∗
+3)). Furthermore, ML is unobserved,
+and only limited data is given (e.g., observational data from
+L∗
+1). The goal is to learn a high-level SCM c
+MH (right) over
+1Many successful approaches have been developed to estimate
+causal effects from observational data under the backdoor or condi-
+tional ignorability conditions (Shalit, Johansson, and Sontag 2017;
+Louizos et al. 2017; Li and Fu 2017; Johansson, Shalit, and Sontag
+2016; Yao et al. 2018; Yoon, Jordon, and van der Schaar 2018;
+Kallus 2020; Shi, Blei, and Veitch 2019; Du et al. 2020; Guo
+et al. 2020), and also to answer causal queries through neural-
+parameterized SCMs (Kocaoglu et al. 2018; Goudet et al. 2018).
+2The literature also includes non-neural approaches for such
+problems, including estimators with stronger statistical properties
+such as double robustness and convergence guarantees, for example,
+(Jung, Tian, and Bareinboim 2020a,b, 2021).
+Figure 1: Overview of this paper. High-level SCM c
+MH (right)
+is trained on available data to serve as an abstract proxy of
+the true, unobserved, low-level SCM ML (left).
+the high-level variables VH that encodes the given causal
+constraints (GC in the figure) and matches ML on the avail-
+able data across τ (e.g. bL1 = τ(L∗
+1)). Then, we investigate
+when and how the resulting model c
+MH can be used as a
+surrogate, allowing one to make interventional and counter-
+factual inferences about the higher layers of ML through the
+higher layers of c
+MH.
+As an example, suppose an economist is studying the ef-
+fects of spending trends of various countries on their average
+income Y . In addition to Y , she has collected observational
+data on several variables of spending trends, such as con-
+sumer spending C, investments I, government spending G,
+imports M, and exports E. She wants to understand the
+causal effect of increasing general spending on average in-
+come of the population, and one way to do this is to study the
+causal effect of collectively increasing C, I, G, M, and E on
+Y . However, the economist notes that C, I, G, M, and E can
+be aggregated together into a single abstract variable called
+gross domestic product (GDP). The tools that we introduce in
+this paper allow her to proceed by constructing a high-level
+model c
+MH over the variables GDP and Y , encoding the re-
+quired causal assumptions, and training the model over the
+given observational data. Despite the high-level variables not
+matching the original low-level variables (i.e., C, I, G, M,
+E), the causal effect of GDP on Y can be queried from the
+model c
+MH to solve the problem.
+More specifically, our contributions are as follows: In
+Sec. 2, we define a new class of abstractions based on clusters
+of variables (intervariable) and their domains (intravariable).
+Building on this new class, we define a notion of abstraction
+consistency on the layers of the PCH. We then show how
+to systematically construct an abstraction consistent with all
+three layers of the PCH and then relate these abstractions to
+existing definitions. In Sec. 3, we show how to leverage NCM
+machinery to perform interventional (layer 2) and counter-
+factual (layer 3) inferences across these abstractions when
+the true SCM is unavailable. In Sec. 4, we introduce a vari-
+ant of the NCM that learns representations of each variable
+and encodes causal assumptions on the representation level,
+2
+
+allowing us to learn abstractions even in settings where the
+assumption of the availability of clusters is relaxed. Experi-
+ments in Sec. 5 corroborate with the theory.
+1.1
+Preliminaries
+We now introduce the notation and definitions used through-
+out the paper. We use uppercase letters (X) to denote ran-
+dom variables and lowercase letters (x) to denote correspond-
+ing values. Similarly, bold uppercase (X) and lowercase (x)
+letters denote sets of random variables and values respec-
+tively. We use DX to denote the domain of X and DX =
+DX1 ×· · ·×DXk for the domain of X = {X1, . . . , Xk}. We
+denote P(X = x) (often shortened to P(x)) as the probabil-
+ity of X taking the values x under the distribution P(X).
+We utilize the basic semantic framework of structural
+causal models (SCMs) (Pearl 2000), following the presenta-
+tion in Bareinboim et al. (2022).
+Definition 1 (Structural Causal Model (SCM)). A structural
+causal model M is a 4-tuple ⟨U, V, F, P(U)⟩, where
+• U is a set of background (exogenous) variables that are
+determined by factors outside the model;
+• V is a set {V1, V2, . . . , Vn} of variables, called endoge-
+nous, that are determined by other variables in the model
+– that is, variables in U ∪V;
+• F is a set of functions {fV1, fV2, . . . , fVn} such that each
+fVi is a mapping from exogenous parents UVi ⊆U and
+endogenous parents PaVi ⊆V \ Vi to Vi;
+• P(U) is a probability function defined over DU.
+■
+Definition 2 (Causal Diagram (Bareinboim et al. 2022,
+Def. 13)). Each SCM M induces a causal diagram G, con-
+structed as follows:
+1. add a vertex for each Vi ∈V;
+2. add a directed arrow (Vj →Vi) for every Vi ∈V and
+Vj ∈PaVi; and
+3. add a dashed-bidirected arrow (Vj L9999K Vi) for every
+pair Vi, Vj ∈V such that UVi and UVj are not indepen-
+dent (Markovianity is not assumed).
+■
+Our treatment is constrained to recursive SCMs, which
+implies acyclic causal diagrams, with finite discrete domains
+over endogenous variables V.
+Counterfactual (and also interventional and observational)
+quantities can be computed from SCM M as follows:
+Definition 3 (Layer 3 Valuation (Bareinboim et al. 2022,
+Def. 7)). An SCM M induces layer L3(M), a set of
+distributions over V, each with the form P(Y∗)
+=
+P(Y1[x1], Y2[x2],...) such that
+P M(y1[x1], y2[x2], . . . ) =
+Z
+DU
+1
+
+Y1[x1](u) = y1, Y2[x2](u) = y2, . . .
+
+dP(u) (1)
+where Yi[xi](u) is evaluated under Fxi := {fVj : Vj ∈V \
+Xi} ∪{fX ←x:X ∈Xi}. L2 is the subset of L3 for which
+all xi are equal, and L1 is the subset for which all Xi = ∅. ■
+Each Yi corresponds to a set of variables in a world where
+the original mechanisms fX are replaced with constants xi
+for each X ∈Xi; this is also known as the mutilation pro-
+cedure. This procedure corresponds to interventions, and we
+use subscripts to denote the intervening variables (e.g. Yx)
+or subscripts with brackets when the variables are indexed
+(e.g. Y1[x1]). For instance, P(yx, y′
+x′) is the probability of
+the joint counterfactual event Y = y had X been x and
+Y = y′ had X been x′.
+We use the notation Li(M) to denote the set of Li dis-
+tributions from M. We use Z to denote a set of quanti-
+ties from Layer 2 (i.e. Z = {P(Vzk)}ℓ
+k=1), and Z(M)
+denotes those same quantities induced by SCM M (i.e.
+Z(M) = {P M(Vzk)}ℓ
+k=1).
+We also build on Neural Causal Models (NCMs), in partic-
+ular for performing causal inferences:
+Definition 4 (G-Constrained Neural Causal Model (G-NCM)
+(Xia et al. 2021, Def. 7)). Given a causal diagram G, a G-
+constrained Neural Causal Model (for short, G-NCM) c
+M(θ)
+over variables V with parameters θ = {θVi : Vi ∈V} is an
+SCM ⟨bU, V, bF, P( bU)⟩such that
+• bU = {bUC : C ∈C(G)}, where C(G) is the set of all
+maximal cliques over bidirected edges of G;
+• bF = { ˆfVi : Vi ∈V}, where each ˆfVi is a feedforward
+neural network parameterized by θVi ∈θ mapping values
+of UVi ∪PaVi to values of Vi for UVi = {bUC : bUC ∈
+bU s.t. Vi ∈C} and PaVi = PaG(Vi);
+• P( bU) is defined s.t. bU ∼Unif(0, 1) for each bU ∈bU. ■
+2
+Abstractions of the Pearl Causal Hierarchy
+The discussion of abstractions begins with defining causal
+variables. In many established causal inference tasks, it is
+typically assumed that there is a well-specified and known set
+of endogenous variables of interest V, and nature is modeled
+by a collection of mechanisms that assign values to each of
+these variables. However, in practice, the definition of V may
+not always be clear. In particular, the variables of interest may
+not align with the features of the data. For example, in an eco-
+nomic system, perhaps data on each individual consumer is
+collected, but the variable of interest is an aggregate measure
+like gross domestic product (GDP). In image data, perhaps
+the pixel values are collected, but the variables of interest are
+related to the objects of the image, not the individual pixels.
+Acknowledging that the data is not always provided in the
+best choice of granularity, the causal abstraction literature
+typically defines two sets of variables, VL and VH, which
+describe the lower level and higher level settings, respectively.
+For example, VL might describe the pixels of an image, while
+VH might describe its structural content. They are typically
+modeled by corresponding causal models ML and MH,
+respectively.
+In this section, we study on the distinction between low
+level variables VL (e.g. pixels) and their higher level coun-
+terparts VH (e.g. image) from the perspective of individual
+distributions of the PCH. We consider nature’s underlying
+SCM ML defined over low level variables, VL, and the goal
+3
+
+is to reason about the higher level variables VH given data
+on VL3.
+2.1
+Constructive Abstraction Functions
+The connection between VH and VL can be described
+through a mapping between their domains, τ : DVL →DVH.
+Here, we consider a family of abstraction functions where τ
+is based on clusters of the variables and values of VL:
+Definition 5 (Inter/Intravariable Clusterings). Let M be an
+SCM over variables V.
+1. A set C is said to be an intervariable clustering of V if
+C = {C1, C2, . . . Cn} is a partition of a subset of V.
+C is further considered admissible w.r.t. M if for any
+Ci ∈C and any V ∈Ci, no descendent of V outside
+of Ci is an ancestor of any variable in Ci. That is, there
+exists a topological ordering of the clusters of C relative
+to the functions of M.
+2. A set D is said to be an intravariable clustering of variables
+V w.r.t. C if D = {DCi : Ci ∈C}, where DCi =
+{D1
+Ci, D2
+Ci, . . . , Dmi
+Ci } is a partition (of size mi) of the
+domains of the variables in Ci, DCi (recall that DCi
+is the Cartesian product DV1 × DV2 × · · · × DVk for
+Ci = {V1, V2, . . . , Vk}, so elements of Dj
+Ci take the form
+of tuples of the value settings of Ci).
+■
+In words, V is divided into n subsets or clusters
+C1, . . . , Cn (variables that are not put into one of the clusters
+are projected away), and they are called intervariable clusters
+because the variables themselves are divided apart. Admis-
+sibility implies that the recursivity assumption of SCMs is
+retained through the intervariable clusters. Then, the joint do-
+mains of each of these n clusters are further partitioned. For
+example, for a specific intervariable cluster Ci, the domain
+DCi contains the set of all tuples of values of Ci, and DCi
+describes a partition D1
+Ci, . . . , Dmi
+Ci of size mi over this set
+of values (i.e. each Dj
+Ci ⊆DCi). The intravariable clusters
+are the set of the value partitions over each intervariable clus-
+ter, and the term “intravariable” denotes that the clustering
+is within the variable domains. Intuitively speaking, inter-
+variable clusters partition the low level variables to describe
+each high level variable as a collection of low level variables.
+Intravariable clusters then describe the domains of these high
+level variables by partitioning the corresponding value spaces
+of these intervariable clusters.
+Example 1. Consider a study on the effects of certain food
+dishes on body mass index (BMI), inspired by nutrition stud-
+ies like Gamba et al. (2014). Data is collected on individuals
+eating at restaurants, including the restaurant (R), dish or-
+dered (D), the amount of carbohydrates (C), fat (F), and
+protein (P) in the dish, and the BMI of the customer (B).
+That is, VL = {R, D, C, F, P, B}. One food scientist argues
+that any nutritional impact of the food on BMI could be ab-
+stracted based on how many calories are in each dish. One
+may then be tempted to cluster the variables C, F, and P
+3For concreteness, we assume that ML is an SCM, but the
+underlying generative model can be left implicit as explained in
+Appendix D.1.
+Figure 2: Example of a constructive abstraction function τ
+w.r.t. corresponding inter/intravariable clusters. Top (inter-
+variable): The low-level variables, dish (D) and BMI (B),
+are in their own clusters while restaurant (R) is abstracted
+away. Carbohydrates (C), fat (F), and protein (P) are clus-
+tered together and are mapped to a single variable, calories
+(Z). Bottom (intravariable): The intravariable clustering
+for C2 = {C, F, P} is shown. Calories Z can be computed
+from C, F, P using the formula Z = 4C + 9F + 4P. This
+means that the domain is partitioned such that two different
+values, (c1, f1, p1), (c2, f2, p2) are in the same intravariable
+cluster if 4c1 + 9f1 + 4p1 = 4c2 + 9f2 + 4p2.
+together into one variable, named calories, labeled Z. This is
+an example of intervariable clustering.
+To denote this formally, we may choose C = {C1 =
+{B}, C2 = {C, F, P}, C3 = {D}} as the intervariable clus-
+ters. In this case, B and D are placed in their own clusters, C1
+and C3, respectively. C, F, and P are all clustered together
+into C2. R is not included and is abstracted away, which may
+be desirable if R is not relevant to the study. Collectively,
+C1, C2, and C3 form a partition of the subset of VL without
+R. Each of the clusters of C will correspond to a high level
+variable of VH. In this case, for example, let Z denote the
+high level variable corresponding to cluster C2, interpreted
+as calories. This is shown at the top of Fig. 2 (red).
+The domain of C2 contains every tuple of C, F, and P, but
+the domain of Z can be simplified. After all, the computation
+of calories can be specified as Z = 4C + 9F + 4P, which
+means that two sets of values, (c1, f1, p1), (c2, f2, p2) are
+considered equivalent if 4c1 + 9f1 + 4p1 = 4c2 + 9f2 + 4p2.
+This clustering of domain values is an example of intravari-
+able clustering, shown at the bottom of Fig. 2 (blue). More
+formally, the intervariable clusters would be denoted D =
+{DC1, DC2, DC3}, where each DCi is a partition of DCi. In
+the case of DC2, we may define DC2 = {D1
+C2, D2
+C2, . . . },
+where each Dj
+C2 is a collection of tuples (c, f, p) ∈DC2 cor-
+responding to some specific value 4c + 9f + 4p. In Fig. 2 for
+example, D1
+C2 = {(c, f, p) : 4c+9f +4p = 200, (c, f, p) ∈
+DC2}. Each of the intravariable clusters correspond to a do-
+main value of the high level variable. For example, D1
+C2
+corresponds to a value of Z = 200.
+■
+4
+
+For the remainder of this paper, we consider settings where
+the intervariable clusters are admissible. Collectively, given
+an intervariable clustering C and intravariable clustering D
+of VL, an abstraction function τ can be defined as follows.
+Definition 6 (Constructive Abstraction Function). A function
+τ : DVL →DVH is said to be a constructive abstraction
+function w.r.t. inter/intravariable clusters C and D iff
+1. There exists a bijective mapping between VH and C such
+that each VH,i ∈VH corresponds to Ci ∈C;
+2. For each VH,i ∈VH, there exists a bijective mapping
+between DVH,i and DCi such that each vj
+H,i ∈DVH,i
+corresponds to Dj
+Ci ∈DCi; and
+3. τ is composed of subfunctions τCi for each Ci ∈C
+such that vH = τ(vL) = (τCi(ci) : Ci ∈C), where
+τCi(ci) = vj
+H,i if and only if ci ∈Dj
+Ci. We also apply
+the same notation for any WL ⊆VL such that WL is
+a union of clusters in C (i.e. τ(wL) = (τCi(ci) : Ci ∈
+C, Ci ⊆WL)).
+■
+In words, through the subfunction τCi, each low level clus-
+ter Ci ∈C maps to a single high level variable VH,i ∈VH,
+and the value ci ∈DCi maps to a corresponding high level
+value vj
+H,i ∈DVH,i. Specifically, τCi(ci) maps to vj
+H,i if ci
+is in the intravariable cluster Dj
+Ci. Then, the overall function
+τ is simply composed of the subfunctions τCi. Intuitively, τ
+is a constructive abstraction function if it maps VL to VH
+by first grouping the variables w.r.t. their corresponding in-
+tervariable cluster in C (red maps to yellow in Fig. 2 (top)),
+followed by assigning each cluster a value based on which
+intravariable cluster they belong in D (blue maps to green
+in Fig. 2 (bottom)). As a result, VH can be interpreted such
+that VH = C and DVH,i = DCi for each VH,i ∈VH4. This
+construction of τ means that τ is unique given the clusters C
+and D (up to a renaming of the variables VH and its values
+DVH).
+Example 2 (Example 1 continued). Suppose the high level
+variables are denoted as VH = {DH, Z, BH}, where DH
+and BH represent the high level counterparts of D and B
+that remain unchanged across the abstraction. Each high-level
+variable (i.e. DH, Z, BH) corresponds to an intervariable
+cluster (i.e., C1, C2, C3, respectively), establishing a bijec-
+tive connection between VH and C. Each of their domains
+also correspond to an intravariable cluster in D. For exam-
+ple, each value of Z = z corresponds to the choice of Dj
+C2
+such that 4c + 9f + 4p = z. The constructive abstraction
+function τ constructed from the clusters C and D would map
+(DH, Z, BH) ←τ(R, D, C, F, P, D), which can be decom-
+posed as
+τ(R, D, C, F, P, D)
+= (τC1(D), τC2(C, F, P), τC3(B))
+(2)
+= (D, 4C + 9F + 4P, B).
+(3)
+4For another example of abstractions constructed from clusters,
+see App. E Ex. 18. For examples of abstraction functions that are
+not constructive, see Ex. 20.
+Observe that τ is broken down into τC1, τC2, and τC3, which
+maps the variables of each intervariable cluster to their corre-
+sponding high level variable DH, Z, and BH, respectively.
+D and B are not affected by the abstraction in this exam-
+ple, so τC1 and τC3 are the identity function, directly setting
+DH ←D and BH ←B. However, the calories, Z, is com-
+puted through τC2(C, F, P) = 4C + 9F + 4P. This ensures
+that all values from DC2 = DC × DF × DP that are in the
+same intravariable cluster are mapped to the same value of
+Z. This mapping is illustrated in Fig. 2.
+■
+Note that the relationship between VL and VH modeled
+by τ is not causal. Rather, the contents of VL constitute VH5.
+Intuitively, two variables of VL are mapped to the same inter-
+variable cluster if they constitute the same high level variable
+(e.g. two pixels of the same dog), and two values are mapped
+to the same intravariable cluster if, from a higher level per-
+spective, they are functionally identical (e.g. same image of
+the dog but rotated or cropped). In this sense, intravariable
+clustering can be thought of as invariances in the data, since
+downstream functions are invariant to values that are in the
+same intravariable cluster6.
+This paper will focus on abstractions based on construc-
+tive abstraction functions τ created from intervariable and
+intravariable clusters. This is in contrast with the previous
+works on causal abstractions discussed in App. B, which
+leave the functional form of τ implicit.7 One benefit of mak-
+ing τ concrete is that it allows for a rigorous definition of
+equivalence between the distributions of a low level model
+and that of a high level model, as will be elaborated next.
+2.2
+Layer-Specific Abstractions
+Ultimately, we would like to study causal properties of VL
+through their higher level counterparts VH. A sensible goal
+is, therefore, to learn an SCM MH over VH, which can then
+be queried for causal inference tasks. Still, even if VH and
+VL are connected through some function τ, this alone does
+not imply that MH is an abstraction of ML. This is the case
+since the distributions over VH induced by MH may not
+have any clear connection with the distributions over VL.
+To explain this point with a simple example, suppose VL =
+{X, Y } and VH = VL (i.e., τ is the identity function).
+However, in ML, fX takes Y as an argument, while in MH,
+fY takes X as an argument. These two models are obviously
+unrelated despite sharing the same set of variables.
+When two SCMs are defined over the same space of vari-
+ables, one can verify that they are similar if they induce
+the same distributions. For example, an SCM M′ is L2-
+consistent with M if L2(M′) = L2(M), that is, M and
+M′ match in every interventional distribution (Bareinboim
+et al. 2022; Xia et al. 2021). However, when two SCMs are
+5The distinction between causal and constitutional relationships
+is important and is explained in detail in Appendix D.1.
+6This analogy is explored further in Apps. D.2 and D.3.
+7In a related setting, there may be cases where information about
+MH is provided while τ is unknown. In such cases, there are works
+in the literature that aim to learn τ (Zennaro et al. 2023; Felekis et al.
+2024) such that desired abstraction properties hold. Such functions
+may or may not be constructive, refer to App. B.2 for further details.
+5
+
+defined over different variable spaces, comparing their distri-
+butions is no longer well-defined. Hence, a different notion
+of consistency is needed to compare an SCM over VL with
+another over VH through τ.
+We first note that not all low-level quantities have a clear
+interpretation in the high-level setting. For instance, in Ex-
+ample 1, the low-level quantity P(C = 5) does not have
+a counterpart in VH because C is clustered together with
+F and P in the intervariable clusters. As another example,
+P(C = 5, F = 0, P = 0) also does not have a counter-
+part in VH because τ maps (C = 5, F = 0, P = 0) to the
+same value of Z as other quantities such as (C = 0, F =
+0, P = 5). In both cases, Z = 4C + 9F + 4P = 20. Hence,
+P(C = 5, F = 0, P = 0) is not equivalent to P(Z = 20),
+which, in a sense, represents all values of (C, F, P) such that
+4C + 9F + 4P = 20.
+To define the low-level counterfactual quantities that have
+high-level counterparts through τ, first denote YL,∗as a set
+of counterfactual variables over VL. That is,
+YL,∗=
+ YL,1[xL,1], YL,2[xL,2], . . .
+
+,
+(4)
+where each YL,i[xL,i] corresponds to the potential outcomes
+of the variables YL,i under the intervention XL,i = xL,i.
+Each YL,i and XL,i must be unions of clusters from C
+(i.e. YL,i
+= S
+C∈C′ C for some C′
+⊆C) such that
+τ(YL,i) and τ(XL,i) are well-defined (i.e. τ(YL,i) =
+ V
+C∈C′ τC(C)
+
+). For instance, from Ex. 1, one term could
+be YL,i = {D, C, F, P} = C1∪C2, but YL,i = {D, C, F}
+would be invalid since C and F are clustered together with
+P. For the high-level counterpart, denote
+YH,∗= τ(YL,∗)
+(5)
+=
+ τ(YL,1[τ(xL,1)]), τ(YL,2[τ(xL,2)]), . . .
+
+.
+(6)
+For any value yH,∗∈DYH,∗, denote
+DYL,∗(yH,∗) = {yL,∗: yL,∗∈DYL,∗, τ(yL,∗) = yH,∗},
+(7)
+that is, the set of all values yL,∗such that τ(yL,∗) = yH,∗.
+Considering again Ex. 1, if yH,∗refers to the value of Z =
+20, then DYL,∗(yH,∗) is the set of all tuples (c, f, p) ∈DC2
+such that τ(C = c, F = f, P = p) = (Z = 20) (i.e.,
+4c + 9f + 4p = 20).
+We can now define a notion of consistency relating low
+level counterfactual quantities to high level counterparts.
+Definition 7 (Q-τ Consistency). Let ML and MH be
+SCMs defined over variables VL and VH, respectively. Let
+τ : DVL →DVH be a constructive abstraction function
+w.r.t. clusters C and D. Let
+Q =
+X
+yL,∗∈DYL,∗(yH,∗)
+P(YL,∗= yL,∗)
+(8)
+be a low-level Layer 3 quantity of interest (for some yH,∗∈
+DYH,∗), as expressed in Eq. 4, and let
+τ(Q) = P(YH,∗= yH,∗)
+(9)
+be its high level counterpart, as expressed in Eq. 6. We say
+that MH is Q-τ consistent with ML if
+X
+yL,∗∈DYL,∗(yH,∗)
+P ML(YL,∗= yL,∗)
+= P MH(YH,∗= yH,∗),
+(10)
+that is, the value of Q induced by ML is equal to the value
+of τ(Q) induced by MH8. Furthermore, if MH is Q-τ con-
+sistent with ML for all Q ∈Li(ML) of the form of Eq. 8,
+then MH is said to be Li-τ consistent with ML.
+■
+In words, suppose Q is a quantity from VL in the form
+of Eq. 8. That is, it is a counterfactual quantity such that
+the variables of each term YL,i and each intervention XL,i
+are unions of clusters in C, and it is summed over values of
+yL,i that map to one specific set of high level variables yH,i.
+Then, a query of this form has a counterpart τ(Q), obtained
+by applying τ on each term, shown in Eq. 9. We say that MH
+is Q-τ consistent with ML if the value of τ(Q), computed
+from MH, is equal to the value of Q computed from ML
+(i.e. Eq. 10 holds). Note that Def. 7 naturally applies to the
+L2 case (i.e. all xL,i are identical) and the L1 case (i.e. all
+XL,i = ∅).
+Def. 7 delineates the formal connection between quantities
+of ML and MH. Intuitively, MH can only be viewed as
+an abstraction of ML for the quantities in which they are
+τ-consistent. Consider the following example to ground the
+discussion.
+Example 3. Consider a study on a new cancer drug. The
+drug is given in two doses, and patients take the second dose a
+month after the first dose. The variables observed are whether
+the individual takes the first dose (A), whether they take the
+second dose (B), whether they recover (Y ), and whether
+they come from a wealthy background (R) and therefore
+have better nutrition and medical care. The SCM ML is as
+follows:
+UL = {URY , UA, UB, UY }
+(11)
+VL = {R, A, B, Y }
+(12)
+FL =
+
+
+
+
+
+
+
+
+
+
+
+
+
+R ←f L
+R(uRY ) = uRY
+A ←f L
+A(r, uA) = r ⊕uA
+B ←f L
+B(r, a, uB) = (r ∧a) ⊕uB
+Y ←f L
+Y (a, b, uRY , uY )
+= ((a ∧b) ∧uRY ) ⊕uY
+(13)
+P(UL) =
+
+
+
+P(URY = 1) = 0.5
+P(UA = 1) = P(UB = 1) = 0.2
+P(UY = 1) = 0.1
+(14)
+In words, people are more likely to take both doses if they are
+rich, and most people will only take the second dose if they
+have already taken the first dose. Also, people who take both
+doses are more likely to recover, but only if they came from
+a high socioeconomic background (URY = 1). The values
+computed from ML are shown in Figure 3.
+The rows of the figure can be used to compute quantities
+of the PCH from ML. Denote pi as the probability of the
+ith row of the table. Then, for example, the quantity P(Y =
+1 | A = 1, B = 1), or the probability that someone recovers
+given that they took both doses of the drug is
+P ML(Y = 1 | A = 1, B = 1)
+8Note that the equality in Eq. 10 is consistent with the push-
+forward measure through τ.
+6
+
+URY
+UA
+UB
+UY
+R
+A
+B
+Y
+YA=0,B=0
+YA=1,B=1
+P
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+p0 = 0.288
+1
+0
+0
+0
+1
+0
+0
+0
+1
+1
+1
+p1 = 0.032
+2
+0
+0
+1
+0
+0
+0
+1
+0
+0
+0
+p2 = 0.072
+3
+0
+0
+1
+1
+0
+0
+1
+1
+1
+1
+p3 = 0.008
+4
+0
+1
+0
+0
+0
+1
+0
+0
+0
+0
+p4 = 0.072
+5
+0
+1
+0
+1
+0
+1
+0
+1
+1
+1
+p5 = 0.008
+6
+0
+1
+1
+0
+0
+1
+1
+0
+0
+0
+p6 = 0.018
+7
+0
+1
+1
+1
+0
+1
+1
+1
+1
+1
+p7 = 0.002
+8
+1
+0
+0
+0
+1
+1
+1
+1
+0
+1
+p8 = 0.288
+9
+1
+0
+0
+1
+1
+1
+1
+0
+1
+0
+p9 = 0.032
+10
+1
+0
+1
+0
+1
+1
+0
+0
+0
+1
+p10 = 0.072
+11
+1
+0
+1
+1
+1
+1
+0
+1
+1
+0
+p11 = 0.008
+12
+1
+1
+0
+0
+1
+0
+0
+0
+0
+1
+p12 = 0.072
+13
+1
+1
+0
+1
+1
+0
+0
+1
+1
+0
+p13 = 0.008
+14
+1
+1
+1
+0
+1
+0
+1
+0
+0
+1
+p14 = 0.018
+15
+1
+1
+1
+1
+1
+0
+1
+1
+1
+0
+p15 = 0.002
+Figure 3: Values computed from ML in Example 3.
+= P ML(Y = 1, A = 1, B = 1)
+P ML(A = 1, B = 1)
+=
+p7 + p8
+p6 + p7 + p8 + p9
+=
+0.002 + 0.288
+0.018 + 0.002 + 0.288 + 0.032
+≈0.853.
+(15)
+The causal quantity P(YA=1,B=1 = 1), or the probability
+that someone recovers when forced to take both doses of the
+drug, can be computed as
+P ML(YA=1,B=1 = 1)
+= p1 + p3 + p5 + p7 + p8 + p10 + p12 + p14
+= 0.032 + 0.008 + 0.008 + 0.002
++ 0.288 + 0.072 + 0.072 + 0.018
+= 0.5.
+(16)
+Indeed, one may be misled to think that the drug is extremely
+effective when only looking at the conditional quantity in
+Eq. 15, as opposed to the causal effect, as in Eq. 16. In reality,
+the causal effect of the drug is not as high.
+Suppose the researchers decide that this much detail in the
+study is unnecessary, and they consider working in a more
+abstract model. One way to simplify the model is to reduce
+the amount of variables. Perhaps they decide that wealth (R)
+is irrelevant and can be abstracted away, and the two doses (A
+and B) can simply be abstracted into one variable, treatment
+(X). This can be represented using the intervariable clusters
+C = {C1 = {A, B}, C2 = {Y }}, where A and B are in the
+same cluster, Y is in a separate cluster, and R is not included.
+Further, the treatment X is only considered complete if
+both doses are taken, so we can further perform an intravari-
+able clustering, where the domains are:
+DC1 =
+
+
+
+x0 =
+{(A = 0, B = 0), (A = 0, B = 1),
+(A = 1, B = 0)}
+x1 =
+{(A = 1, B = 1)}
+(17)
+We denote X as the higher level variable corresponding to
+C1, and we define its domain DX = {0, 1} to be binary,
+where x0 corresponds to 0 and x1 corresponds to 1. We leave
+Y as is in the lower level space.
+We can then define the constructive abstraction function τ
+based on C and D, where VH = {X, Y }. For example,
+τ(R = 1, A = 0, B = 1, Y = 1) = (X = 0, Y = 1), (18)
+and
+τ(R = 1, A = 1, B = 1, Y = 0) = (X = 1, Y = 0). (19)
+Now define MH over the newly defined VH = τ(VL) as
+follows.
+UH = {UX, UY 0, UY 1}
+(20)
+VH = {X, Y }
+(21)
+FH =
+
+
+
+X ←f H
+X (uX) = uX
+Y ←f H
+Y (x, uY 0, uY 1) =
+uY 0
+x = 0
+uY 1
+x = 1
+(22)
+P(UH) =
+
+
+
+P(UX = 1) = 0.34
+P(UY 0 = 1) = 0.1
+P(UY 1 = 1) = 0.852941
+(23)
+Interestingly, note that P MH(Y
+= 1 | X = 1) =
+P(UY 1 = 1) ≈0.853, which is equal to P ML(Y
+=
+1 | A = 1, B = 1) computed in Eq. 15. In fact, if
+Q = P(Y = 1, A = 1, B = 1), then the corresponding
+τ(Q) from Def. 7 is P(Y = 1, X = 1), since τ(Y = 1, A =
+1, B = 1) = (Y = 1, X = 1). Since they are equal, we
+would say that MH is Q-τ consistent with ML.
+Now suppose Q′ = P(YA=1,B=1 = 1). The correspond-
+ing τ(Q′) would be P(YX=1 = 1). However, note that
+P MH(YX=1 = 1) = P(UY 1 = 1) ≈0.853, which is not
+equal to P ML(YA=1,B=1 = 1) = 0.5 computed from Eq. 16.
+Then, MH is not Q′-τ consistent with ML.
+7
+
+It turns out that MH is Q-τ consistent with ML for every
+Q ∈L1, making MH L1-τ consistent with ML. On the
+other hand, this is not the case for L2, the interventional layer.
+In fact, it seems that MH is equating correlation with causa-
+tion and fails to capture the nuances of interventions in ML.
+Still, such a model could be useful if the queries of interest
+are on L1. One could argue that MH is a suitable abstraction
+of ML on Layer 1, but not on Layer 2. The concept of Q-τ
+consistency allows us to define “partial” abstractions based
+on the specific quantities of the PCH that match.
+■
+It turns out that when MH is Q-τ consistent with ML
+on all three layers of the PCH (i.e. L3-τ consistent), then
+MH can be considered an abstraction of ML on the SCM-
+level, which coincides with the definition of constructive τ-
+abstractions (Def. 17 from App. B) from Beckers and Halpern
+(2019), shown below.
+Proposition 1 (Abstraction Connection). Let τ : DVL →
+DVH be a constructive abstraction function (Def. 6). MH is
+L3-τ consistent (Def. 7) with ML if and only if there exists
+SCMs M′
+L and M′
+H s.t. L3(M′
+L) = L3(ML), L3(M′
+H) =
+L3(MH), and M′
+H is a constructive τ-abstraction of M′
+L.
+■
+All proofs are provided in Appendix A. This proposition
+provides the connection between the abstractions defined in
+this work and established definitions from previous works9.
+2.3
+Algorithmic Abstraction Construction
+With the abstraction function τ defined, the notion of Q-τ
+consistency allows for comparisons of distributions between
+the low level model ML and the abstraction MH. Still, it
+would be desirable to be able to systematically construct MH
+given ML and τ such that MH is Q-τ consistent with ML
+for as many queries Q as possible. Moving in this direction,
+we first note that as a subtlety, for some cases of ML, there
+are certain choices of C and D (and corresponding τ) for
+which Q-τ consistency (for some queries Q) is impossible to
+achieve in any choice of MH. This impossibility is illustrated
+in the following example, inspired by Spirtes and Scheines
+(2004).
+Example 4. Consider a study that aims to understand the
+effects of diet on heart disease. Having a poor diet (X) is
+known to cause heart disease (Y ) depending on its cholesterol
+content. Cholesterol comes in two forms, called high-density
+and low-density lipoproteins (HDL and LDL, respectively).
+The HDL is believed to lower heart disease risk while LDL
+increases it (Steinberg 2007; Truswell 2010). Suppose the
+study is simplified to binary variables, and the true model
+9Note that one subtlety of this result is that it is not MH that
+is directly a constructive τ-abstraction of ML, but rather their L3-
+equivalent counterparts, M′
+H and M′
+L. Indeed, the definition of
+constructive τ-abstractions is stronger than L3-τ consistency (see
+proof for more details), but in tasks where we are only concerned
+with the layers of the PCH, this distinction is inconsequential.
+ML is:
+UL = {UX, UC1, UC2, UY }
+(24)
+VL = {X, HDL, LDL, Y }
+(25)
+FL =
+
+
+
+
+
+
+
+X ←f L
+X(uX) = uX
+HDL ←f L
+HDL(x, uC1) = x ⊕uC1
+LDL ←f L
+LDL(x, uC2) = x ⊕uC2
+Y ←f L
+Y (hdl, ldl, uY ) = (ldl ∧¬hdl) ⊕uY
+(26)
+P(UL) =
+
+
+
+
+
+
+
+P(UX = 1) = 0.5
+P(UC1 = 1) = 0.1
+P(UC2 = 1) = 0.1
+P(UY = 1) = 0.1
+(27)
+As ML indicates, a person is more likely to get heart disease
+if their diet consists of high LDL levels but low HDL levels.
+For example, note that P ML(YLDL=1,HDL=0 = 1) = 0.9
+while P ML(YLDL=0,HDL=1 = 1) = 0.1.
+Now, suppose a data scientist decides to abstract HDL and
+LDL together into a variable called “total cholesterol” (TC).
+Say that TC is defined as
+TC = HDL + LDL.
+(28)
+In fact, this leads to a choice of intervariable clusters
+C = {C1 = {X}, C2 = {HDL, LDL}, C3 = {Y }},
+(29)
+and then for intravariable clusters, they would choose
+DC2 =
+
+
+
+
+
+
+
+tc0
+= {(HDL = 0, LDL = 0)}
+tc1
+= {(HDL = 0, LDL = 1),
+(HDL = 1, LDL = 0)}
+tc2
+= {(HDL = 1, LDL = 1)}.
+(30)
+For the other clusters, simply use the same variables. Let τ be
+the constructive abstraction function defined with this choice
+of C and D (i.e. τC2(hdl, ldl) = hdl + ldl).
+An issue arises due to the grouping of values (HDL =
+0, LDL = 1) and (HDL = 1, LDL = 0) into the same
+intravariable cluster. To witness, note that τC1(HDL =
+0, LDL = 1) = τC2(HDL = 1, LDL = 0) = (TC = 1).
+Now, consider two queries Q1 = P(YHDL=0,LDL=1 = 1)
+and Q2 = P(YHDL=1,LDL=0 = 1), and observe that
+P ML(YHDL=0,LDL=1 = 1) = P(UY = 0) = 0.9,
+(31)
+P ML(YHDL=1,LDL=0 = 1) = P(UY = 1) = 0.1.
+(32)
+However, since τC1(HDL
+=
+0, LDL
+=
+1)
+=
+τC2(HDL = 1, LDL = 0) = (TC = 1), both Q1 and
+Q2 have the same high-level counterpart. That is, τ(Q1) =
+τ(Q2) = P(YT C=1 = 1). No choice of MH over VH can
+be both Q1-τ consistent and Q2-τ consistent with ML be-
+cause P MH(YT C=1 = 1) cannot both be equal to 0.9 and
+0.1.
+■
+Intuitively, Ex. 4 shows two values that cannot be grouped
+into the same intravariable cluster because the function f L
+Y
+(from Eq. 26) produces different results depending on which
+8
+
+value is used. Grouping the two values in the same cluster
+would imply that the two values are “equivalent” and hence,
+there would be an inevitable loss of information. Indeed,
+real-world studies that consider total cholesterol instead of
+separating it into LDL and HDL often have conflicting results,
+indicating an invalid abstraction. This phenomenon can be
+described formally through the following condition.
+Definition 8 (Abstract Invariance Condition (AIC)). Let
+ML = ⟨UL, VL, FL, P(UL)⟩be an SCM and τ : DVL →
+DVH be a constructive abstraction function relative to C
+and D. The SCM ML is said to satisfy the abstract invari-
+ance condition (AIC, for short) with respect to τ if, for all
+v1, v2 ∈DVL such that τ(v1) = τ(v2), ∀u ∈DUL, Ci ∈
+C, the following holds:
+τCi
+
+f L
+V (pa(1)
+V , uV ) : V ∈Ci
+
+= τCi
+
+f L
+V (pa(2)
+V , uV ) : V ∈Ci
+
+,
+(33)
+where pa(1)
+V
+and pa(2)
+V
+are the values corresponding to v1
+and v2. Then, f
+paV is used to denote any arbitrary value
+s.t. τ(f
+paV ) = τ(pa(1)
+V ) = τ(pa(2)
+V ).
+■
+In words, the AIC enforces that if two low level values
+v1, v2 ∈DVL map to the same high level value (i.e. τ(v1) =
+τ(v2)), then for each cluster Ci ∈C, the functions of those
+clusters should map to the same value regardless of UL
+(i.e. the outputs of f L
+V (pa(1)
+V , uV ) for each V ∈Ci should
+map to the same result as the outputs of f L
+V (pa(2)
+V , uV ) when
+passed through τCi). Intuitively, this implies that two values
+in the same intravariable cluster have the same functional
+effect in the higher level setting.
+In Ex. 4, the AIC is not satisfied since (HDL
+=
+0, LDL = 1) and (HDL = 1, LDL = 0) cannot be
+grouped into the same intravariable cluster. As established,
+τC1(HDL = 0, LDL = 1) = τC2(HDL = 1, LDL =
+0) = 1. However, observing f L
+Y (from Eq. 26) given these
+inputs, note that f L
+Y (HDL = 0, LDL = 1, uY ) = ¬uY ,
+while f L
+Y (HDL = 1, LDL = 0, uY ) = uY , which give
+opposite results for either choice of uY .
+In contrast, we consider a different abstraction that does
+satisfy the AIC next.
+Example 5 (Example 4 continued). Consider a different
+choice of clusters that does not violate the AIC. Although
+somewhat unintuitive, we can actually abstract the cholesterol
+values in the given ML by taking their difference instead of
+their sum!10 For example, define Z = LDL−HDL. In terms
+of clusters we would keep the same intervariable clusters C =
+{C1 = {X}, C2 = {HDL, LDL}, C3 = {Y }}, but for
+intravariable clusters, we choose DC2 = {z−1 = {(HDL =
+1, LDL = 0)}, z0 = {(HDL = 0, LDL = 0), (HDL =
+1, LDL = 1)}, z1 = {(HDL = 0, LDL = 1)}}. Define τ
+as the constructive abstraction function defined over C and
+D (i.e. τC2(hdl, ldl) = ldl −hdl).
+10This is true given the simple definition of ML in this example.
+In more complex descriptions, such as in cases where the variables
+are continuous, the clusters would have to be chosen more carefully
+to avoid violations of the AIC.
+Algorithm 1: Constructing MH from ML.
+Input
+: SCM ML = ⟨UL, VL, FL, P(UL)⟩,
+admissible inter/intravariable clusters C and
+D satisfying abstract invariance condition
+Output : SCM MH and τ : DVH →DVL s.t. MH
+is L3-τ consistent with ML
+1 UH ←UL,P(UH) ←P(UL)
+2 VH ←C,DVH ←D
+3 τ ←AbsFunc(C,D)
+// from Def. 6
+4 for Ci ∈C do
+5
+fH
+i
+←τ
+ fL
+V (f
+paV ,uV ) : V ∈Ci
+
+6 FH ←{fH
+i
+: Ci ∈C}
+7 return τ, MH = ⟨UH,VH,FH,P(UH)⟩
+The difference now is that instead of clustering together
+the values (HDL = 1, LDL = 0) and (HDL = 0, LDL =
+1), it is the values (HDL = 0, LDL = 0) and (HDL =
+1, LDL = 1) that are clustered together. When looking at
+f L
+Y (Eq. 26) under these two values, we see that f L
+Y (HDL =
+0, LDL = 0, uY ) = f L
+Y (HDL = 1, LDL = 1, uY ) = uY
+for any choice of uY , satisfying the AIC.
+Intuitively, fY no longer changes behavior between these
+two values, or in other words, fY is invariant between these
+two values. With no other downstream variables to consider,
+this implies that these two values are functionally identical in
+the model and can be abstracted together into a single value
+without loss of information.
+■
+It turns out that the AIC describes precisely when an ap-
+propriate MH exists as an abstraction of the low level model
+ML, as shown by the following result.
+Proposition 2 (Abstraction Conditions). For any SCM ML
+and constructive abstraction function τ relative to C and D,
+there exists an SCM MH over variables VH = τ(VL) such
+that MH is L3-τ consistent with ML if and only if there
+exists M′
+L such that L3(ML) = L3(M′
+L) and M′
+L satisfies
+the abstract invariance condition with respect to τ.
+■
+This critical property guarantees the existence of a higher
+level SCM MH such that L3-τ consistency holds, so we will
+assume that the AIC holds for the rest of this work. Still, see
+App. D.2 for further discussion on its implications and for
+possible relaxations in cases where L3-τ consistency is not
+required.
+With the notion of abstractions well-defined, we study how
+MH can be obtained from ML. Interestingly, when given the
+admissible clusterings C and D, the procedure for recovering
+τ and converting ML to MH can be done as shown in Alg. 1.
+Intuitively, one can obtain an abstraction MH of ML by first
+constructing the abstraction function τ using the clusterings
+C and D (lines 2-3), followed by designing the functions of
+MH to wrap the original functions of ML with τ (lines 4-6).
+This can be verified using the following result.
+Proposition 3. Let τ and MH be the function and SCM
+obtained from running Alg. 1 on inputs ML, C, and D. Then,
+MH is L3-τ consistent with ML.
+■
+9
+
+See below for an example of running Alg. 1
+Example 6 (Example 3 continued). We will run Alg. 1 on
+ML and clusters C and D described earlier in Ex. 3. Follow-
+ing the algorithm, we first set UH = UL and P(UH) =
+P(UL). We construct τ via Def. 6, as shown in the earlier
+example. Then, we can compute the function f H
+X as follows.
+f H
+X (uRY , uA, uB)
+= τC1(f L
+A(r, uA), f L
+B(r, a, uB))
+= τC1(r ⊕uA, (r ∧(r ⊕uA)) ⊕uB)
+= τC1(uRY ⊕uA, (uRY ∧(uRY ⊕uA)) ⊕uB)
+(34)
+For f H
+Y , denote ˜a and ˜b as an arbitrary setting of A and B
+such that τ(˜a,˜b) = x, as indicated in line 5 of the algorithm.
+f H
+Y (x, uRY , uY )
+= τC2(f L
+Y (˜a,˜b, uRY , uY ))
+= τC2(((˜a ∧˜b) ∧uRY ) ⊕uY )
+= τC2((x ∧uRY ) ⊕uY )
+(35)
+Putting everything together, we obtain MH as follows.
+UH = UL = {URY , UA, UB, UY }
+(36)
+VH = {X, Y }
+(37)
+FH = {
+(38)
+X ←f H
+X (uRY , uA, uB)
+= τC1(uRY ⊕uA, (uRY ∧(uRY ⊕uA)) ⊕uB)
+Y ←f H
+Y (x, uRY , uY ) = τC2((x ∧uRY ) ⊕uY )
+P(UH) = P(UL)
+(39)
+It is not difficult to see that MH is L3-τ consistent
+with ML. As an example, note that P MH(YX=1
+=
+1) = P(URY
+= 1, UY
+= 0) + P(URY
+= 0, UY
+=
+1)
+=
+(0.5)(0.9) + (0.5)(0.1)
+=
+0.5, which matches
+P ML(YA=1,B=1 = 1) from Eq. 16.
+■
+Ex. 6 shows how Alg. 1 can be used to systematically
+obtain an abstraction MH of the low-level model ML, so
+long as ML is provided alongside the clusters C and D.
+Since ML is almost never available in practice, the following
+sections show how this requirement can be relaxed.
+3
+Inferences Across Abstractions
+As demonstrated by Alg. 1, converting a low level model
+ML to a high level model MH is somewhat immediate
+when given full observability of the underlying SCM ML.
+However, in real applications, it is rarely the case that the full
+specification of ML is known. Typically, one will only be
+given partial information of ML in the form of data, such
+as samples of the observational distribution P(VL). The
+question we investigate in this section is: is it still possible to
+“learn” some MH given the observed data?
+We first note the impossibility result described by the
+Causal Hierarchy Theorem (CHT) (Bareinboim et al. 2022,
+Thm. 1), which states that a model trained to match another
+SCM on lower layers of the causal hierarchy (e.g. L1) will
+Figure 4: Illustration of the Abstract CHT. Without additional
+information, a high-level model c
+MH trained to be L1-τ con-
+sistent with ML is not guaranteed to be L2 or L3-τ consis-
+tent.
+likely not match on higher layers (e.g. L2 or L3). Naturally,
+the same is true when it comes to inferring causal quanti-
+ties across abstractions. One may be tempted to believe that
+MH can be learned given L1 data from ML by instanti-
+ating some expressive parametric model c
+MH on VH, and
+then training c
+MH on P(VH) = P(τ(VL)) such that c
+MH is
+L1-τ consistent with ML. Unfortunately, this strategy will
+fail in general since even under perfect training, c
+MH is not
+guaranteed to be L2-τ (or L3-τ) consistent with ML. This
+means that any causal quantities induced by c
+MH will likely
+bear no relationship with causal quantities induced by ML.
+This phenomenon is described by the following proposition.
+Proposition 4 (Abstract Causal Hierarchy Theorem (Infor-
+mal)). Given constructive abstraction function τ : DVH →
+DVL, even if MH is Li-τ consistent with ML, MH will
+almost never be Lj-τ consistent with ML for j > i.
+■
+In words, matching across abstractions on lower layers
+does not guarantee the same will hold for higher layers. This
+idea is illustrated in Fig. 4. The left of the figure shows the
+unobserved true SCM ML, which induces distributions from
+the three layers of the PCH. Observational data from L1 is
+provided, and one may train a high-level model c
+MH (right)
+such that it is L1-τ consistent with ML. However, even if
+training is perfect, it is not guaranteed that c
+MH is L2 or L3-
+τ consistent with ML. That is, queries from the L2 or L3
+distributions of c
+MH are not expected to match the equivalent
+queries in ML in general. (See further details in App. A.)
+The consequence of this result is that causal assumptions
+will be necessary to make progress. In particular, the class of
+plausible models must be constrained through assumptions
+about the generating model. Given this necessity, one type
+of assumption prevalent throughout causal inference litera-
+ture is the availability of a causal diagram (Pearl 1995), a
+graphical structure that qualitatively describes the functional
+relationships between variables in a non-parametric manner.
+This assumption is weaker than having the entire generat-
+10
+
+R
+D
+C
+F
+P
+B
+DH
+Z
+BH
+Figure 5: The causal diagram G over variables VL for the
+nutrition study in Ex. 1 is on the left. Clusters C = {DH =
+{D}, Z = {C, F, P}, BH = {B}} are outlined in blue. The
+corresponding C-DAG GC is on the right.
+ing SCM, since it only encodes qualitative information of
+the functional dependences between exogenous and endoge-
+nous variables (as in Def. 2) rather than full detail of the
+generating mechanisms and exogenous distributions. Still, it
+has been shown that having the causal diagram allows cer-
+tain inferences across layers, determined through the causal
+identification problem (Pearl 2000; Bareinboim and Pearl
+2016).
+In the context of abstractions however, specifying the
+causal diagram for the true model ML requires describing
+the relationships between every low-level variable in VL.
+This may be unrealistic in many practical settings since there
+are typically too many low-level variables (e.g. 128 × 128
+pixels in an image) to expect a description of the relationship
+between every pair, and many of these relationships may not
+be well-defined in a causal manner. Instead, it may be more
+reasonable to specify a causal diagram over VH (or inter-
+variable clusters C). The amount of information required is
+reduced when |VH| ≪|VL|, and the causal relationships be-
+tween variables may be more clear given that the higher-level
+variables tend to be more explainable. The causal diagram
+over VH can be viewed as a graphical abstraction of the
+causal diagram over VL. The relationship can be formalized
+through the concept of cluster causal diagrams (C-DAGs)
+(Anand et al. 2023), as described next.
+Definition 9 (Cluster Causal Diagram (C-DAG) (Anand et al.
+2023, Def. 1)). Given a causal diagram G = ⟨V, E⟩and an
+admissible clustering C = {C1, . . . , Ck} of V, construct a
+graph GC = ⟨C, EC⟩over C with a set of edges EC defined
+as follows:
+1. A directed edge Ci →Cj is in EC if there exists some
+Vi ∈Ci and Vj ∈Cj such that Vi →Vj is an edge in E.
+2. A dashed bidirected edge Ci ↔Cj is in EC if there
+exists some Vi ∈Ci and Vj ∈Cj such that Vi ↔Vj is
+an edge in E.
+■
+In words, the nodes of the C-DAG GC simply correspond
+to the clusters of C, and edges connect clusters Ci and Cj
+if they connect some Vi ∈Ci and Vj ∈Cj in the original
+causal diagram G. Interestingly, the C-DAG definition aligns
+with the concept of intervariable clusters, providing a way for
+encoding constraints in the smaller space of VH. Revisiting
+the nutrition study in Ex. 1, Fig. 5 shows the corresponding
+causal diagram G (left) and the simpler C-DAG GC (right).
+With the constraints of GC, we now introduce a notion of iden-
+tification across abstractions to determine precisely which
+queries can be inferred.
+(a) When Q is τ-ID from GC and Z, all SCMs over VH that induce
+GC and is Z-τ consistent with ML are also Q-τ consistent with
+ML for any choice of ML.
+(b) When Q is not τ-ID from GC and Z, then there exist choices
+of ML such that some SCM MH over VH that induces GC and is
+Z-τ consistent with ML is not Q-τ consistent with ML.
+Figure 6: Examples of τ-ID and τ-nonID cases. The space
+of models over VL, ΩL, is shown in dark red (left), and
+the subspace that induces C-DAG GC is shown in light red.
+The blue dot within this space is an arbitrary choice of ML.
+The space of models over VH, ΩH, is shown in dark yellow
+(right), and the subspace that induces the causal graph GC
+and is also Z-τ consistent with ML is shown in light yellow.
+Definition 10 (Abstract Identification). Let τ : DVH →
+DVL be a constructive abstraction function. Consider C-DAG
+GC, and let Z = {P(VL[zk])}ℓ
+k=1 be a collection of available
+interventional (or observational if Zk = ∅) distributions
+over VL. Let ΩL and ΩH be the space of SCMs defined
+over VL and VH, respectively, and let ΩL(GC) and ΩH(GC)
+be their corresponding subsets that induce C-DAG GC. A
+query Q is said to be τ-ID from GC and Z iff for every
+ML ∈ΩL(GC), MH ∈ΩH(GC) such that MH is Z-τ
+consistent with ML, MH is also Q-τ consistent with ML.
+■
+This definition establishes a notion of identification be-
+tween two different spaces of SCMs, ΩL and ΩH, that are
+connected through τ. The concept of τ-ID is illustrated in
+Fig. 6. In words, τ-identifiability implies that in every pair
+of SCMs ML over VL and MH over VH, “matching” in
+graph GC and data Z implies a match in query Q. Since ML
+and MH are defined over different spaces of variables, the
+term “match” has some nuance. Specifically, “matching” in
+GC implies that GC is a C-DAG for ML and is a causal dia-
+gram for MH. “Matching” in Z (resp. Q) implies that MH
+is Z-τ consistent (resp. Q-τ consistent) with ML. As shown
+in Fig. 6a, τ-ID implies that for any choice of ML over
+VL that induces C-DAG GC (blue dot in light red space), all
+SCMs MH over VH that induce GC and are Z-τ consistent
+with ML (light yellow space) are also Q-τ consistent with
+ML. As a consequence, τ(Q) can be evaluated from any of
+11
+
+R
+A
+B
+Y
+P
+0
+0
+0
+0
+0.288
+0
+0
+0
+1
+0.032
+0
+0
+1
+0
+0.072
+0
+0
+1
+1
+0.008
+0
+1
+0
+0
+0.072
+0
+1
+0
+1
+0.008
+0
+1
+1
+0
+0.018
+0
+1
+1
+1
+0.002
+1
+0
+0
+0
+0.072
+1
+0
+0
+1
+0.008
+1
+0
+1
+0
+0.018
+1
+0
+1
+1
+0.002
+1
+1
+0
+0
+0.072
+1
+1
+0
+1
+0.008
+1
+1
+1
+0
+0.032
+1
+1
+1
+1
+0.288
+(a) P ML(VL).
+R
+A
+B
+Y
+(b) Causal diagram G. Intervariable clusters C are grouped
+by the dashed-blue lines.
+X
+Y
+(c) C-DAG GC.
+VH term
+Corresponding VL term
+P
+P(X = 0, Y = 0)
+P
+r
+P
+a,b:(a,b)̸=(1,1) P(R = r, A = a, B = b, Y = 0)
+0.594
+P(X = 0, Y = 1)
+P
+r
+P
+a,b:(a,b)̸=(1,1) P(R = r, A = a, B = b, Y = 1)
+0.066
+P(X = 1, Y = 0)
+P
+r P(R = r, A = 1, B = 1, Y = 0)
+0.05
+P(X = 1, Y = 1)
+P
+r P(R = r, A = 1, B = 1, Y = 1)
+0.29
+(d) τ(P ML(VL)).
+Figure 7: Dataset quantities computed from ML and graphs for Example 7.
+these choices of MH to compute Q.
+On the other hand, τ-nonidentifiability implies that there
+exist a pair of models ML over VL and MH over VH
+such that ML and MH match in both GC and Z yet still
+do not match in Q. As shown in Fig. 6b, τ-non-ID implies
+that there exists some ML over VL that induces C-DAG
+GC (blue dot in light red space) such that there is some MH
+over VH that induces GC and is Z-τ consistent with ML
+(light yellow space) but is not Q-τ consistent with ML. This
+means that despite the constraints added through the C-DAG
+GC, there are still queries that cannot be inferred across τ due
+to nonidentifiability. This is more acute when there is a large
+amount of unobserved confounding. Consider the following
+example where this is the case.
+Example 7 (Example 3 continued). The data scientist team
+may be interested in computing the causal effect of taking
+both stages of the drug on the recovery rate of the disease,
+Q = P(YA=1,B=1 = 1). However, ML is not observed, and
+instead, the observational data from P(VL) (Z = {P(VL)})
+and the C-DAG GC from Fig. 7c are given. Is Q τ-ID from Z
+and GC? It turns out the answer is no. To witness, consider
+the following pair of models.
+M1 =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+U1 = {UXY , UY 0, UY 1}
+VH = {X, Y }
+F1 =
+
+
+
+
+
+
+
+X ←f 1
+X(uXY ) = uXY
+Y ←f 1
+Y (x, uXY , uY 0, uY 1)
+=
+x ∨uY 0
+uXY = 0
+uY 1
+uXY = 1
+P(U1) =
+
+
+
+P(UXY = 1) = 0.34
+P(UY 0 = 1) = 0.1
+P(UY 1 = 1) = 0.852941
+(40)
+M2 =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+U2 = {UXY , UY 0, UY 1}
+VH = {X, Y }
+F2 =
+
+
+
+
+
+
+
+X ←f 2
+X(uXY ) = uXY
+Y ←f 2
+Y (x, uXY , uY 0, uY 1)
+=
+¬x ∧uY 0
+uXY = 0
+uY 1
+uXY = 1
+P(U2) =
+
+
+
+P(UXY = 1) = 0.34
+P(UY 0 = 1) = 0.1
+P(UY 1 = 1) = 0.852941
+(41)
+Every value of P ML(VL) can be computed using the table
+in Fig. 3, producing the table in Fig. 7a. The corresponding
+values of τ(P ML(VL)) can then be computed as shown in
+Fig. 7d via Eq. 10. One can verify that both P M1(VH) and
+P M2(VH) match the values in Fig. 7d, implying that both
+M1 and M2 are P(VL)-τ consistent with ML. Moreover,
+M1 and M2 also induce GC from Fig. 7c: fY takes X as
+input, and fX and fY share UXY as a confounding variable.
+Also, fX does not contain Y as an input.
+However, computing τ(Q) = P(YX=1 = 1) leads to two
+different answers, i.e.:
+P M1(YX=1 = 1)
+= P(UXY = 0) + P(UXY = 1, UY 1 = 1)
+= 0.66 + (0.34)(0.852941) = 0.95,
+(42)
+and
+P M2(YX=1 = 1)
+= P(UXY = 1, UY 1 = 1)
+= (0.34)(0.852941) = 0.29.
+(43)
+These values are not only different, but also neither are equal
+to the true value P ML(YA=1,B=1 = 1) = 0.5, as computed
+12
+
+R
+X
+Y
+(a) C-DAG GC.
+VH term
+Corresponding VL term
+P
+P(R = 0, X = 0, Y = 0)
+P
+a,b:(a,b)̸=(1,1) P(R = 0, A = a, B = b, Y = 0)
+0.432
+P(R = 0, X = 0, Y = 1)
+P
+a,b:(a,b)̸=(1,1) P(R = 0, A = a, B = b, Y = 1)
+0.048
+P(R = 0, X = 1, Y = 0)
+P(R = 0, A = 1, B = 1, Y = 0)
+0.018
+P(R = 0, X = 1, Y = 1)
+P(R = 0, A = 1, B = 1, Y = 1)
+0.002
+P(R = 1, X = 0, Y = 0)
+P
+a,b:(a,b)̸=(1,1) P(R = 1, A = a, B = b, Y = 0)
+0.162
+P(R = 1, X = 0, Y = 1)
+P
+a,b:(a,b)̸=(1,1) P(R = 1, A = a, B = b, Y = 1)
+0.018
+P(R = 1, X = 1, Y = 0)
+P(R = 1, A = 1, B = 1, Y = 0)
+0.032
+P(R = 1, X = 1, Y = 1)
+P(R = 1, A = 1, B = 1, Y = 1)
+0.288
+(b) τ(P ML(VL)).
+Figure 8: Updated items given the new choice of C in Example 8
+in Eq. 16. A scientist using model M1 may conclude that
+the treatment is extremely effective, while a scientist using
+model M2 may conclude the opposite: the treatment is not
+only ineffective, it is even harmful. The query is not τ-ID in
+this case, and no further inferences of this query should be
+made at this stage.
+■
+Now consider the following τ-ID example.
+Example 8 (Example 3 continued). The data scientist team
+is studying causal inference and notes that Example 7 showed
+that the query Q = P(YA=1,B=1 = 1) is non-ID from
+the available data. However, suppose instead, a different
+set of clusters is used that includes R, i.e. C = {C1 =
+{A, B}, C2 = {Y }, C3 = {R}}. The domain of R would
+remain the same, so τC3(R) = R. Constructing τ with
+these clusters, the high level variables are revised to VH =
+{R, X, Y }, and τ(P ML(VL)) can be computed as shown in
+the table in Fig. 8b. The C-DAG GC would be updated to the
+one in Fig. 8a.
+It turns out that now, Q = P(YA=1,B=1 = 1) is τ-ID, and
+this can be shown by applying the backdoor-criterion (Pearl
+2000, Thm. 3.3.2), adjusting over the variable R as follows.
+P(YA=1,B=1 = 1)
+=
+X
+r
+P(Y = 1 | r, A = 1, B = 1)P(r)
+=
+X
+r
+P(Y = 1 | r, X = 1)P(r).
+(44)
+Then P
+r P(Y = 1 | r, X = 1)P(r) could immediately
+be computed from P(VH).
+As an example, consider the following choice of MH,
+designed in a systematic way to match τ(P ML(VL)).
+UH = {URY , UX0, UX1, UY 0, UY 1, UY 2, UY 3} (45)
+VH = {R, X, Y }
+(46)
+FH =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+R ←fR(uRY ) = uRY
+X ←fX(r, uX0, uX1) =
+uX0
+r = 0
+uX1
+r = 1
+Y ←fY (x, uRY , uY 0, uY 1, uY 2, uY 3)
+=
+
+
+
+
+
+
+
+uY 0
+x = 0, uRY = 0
+uY 1
+x = 0, uRY = 1
+uY 2
+x = 1, uRY = 0
+uY 3
+x = 1, uRY = 1
+(47)
+P(UH) =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+P(URY = 1)
+= 0.5
+P(UX0 = 1)
+= 0.04
+P(UX1 = 1)
+= 0.64
+P(UY 0 = 1)
+= 0.1
+P(UY 1 = 1)
+= 0.1
+P(UY 2 = 1)
+= 0.1
+P(UY 3 = 1)
+= 0.9
+(48)
+One can verify that, indeed, P MH(VH) matches
+τ(P ML(VL)) from Fig. 8b. It is also clear that MH induces
+GC. Further, we can compute the query to find that
+P MH(YX=1 = 1)
+= P(URY = 0, UY 2 = 1) + P(URY = 1, UY 3 = 1)
+= (0.5)(0.1) + (0.5)(0.9)
+= 0.5,
+(49)
+which matches the true value P ML(YA=1,B=1 = 1) = 0.5
+from Eq. 16.
+■
+The definition of τ-ID provides rigorous semantics to an-
+swer whether a query can be inferred across abstractions.
+The next step is to establish an approach to determine τ-ID
+when given the available data and graph. For this purpose,
+one fundamental result is that the notion of τ-ID is actually
+equivalent to classical identification in the higher level space,
+as shown by the following proposition.
+Theorem 1 (Dual Abstract ID). Consider a counterfactual
+query Q over VL, a constructive abstraction function τ
+w.r.t. clusters C and D, a C-DAG GC, and data Z from VL.
+Q is τ-ID from GC and Z if and only if τ(Q) is ID from GC
+and τ(Z).
+■
+13
+
+In words, τ-ID and classical ID on the high level space
+are equivalent. This is a powerful result since it implies that
+inferences can be made about the low level space by using
+existing results in the high level space. Our goal is to learn a
+higher level SCM MH to make inferences about ML, and
+we build on the machinery of Neural Causal Models (NCMs)
+(Xia et al. 2021) toward this goal. NCMs allow one to take
+the graph GC as an inductive bias (a GC-NCM as described in
+Def. 4) and leverage gradient-based methods to fit any SCM
+within the constrained space. Indeed, identification in NCMs
+can be shown to be equivalent to classical identification when
+considering models of the same granularity (Xia, Pan, and
+Bareinboim 2023, Thm. 3). When combined with Thm. 1,
+this implies the following result.
+Corollary 1 (Abstract ID with NCMs). Q is τ-ID from GC
+and Z iff τ(Q) is Neural-ID from bΩ(GC) and τ(Z). Moreover,
+if it is ID, then Q can be computed by τ(Q) from any GC-
+NCM c
+M that is τ(Z)-consistent.
+■
+In words, determining τ-ID is equivalent to determining
+neural identification (identification in the space of NCMs) on
+the higher level space. Further, to evaluate Q in identifiable
+cases, τ(Q) can be queried from any GC-NCM c
+M that is
+τ(Z)-consistent. Corol. 1 implies that we can perform causal
+identification and estimation across abstractions using the
+NeuralID algorithm (Xia, Pan, and Bareinboim 2023, Alg. 1)
+on the high level space. This procedure is shown in Alg. 2.
+First, τ is constructed as described in Def. 6 given the clusters.
+Then, a GC-NCM is constructed over high-level variables
+VH. Two parameterizations of the NCM are created. Both
+are optimized to fit the transformed data τ(Z), but one is
+optimized to maximize the transformed query τ(Q) while the
+other is optimized to minimize it. If both parameterizations
+return the same result, then it must be the true value of the
+query; otherwise, the query is not identifiable.
+To implement this algorithm in practice, we leverage the
+GAN-NCM approach introduced in Xia, Pan, and Barein-
+boim (2023); see details in Appendix C. Alg. 2 is sound and
+complete for solving the abstract identification problem, as
+shown below.
+Corollary 2 (Soundness and Completeness). Let ML be the
+low-level SCM, C and D be inter/intravariable clusters of
+VL, GC be a C-DAG, Q be a query, and bQ be the result from
+running Alg. 2 with inputs Z(ML) > 0, C, D, GC, and Q.
+Then, Q is τ-ID from GC and Z if and only if bQ is not FAIL.
+Moreover, if bQ is not FAIL, then bQ = Q(ML).
+■
+While Alg. 2 solves the abstract ID problem, the conse-
+quences of the results in this section are more general. No-
+tably, if Q is indeed τ-ID (which can be verified through
+Alg. 2), the algorithm produces a neural model c
+M that serves
+as a proxy SCM that is Q-τ consistent with the true model
+ML. Such an SCM could serve as a generative model of the
+distribution Q, which has many uses. The samples generated
+from such a model could be used to estimate the query, or,
+in more complex settings such as with image data, it may be
+desirable to simply have novel generated samples consistent
+with the causal invariances embedded in the system.
+Algorithm 2: NeuralAbstractID – Identifying and
+estimating queries across abstractions using NCMs.
+Input
+: query Q, L2 datasets Z(ML), C-DAG GC,
+and admissible inter/intravariable clusters C
+and D satisfying invariance condition
+Output : Q(ML) if identifiable, FAIL otherwise.
+1 VH ←C,DVH ←D
+2 τ ←AbsFunc(C,D)
+// from Def. 6
+3 c
+M ←NCM(VH, GC)
+// from Def. 4
+4 θ∗
+min←arg minθ τ(Q)(c
+M(θ)) s.t.
+τ(Z)(c
+M(θ))=τ(Z(ML))
+5 θ∗
+max←arg maxθ τ(Q)(c
+M(θ)) s.t.
+τ(Z)(c
+M(θ))=τ(Z(ML))
+6 if τ(Q)(c
+M(θ∗
+min)) ̸= τ(Q)(c
+M(θ∗
+max)) then
+7
+return FAIL
+8 else
+9
+return τ(Q)(c
+M(θ∗
+min))
+// choose min or
+max arbitrarily
+4
+Representations in Learning Abstractions
+In many applications, the choice of intervariable clusters
+C is natural and can be made in tandem when deciding
+the assumptions of the C-DAG GC11. On the other hand,
+fully specifying the intravariable clusters D is usually chal-
+lenging when working with high-dimensional data like im-
+ages. If an intervariable cluster contained three binary vari-
+ables from VL, then specifying its intravariable cluster
+would require specifying some partition over its eight val-
+ues, (0, 0, 0), (0, 0, 1), . . . , (1, 1, 1), which is not difficult.
+However, if an intervariable cluster contained, for example,
+128×128 pixels, each with 256 possible values, then the size
+of the domain of this cluster would be 256128×128. Specify-
+ing an arbitrary partition over this many values is infeasible,
+as doing so would require an enumeration of every possi-
+ble image along with some label designating each one to a
+cluster. In this section, we investigate the problem of learn-
+ing abstractions when the intravariable clusters D are left
+unspecified.
+While coarser clusters tend to be better in practice due to
+the dimensionality reduction, the theory in this paper can be
+applied for any choice of D so long as the AIC (Def. 8) holds.
+Hence, a possible constraint when learning D is to find a set
+of clusters such that the AIC is not violated. To this effect,
+the following result can be leveraged.
+Proposition 5. Consider a low level SCM ML and con-
+structive abstraction function τ w.r.t. clusters C and D.
+ML is guaranteed to satisfy the AIC w.r.t. τ if and only
+if DCi = {{ci} : ci ∈DCi} for all Ci ∈C.
+■
+In words, the AIC is satisfied when the intravariable clus-
+ters are maximal (i.e. each value is assigned to its own clus-
+ter). Consequently, this means that Alg. 2 can be applied in
+11Please refer to App. D.1 for best practices on how to choose or
+learn intervariable clusters when they are not given.
+14
+
+any case where τCi is a bijective mapping between DCi and
+DVH,i. Also implied by this result is that, without additional
+information, one cannot choose any coarser clustering with-
+out potentially violating the AIC12. For some intuition on
+why this is the case, consider the following example.
+Example 9 (Example 1 continued). Consider once again
+the nutrition example where carbohydrates (C), fat (F), and
+protein (P) were combined to form the high-level variable,
+calories (Z). Calories was defined to be Z = 4C + 9F + 4P,
+resulting in a set of intravariable clusters where (c1, f1, p1)
+and (c2, f2, p2) were clustered together if 4c1 +9f1 +4p1 =
+4c2 + 9f2 + 4p2.
+It turns out that, without additional information, it is pos-
+sible that this choice of clustering violates the AIC. For ex-
+ample, it could be the case that in the true model ML, the
+function for BMI fB depends heavily on protein, since mus-
+cle density may affect BMI more than fat. In an extreme
+example, suppose
+B ←fB(c, f, p, uB) = p + uB,
+(50)
+that is, fB only depends on protein out of the three macronu-
+trients. In this case, (C = 0, F = 0, P = 20) and (C =
+20, F = 0, P = 0) would result in different values of B de-
+spite being clustered together in the same intravarable cluster,
+therefore, violating the AIC. Without information about fB,
+it is not known whether any given two tuples, (c1, f1, p1) and
+(c2, f2, p2), would witness this violation, so the only option
+is to leave all values of (C, F, P) in their own intravariable
+clusters.
+■
+This example illustrates that without further information
+about the functions of the underlying SCM, it is, in general,
+impossible to cluster two intravariable values together with-
+out potentially violating the AIC. This is also the case with
+the cholesterol discussion in Ex. 4 and 5. Without knowing
+fY , it would be impossible to determine whether the cluster
+choice in Ex. 5 would work better than the one in Ex. 4.
+Still, Prop. 5 states that the intravariable clustering which
+leaves every value in its own cluster will always satsify the
+AIC. While this choice of D does not reduce the dimen-
+sionality of the abstracted space, this means that we are not
+restricted to the original space of VL and can choose any
+VH with the same cardinality. In practice, this means that we
+can choose the option for VH that is the most beneficial for
+a given task. For example, some choices of VH and corre-
+sponding domains DVH may have desirable properties such
+as simpler gradient computation, disentangled variables, or
+compatibility with arithmetic operations. In order to leverage
+this insight, we introduce the representational NCM.
+Definition 11 (Representational NCM (RNCM)). A represen-
+tational NCM (RNCM) is a tuple ⟨bτ, c
+M⟩, where bτ(vL; θτ)
+is a function parameterized by θτ mapping from VL to
+VH, and c
+M is an NCM defined over VH. A GC-constrained
+12In many cases, there may be additional information in the form
+of invariances (e.g. rotational invariance in image data). In such
+cases, this information can be leveraged to learn coarser clusters.
+See Appendix D.3 for more details.
+Figure 9: Example using graph GC shown in (a) to compare
+(b) the GC-NCM and (c) GC-RNCM. Functions of the NCM
+directly output values of the lower level variables (grouped
+by clusters in C), while functions of the RNCM output values
+of their higher level counterparts, mapped by bτ.
+RNCM (GC-RNCM) is an RNCM ⟨bτ, c
+M⟩such that bτ is com-
+posed of subfunctions bτCi for each Ci ∈C (each with its
+own parameters θτCi), and c
+M is a GC-NCM (Def. 4).
+■
+In words, an RNCM is a pair of a parameterized abstraction
+function bτ and an NCM c
+M defined over the space of high
+level variables VH obtained from bτ(VL). The GC-RNCM
+is simply an RNCM constrained over the C-DAG GC, where
+bτ must use the intervariable clusters specified by C. Fig. 9
+illustrates the difference between a GC-RNCM and a standard
+GC-NCM. Given GC in (a), the GC-NCM (b) directly defines
+the domains of the inputs and outputs of the functions to be
+the space of the variables VL. On the other hand, the GC-
+RNCM (c) defines the domains over VH = bτ(VL) instead.
+Training can be done as a two-step process, where first bτ
+is trained to map to an optimal task-specific space, and then
+c
+M can be trained on bτ(VL) (e.g., through Alg. 2). In the first
+step, bτ (parameterized by θτ) can be trained according to a
+loss such as
+Lbτ(vL) =
+
+bτ −1(bτ(vL, θτ); θτ −1) −vL
+
+2
++ λrLr(vL),
+(51)
+where bτ −1 is a neural network parameterized by θτ −1 that
+attempts to invert bτ and recover the original vL, Lr is a sep-
+arate representation regularizer, and λr is its regularization
+strength. The first term in Eq. 51 is used to enforce bijectivity
+between DCi and DVH,i, as required by Prop. 5. In words,
+one can train bτ in an autoencoder-like setup (Kramer 1991;
+Kingma and Welling 2014) with a reconstruction loss. The
+second term is left open-ended and can be used to impose
+a desired form on the output of bτ. The following example
+helps to ground this point.
+Example 10. Consider a simple example with VL = X ∪
+{Y }, where X is the collection of pixels representing an im-
+age of a cat or dog, and Y is a binary label (caused by X)
+predicting whether the animal depicted in X is aggressive
+or docile. Suppose researchers are studying the relationship
+between X and Y and would like to work in a more abstract
+space. Denote XH as the high-level counterpart of X. More-
+over, suppose the researchers are given another set of labels
+of X, say Z, which state whether the animal in the image is
+a cat or dog. Z is not included in the study with VL, but it
+could potentially be used for learning the space of XH.
+15
+
+Specifically, the researchers would like to train bτX
+:
+DX →DXH such that the AIC is satisfied from Prop. 5,
+and XH additionally encodes some information about Z.
+One clever approach is to introduce another neural network
+g(xH; θg) parameterized by θg that aims to classify Z from
+XH. The researchers could train bτX with the loss Lbτ from
+Eq. 51 such that Lr is the classification loss of g. This would
+result in XH encoding both enough information to recon-
+struct X and also to classify Z. Although XH may not have
+lower dimensionality than the original X, it may be more
+useful in a downstream task, such as building a classifier for
+Y (i.e. XH may be a more well-behaved set of features for a
+classifier of Y than the original set of pixel values X).
+■
+In general, bτ can be thought of as a function mapping to a
+representation space, where the second term in Eq. 51 can be
+used to regularize the representation space for a desired task.
+The flexibility of this approach makes it amenable to the wide
+developments of the representation learning literature (Ben-
+gio, Courville, and Vincent 2013). We empirically demon-
+strate this approach below in the experiment of Sec. 5.2.
+5
+Experiments
+In this section, we empirically evaluate the effects of utilizing
+abstractions in causal inference tasks. More details on the
+data-generating models and architectures can be found in
+Appendix C. Implementation code is publicly available at
+https://github.com/CausalAILab/NeuralCausalAbstractions.
+5.1
+Nutritional Study
+We follow up on the nutrition study discussed in Ex. 1. Since
+a BMI of 25 or over is considered overweight, the goal is to
+identify and estimate the query Q = P(BD=d ≥25), the
+causal effect of diet on weight, given the available graphical
+constraints and observational data P(VL) using Alg. 2. R
+and D are 32-dimensional one-hot vectors, and the others
+are real-valued, so the query may be difficult to answer given
+such high-dimensional variables. Instead, it may be more
+effective to work in an abstract space with the proposed inter-
+variable clusters C = {DH = {D}, Z = {C, F, P}, BH =
+{B}}. The original graph G and corresponding C-DAG GC
+are shown in Fig. 5. We are also given intravariable clusters
+D such that all values of DH, Z, and BH are clustered into
+binary categories. Specifically, DH = 1 denotes unhealthy
+dishes, Z = 1 denotes high calorie count, and BH = 1
+denotes an overweight BMI (≥25).
+We compare the effectiveness identifying and estimating
+Q with NCMs in three different settings, with results shown
+in Fig. 10. The first approach (red) attempts to solve the prob-
+lem directly in the space of VL by identifying and estimat-
+ing Q from the original causal diagram G and observational
+dataset from P(VL). The second approach (yellow) solves
+the same task but first normalizes each variable13 of the data
+between 0 and 1. The third approach (blue) is the newly
+13This normalization approach is equivalent to using a construc-
+tive abstraction function τ over the full set of clusters C = VL and
+D = DVL (with a bit of abuse of notation). That is, each variable
+and value are placed in their own cluster, and all values are simply
+remapped to different values.
+(a) Gaps between max and min
+query across 1000 training itera-
+tions when running Alg. 2.
+(b) Mean absolute error (MAE)
+v. dataset size (in log-log scale)
+for query estimation.
+Figure 10: Results of the nutrition experiment. Our approach
+(blue) is compared with a GAN-NCM trained on raw data
+(red) and one trained on normalized data (yellow).
+C
+D
+I
+(a) GC for Colored MNIST.
+(b) Image samples. Digits are
+highly correlated with the corre-
+sponding gradient color.
+Figure 11: Colored MNIST Experimental Setup
+proposed approach and leverages the concept of τ-ID, iden-
+tifying and estimates Q from the C-DAG GC and high level
+data τ(P(VL)). The model is trained over the abstract space
+of VH computed using the constructive abstraction function
+τ defined on C and D. All three approaches are implemented
+in the style of GAN-NCM (Xia, Pan, and Bareinboim 2023).
+Since Q is identifiable, the gap between the max and min
+queries computed in Alg. 2 are expected to be as small as
+possible. As shown in Fig. 10a, the proposed approach (blue)
+converges quickly while others fail to close the gap between
+the max and min queries. Fig. 10b also shows that the pro-
+posed approach can estimate Q with significantly lower error.
+Furthermore, since the proposed approach uses the C-DAG
+GC instead of the original causal diagram G, the approach
+operates under fewer assumptions of domain knowledge.
+5.2
+Colored MNIST Digits
+We evaluate the RNCM in a high-dimensional image dataset
+of colorized MNIST (Deng 2012) digits. Each image (I) has
+a corresponding digit (D) and color (C) label, and their rela-
+tionships are shown in the C-DAG GC in Fig. 11a. Color and
+digit are highly correlated (e.g. 0s are typically red, while
+5s are cyan), as shown in Fig. 11b. We evaluate three ap-
+proaches in the task of sampling images from causal queries.
+The first approach is a naïve conditional GAN that does not
+take causality into account. The second is a standard GAN-
+NCM as described in Xia, Pan, and Bareinboim (2023). The
+third is called a GAN-RNCM, a GAN implementation of the
+representational NCM following the approach described in
+Sec. 4.
+Samples of the results are shown in Fig. 12. All models
+are capable of producing digit images, as shown in the first
+column. The second column illustrates P(I | D = 0), the
+images conditioned on digit = 0. Many red 0s are expected
+16
+
+Figure 12: Colored MNIST results. Samples from various causal queries (top) are collected from competing approaches (left),
+with the ground truth samples from the data generating model shown in the bottom row. The left column simply shows image
+samples from P(I) from each of the models, while the second, third, and fourth columns show samples generated from an L1,
+L2, and L3 query, respectively.
+since most 0s are red in the dataset. The third column il-
+lustrates the interventional query P(ID=0), the images with
+digits forced to be 0 through intervention. As interventions
+ignore the spurious correlations between color and digit, 0s of
+all colors are expected. Finally, the fourth column illustrates
+the counterfactual query P(ID=0 | D = 5), indicating what
+the digits would have looked like had they been 0, given that
+they were originally 5. Since 5s tend to be cyan, the samples
+are expected to be 0s that retain the cyan color of the 5s.
+In all cases, GAN-RNCM (new approach) produces results
+closer to the expected outcomes, as shown by the ground
+truth. The conditional GAN fails to distinguish causal queries
+from conditional queries, and samples appear similar in the
+2nd, 3rd, and 4th columns. The standard GAN-NCM faces
+challenges disentangling color from digit, as shown from the
+presence of several non-zero digits in the 3rd column and sev-
+eral digits that resemble 5s in the 4th column. Further, both
+the conditional GAN and the GAN-NCM face challenges in
+capturing the relationship between color and image in more
+complex distributions, as evident from the mosaic coloring
+in many of the samples. The GAN-RNCM significantly out-
+performs the other approaches in terms of sample quality for
+the causal queries.
+6
+Conclusions
+In this paper, we developed a new framework of abstrac-
+tions based on the PCH’s layers with the goal of learning
+a high-level causal model at a coarser granularity. In each
+section of the paper, we relaxed certain assumptions that are
+not easily achievable in practice, and showed how to obtain
+the high-level model under these particular settings. These
+increasingly more refined results are summarized in Fig. 13.
+We started by noting that previous works on causal ab-
+stractions, such as Beckers and Halpern (2019), set a strong
+foundation of defining abstractions in rigorous terms. (A
+detailed discussion is provided in Appendix B.) The main
+drawback is that these definitions are declarative, meaning
+that given a low level SCM ML, high level SCM MH, and
+an abstraction function τ, the definitions in these works can
+be used to decide whether MH is an abstraction of ML or
+not. Still, solving this decision task requires a substantial
+amount of input information, as highlighted in the first row of
+Fig. 13, and which is unavailable in many practical settings.
+We then examined in Sec. 2 the challenge of obtaining the
+abstract model MH when the same is unavailable, as shown
+in the second row of Fig. 13. We provided a systematic way
+of constructing τ given inter/intravariable clusters (Defs. 5
+and 6). Building on this, we developed Alg. 1, which allows
+one to obtain the higher level abstraction MH given ML
+and the constructive abstraction function τ.
+Still, these results can be hard to apply since ML is not
+commonly available in some real world settings. Rather, par-
+tial information about ML through its data distributions may
+be available. We then described in Sec. 3 how to obtain MH
+under these restrictions, as shown in the third row of Fig. 13.
+Causal inferences on higher levels of the PCH cannot be re-
+alized using lower layers alone, as shown by Prop. 4, which
+means that assumptions are needed. The assumptions con-
+sidered in this paper take the form of C-DAGs (Def. 9), an
+abstract version of causal diagrams leveraging the intervari-
+able clusters. Then, given the data Z, the C-DAG GC, and the
+abstraction function τ constructed from the clusters, Alg. 2
+can be used to learn the abstract NCM c
+MH. Then, c
+MH can be
+used for tasks such as identification, estimation, or sampling.
+We showed in Sec. 4 how to learn τ, noting that acquiring
+intravariable clusters D may be challenging in practice. The
+fourth row of Fig. 13 highlight this task. Specifically, we
+introduced the representational NCM or RNCM (Def. 11),
+which parameterizes bτ as a neural network. We then devel-
+oped a learning procedure for intravariable clusters, consider-
+ing task-specific objectives. Whenever additional information
+about the problem is available in the form of invariances (e.g.,
+translational, rotational, permutation), coarser clusters can be
+learned, as elaborated in Appendix D.3.
+Finally, although not shown in the table, additional tech-
+nical content can be found in Appendix D. Specifically, Ap-
+pendix D.1 discusses how to make the best choice of intervari-
+able clusters C when it is not given. Appendix D.2 describes
+possible ways to relax the AIC (Def. 8), which is an assump-
+tion that is made throughout the paper. We encourage further
+research on the topics covered in this paper, such as on the
+best way to learn bτ in an RNCM.
+17
+
+Approach
+SCM ML
+Abstraction τ
+SCM MH
+Output
+ML
+Data Z
+Graph G
+C-DAG GC
+τ
+C
+D
+MH
+Existing works
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+Abstraction: Yes/No
+Sec. 2
+✓
+✓
+✓
+✓
+-
+✓
+✓
+-
+L3-τ consistent MH
+Sec. 3
+-
+✓
+-
+✓
+-
+✓
+✓
+-
+Z-τ / GC consistent MH
+Sec. 4
+-
+✓
+-
+✓
+-
+✓
+-
+-
+Z-τ / GC consistent MH
+Figure 13: Summary table of contributions of each section in terms of input assumptions and outputs. A checkmark (✓) indicates
+that the corresponding information is assumed to be available in that section. A gray checkmark indicates that it is implied by a
+stronger assumption (e.g. data Z can be sampled from ML if ML is available). A dash (-) indicates that the information is not
+assumed. An approach that has fewer checkmarks makes fewer assumptions and is therefore more applicable in practice.

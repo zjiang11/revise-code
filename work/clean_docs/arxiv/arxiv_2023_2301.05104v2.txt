@@ -1,0 +1,927 @@
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+Youwei Liang∗1 Kevin Stone∗2 Ali Shameli 2 Chris Cummins 2 Mostafa Elhoushi 2 Jiadong Guo 2
+Benoit Steiner 2 Xiaomeng Yang 2 Pengtao Xie 1 Hugh Leather 2 Yuandong Tian 2
+Abstract
+Finding the optimal pass sequence of compilation
+can lead to a signiﬁcant reduction in program size
+and/or improvement in program efﬁciency. Prior
+works on compilation pass ordering have two ma-
+jor drawbacks. They either require an excessive
+budget (in terms of compilation steps) at compile
+time or fail to generalize to unseen programs. In
+this paper, for code-size reduction tasks, we pro-
+pose a novel pipeline to ﬁnd program-dependent
+pass sequences within 45 compilation calls. It
+ﬁrst identiﬁes a coreset of 50 pass sequences
+via greedy optimization of a submodular func-
+tion, and then learns a policy with Graph Neural
+Network (GNN) to pick the optimal sequence by
+predicting the normalized values of the pass se-
+quences in the coreset. Despite its simplicity, our
+pipeline outperforms the default -Oz ﬂag by an
+average of 4.7% over a large collection (4683) of
+unseen code repositories from diverse domains
+across 14 datasets. In comparison, previous ap-
+proaches like reinforcement learning on the raw
+pass sequence space may take days to train due
+to sparse reward, and may not generalize well in
+held-out ones from different domains. Our re-
+sults demonstrate that existing human-designed
+compiler ﬂags can be improved with a simple yet
+effective technique that transforms the raw action
+space into a small one with denser rewards.
+1. Introduction
+For more efﬁcient execution with fewer resources (e.g.,
+memory, CPU, and storage), applying the right ordering for
+compiler optimization passes to a given program, i.e., pass
+ordering, is an important yet challenging problem. Manual
+efforts require expert knowledge and are time-consuming,
+error-prone, and often yield sub-par results, due to the huge
+*Equal second author contribution,
+listed alphabetically.
+1University of California, San Diego 2Meta AI. Correspondence
+
+Coreset Optimization
+Programs
+Reward
+Matrix
+Action sequences
+Optimize
+Coreset
+...
+...
+...
+Normalized Value Prediction
+Inference
+Program
+Value
+Softmax
+...
+Coreset
+GNN-GEAN
+Program
+Observation
+Figure 1. A depiction of our main contributions. (Top) Coreset
+Optimization: A process for discovering a small set of pass se-
+quences (coreset) that generalizes. (Bottom) Normalized Value
+Prediction A process where our model learns to predict the nor-
+malized value of pass sequences from the coreset. (Bottom inset)
+Our model, Graph Edge Attention Network (GEAN), for encoding
+program observations.
+size of the search space. For example, the LLVM compiler
+has 124 different compilation ﬂags. If the pass sequences
+have a length of 45, then the possible number of sequences
+(12445 ∼1094) is already more than the atoms in the uni-
+verse (∼1080 (Planck Collaboration et al., 2016)).
+In recent years, machine learning (ML)-guided pass order-
+ing has emerged as an interesting ﬁeld to replace this labori-
+ous process (Wang & O’Boyle, 2018). Along this line, many
+works show promising results using various optimization
+and/or ML techniques (e.g., reinforcement learning (Haj-Ali
+et al., 2020a), language modelling (Cummins et al., 2017),
+evolutionary algorithms (Kulkarni & Cavazos, 2012), etc).
+However, there are several limitations. Some previous works
+(e.g., MLGO (Troﬁn et al., 2021), MLGoPerf (Ashouri et al.,
+2022)) run adaptive search algorithms to optimize a set of
+programs for many hours. While this achieves strong per-
+formance gain, the procedure can be slow and does not
+distill knowledge from past experience and requires search-
+ing from scratch for unseen programs. Recent works like
+Autophase (Haj-Ali et al., 2020b) learn a pass policy via re-
+arXiv:2301.05104v2  [cs.PL]  27 Jan 2023
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+inforcement learning, and applies it to unseen programs
+without further search procedure, and GO (Zhou et al.,
+2020) ﬁne-tunes the models for unseen programs. These ap-
+proaches work for unseen programs from the same/similar
+domain, but can still be quite slow in the training stage, and
+do not show good generalization to programs from very
+different domains.
+In this work, we propose a novel pass ordering optimization
+pipeline to reduce the code size of a program. As a ﬁrst
+contribution, we formulate the search for a universal core
+set of pass sequences (termed coreset) as an optimization
+problem of a submodular reward function and use a greedy
+algorithm to approximately solve it. The resulting coreset
+consists of 50 pass sequences with a total number of passes
+of 625. Importantly, it leads to very strong performance
+across programs from diverse domains, ranging from the
+Linux Kernel to BLAS. Speciﬁcally, for one unseen pro-
+gram in the evaluation set, there exists one of the 50 pass
+sequences that leads to an average code size reduction of
+5.8% compared to the default -Oz setting, across 10 diverse
+codebases (e.g. Cbench (Fursin, 2014), MiBench (Guthaus
+et al., 2001), NPB (Bailey et al., 1995), CHStone (Hara
+et al., 2008), and Anghabench (Da Silva et al., 2021)) of
+over one million programs in total. Considering the huge
+search space of compiler ﬂags, this is a very surprising
+ﬁnding.
+While it is time-consuming to ﬁnd an optimal pass sequence
+with an exhaustive enumeration of the core subset of pass
+sequences, as a second contribution, we ﬁnd that the (near)
+optimal pass sequence can be directly predicted with high
+accuracy via our Graph Edge Attention Network (GEAN), a
+graph neural network (GNN) architecture adapted to encode
+the augmented ProGraML (Cummins et al., 2021) graphs
+of programs. Therefore, we can run a few pass sequences
+selected by the model on an unseen program to obtain a
+good code size reduction. This enables us to ﬁnd a good
+ﬂag conﬁguration that leads to 4.7% improvement on aver-
+age, with just 45 compilation passes, a reasonable trade-off
+between the cost spent on trying compilation passes and the
+resulting performance gain.
+We compare our approach with extensive baselines, includ-
+ing reinforcement learning (RL) -based methods such as
+PPO, Q-learning, and behavior cloning. We ﬁnd that RL-
+based approaches operating on the original compiler pass
+space often suffer from unstable training (due to inaccurate
+value estimation) and sparse reward space and fail to gener-
+alize to unseen programs at inference. In comparison, our
+approach transforms the vast action space into a smaller one
+with much more densely distributed rewards. In this trans-
+formed space, approaches as simple as behavior cloning can
+be effective and generalizable to unseen programs.
+2. Related Work
+Graph structured data are present in numerous applications
+and it has been shown that taking advantage of this data
+can help us train very effective machine learning models.
+(Brauckmann et al., 2020) use abstract syntax trees and con-
+trol ﬂow graphs for learning compiler optimization goals.
+They show that using such graphs allows them to outper-
+form state-of-the-art in the task of heterogeneous OpenCL
+mapping. (Guo et al., 2020) uses a transformer based model
+with a graph guided masked attention that incorporates the
+data ﬂow graph into the training. They achieve state of the
+art performance in four tasks including code search, clone
+detection, code translation, and code reﬁnement.
+As a contender to graph neural networks, (Mialon et al.,
+2021) uses transformers to process graphs. They show that
+if we effectively encode positional and local sub-structures
+of graphs and feed them to the transformer, then the trans-
+former can outperform the classical GNN models. They
+test their model on classiﬁcation and regression tasks and
+achieve state of the art performance.
+In (Srinivas et al.,
+2020), they used an unsupervised model to learn embed-
+dings of high dimensional pixel data using contrastive learn-
+ing. They then use this embedding for downstream rein-
+forcement learning tasks.
+3. Methodology
+3.1. Action space
+The CompilerGym framework (Cummins et al., 2022) pro-
+vides a convenient interface for the compiler pass ordering
+problem. The default environment allows choosing one of
+124 discrete actions at each step corresponding to running
+a speciﬁc compiler pass. In this work we will use the term
+pass interchangeably with action. We ﬁx episode lengths to
+45 steps to match the setup in (Haj-Ali et al., 2020b). Given
+that our trajectories have a length of 45 steps, this means
+we have 12445 ∼1.6 × 1094 possible pass sequences to
+explore. To ﬁnd an optimal pass sequence for a program,
+we can apply some existing reinforcement learning meth-
+ods including Q learning like DQN (Mnih et al., 2015) and
+policy gradient like PPO (Schulman et al., 2017).
+Pass Sequences However for this problem it turns out that
+certain pass sequences are good at optimizing many differ-
+ent programs (where “good” is deﬁned as better than the
+compiler default -Oz). We found that constraining the ac-
+tion space to a learned set of pass sequences enables state
+of the art performance and also signiﬁcantly reduces the
+challenge of exploration. This allows us to cast the problem
+as one of supervised learning over this set of pass sequences.
+We use the following algorithm to ﬁnd a good set of pass
+sequences.
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+Figure 2. An exemplar reward matrix for 67 programs and 50 pass
+sequences. Most of the pass sequences do not lead to strong re-
+wards, except for a few. On the other hand, certain pass sequences
+(i.e., columns) can lead to high rewards for multiple programs
+simultaneously and thus are good candidates for the coreset.
+Suppose we have N programs and M promising pass se-
+quences. Let R = [rij] ∈RN×M be the reward matrix, in
+which rij > 0 is the ratio of the codesize of i-th program if
+applied with j-th pass sequence, compared to -O0. rij > 1
+means that the j-th pass sequence does better than -O0 in
+codesize reduction for i-th program, and rij < 1 means
+it performs worse. The reward matrix is normalized per
+row, by the maximum reward for each program, so that the
+optimal pass sequence has reward of 1 for each program.
+Then we aim to pick a subset S of K pass sequences, called
+the coreset, from all M pass sequences, so that the overall
+saving J(S) is maximized:
+max
+|S|≤K J(S) =
+N
+X
+i=1
+max
+j∈S rij
+(1)
+Finding M candidate pass sequences. Note that there can
+be exponential number of pass sequences, and we cannot
+construct the entire reward matrix, instead we seed a list
+of candidate action trajectories. For this, we run a random
+policy on a subset of M (17500) selected training programs.
+For each selected program, we run E (200) episodes and
+pick the best pass sequence as one of the M candidates.
+If part of the best pass sequence leads to the same state,
+they are truncated so that the sequence becomes shorter.
+If multiple pass sequences yield the same reward we only
+retain the ﬁrst after ordering them length-lexicographically.
+On average these last two steps reduce the length of the
+candidate pass sequences by 80%.
+We then construct the reward rij by applying the j-th best
+pass sequence to program i, and comparing it with -O0.
+Finding the best coreset S with greedy algorithm. As
+a function deﬁned in subsets, J(S) can be proven to be a
+nonnegative and monotone submodular function (See Ap-
+pendix). While maximizing a submodular function is NP-
+hard (Ward & ˇZivn`y, 2016), the following greedy algorithm
+is proven to be an efﬁcient approximate algorithm that leads
+to fairly good solutions (Nemhauser et al., 1978). Start-
+ing from S0 = ∅, at each iteration t, it picks a new pass
+sequence jt as follows:
+jt := arg max
+j /∈St−1 J(St−1 ∪{j})
+(2)
+And St ←St−1 ∪{jt} until we pick K pass sequences. We
+set K = 50 in this paper.
+Given the discovered coreset S, we deﬁne a generalized ac-
+tion as a pass sequence in S. Applying a generalized action
+to a program means that we roll out the corresponding pass
+sequence on the program and return the best program state
+(i.e., having the highest cumulative reward) (it is feasible
+because we can cache the program state for each step).
+3.2. Normalized Value Prediction
+After discovering the “good” pass sequences (i.e., the core-
+set), we can turn the problem of the sequential decision-
+making on compiler passes into a problem of supervised
+learning. The target is to train a model to predict the best
+pass sequence conditioned on the program, where the label
+of the program is the index of the pass sequence that results
+in the largest code size reduction. However, one important
+observation we have is that there are typically multiple pass
+sequences in the coreset that all result in the largest code
+size reduction (see Figure 3 for the examples). Therefore,
+instead of using the single-class classiﬁcation method with
+a cross entropy loss, we leverage the fact we have access to
+the values for all pass sequences. We predict the softmax
+normalized value of each pass sequence with a cross entropy
+loss detailed below. This approach is similar to behavior
+cloning (Pomerleau, 1988) but with soft targets over the
+coreset.
+For a program p, we roll out all pass sequences in the
+coreset on it, obtaining a reward rp
+j for the j-th sequence
+(i.e., the highest cumulative reward observed during the
+rollout of the pass sequence), which forms a value vector
+rp = [rp
+1, . . . , rp
+K]. Then, the normalized values of the pass
+sequences are deﬁned by
+vp = Softmax(rp/T)
+(3)
+where T is a temperature parameter.
+For an initial observation op of a program, our model out-
+puts a probability distribution, a = f(op), over the pass
+sequences. The target of the training is to make a close to
+the normalized values of the pass sequences. To this end, we
+use the Kullback–Leibler (KL) divergence to supervise the
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+model, which can be reduced to the following cross entropy
+loss up to a constant term.
+L(ap, vp) = −
+K
+X
+j=1
+ap
+j log vp
+j
+(4)
+3.3. Program Representations
+Since we use the CompilerGym (Cummins et al., 2022)
+environments for program optimization, we exploit the pro-
+gram representations from CompilerGym, where program
+source code is converted to LLVM Intermediate Represen-
+tation (IR) (Lattner & Adve, 2004) and several representa-
+tions are constructed from the IR, including the ProGraML
+graph (Cummins et al., 2021), the Autophase feature (Haj-
+Ali et al., 2020b), and the Inst2vec feature (Ben-Nun et al.,
+2018). We choose to use the LLVM environment from
+CompilerGym because the LLVM ecosystem is a popular
+compiler infrastructure that powers Swift, Rust, Clang, and
+more.
+Autophase We use the Autophase features Haj-Ali et al.
+(2020b) to build some baseline models for comparison,
+which will be detailed in Section 4.2. The Autophase feature
+is a 56-dimension integer feature vector summarizing the
+LLVM IR representation, and it contains integer counts of
+various program properties such as the number of instruc-
+tions and maximum loop depth. we use an MLP to encode
+it and output a program representation.
+ProGraML As a part of our main method, we leverage
+ProGraML (Cummins et al., 2021) graphs for training GNN
+models. ProGraML is a graph-based representation that en-
+codes semantic information of the program which includes
+control ﬂow, data ﬂow, and function call ﬂow. This repre-
+sentation has the advantage that it is not a ﬁxed size - it
+does oversimplify large programs - and yet it is still a more
+compact format than the original IR format. We list three
+bullet points of the ProGraML graph below.
+• Node features Each node in a ProGraML graph have
+4 features described in Table 1. The “text” feature
+is a textual representation and the main feature that
+captures the semantics of a node. For example, it tells
+us what an “instruction” node does (e.g., it can be
+alloca, store, add, etc).
+• Edges features Each edge in a ProGraML graph have
+2 features described in Table 1.
+• Type graph There is an issue with the ProGraML
+graph. Speciﬁcally, a node of type variable/constant
+node can end up with a long textual representation
+(for the “text” feature) if it is a composite data struc-
+ture. For example, a struct (as in C/C++) contain-
+ing dozens of data members needs to include all the
+members in its “text” feature. In other words, the
+current ProGraML representation does not automati-
+cally break down composite data types into their ba-
+sic components. Since there is an unbounded num-
+ber of possible structs, this prevents 100% vocabulary
+coverage on any IR with structs (or other composite
+types). To address this issue, we propose to expand
+the node representing a composite data type into a
+type graph. Speciﬁcally, a pointer node is expanded
+into this type graph: [variable] <- [pointer] <-
+[pointed-type], where [...] denotes a node and
+<- denotes an edge connection. A struct node is ex-
+panded into a type graph where all its members are
+represented by individual nodes (which may be fur-
+ther expanded into their components) and connected
+to a struct node. An array is expanded into this
+type graph:[variable] <- [array] <- [element-
+type]. The newly added nodes are categorized as
+type nodes and the edges connecting the type nodes
+are type edges. The type nodes and type edges con-
+stitute the type sub-graphs in the ProGraML graphs. In
+this manner, we break down the composite data struc-
+tures into the type graphs that consist of only primitive
+data types such as float and i32.
+3.4. Network Architecture
+Since the Autophase feature can be encoded by a simple
+MLP, we discuss only the network architectures for encod-
+ing the ProGraML graphs in this section.
+We use a graph neural network (GNN) as the backbone
+to encode the ProGraML graphs and output a graph-level
+representation. The GNN encodes the graph via multiple
+layers of message passing and outputs a graph-level repre-
+sentation by a global average pooling over the node features.
+The goal of graph encoding is to use the structure and re-
+lational dependencies of the graph to learn an embedding
+that allows us to learn a better policy. To this end, we ex-
+perimented with several different GNN architectures such
+as Graph Convolutional Network (GCN) (Kipf & Welling,
+2017), Gated Graph Convolutions Network (GGC) (Li et al.,
+2015), Graph Attention Network (GAT) (Brody et al., 2022),
+Graph Isomorphism Network (GIN) (Xu et al., 2019). To
+better capture the rich semantics of node/edge features in
+the ProGraML graphs, we propose Graph Edge Attention
+Network (GEAN), a variant of the graph attention net-
+work (Veliˇckovi´c et al., 2017). These GNNs leverage both
+the node and edge features, so we start by presenting how
+to embed the node and edge features.
+Node embedding For the “text” features of the nodes, we
+build a vocabulary that maps from text to integer. The
+vocabulary covers all the text ﬁelds of the nodes in the
+graphs in the training set. The ﬁnal vocabulary consists of
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+Feature
+Description
+Node
+type
+One of {instruction, variable, constant, type}
+text
+Semantics of the node
+function
+Integer position in function
+block
+Integer position in IR basic block
+Edge
+ﬂow
+Edge type. One of {call, control, data, type}
+position
+Integer edge position in ﬂow branching
+Table 1. Features in the ProGraML graph representation which we
+augment with type information (changes highlighted). We ablate
+the augmentations in Section 4.5.
+117 unique textual representations, and we add an additional
+item “unknown” to the vocabulary which denotes any text
+features that may be encountered at inference time and we
+have not seen before. The i-th textual representation is
+embedded using a learnable vector vi ∈Rd, where d is
+the embedding dimension. The “type” feature is not used
+because it can be inferred from the “text” feature.
+Edge embedding The edge embedding is the sum of three
+types of embedding as the following.
+• Type embedding We have 4 types of edge ﬂows, so
+we use 4 learnable vectors to represent them.
+• Position embedding The “position” feature of an edge
+is a non-negative integer which does not have an upper
+bound. We truncate any edge positions larger than 32
+to 32 and use a set of 32 learnable vectors to represent
+the edge positions.
+• Block embedding We use the block indices of the
+two nodes connected by the edge to construct a new
+edge feature. The motivation is that whether the edge
+goes beyond an IR basic block can inﬂuence program
+optimization. Suppose the block indices of the source
+node and the target node of an edge are respectively bi
+and bj. We get the relative position of the two nodes
+with respect to IR basic blocks in the following way:
+pblock = sign(bi −bj). If the edge connects two nodes
+in the same IR basic block, then pblock is 0. And
+pblock = ±1 indicates the edge goes from a block
+to the next/previous block. There are 3 possible values
+for pblock, so it is embedded using 3 learnable vectors.
+The ﬁnal embedding of an edge is the sum of its type, posi-
+tion, and block embedding vectors.
+Graph mixup We note that the ProGraML graphs of two
+programs can be composed into a single graph without af-
+fecting the semantics of the two programs. And their value
+vectors can be added up to correctly represent the value vec-
+tor of the composite graph. In this manner, we can enrich
+the input space to the GNNs and mitigate model overﬁtting
+for the normalized value prediction method.
+Graph Edge Attention Network We introduce the GEAN
+in this paragraph and defer its mathematical details to the
+Appendix. There are two main differences between the GAT
+and GEAN. 1) GEAN adopts a dynamic edge representa-
+tion. Speciﬁcally, GAT uses the node-edge-node feature to
+calculate the attention for neighborhood aggregation, while
+GEAN uses the node-edge-node feature to calculate not
+only the attention but also a new edge representation. Then,
+the updated edge representation is sent to the next layer for
+computation. Note that GAT uses the same edge embedding
+in each layer. We conduct an ablation study showing that
+the edge representation in GEAN improves the generaliza-
+tion of the model. 2) GAT treats the graph as an undirected
+graph while GEAN encodes the node-edge-node feature to
+output an updated node-edge-node feature, where the two
+updated node features represent the feature to be aggregated
+in the source node and the target node, respectively. This
+ensures that the directional information is preserved in the
+neighborhood aggregation.
+3.5. Dataset Preparation
+Overﬁtting issues could happen if training is performed
+on a small subset of programs, or the set of programs is
+not diverse enough. To mitigate this we ﬁnd it helpful to
+create an aggregate dataset that uses many different public
+datasets as curated by CompilerGym. CompilerGym gives
+us access to 14 different datasets constructed using two
+different methods.
+• Curated These are small collections of hand-picked
+programs. They are curated to be distinct from one
+another without overlap and are not useful for training.
+Typically programs are larger as they may comprise
+multiple source ﬁles combined into a single program.
+These are commonly used for evaluating compiler op-
+timization improvements.
+• Uncurated These are comprised of individual com-
+piler IRs from building open source repositories such
+as Linux and Tensorﬂow. We also include synthetically
+generated programs, targeted for compiler testing (not
+optimization).
+For our aggregate dataset we decided to holdout the entirety
+of the four curated datasets for use as an out-of-domain test
+set. This is important because they represent the types of
+programs we expect to see in the wild. We also split the
+uncurated datasets into train, validaton, and test programs.
+3.6. Evaluation
+For all our metrics and rewards we leverage the IR instruc-
+tion count as value we are trying to minimize. We also
+report metrics on each CompilerGym dataset as well as
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+Type
+Dataset
+Train
+Val
+Test
+Uncurated
+anghabench-v1
+70,7000
+1,000
+2,000
+blas-v0
+133
+28
+29
+github-v0
+7,000
+1,000
+1,000
+linux-v0
+4,906
+1,000
+1,000
+opencv-v0
+149
+32
+32
+poj104-v1
+7,000
+1,000
+1,000
+tensorﬂow-v0
+415
+89
+90
+clgen-v0
+697
+149
+150
+csmith-v0
+222
+48
+48
+llvm-stress-v0
+697
+149
+150
+Curated
+cbench-v1
+0
+0
+11
+chstone-v0
+0
+0
+12
+mibench-v1
+0
+0
+40
+npb-v0
+0
+0
+121
+Total
+-
+728,219
+4,495
+4,683
+Table 2. CompilerGym dataset types and training splits. The hand
+curated datasets are used solely to evaluate generalization to real
+world program domains at test time.
+the mean over datasets to get a single number to compare
+overall results.
+• The mean percent improved over -Oz (MeanOverOz)
+deﬁned as following:
+¯IOz = MeanOverOz :=
+1
+|P|
+X
+p
+IOz
+p
+−Iπθ
+p
+IOz
+p
+,
+(5)
+where p is a speciﬁc program from the set of programs
+P in the dataset. IOz
+p
+is the number of IR instructions
+in the program after running the default compiler pass
+-Oz. Iπθ
+p
+is the number of IR instructions in the pro-
+gram after applying the policy under consideration.
+We can think of this as a simple average of the percent
+improvement over -Oz.
+• We
+also
+look
+compare
+the
+geometric
+mean
+(GMeanOverOz) of ﬁnal sizes across all pro-
+grams relative to -Oz to give a weighted comparison
+that is insensitive to outliers.
+¯IOz
+G
+= GMeanOverOz :=
+ Y
+p
+IOz
+p
+Iπθ
+p
+!
+1
+|P|
+(6)
+4. Experiments
+4.1. Experimental Setup
+For the methods in Table 3, we search over a set of hyper-
+parameters, including the temperature T in Eq. 3, number
+of layers, the embedding dimension of the node/edge fea-
+tures, and the output dimension in the hidden layers in the
+MLPs. We select the best model of each method based on
+the validation metric (validation MeanOverOz in 45 steps)
+and report the best model’s metrics on the test set.
+4.2. Baseline Methods
+Oracle We consider a brute-force search over the coreset
+in order to ﬁnd the best pass sequence for a given program.
+This gives us an upper-bound of the downstream policy
+network. In our case the coreset has a total of 50 sequences
+(625 total passes).
+Top-45 We also consider how well we would do if the oracle
+is only allowed to use the most popular pass sequences
+but limited to 45 passes. We use 45 passes because this
+is maximum allowed for our all other baselines and our
+proposed method.
+RL-PPO We reproduce the Autophase (Haj-Ali et al.,
+2020b) pipeline by using the state-of-the-art RL algorithm
+PPO (Schulman et al., 2017) to learn a policy model. We
+have two program representations for training the RL mod-
+els, including the Autophase feature and the ProGraML
+graphs (note that Haj-Ali et al. (2020b) only used the
+Autophase feature).
+The Autophase/ProGraML feature
+is sent to a GNN/MLP for feature encoding, which out-
+puts a program-level embedding. Following Haj-Ali et al.
+(2020b), we add an additional action history feature to the
+RL pipeline, which is a histogram of previously applied
+passes. The vector of the histogram of action history is
+divided by 45 (i.e., the number of the total passes in our
+budget) for normalization. A 2-layer MLP is used to encode
+the action history to obtain a feature vector, which is con-
+catenated with the program embedding extracted from the
+ProGraML graph or the Autophase feature. The concate-
+nated feature is sent to a 2-layer MLP to output the action
+probability for the policy network. The value network (i.e.,
+the critic) in our PPO pipeline mimics the policy network
+(i.e., the actor) in feature encoding and outputs a scalar to es-
+timate the state values. The state values are the expectation
+of the discounted cumulative rewards where the reward in
+each step is the improvement over -O0: (I(t)
+p
+−Iπθ
+p )/I(t)
+p ,
+where I(t)
+p
+denotes the current IR instruction count of the
+program p at time step t. This reward is reasonable since
+it makes the value approximation Markovian. At inference,
+an action is sampled from the output of the learned policy
+network at each time step until the total number of steps
+reaches 45.
+Q-value-rank We consider each pass sequence in the core-
+set as a generalized action and train a Q network to predict
+the value of each generalized action. Recall that the value
+vector rp is the highest cumulative reward observed during
+the rollout of each pass sequence in the coreset on program
+p. The Q-value-rank model is trained to approximate the
+value vector using a mean squared loss.
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+Figure 3. GEAN-Q-value-rank: ground truth of rewards and model predictions over the 50 generalized actions for three benchmarks.
+BC We consider learning a standard behavior cloning model
+to predict the best pass sequences from the coreset, where
+the best pass sequence is deﬁned as the following. As in the
+previous bullet point, the value vector is denoted by rp. If
+there is only one i such that rp
+i = maxj∈n rp
+j , then the clas-
+siﬁcation label is i. If there are multiple such i’s (multiple
+pass sequences) that achieve the largest reward maxj∈n rp
+j ,
+then we order the corresponding pass sequences by length-
+lexicographic ordering. The classiﬁcation label is selected
+to be the ﬁrst one after the ordering. This ensures that our
+deﬁnition for the best pass sequence (among the coreset) for
+a program is unique and consistent. We use a standard cross
+entropy loss to train the single-class classiﬁcation model.
+NVP This is the normalized value prediction method de-
+scribed in Section 3.2.
+The last three methods (i.e., Q-value-rank, BC, and NVP)
+share the same inference protocol. Note that they all output
+a vector a of length 50 whose entries correspond to the pass
+sequences in the coreset. At inference, we roll out the pass
+sequences with the highest values in a one by one until our
+budget of 45 passes is reached. Since the pass sequence has
+an average length of 12.5, typically 3 or 4 pass sequences are
+applied (anything beyond 45 passes will be truncated). For
+BC and NVP, we also tried sampling pass sequences using
+the model output a, but that resulted in worse performance.
+Therefore, we stick to selection by maximum values.
+4.3. Main Results
+In Table 3 we present the main results of our experiments
+comparing our proposed method -NVP to various base-
+lines. The test programs were completely held-out during
+both data-driven learning phases (pass sequence search and
+model training).
+The results show that our model achieves strong perfor-
+mance over the prior method (Autophase-RL-PPO) pro-
+posed in (Haj-Ali et al., 2020b). Additionally, we can see
+that both the GEAN model and the normalized value pre-
+diction over the discovered coreset are needed to achieve
+the best performance within 45 passes. See Figure 6 in the
+Method
+#passes
+¯IOz
+¯IOz
+G
+Compiler (-Oz)
+-
+0%
+1.000
+Autophase-RL-PPO
+45
+-16.3%
+0.960
+GCN-RL-PPO
+45
+-12.2%
+0.987
+GGC-RL-PPO
+45
+-8.5%
+1.000
+GIN-RL-PPO
+45
+-11.3%
+0.991
+GAT-RL-PPO
+45
+-10.3%
+0.999
+GEAN-RL-PPO
+45
+-10.0%
+0.997
+GEAN-Q-value-rank
+45
+-0.3%
+1.043
+Autophase-BC
+45
+2.6%
+1.043
+GEAN-BC
+45
+2.1%
+1.038
+Autophase-NVP (Ours)
+45
+3.8%
+1.054
+GCN-NVP (Ours)
+45
+4.4%
+1.058
+GGC-NVP (Ours)
+45
+4.1%
+1.056
+GIN-NVP (Ours)
+45
+4.2%
+1.056
+GAT-NVP (Ours)
+45
+4.1%
+1.055
+GEAN-NVP (Ours)
+45
+4.7%
+1.062
+Top-45
+45
+-7.5%
+0.992
+Oracle
+625
+5.8%
+1.075
+Table 3. Evaluation results on held-out test set averaged over all
+datasets. ¯IOz denotes per-program MeanOverOz, and ¯IOz
+G
+de-
+notes GMeanOverOz over all programs. All methods except
+Compiler and Oracle baselines use 45 compiler optimization
+passes.
+Appendix for a visualization of the improvement in program
+size over the 45 passes on programs from the holdout set.
+The Oracle shows strong performance but requires a large
+number of interactions with the compiler. But, this shows
+that the pass sequence search generalizes to new unseen
+programs. This is somewhat unsurprising given that the
+compiler’s built-in hand-tuned pass list (-Oz) works reason-
+ably well for most programs.
+The performance of Top-45 by itself is weak showing that
+in order to achieve good results in a reasonable number
+of passes (45) we need to leverage a general policy and
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction
+search to select the most likely candidate pass sequences to
+evaluate.
+4.4. Why Did the RL-PPO Baseline Fail?
+We provide an empirical analysis of why the RL-PPO ap-
+proaches obtain much lower performance compared to our
+NVP approaches. We hypothesize two possible reasons for
+the failures of RL-PPO. 1) Inaccurate state-value estima-
+tion results in a high variance in training. In the PPO
+algorithm, we have a policy network (the actor) to output
+a probability distribution over the actions. And we have
+a value network (the critic) for estimating the state val-
+ues, where the approximation is based on regressing the
+cumulative reward of trajectories sampled from the current
+policy (Schulman et al., 2017). The update of the policy
+network is based on the state value outputted by the value
+network. Inaccurate state value estimation results in a high
+variance in training the policy network. Due to the stochas-
+tic nature of the value estimation that stems from the Monte
+Carlo sampling in cumulative reward regression, it is difﬁ-
+cult to analyze how accurately the value network approx-
+imates the ground truth state values (which are unknown
+even for the programs in the training set). We alleviate
+this issue by analyzing the Q-value-rank approach (as
+introduced in Section 4.2), which can be seen as a sim-
+pliﬁed version of the value approximation in PPO. The
+Q-value-rank approach is simpler because the values
+to estimate are deterministic (i.e., the value vector rp is
+ﬁxed for a program p). Moreover, since we consider the
+50 pass sequences in our coreset as 50 generalized actions,
+the Q-value-rank approach can be seen as the value
+approximation in a PPO pipeline where a trajectory consists
+of only a single step over the 50 generalized actions. In
+this sense, the Q-value-rank approach is a simpliﬁed
+version of the regular value estimation in PPO. Figure 3
+shows that the value estimation is inaccurate for programs
+in the held-out test set even for Q-value-rank approach.
+Therefore, it is even more challenging to estimate the state
+values in PPO. The inaccuracy leads to a high variance in
+training the policy network. 2) The reward is very sparse.
+As shown in Figure 2, the rewards are very sparse. There-
+fore, the good states (i.e., the program states with a higher
+chance to be optimized in code size reduction) are rarely
+seen by the value/policy network during rollouts. Then, the
+value network does not have a good value estimation for
+those good states, and the policy network does not converge
+to output a good policy for them. We conjecture these two
+issues are the main reason for why the RL-PPO methods
+obtain the worst performance as shown in Table 3.
+4.5. Ablation Studies
+Ablation for GEAN-NVP We perform 3 ablation exper-
+iments for GEAN-NVP, where we remove graph mixup,
+Figure 4. The effect of temperature on GEAN-NVP.
+Method
+Test MeanOverOz
+GEAN-NVP
+4.7% (0.0%)
+- graph mixup
+4.4% (-0.3%)
+- edge embedding
+4.4% (-0.3%)
+- type graph
+-5.3% (-10.0 %)
+Table 4. Ablation on GEAN-NVP components.
+mask the edge embedding, and remove the type graph,
+respectively.
+The results in Table 4 show that the test
+MeanOverOz metric drops after removing any of the three
+components. Speciﬁcally, the performance drops signiﬁ-
+cantly after removing the type graph, which validates its
+importance.
+The effect of the temperature The temperature parameter
+T in Eq. 3 controls how sharp the target distribution is. The
+distribution tends to be sharper as the temperature decreases.
+To analyze the inﬂuence of the temperature on the general-
+ization of the model, We vary the temperature T in training
+the GEAN-NVP model and report the results in Figure 4.
+5. Conclusions
+In this paper, we develop a pipeline for program size re-
+duction under limited compilation passes. We ﬁnd that it is
+a great challenge to approximate the state values (i.e., the
+maximum code size reduction) for a diverse set of programs,
+so existing state-of-the-art methods such as proximal policy
+optimization (PPO) fail to obtain good performances. To
+tackle this problem, we propose a search algorithm that dis-
+covers a good set of pass sequences (i.e., the coreset), which
+generalizes well to unseen programs. Moreover, we propose
+to train a GNN to approximate the normalized state values
+of programs over the coreset, for which we propose a variant
+of the graph attention network, termed GEAN. Our pipeline
+of coreset discovery and normalized value prediction via
+GEAN perform signiﬁcantly better than the PPO baselines.
+
+Learning Compiler Pass Orders using Coreset and Normalized Value Prediction

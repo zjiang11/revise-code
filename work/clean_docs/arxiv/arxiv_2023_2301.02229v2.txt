@@ -1,0 +1,958 @@
+All in Tokens: Unifying Output Space of Visual Tasks via Soft Token
+Jia Ning1,4*, Chen Li2,4*, Zheng Zhang4*, Zigang Geng3,4, Qi Dai4, Kun He1, Han Hu4
+1Huazhong University of Science and Technology
+2Xi’an Jiaotong University
+3University of Science and Technology of China
+4Microsoft Research Asia
+
+Abstract
+Unlike language tasks, where the output space is usu-
+ally limited to a set of tokens, the output space of visual
+tasks is more complicated, making it difﬁcult to build a uni-
+ﬁed visual model for various visual tasks. In this paper, we
+seek to unify the output space of visual tasks, so that we
+can also build a uniﬁed model for visual tasks. To this end,
+we demonstrate a single uniﬁed model that simultaneously
+handles two typical visual tasks of instance segmentation
+and depth estimation, which have discrete/ﬁxed-length and
+continuous/varied-length outputs, respectively. We propose
+several new techniques that take into account the particu-
+larity of visual tasks: 1) Soft token. We employ soft token
+to represent the task output. Unlike hard tokens in the com-
+mon VQ-VAE which are assigned one-hot to discrete code-
+books/vocabularies, the soft token is assigned softly to the
+codebook embeddings. Soft token can improve the accu-
+racy of both the next token inference and decoding of the
+task output; 2) Mask augmentation. Many visual tasks have
+corruption, undeﬁned or invalid values in label annotations,
+i.e., occluded area of depth maps. We show that a mask aug-
+mentation technique can greatly beneﬁt these tasks. With
+these new techniques and other designs, we show that the
+proposed general-purpose task-solver can perform both in-
+stance segmentation and depth estimation well. Particu-
+larly, we achieve 0.275 RMSE on the speciﬁc task of NYUv2
+depth estimation, setting a new record on this benchmark.
+The general-purpose task-solver, dubbed AiT, is available at
+https://github.com/SwinTransformer/AiT.
+1. Introduction
+A uniﬁed model for various tasks across modalities is
+one of the most ambitious goals of artiﬁcial intelligence
+(AI). However, this is challenging due to the diversity and
+*Equal Contribution. Jia, Chen, and Zigang are interns at MSRA.
+complexity of real-world tasks.
+Despite the difﬁculties,
+large-scale language models in the ﬁeld of natural language
+processing (NLP), e.g., GPT-3 [6], have demonstrated im-
+pressive capabilities as a general-purpose solver for lan-
+guage tasks. Encouraged by the success of NLP, this paper
+attempts to investigate the possibility of universal models
+for various computer vision tasks.
+Most existing related research for universal computer vi-
+sion models focuses on the uniﬁcation of architectures [19,
+40] and pre-training [2]. A few works aim for develop-
+ing one model for multiple visual tasks, yet they are usu-
+ally applicable to limited tasks:
+[1] handles only tasks
+with language as output; CLIP models [33] and the follow-
+ups [48, 49, 52] tackle only retrieval and image classiﬁca-
+tion tasks; [9] deals with tasks that have describable and
+sequential outputs. In this paper, we aim for a truly general-
+purpose solver for various vision tasks. To this end, we
+ﬁrst notice that a key obstacle was overlooked and under-
+explored: unlike language tasks whose inputs and outputs
+are represented by language tokens of the same form, the
+output forms for different computer vision tasks are more
+diverse. For example, the output of object detection is a set
+of coordinates and labels; the output of semantic segmenta-
+tion is a discrete label map; the output of depth estimation is
+an image with ﬂoating-point values; and the output of ﬂow
+estimation is a vector ﬁeld.
+In this paper, we address this obstacle by unifying the
+output space of various visual tasks through a general to-
+kenizer to encode the output space into a set of tokens.
+Speciﬁcally, the proposed framework consists of three com-
+ponents: tokenizer, detokenizer, and task solver, as illus-
+trated in Figure 1. The tokenizer and detokenizer are in-
+stantiated by VQ-VAE [38], which encodes the task output
+into a set of tokens, which are then reconstructed into the
+original output by the decoder. The task solver for different
+vision tasks is instantiated using an auto-regressive encoder-
+decoder model. The encoder-decoder model takes images
+as inputs and predicts a token sequence in a causal mode,
+arXiv:2301.02229v2  [cs.CV]  14 Feb 2023
+
+which is decoded into the original task-speciﬁc output form
+by the VQ-VAE decoder.
+To improve the effectiveness, we propose several new
+techniques that take into account the particularity of visual
+tasks. First, we propose soft token instead of hard ones as
+used in language tasks or by the original visual VQ-VAE
+framework. The soft token is represented by probability
+vectors, with each value in a vector denoting the probabil-
+ity belonging to a codebook. When a soft token is fed to
+the input of the detokenizer or to the input of the next token
+prediction network, its input embedding is computed by the
+weighted average of the codebook embeddings based on the
+probability values. This indicates that the soft token embed-
+ding has spanned an interpolable continuous space, which
+may better represent the visual output, especially when it’s
+continuous. The continuous nature of the soft token also al-
+lows the introduction of an auxiliary loss which learns the
+task output end-to-end, back from the detokenizer output to
+the task-solver input. In experiments, we show that the three
+usages of the soft token can all lead to better results.
+Second, we propose a mask augmentation technique to
+deal with visual tasks which have corrupted, undeﬁned, or
+invalid values in annotations. The depth estimation is a typ-
+ical example of such a task, where the occluded area is not
+deﬁned [37], as shown in Figure 3. The undeﬁned regions
+make it difﬁcult to the training of VQ-VAE tokenizers and
+detokenizers because it does not know what to reconstruct
+in the undeﬁned area. To solve this problem, we randomly
+mask several patches of the input depth map when train-
+ing VQ-VAE. Unlike undeﬁned areas, manually masked
+patches have ground truth annotations, which help train the
+VQ-VAE network to be able to recover the ground truth for
+undeﬁned areas. In experiments, we show this technique
+to notably improve the accuracy of depth estimation. The
+mask augmentation technique is also expected to be use-
+ful for other visual problems with similar undeﬁned or cor-
+rupted annotations, and therefore strengthens the generality
+of our uniﬁed task solver.
+Third, we systematically study the impact of architec-
+tures in the VQ-VAE model. We ﬁnd that a very lightweight
+VQ-VAE with up to 5 convolution layers, 2 residual blocks,
+and 128 codebooks can serve as a very powerful tokenizer.
+The number of parameters and computations can be as small
+as 2M and 0.06G FLOPs. This suggests that the overhead
+of the VQ-VAE model is small, which improves the practi-
+cality of our framework.
+We choose two classical visual tasks with varying out-
+put spaces to validate our approach: depth estimation, and
+instance segmentation, whose output spaces are in formats
+of the ﬂoating-point maps and binary masks, and have ﬁxed
+size and variable size, respectively. We achieve competitive
+accuracy on COCO instance segmentation [26], and state-
+of-the-art accuracy for NYUv2 depth estimation [37]. The
+proposed framework and techniques are generic and can be
+applied to other visual tasks, which will be our future work.
+2. Related Works
+Uniﬁed Frameworks in Computer Vision
+Encouraged
+by the success of T5 [34]/GPT [6] in NLP, the explo-
+ration of a single uniﬁed model for various tasks in com-
+puter vision has emerged. However, most existing works
+[1, 40, 48, 49, 52] are focused on the training algorithm or
+model architectures. This makes these models either only
+available as pre-trained models [40,48,49] or only for VL-
+related tasks [1, 52]. Perceiver-IO [19] presents a frame-
+work that can process different vision tasks, and it adopts
+the learned positional encoding or Fourier feature to unify
+the output of different tasks.
+Very recently, Pix2SeqV2 [9] proposed to unify different
+vision tasks into tokens and the tokens in Pix2SeqV2 need
+to be designed manually for different tasks. For example,
+they use the polygon to represent the instance segmentation.
+The most related works with ours are UViM [21] and
+Uniﬁed-IO [29]. They also adopt VQ-GAN/VQ-VAE as a
+general tokenizer/detokenizer and an auto-regressive Trans-
+former encoder/decoder to solve different tasks. However,
+they are direct applications of these techniques without an
+in-depth consideration of the particularity of visual prob-
+lems.
+Our study, while concurrently started, takes more in-
+depth consideration of the particularity of visual problems.
+We propose techniques of soft token and mask augmenta-
+tion, which prove beneﬁcial generally for visual tasks or a
+part of them. We also extensively investigate the architec-
+ture of the VQ-VAE, which shows that this part can be made
+very light-weight, and thus make the framework more prac-
+tical.
+Vector-Quantization
+Discretized token output space is
+widely used in generative models, such as DALL-E [35],
+VQGAN [14], and VQ-Diffusion [16], to represent high-
+dimensional complex data.
+Models like VQ-VAE [38],
+dVAE [3] deﬁne a discrete latent space with the encoder-
+decoder architecture and a ﬁxed size of codebook, The in-
+put is mapped to the discrete tokens of the codebook. We
+adopt the VQ-VAE framework to build our token space, and
+our soft token approach that treats the token space as a con-
+tinuous one instead of the original discrete one expands the
+usage of VQ-VAE.
+Monocular Depth Estimation
+Monocular depth estima-
+tion is a fundamental task for 3D perception. Deep learning
+dominates the depth estimation since Eigen et al. [13] intro-
+duces it into the depth task. The follow-up works include
+proposing powerful network [23, 24, 36], designing novel
+
+augmentation [18, 20], making use of the geometric con-
+straints [32,47], exploring pairwise relationship [10,22,53],
+combing with conditional random ﬁeld [27,44,50].
+Some works [30, 36, 39, 46, 51] combine depth estima-
+tion with other tasks, such as semantic segmentation, and
+edge estimation. However, they design different heads and
+loss functions for different tasks respectively. There are also
+some methods [4, 5, 12, 15, 25] discretizing the continuous
+depth and cast the depth estimation as a per-pixel classi-
+ﬁcation task. Our approach represents the depth maps as
+a set of tokens, and uniﬁes it with other visual tasks, i.e.
+instance segmentation, in a uniﬁed network structure and
+output space. More importantly, we show that a general
+framework for various visual tasks can achieve state-of-the-
+art accuracy on the NYUv2 depth estimation task.
+Instance Segmentation
+Instance segmentation aims to
+predict the segments of each instance.
+There are many
+works [17,41,45] studying how to represent the masks. For
+example, MaskRCNN [17] used a binary mask, Dense Rep-
+Points [45] adopts a set of deformable points to represent
+the segments, and PolarMask [41] models the segments by
+polygons. While their representation is speciﬁc to instance
+segmentation, we model the instance segmentation by a set
+of discrete (soft) tokens, which is more general for visual
+representations.
+3. Framework
+The goal of this work is to unify the output space of vi-
+sual tasks into discrete tokens and to build a single model
+that can handle different tasks simultaneously. In this sec-
+tion, we present the framework to achieve this goal, which
+is shown in Figure. 1. The framework consists of three mod-
+ules, a tokenizer that encodes the task output to the discrete
+tokens, a detokenizer that decodes tokens to the task output,
+and a task-solver that predicts tokens from images. In our
+approach, the encoder and decoder of VQ-VAE are used as
+the tokenizer and detokenizer, and the task-solver is imple-
+mented by an auto-regressive encoder-decoder model. Dur-
+ing training, task annotations are ﬁrst mapped by the tok-
+enizer as discrete tokens and used as supervision to train the
+task-solver. In inference, the tokens predicted by the task-
+solver are decoded by the detokenizer into task outputs.
+3.1. Tokenizer and Detokenizer
+VQ-VAE is an encoder-decoder model with a set of la-
+tent codes. It was originally proposed to learn discrete rep-
+resentation for natural images. In this work, we use its en-
+coder and decoder as the tokenizer and detokenizer. In train-
+ing, the input image is encoded as a set of contiguous em-
+beddings, and these embeddings are assigned to their near-
+est latent codes. In the decoder, the corresponding codes are
+used as inputs instead of contiguous embeddings and then
+decoded into the image. By minimizing the reconstruction
+loss between the input image and decoded images, the en-
+coder, decoder and latent codes can be trained.
+Since we adopt discrete tokens as targets in the task-
+solver, the accuracy of reconstruction has an upper-bound
+on the performance of the whole framework. In addition,
+both training and inference of task-solver require the tok-
+enizer and detokenizer, the fast inference speed is also de-
+sired. The original network architecture of VQ-VAE is de-
+signed for natural images, which have more complex tex-
+tures and colors than the task output, making it not the opti-
+mal design for us. Therefore, we have exhaustively studied
+the effects of VQ-VAE with different design choices in our
+framework.
+Typical reconstruction losses (e.g. l-1 loss, MSE loss,
+etc.) cannot directly reﬂect the realistic performance of the
+task, we use standard evaluation metrics for different tasks
+to measure VQ-VAE. As shown in Table 2 and Table 4. We
+found that a very lightweight VQ-VAE can achieve promis-
+ing results in depth estimation and instance segmentation.
+Since the input value ranges for depth estimation and in-
+stance segmentation are different. We train two VQ-VAE
+models for two tasks separately, and they have similar archi-
+tecture. For depth estimation, the encoder consists of 5 con-
+volution layers (kernel size is 3 and stride is 2) and follows
+2 residual blocks. The output feature map has a downsam-
+ple ratio of 32, and the channel dimension is progressively
+increased from 16 to 256. The architecture of the decoder
+is symmetrical to the encoder, only replacing the convolu-
+tion layers with the deconvolution layer. For instance seg-
+mentation, we reduce the convolution and deconvolution of
+the encoder and decoder from 5 layers to 4 layers and keep
+all others the same. Subsequently, the downsample ratio is
+changed to 16.
+In addition, compared to the standard VQ-VAE usually
+adopts a large codebook size (e.g. 8192), our codebook size
+can be reduced to 128. We note that though larger codebook
+size consistently improves VQ-VAE reconstruction ability,
+they show no difference when applied to task-solver (see Ta-
+ble 1 and Table 2). There are two speculations on the effec-
+tiveness of a small codebook: 1) the output space of depth
+and segmentation is simple, without the need for a large
+codebook; 2) the large codebook may increase the learning
+difﬁculty for task-solver.
+3.2. Task-solver
+The task-solver is an auto-regressive encoder-decoder
+network. The encoder is a Swin Transformer with 6 ad-
+ditional standard transformer blocks, each block consists of
+a self-attention and an FFN. The decoder has 6 blocks, each
+block consists of a self-attention, a cross-attention, and an
+FFN. The architecture we used is similar to [8].
+
+Figure 1. Illustration of our uniﬁed framework with two stages. In this framework, various vision task outputs are transferred to discrete
+token space by a VQ-VAE tokenizer. In this way, discrete or continuous visual tasks can be converted into one discrete classiﬁed task,
+Given an input image, the encoder is ﬁrst applied to learn
+a generic representation of all tasks. Then, based on the
+given task token, the decoder is used to predict a token se-
+quence in an auto-regressive manner. For different tasks,
+we customize their sequence formats, as described in the
+following:
+Depth Estimation
+The task token of depth estimation is
+denoted as [DEP]. It has a straightforward format, which
+is a token sequence of length HW
+322 , where H and W are the
+height and width of input images, respectively.
+Instance Segmentation
+The sequence format of instance
+segmentation is more complicated than depth estimation,
+which consists of three parts: bounding box coordinates,
+class of bounding box, and a binary mask. We follow the
+practice of Pix2Seq [8] for representing coordinates and the
+class of a bounding box.
+The coordinates are manually
+quantized into 2000 bins, and different classes are repre-
+sented by different tokens (including a background class,
+e.g. COCO dataset has 81 class tokens in total). For the bi-
+nary mask, we use 4 × 4 tokens to represent one mask. It
+is worth noting that since the computational complexity of
+auto-regressive is proportional to the square of the output
+sequence length, we have to use very few tokens to repre-
+sent the mask. Nevertheless, beneﬁtting from our powerful
+detokenizer, these tokens can be decoded to a 64×64 mask.
+Based on these designs, each instance is represented by a
+total of 21 tokens (i.e. 4 tokens for coordinates, 1 token for
+class, 16 tokens for mask), and we use [INS] as the task
+token of instance segmentation, as shown in Figure 2. We
+append the meaningless zero mask for the noise box and do
+not add loss on those mask tokens during training.
+Figure 2. Illustration of instance segmentation and depth estima-
+tion token format. (a) We organize every object by 21 tokens. For
+positive objects, this format includes 4 box, 1 label and 16 mask
+tokens. While for noise tokens, 4 noise, 1 background and 16 zero
+tokens are employed; (b) For dense tasks like depth estimation, we
+treat every patch a token to form a token map.
+3.3. Soft Token
+In a typical auto-regressive prediction procedure, the to-
+ken with the maximal predicted probability is selected as the
+output, and used its embedding as the input to the decoder
+for the next prediction step. This approach is called hard-
+inference. However, since the tokens learned by VQ-VAE
+
+Figure 3. There are some corrupted regions (black regions/pixels)
+in the GT depth map. While we have ignored these regions in
+training VQ-VAE as well, the reconstructed regions are still ab-
+normal, which is reﬂected in the shadows in reconstruction results.
+This phenomenon can be alleviated by adding masked augmenta-
+tion.
+are not completely independent of each other, the correla-
+tion between the tokens may affect the token prediction ac-
+curacy, making the hard inference probably not optimal. To
+leverage the correlation, a soft token technique is presented
+in the inference: instead of directly using the embedding
+of a single token, the soft token is the weighted averaged
+embedding of different tokens by their prediction probabil-
+ity. In addition to being applied in task-solver to predict the
+next token more accurately, the same idea can also be used
+in detokenizor to get better reconstruction results.
+Furthermore, the soft token results in the embedding
+space being spanned to an interpolable continuous space.
+Therefore, we can introduce an auxiliary loss that learns
+the task-speciﬁc output targets in an end-to-end manner by
+backing from the detokenzior output to the task-solver in-
+put.
+We examined the soft token in both instance segmen-
+tation and depth estimation. It can consistently improve
+the performance without any additional computational cost,
+which is a free-lunch technique in inference.
+3.4. Mask Augmentation in Depth Estimation
+The ground-truth depth maps in the depth estimation
+dataset often have some corrupted regions that are not anno-
+tated with depth information. In the conventional depth esti-
+mation frameworks, these regions are ignored during train-
+ing. However, the same solution cannot be applied to our
+framework. There are two challenges: First, while we have
+ignored these regions in training VQ-VAE as well, the re-
+constructed regions are still abnormal (see Figure 3) and
+further affect the training of the task-solver and make the
+ﬁnal result also have many artifacts; Second, a token pre-
+dicted by VQ-VAE corresponds to a 322 patch, which may
+contain both normal and corrupted pixels. Therefore, it is
+hard to deal with this issue by ignoring the tokens.
+Figure 4. Illustration of our masked augmentation. In order to
+make the tokenizer have a stronger complement capability, we add
+random mask noise under a certain mask ratio and patch size to the
+original GT depth maps as inputs. But we still use the GT depth
+maps to apply reconstruction loss.
+As shown in Figure 4, we present to introduce mask
+augmentation in the training of VQ-VAE to alleviate this
+challenge. Speciﬁcally, we randomly mask some regions
+in the input depth images and then use their original depth
+information as supervision. In this way, the VQ-VAE can
+complete/recover some corrupted regions with reasonable
+results. Figure 3 shows the visualization. In Table 8, we no-
+tice that applying mask augmentation can improve the per-
+formance of depth estimation.
+4. Experiments
+4.1. Tasks and Datasets
+To examine the generalizability of our framework, we
+choose depth estimation and instance segmentation, which
+are two tasks with very different output spaces.
+Instance Segmentation
+The instance segmentation re-
+quires predicting the location, the class, and the mask of
+each instance. The COCO2017 benchmark is one of the
+most challenging datasets for this task. It consists of 117K
+training images, 5K validation images, and 41K test im-
+ages.
+A total of 80 classes annotation are provided.
+In
+our experiments, we follow the common setting of previ-
+ous works [17, 41, 45] that report the performance on the
+validation set for comparison.
+Depth Estimation
+Depth estimation is a fundamental
+problem in computer vision, which requires estimating the
+depth for each pixel. Unlike segmentation whose output is
+a binary mask, the depth map is a ﬂoating point image. In
+this work, we use the NYUv2 Depth dataset, which consists
+of 24K training images and 654 validation images, and the
+RMSE is used as the major metric.
+
+4.2. Implementation Details
+We train two separate VQ-VAE for depth estimation and
+instance segmentation. For depth estimation, the input im-
+age size used in depth is 4802, with a batch size of 8. The
+Adam optimizer is used with the base learning rate of 3e-4,
+β1 = 0.9, β2 = 0.999. An exponential learning rate sched-
+ule is applied with the learning rate decay of 0.98 and a total
+of 20 training epochs. For instance segmentation. The input
+image size is 642 with a batch size of 512. The Adam opti-
+mizer is used with the base learning rate of 3e-4, β1 = 0.9,
+β2 = 0.999. A cosine learning rate schedule is applied with
+a total of 20 training epochs. By default, the EMA model
+update technique is used for all VQ-VAE models.
+For the task-solver,
+we adopt the auto-regressive
+encoder-decoder architecture, which is similar to Pix2Seq
+[8]. It consists of a backbone, 6 encoder layers, and 6 de-
+coder layers. We use the SwinV2 [28] as the backbone,
+which is pre-trained with SimMIM [43]. Most experiments
+in the ablation study are separately trained on depth estima-
+tion and instance segmentation.
+In depth estimation, we use the AdamW optimizer with
+a base learning rate of 2e-4 and 1e-4, the weight decay of
+0.05 and 0.075 for SwinV2-B and SwinV2-L, respectively.
+The β1 and β2 are set to 0.9 and 0.999, and drop path rate
+is set to 0.1. The total training length is 25 epochs with the
+batch size of 24. The step learning rate schedule is used
+and the learning rate dropped to 2e-5 at the 18th epoch. For
+data augmentation, the random cropping of 4802 and hori-
+zontal ﬂip with probability 0.5 are employed. We also ap-
+pend random brightness contrast, random gamma, and hue
+saturation value.
+Training of instance segmentation from scratch is expen-
+sive because of the long sequence length. To reduce the
+cost, we ﬁrst train an object detection model and then ﬁne-
+tuning on instance segmentation. For object detection pre-
+training, the AdamW optimizer with a base learning rate of
+1e-3, a weight decay of 0.05, a drop path rate of 0.3, and
+a layer decay of 0.85, linear decay learning rate scheduler
+are applied, and a total of 100 training epochs with a batch
+size of 128 are performed. For instance segmentation ﬁne-
+tuning, we only initialized the backbone and encoder with
+detection pre-trained model, and randomly initialized the
+decoder. In addition, AdamW optimizer with a base learn-
+ing rate of 1e-4, a weight decay of 0.05, and a layer decay of
+0.85, linear decay learning rate scheduler are applied, and
+the total training length is 50 epochs with a batch size of
+16. Large-scale jittering with the range of 0.1 to 3.0 and
+crop size of 6402 are used for both object detection and in-
+stance segmentation. β1 = 0.9, β2 = 0.999 are used for
+AdamW in all experiments.
+4.3. Ablation Study
+We ablate the key design choices and techniques in this
+section.
+By default, we train the model separately for
+each task in the ablation study for better illustration, and
+SwinV2-B is used as the default backbone. For depth esti-
+mation experiments, a VQ-VAE with codebook size of 128,
+downsample rate of 32 and mask ratio of 0.5 is used by de-
+fault. For instance segmentation, the codebook size is 128
+and the downsample rate is 16. If not speciﬁed, we use the
+soft token but do not apply auxiliary loss for all ablation
+experiments.
+Table 1. Ablation study on codebook size of VQ-VAE on depth
+and instance segmentation in reconstruction.
+Width #tokens Depth Instance Seg.
+RMSE Mask mAP
+1.0×
+64
+0.1025
+88.94
+1.0×
+128
+0.0966
+89.34
+1.0×
+256
+0.0902
+90.22
+Table 2. Ablation study on codebook size of VQ-VAE on depth
+and instance segmentation in task-solver.
+Width #tokens Depth
+Instance Seg.
+RMSE Box mAP Mask mAP
+1.0×
+64
+0.3090
+43.5
+33.0
+1.0×
+128
+0.3080
+43.6
+33.2
+1.0×
+256
+0.3119
+43.4
+33.4
+Table 3. Ablation study on the width of VQ-VAE on depth and
+instance segmentation in reconstruction.
+Width #tokens Depth Instance Seg.
+RMSE Mask mAP
+0.5×
+128
+0.1196
+88.97
+1.0×
+128
+0.0966
+89.34
+2.0×
+128
+0.1025
+90.92
+Table 4. Ablation study on the width of VQ-VAE on depth and
+instance segmentation in task-solver.
+Width #tokens Depth
+Instance Seg.
+RMSE Box mAP Mask mAP
+0.5×
+128
+0.3127
+43.4
+33.1
+1.0×
+128
+0.3080
+43.6
+33.2
+2.0×
+128
+0.3124
+43.2
+33.1
+Architecture of VQ-VAE
+We study how different de-
+signs of VQ-VAE affect performance. We ﬁrst evaluate the
+reconstruction performance of different codebook sizes. To
+more accurately and intuitively observe the reconstruction
+performance, our evaluation is performed on the validation
+
+Table 5. Ablation study on the downsample ratio of VQ-VAE on
+depth and instance segmentation in reconstruction.
+Downsample Ratio Depth Instance Seg.
+RMSE Mask mAP
+32
+0.0966
+70.91
+16
+0.0696
+89.34
+8
+0.0515
+-
+Table 6. Ablation study on the downsample ratio of VQ-VAE on
+depth and instance segmentation in task-solver.
+Downsample Ratio Depth
+Instance Seg.
+RMSE Box mAP Mask mAP
+32
+0.3080
+42.7
+30.3
+16
+0.3304
+43.6
+33.2
+8
+0.3514
+-
+-
+Table 7. Ablation on the effectiveness of soft token.
+Description
+Depth
+Instance Seg.
+RMSE
+box mAP
+mask mAP
+Baseline (hard-inf)
+0.3174
+43.6
+31.1
+On. task-solver
+0.3127
+43.5
+32.1
+On. detokenizor
+0.3120
+43.6
+32.3
+On. both
+0.3080
+43.6
+33.2
+On. both + aux. loss
+0.3052
+43.3
+34.2
+set of different tasks and adopts mask mAP and RMSE as
+metrics. The results are shown in Table 1. We ﬁnd that
+although the large codebook size (e.g. 256) beneﬁts the re-
+construction performance, the small codebook size (e.g. 64)
+can also yield sufﬁciently good reconstruction performance.
+Further applying to the task-solver, we found different code-
+book size has little effect on ﬁnal performance (see Table 2).
+Using the same evaluation method, we study the effect
+of the width of VQ-VAE. Table 3 shows the reconstruction
+performance and Table 4 shows the performance of apply-
+ing to task-solver. Similar to the observation on codebook
+size, we ﬁnd that the network width has little effect on the
+ﬁnal performance.
+The downsample ratio of VQ-VAE is another key that
+may affect network performance. We vary the downsam-
+ple ratio in [8, 16, 32]. We note that the instance segmen-
+tation cannot support a downsample ratio of 8 because it
+results in too long sequences. Table 5 shows the recon-
+struction performance, as the downsample ratio increases,
+the reconstruction performance gets worse, satisfying the
+intuition. However, we ﬁnd that better reconstruction per-
+formance does not always lead to better performance when
+applying the VQ-VAE in task-solver. In Table 6, the best
+performance is achieved at downsample ratio of 32. We ex-
+plain this phenomenon is that a smaller downsample ratio
+facilitates reconstruction, but it also increases the length of
+the token sequence, which is detrimental to the task-solver.
+Soft Token
+To leverage the correlation between tokens,
+we introduce the soft token techniques, which can be used to
+improve the performance in the inference stage for free. We
+examined this technique in Table 7. Compared with the hard
+inference baseline, applying the soft token in task-solver
+and detokenzior alone can bring performance gains, and
+further performance improvement is achieved when used in
+two stages at the same time: the depth performance is im-
+proved by +0.009 RMSE and the instance segmentation is
+improved by +2.1 mAP. On top of it, adding the auxiliary
+loss on the output of detokenizor enlarges the gain to +0.012
+RMSE and +3.1 mAP.
+Table 8. Affects of mask augmentation in training VQ-VAE on
+depth. The patch size of all models is set to 16.
+Mask Ratio VQ-VAE task-solver
+0.0
+0.0831
+0.3105
+0.3
+0.0893
+0.3093
+0.5
+0.0966
+0.3080
+0.7
+0.1196
+0.3225
+Mask Augmentation
+We evaluate the effectiveness of
+mask augmentation in depth estimation. The different mask
+ratios vary from 0.3 to 0.7 are used, and Table 8 shows the
+results. The best performance is achieved by using the mask
+ratio of 0.5, which is +0.003 better than the baseline.
+4.4. Preliminary Study on Parallel Prediction
+In previous sections, we mainly demonstrate the use of
+auto-regressive models to unify various visual tasks. Note
+the bi-directional or even qua-directional natural may en-
+courage parallel decoding approaches. Therefore, we make
+some preliminary studies on the parallel decoder instead of
+the auto-regressive decoder.
+As parallel decoder has been prevalent in object de-
+tection and instance segmentation, i.e. DETR [7] and
+Mask2Former [11], we mainly studied the parallel decoder
+for the depth estimation problem. As shown in Table 9,
+the parallel decoder performs better than the auto-regressive
+counterpart by around 0.01 RMSE (0.275 vs. 0.284). This
+indicates a strong potential than the auto-regressive models.
+Our techniques such as soft token also beneﬁt the parallel
+decoder, as shown in Table 9. This implies the generality of
+the proposed techniques.
+4.5. Comparison with Other Uniﬁed Frameworks
+and State-of-the-arts in Depth Estimation
+UViM and Uniﬁed-IO are the most relevant works to
+ours.
+We compare the performance with these methods
+on the overlap task, i.e. NYUv2 depth estimation. The re-
+sults are shown in Table. 9. Our auto-regressive approach
+achieves 0.284 RMSE, which is 0.183 and 0.101 better than
+
+Figure 5. Visualization on instance segmentation task of our method.
+Figure 6. Visualization of depth estimation task. With the well-designed structure and techniques, our model is capable for this task.
+UViM and Uniﬁed-IO. Moreover, our parallel approach fur-
+ther improves the performance to 0.275 RMSE. This re-
+sult surpasses previous state-of-the-arts by 0.012 RMSE.
+While UViM and Uniﬁed-IO mainly conceptually propose
+uniﬁed frameworks for various visual tasks, we push more
+solid steps through in-depth study of the general visual task-
+solver.
+4.6. One Model for Multiple Tasks
+We train the instance segmentation and depth jointly us-
+ing a shared task-solver. Table 10 shows that the joint train-
+ing with shared model weights has marginal performance
+gradation compared to using separate task solvers.
+5. Conclusion
+In this work, we investigate the uniﬁcation of output
+spaces for various vision tasks by a set of visual tokens, and
+further develop a uniﬁed auto-regressive encoder-decoder
+model. Two new techniques are proposed which take the
+particularity of visual tasks into account to improve the sys-
+tem: 1) Soft token can leverage the correlation between
+tokens to improve performance in the inference stage and
+enables end-to-end learning for the ﬁnal visual targets; 2)
+Mask augmentation is used to alleviate the issue of cor-
+rupted/undeﬁned areas of visual tasks, i.e. depth estima-
+tion. With these two techniques, our general method set a
+new state-of-the-art on the NYUv2 depth dataset, as well as
+competitive accuracy on the COCO 2017 object detection
+
+Table 9.
+Results of monocular depth estimation task on
+NYUv2 [37]. Both AiT and AiT-P are our methods, where AiT
+indicates auto-regressive prediction, and AiT-P indicates parallel
+prediction.
+Method
+RMSE ↓
+δ1 ↑
+δ2 ↑
+δ3 ↑
+REL ↓
+log10 ↓
+DORN [15]
+0.509
+0.828
+0.965
+0.992
+0.115
+0.051
+BTS [23]
+0.392
+0.885
+0.978
+0.995
+0.110
+0.047
+AdaBins [4]
+0.364
+0.903
+0.984
+0.997
+0.103
+0.044
+DPT [36]
+0.357
+0.904
+0.988
+0.998
+0.110
+0.045
+LocalBins [5]
+0.357
+0.907
+0.987
+0.998
+0.099
+0.042
+P3Depth [31]
+0.356
+0.898
+0.981
+0.996
+0.104
+0.043
+BinsFormer [25]
+0.339
+0.921
+0.989
+0.998
+0.096
+0.041
+NeWCRFs [50]
+0.334
+0.922
+0.992
+0.998
+0.095
+0.041
+BinsFormer [25]
+0.330
+0.925
+0.989
+0.997
+0.094
+0.040
+SwinV2-B [42]
+0.303
+0.938
+0.992
+0.998
+0.086
+0.037
+SwinV2-L [42]
+0.287
+0.949
+0.994
+0.999
+0.083
+0.035
+UViM [21]
+0.467
+-
+-
+-
+-
+-
+Uniﬁed-IOXL [29]
+0.385
+-
+-
+-
+-
+-
+AiT (SwinV2-B)
+0.305
+0.934
+0.991
+0.998
+0.087
+0.037
+AiT (SwinV2-L)
+0.284
+0.949
+0.993
+0.999
+0.079
+0.034
+AiT-P (SwinV2-B)
+0.301
+0.940
+0.992
+0.998
+0.085
+0.036
+AiT-P (SwinV2-L)
+0.275
+0.954
+0.994
+0.999
+0.076
+0.033
+AiT-P (SwinV2-L)
+w/o soft token
+0.282
+0.951
+0.994
+0.999
+0.080
+0.034
+Table 10. Joint training of depth estimation and instance segmen-
+tation using a single task-solver. The performance of joint training
+is slightly worse compared to using separate task-solvers for each
+task.
+Description.
+Depth
+Instance Seg.
+RMSE Box mAP Mask mAP
+separate training 0.3052
+43.3
+34.2
+joint training
+0.3103
+42.2
+34.1
+and instance segmentation benchmark. We also conducted
+preliminary studies on the parallel decoder which is show
+promising results on the depth estimation problem.
+A. Ablation on the Depths of VQ-VAE
+In Table 3 and Table 4, we have studied how different
+widths of VQ-VAE affect the performance. In Table 11, we
+further examine the effect of depth, i.e. different number of
+residual blocks in VQ-VAE. The results show that increas-
+ing the number of residual blocks cannot bring more im-
+provements and we ﬁnd greater results variance when train-
+ing tokenizer with deeper networks.
+B. VQ-VAE vs. Interpolation Tokenizer
+We use a lightweight VQ-VAE as the tokenizer to reduce
+the resolution and computation for the task-solver. A intu-
+itive baseline to perform down-sampling is the interpolation
+Table 11. Ablation study on increasing the number of residual
+blocks on the 32× downsampling setting of depth estimation.
+#Resblock Tokenizor Task-solver
+RMSE
+RMSE
+2
+0.0966
+0.3080
+3
+0.1055
+0.3123
+4
+0.1082
+0.3136
+5
+0.1033
+0.3118
+Table 12. Comparison of VQ-VAE and interpolation as the tok-
+enizer.
+Description. Depth
+Instance Seg.
+RMSE Box mAP Mask mAP
+Ours
+0.3080
+43.6
+33.2
+interpolation 0.7544
+43.8
+4.2
+method. For example, in instance segmentation, we can
+use a nearest-neighbor interpolation method to up-sample
+the binary masks. For depth estimation, we use a bilin-
+ear interpolation method and discretize the ﬂoating num-
+bers between 0 to 10 by 128 bins. We select the same in-
+put and target resolution as our VQ-VAE tokenizer for a
+fair comparison. As shown in Table 12, the tokenizer using
+nearest-neighbor interpolation is much worse than our VQ-
+VAE method, showing the effectiveness of using VQ-VAE
+to represent the task output space.
+C. Details for Joint Training
+The AdamW optimizer with a base learning rate of 8e-4,
+α1 = 0.9, α2 = 0.999, a weight decay of 0.05, and a layer
+decay of 0.85, a drop path rate of 0.3, and the linear de-
+cay learning rate scheduler are applied. We train the model
+with 300k iterations and batch size 64. The decoder loss
+weights of 5.0 and 1.0 are used for instance segmentation
+and depth estimation respectively. A depth loss weight of
+0.2 is used. We process these batch data individually i.e.
+different tasks do task-speciﬁc augmentation and generate
+their discrete training token sequence.

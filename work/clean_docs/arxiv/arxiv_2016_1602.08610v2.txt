@@ -1,0 +1,1656 @@
+Scalable Bayesian Rule Lists
+Hongyu Yang
+
+Department of Electrical Engineering and Computer Science
+Massachusetts Institute of Technology, USA
+Cynthia Rudin
+
+Department of Computer Science and Department of Electrical and Computer Engineering
+Duke University, USA
+Margo Seltzer
+
+School of Engineering and Applied Sciences
+Harvard University, USA
+Abstract
+We present an algorithm for building probabilistic rule lists that is two orders of mag-
+nitude faster than previous work. Rule list algorithms are competitors for decision tree
+algorithms. They are associative classiﬁers, in that they are built from pre-mined associa-
+tion rules. They have a logical structure that is a sequence of IF-THEN rules, identical to a
+decision list or one-sided decision tree. Instead of using greedy splitting and pruning like de-
+cision tree algorithms, we fully optimize over rule lists, striking a practical balance between
+accuracy, interpretability, and computational speed. The algorithm presented here uses a
+mixture of theoretical bounds (tight enough to have practical implications as a screening or
+bounding procedure), computational reuse, and highly tuned language libraries to achieve
+computational eﬃciency. Currently, for many practical problems, this method achieves
+better accuracy and sparsity than decision trees; further, in many cases, the computational
+time is practical and often less than that of decision trees. The result is a probabilistic
+classiﬁer (which estimates P(y = 1|x) for each x) that optimizes the posterior of a Bayesian
+hierarchical model over rule lists.
+1. Introduction
+Our goal is to build a competitor for decision tree algorithms in terms of accuracy, in-
+terpretability, and computational speed.
+Decision trees are widely used, particularly in
+industry, because of their interpretability. Their logical IF-THEN structure allows predic-
+tions to be explained to users.
+However, decision tree algorithms have the serious ﬂaw
+that they are constructed using greedy splitting from the top down. They also use greedy
+pruning of nodes. They do not globally optimize any function, instead they are composed
+entirely of local optimization heuristics. If the algorithm makes a mistake in the splitting
+near the top of the tree, it is diﬃcult to undo it, and consequently the trees become long and
+uninterpretable, unless they are heavily pruned, in which case accuracy suﬀers. In general,
+decision tree algorithms are computationally tractable, not particularly accurate, and less
+sparse and interpretable than they could be. This leaves users with no good alternative if
+they desire an accurate yet sparse logical classiﬁer.
+1
+arXiv:1602.08610v2  [cs.AI]  3 Apr 2017
+
+Yang, Rudin, & Seltzer
+The method provided here provides probabilistic predictions, which means it aims to
+accurately predict P(y = 1|x) for each x. Several important ingredients provide the under-
+pinning for our method including:
+(i) A principled objective, which is the posterior distribution for the Bayesian Rule
+List (BRL) model of Letham et al.’s (2015). We optimize this objective over rule lists.
+Our algorithm is called Scalable Bayesian Rule Lists (SBRL).
+(ii) A useful statistical approximation that narrows the search space.
+We assume
+that each leaf of the rule list contains (“captures”) a number of observations that is
+bounded below. Because of this approximation, the set of conditions deﬁning each leaf
+is a frequent pattern. This means the antecedents within the rule list are all frequent
+patterns. All of the possible frequent patterns can be pre-mined from the dataset
+using one of the standard frequent pattern mining methods. This leaves us with a
+much smaller optimization problem: we optimize over the set of possible pre-mined
+rules and their order to create the rule list.
+(iii) High performance language libraries to achieve computational eﬃciency. Opti-
+mization over rule lists can be solved by repeated low level computations that have
+the capacity to be sped up. At every iteration, we make a change to the rule list and
+need to evaluate the new rule list on the data. The high performance calculations
+speed up this evaluation.
+(iv) Computational reuse. When we evaluate a rule list on the data that has been
+modiﬁed from a previous rule list, we need only to change the evaluation of points
+below the change in the rule list.
+Thus we can reuse the computation above the
+change.
+(v) Analytical bounds on BRL’s posterior that are tight enough to be used in practice
+for screening association rules and providing bounds on the optimal solution. These
+are provided in two theorems in this paper.
+Through a series of controlled experiments, we show that SBRL is over two orders of
+magnitude faster than the previous best code for this problem.
+Let us provide some sample results. Figure 1 presents an example of a rule list that we
+learned for the UCI mushroom dataset (see Bache & Lichman, 2013). This rule list is a
+predictive model for whether a mushroom is edible. It was created in about 9 seconds on a
+laptop and achieves perfect out-of-sample accuracy. Figure 2 presents a rule list for the UCI
+adult dataset (see Bache & Lichman, 2013). We ran our SBRL algorithm for approximately
+18 seconds on a laptop to produce this. The algorithm achieves a higher out-of-sample AUC
+(area under the ROC Curve) than that achieved if CART or C4.5 were heavily tuned on
+the test set itself.
+2. Review of Bayesian Rule Lists of Letham et al. (2015)
+Scalable Rule Lists uses the posterior distribution of the Bayesian Rule Lists algorithm.
+Our training set is {(xi, yi)}n
+i=1 where the xi ∈X encode features, and yi are labels, which
+in our case are binary, either 0 or 1. A Bayesian decision list has the following form:
+2
+
+Scalable Bayesian Rule Lists
+if
+bruises=no, odor=not-in-(none,foul)
+then probability that the mushroom is edible = 0.00112
+else if
+odor=foul, gill-attachment=free,
+then probability that the mushroom is edible = 0.0007
+else if
+gill-size=broad, ring-number=one,
+then probability that the mushroom is edible = 0.999
+else if
+stalk-root=unknown,
+stalk-surface-above-ring=smooth,
+then probability that the mushroom is edible = 0.996
+else if
+stalk-root=unknown, ring-number=one,
+then probability that the mushroom is edible = 0.0385
+else if
+bruises=foul, veil-color=white,
+then probability that the mushroom is edible = 0.995
+else if
+stalk-shape=tapering,
+ring-number=one,
+then probability that the mushroom is edible = 0.986
+else if
+habitat=paths,
+then probability that the mushroom is edible = 0.958
+else
+(default rule)
+then probability that the mushroom is edible = 0.001
+Figure 1: Rule list for the mushroom dataset from the UCI repository (data available from
+Bache & Lichman, 2013).
+if
+capital-gain>$7298.00
+then probability to make over 50K = 0.986
+else if
+Young,Never-married,
+then probability to make over 50K = 0.003
+else if
+Grad-school,Married,
+then probability to make over 50K = 0.748
+else if
+Young,capital-loss=0,
+then probability to make over 50K = 0.072
+else if
+Own-child,Never-married,
+then probability to make over 50K = 0.015
+else if
+Bachelors,Married,
+then probability to make over 50K = 0.655
+else if
+Bachelors,Over-time,
+then probability to make over 50K = 0.255
+else if
+Exec-managerial,Married,
+then probability to make over 50K = 0.531
+else if
+Married,HS-grad,
+then probability to make over 50K = 0.300
+else if
+Grad-school,
+then probability to make over 50K = 0.266
+else if
+Some-college,Married,
+then probability to make over 50K = 0.410
+else if
+Prof-specialty,Married,
+then probability to make over 50K = 0.713
+else if
+Assoc-degree,Married,
+then probability to make over 50K = 0.420
+else if
+Part-time,
+then probability to make over 50K = 0.013
+else if
+Husband,
+then probability to make over 50K = 0.126
+else if
+Prof-specialty,
+then probability to make over 50K = 0.148
+else if
+Exec-managerial,Male,
+then probability to make over 50K = 0.193
+else if
+Full-time,Private,
+then probability to make over 50K = 0.026
+else
+(default rule)
+then probability to make over 50K = 0.066.
+Figure 2: Rule list for the adult dataset from the UCI repository (see Bache & Lichman,
+2013).
+if
+x obeys a1 then y ∼Binomial(θ1), θ1 ∼Beta(α + N1)
+else if x obeys a2 then y ∼Binomial(θ2), θ2 ∼Beta(α + N2)
+...
+else if x obeys am then y ∼Binomial(θm), θm ∼Beta(α + Nm)
+else y ∼Binomial(θ0), θ0 ∼Beta(α + N0).
+Here, the antecedents {aj}m
+j=1 are conditions on the x’s that are either true or false, for
+instance, if x is a patient, aj is true when x’s age is above 60 years old and x has dia-
+betes, otherwise false. The vector α = [α1, α0] has a prior parameter for each of the two
+3
+
+Yang, Rudin, & Seltzer
+labels.
+Values α1 and α0 are prior parameters, in the sense that each rule’s prediction
+y ∼Binomial(θj), and θj|α ∼Beta(α). The notation Nj is the vector of counts, where Nj,l
+is the number of observations xi that satisfy condition aj but none of the previous condi-
+tions a1, ..., aj−1, and that have label yi = l, where l is either 1 or 0. Nj is added to the
+prior parameters α from the usual derivation of the posterior for the Beta-binomial. The
+default rule is at the bottom, which makes predictions for observations that are not satisﬁed
+by any of the conditions. When an observation satisﬁes condition aj but not a1, ..., aj−1 we
+say that the observation is captured by rule j. Formally:
+Deﬁnition 1 Rule j captures observation i, denoted Captr(i) = j, when
+j = argmin j′ such that aj′(xi) = True.
+Bayesian Rule Lists is an associative classiﬁcation method, in the sense that the an-
+tecedents are ﬁrst mined from the database, and then the set of rules and their order are
+learned. The rule mining step is fast, and there are fast parallel implementations available.
+Any frequent pattern mining method will suﬃce, since the method needs only to produce all
+conditions with suﬃciently high support in the database. The support of antecedent aj is
+denoted supp(aj), which is the number of observations that obey condition aj. A condition
+is a conjunction of expressions “feature∈values,” e.g., age∈[40,50] and color=white. The
+hard part is learning the rule list, which is what this paper focuses on.
+The likelihood for the model discussed above is:
+Likelihood = p(y|x, d, α) ∝
+m
+Y
+j=0
+Γ(Nj,0 + α0)Γ(Nj,1 + α1)
+Γ(Nj,0 + Nj,1 + α0 + α1) ,
+where d denotes the rules in the list and their order, d = (m, {aj, θj}m
+j=0). Intuitively, one
+can see that having more of one class and less of the other class will make the likelihood
+larger. To see this, note that if Nj,0 is large and Nj,1 is small (or vice versa) the likelihood
+for rule j is large.
+Let us discuss the prior. There are three terms in the prior, one governing the number
+of rules m in the list, one governing the size cj of each rule j (the number of conditions in
+the rule), and one governing the choice of antecedent condition aj of rule j given its size.
+Notation a<j includes the antecedents before j in the rule list if there are any, e.g., a<4 =
+{a1, a2, a3}. Also cj is the cardinality of antecedent aj, also written |aj|, as the number of
+conjunctive clauses in rule aj. E.g., the rule ‘x1=green’ and ‘x2<50’ has cardinality 2. c<j
+includes the cardinalities of the antecedents before j in the rule list. Notation A is the set
+of pre-mined antecedents. The prior is:
+prior(d|A, λ, η) = p(d|A, λ, η) = p(m|A, λ)
+m
+Y
+j=1
+p(cj|c<j, A, η)p(aj|a<j, cj, A).
+(1)
+The ﬁrst term is the prior for the number of rules in the list. Here, the number of rules m
+is Poisson, truncated at the total number of pre-selected antecedents:
+p(m|A, λ) =
+(λm/m!)
+P|A|
+j=0(λj/j!)
+,
+m = 0, . . . , |A|,
+4
+
+Scalable Bayesian Rule Lists
+where λ is a hyper-parameter. The second term in the prior governs the number of conditions
+in each rule. The size of rule j is cj which is Poisson, truncated to remove values for which
+no rules are available with that cardinality:
+p(cj|c<j, A, η) =
+(ηcj/cj!)
+P
+k∈Rj−1(c<j,A)(ηk/k!),
+cj ∈Rj−1(c<j, A),
+where Rj−1 is the set of cardinalities available after removing the ﬁrst j −1 rules, and η is
+a hyperparameter. The third term in the prior governs the choice of antecedent, given that
+we have determined its size through the second term. We simply have aj selected from a
+uniform distribution over antecedents in A of size cj, excluding those in a<j.
+p(aj|a<j, cj, A) ∝1,
+aj ∈Qcj = {a ∈A \ {a1, a2, ..., aj−1} : |a| = cj}.
+(2)
+As usual, the posterior is proportional to the product of the likelihood and the prior.
+p(d|x, y, A, α, λ, η) ∝p(y|x, d, α)p(d|A, λ, η).
+This is the full model, and the posterior p(d|x, y, A, α, λ, η) is what we aim to optimize to
+obtain the best rule lists. The hyperparameter λ is chosen by the user to be the desired size
+of the rule list, and η is chosen as the desired number of terms in each rule. The parameters
+α0 and α1 are usually chosen as 1 in order not to favor one class label over another.
+Given the prior parameters λ, which governs the length of the list, η, which governs
+the desired number of conditions in the list, and α, which provides a preference over labels
+(usually we set all the α’s to 1), along with the set of pre-mined rules A, the algorithm
+must select which rules from A to use, along with their order.
+3. Representation
+We use an MCMC scheme: at each time t, we choose a neighboring rule list at random
+from the neighborhood by adding, removing, or swapping rules, building from the basic
+algorithm of Letham et al. (2015) as a starting point. At each step, we need to evaluate the
+posterior function on each new rule list. Since this process is repeated many times during
+the algorithm, speeding up this particular subroutine can have a tremendous increase in
+computational speed.
+We improve the speed in three ways: we use high performance
+language libraries, computational reuse, and theoretical bounds, all of which are discussed
+in this section and the next.
+3.1 Expressing Computation as Bit Vectors
+The vast majority of the computational time spent constructing rule sets lies in determining
+which rules capture which observations in a particular rule ordering. As a reminder, for a
+given ordering of rules in a set, we say that the ﬁrst rule for which an observation evaluates
+true captures that observation.
+The na¨ıve implementation of these operations calls for
+various set operations – checking whether a set contains an element, adding an element to
+a set, and removing an element from a set. However, set operations are typically slow, and
+hardware does little to help with eﬃciency.
+5
+
+Yang, Rudin, & Seltzer
+We convert all set operations to logical operations on bit vectors, for which hard-
+ware support is readily available.
+The bit vector representation is both memory- and
+computationally- eﬃcient. The vectors have length equal to the total number of data sam-
+ples. Before beginning the algorithm, for each rule, we compute the bit vector representing
+the samples for which the rule generates a true value. For a one million sample data set (or
+more precisely up to 1,048,576 observations) each rule carries with it 128 KB vector (since
+a byte consists of 8 bits), which ﬁts comfortably in most L2 caches.
+For each rule list we consider, we maintain similarly sized vectors for each rule in the
+set indicating which rule in the set captures which observation. Within a rule list, each
+observation is captured by one and only one rule – the ﬁrst rule for which the condition
+evaluates true. Representing the rules and rule lists this way allows us to explore the rule
+list state space, reusing signiﬁcant computation. For example, consider a rule list containing
+m rules. Imagine that we wish to delete the kth rule from the set. The na¨ıve implementation
+recomputes the “captures” vector for every rule in the set. Our implementation updates
+only the captures vector for the rules at position k or after position k in the list, using
+logical operators acting upon the rule list’s “captures” vector for rule k and the rules that
+come after it. This shortens the run time of the algorithm in practice by approximately
+50%. This and other operations will be discussed in the next subsection.
+3.2 An Algebra for Computation Reuse
+Our use of bit vectors transforms the large number of set operations (performed in a tra-
+ditional implementation) into a set of boolean operations on bit vectors. These customized
+operations are summarized below. In our notation, the rule list contains m rules; a[j] and
+a[k] are used to represent the jth and kth rules in the rule list.
+As a starting point, we deﬁne a[k].captures as the captures vector for rule a[k] that
+is computed during the course of computation. Deﬁne a[k].init to be the original vector
+associated with each rule, indicating all observations for which the rule evaluates true. Note
+that a[k].captures ⊂a[k].init, because a[k].captures can take value 1 only if a[k].init is also
+1. Below we show these bit vector operations for the possible MCMC steps. Here ∨is the
+logical OR symbol and ∧is the logical AND symbol.
+1. Remove rule a[k]
+remaining ←a[k].captures
+for j = k + 1 to m do
+tmp ←a[j].init ∧remaining {Everything a[k] previously captured that could be
+captured by rule a[j]}
+a[j −1].captures ←a[j].captures ∨tmp {Include observations a[k] previously
+captured that rule a[j] now captures and move rule a[j] up to the j −1 spot.}
+remaining ←remaining∧¬tmp {Remove the newly captured items from remaining}
+end for
+m ←m −1
+2. Insert rule into the ruleset at position k
+shift rules k to m to positions k + 1 to m + 1 and insert rule at position k.
+6
+
+Scalable Bayesian Rule Lists
+m ←m + 1
+captured ←{⃗0n}
+{The “for” loop below counts what is captured up to position k −1}
+for j = 1 to k −1 do
+captured ←captured ∨j.captures
+end for
+{The “for” loop below recomputes the captures vector for the rest of the rule list,
+which changed when we inserted the rule at position k.}
+for j = k to m do
+a[j].captures ←a[j].init ∧¬captured
+captured ←a[j].captures ∨captured
+end for
+3. Generalized swap a[j] and a[k] (j < k)
+captured ←{⃗0n}
+{The “for” loop below calculates observations captured by rules a[j] through rule
+a[k]. Note that all of these observations will be captured again through new rule
+a[j] through new rule a[k].}
+for t = j to k do
+captured ←captured ∨t.captures
+end for
+swap rules j and k
+{The “for” loop below recalculates observations captured by (swapped) rules j
+through rule k.}
+for t = j to k do
+a[t].captures ←captured ∧a[t].init
+captured ←captured ∧¬a[t].captures
+end for
+3.3 High Performance Bit Vector Manipulation and Ablation Study
+Having transformed expensive set operations into bit vector operations, we can now leverage
+both hardware vector instructions and optimized software libraries. We investigated four
+alternative implementations, each improving computational eﬃciency from the previous
+one.
+• First, we have the original python implementation here for comparison.
+• Next, we retained our python implementation but converted from set operations to
+bit operations.
+• Then, we used the python gmpy library to perform the bit operations.
+• Finally, we moved the implementation from Python to C, representing the bit vectors
+as multiprecision integers, using the GMP library, which is faster on large data sets.
+7
+
+Yang, Rudin, & Seltzer
+py_origin
+py_bitOp
+py_gmpy
+C_bitOp_reuse
+1.5
+2.0
+2.5
+3.0
+Algorithms
+Log10 of runtime in second
+Figure 3: Boxplots of runtime comparison among diﬀerent implementations. From the
+original python code, the ﬁnal code is over two orders of magnitude faster.
+To evaluate how each of these steps improved the computation time of the algorithm,
+we conducted a controlled experiment where each version of the algorithm (corresponding
+to the four possibilities above) was given the same data (the UCI adult dataset, divided
+into ten folds), the same set of rules, and the same number of MCMC iterations (5,000
+iterations for each of the 20 chains) to run. We created boxplots for the log10 of the run
+time over the diﬀerent folds, which is shown in Figure 3. The ﬁnal code is over two orders
+of magnitude faster than the original optimized python code.
+4. Theoretical Bounds with Practical Implications
+We prove two bounds.
+First we provide an upper bound on the number of rules in a
+maximum a posteriori rule list. This allows us to narrow our search space to rule lists
+below a certain size, if desired. Second we provide a constraint that states that certain
+preﬁxes can never lead to the maximum a posteriori rule list. This prevents our algorithm
+from searching in regions of the space that provably do not contain the maximum a posteriori
+rule list.
+4.1 Upper Bound on the Number of Rules in the List
+Given the number of features, the parameter λ for the size of the list, and parameters α0
+and α1, we can derive an upper bound for the size of a maximum a posteriori rule list.
+This formalizes how the prior on the number of rules is strong enough to overwhelm the
+likelihood.
+We are considering binary rules and binary features, so the total number of possible
+rules of each size can be calculated directly. When creating the upper bound, within the
+proof, we hypothetically exhaust rules from each size category in turn, starting with the
+smallest sizes. We discuss this further below.
+Let |Qc| be the number of antecedents that remain in the pile that have c logical condi-
+tions. The sequence of b’s that we deﬁne next is a lower bound for the possible sequence of
+8
+
+Scalable Bayesian Rule Lists
+|Qc|’s. In particular, b represents the sequence of sizes of antecedents that would provide
+the smallest possible |Qc|. Intuitively, the sequence of b’s arises when we deplete the an-
+tecedents of size 1, then deplete all of the antecedents of size 2, etc. The number of ways
+to do this is given exactly by the b values, computed as follows.
+Deﬁnition Let P be the number of features, and b =
+
+b0, b1, b2, ...b2P −1
+	
+be a vector of
+length 2P deﬁned as follows:
+index = 0
+for c = 0 to
+ P
+2
+
+do
+for j =
+ P
+c
+
+down to 1 (using step size=-1) do
+bindex = j
+index = index + 1
+end for
+if (c+c != P) then
+for j =
+  P
+P−c
+
+down to 1 (using step size = -1) do
+bindex = j
+index = index + 1
+end for
+end if
+end for
+Figure 4 is an illustration for the bj’s when the number of features is P = 5.
+We will use the b’s within the theorem below. In our notation, rule list d is deﬁned by
+the antecedents and the probabilities on the right side of the rules, d = (m, {al, θl}m
+l=1).
+Theorem 1 The size m∗of any maximum a posteriori (MAP) rule list d∗(with parameters
+λ, η, and α = (α0, α1)) obeys m∗≤mmax, where
+mmax = min
+
+
+2P −1, max
+
+
+m′ ∈Z+ : λm′
+m′! ≥Γ(N−+ α0)Γ(N+ + α1)
+Γ(N + α0 + α1)
+m′
+Y
+j=1
+bj
+
+
+
+
+
+.
+(3)
+In the common parameter choice α0 = 1 and α1 = 1, this reduces to:
+mmax = min
+
+
+2P −1, max
+
+
+m′ ∈Z+ : λm′
+m′! ≥Γ(N−+ 1)Γ(N+ + 1)
+Γ(N + 2)
+m′
+Y
+j=1
+bj
+
+
+
+
+
+.
+(4)
+The proof is in the appendix.
+Figure 5 illustrates the use of this theorem. In particular, we plotted the upper bound
+for m∗from the Theorem 1 when the number of features P is 10 in Figure 5 (left), and we
+plotted the upper bound when the number of features is 15 in Figure 5 (right), with λ = 3
+and α0 = α1 = 1. For instance, when there are 10 features (left plot) and approximately
+100 positive and 100 negative observations, there will be at most about 36 rules.
+9
+
+Yang, Rudin, & Seltzer
+0
+1
+2
+3
+4
+5
+0
+2
+4
+6
+8
+10
+Cardinality of rules, with #features=5
+value for bj
+b0
+b2
+b3
+b4
+b5
+b6
+b12
+b13
+b14
+b15
+b16
+b17
+b18
+b19
+b20
+b21
+b22
+b23
+b24
+b25
+b26
+b27
+b28
+b29
+b30
+b31
+b7
+b8
+b9
+b10
+b11
+b1
+
+1, 
+
+P
+1
+
+−1
+
+
+3, 
+
+P
+3
+
+−4
+
+
+3, 
+
+P
+3
+
+−2
+
+Figure 4: Example of bj’s for a 5-feature dataset.
+Upper bound for m* with fixed #features=10
+#positive samples
+#negtive samples
+ 10 
+ 20 
+ 30 
+ 40 
+ 50 
+ 60 
+ 70 
+ 80 
+ 90 
+ 100 
+ 110 
+ 120 
+0
+100
+200
+300
+400
+500
+0
+100
+200
+300
+400
+500
+upper bound for m* with #features=15
+#positive samples
+#negative samples
+ 10 
+ 20 
+ 30 
+ 40 
+ 50 
+ 60 
+ 70 
+ 80 
+ 90 
+ 100 
+ 110 
+0
+100
+200
+300
+400
+500
+0
+100
+200
+300
+400
+500
+Figure 5: Upper bound from Theorem 1 for the length of the rule list when the number of
+features is 10 (left ﬁgure) and 15 (right ﬁgure).
+10
+
+Scalable Bayesian Rule Lists
+Figure 6: Notation for a rule list d and its preﬁx dp.
+4.2 Preﬁx Bound
+We next provide a bound that eliminates certain regions of the rule space from consideration.
+Consider a rule list beginning with rules a1, .., ap. If the best possible rule list starting with
+a1, .., ap cannot beat the posterior of the best rule list we have found so far, then we know
+any rule list starting with a1, .., ap is suboptimal. In that case, we should stop exploring
+rule lists starting with a1, .., ap. This is a type of branch and bound strategy, in that we
+have now eliminated (bounded) the entire set of lists starting with a1, .., ap. We formalize
+this intuition below.
+Denote the rule list at iteration t by dt = (at
+1, at
+2, ..., at
+mt, a0). The current best posterior
+probability has value v∗
+t , that is
+v∗
+t = max
+t′≤t Posterior(dt′, {(xi, yi)}n
+i=1).
+Let the current rule list be d = (a1, a2, ...am, a0). Let dp denote a preﬁx of length p of the
+rule list d, i.e., dp = (a1, a2, ...ap), where a1, a2, ..., ap is the same as the ﬁrst p rules in d.
+Figure 6 illustrates this notation. We want to determine whether a rule list starting with
+dp could be better than the best we have seen so far. Deﬁne Υ(dp, {(xi, yi)}n
+i=1) as follows:
+Υ(dp, {(xi, yi)}n
+i=1)
+:=
+λmax (p,λ)/(max (p, λ))!
+P|A|
+j=0(λj/j!)
+
+
+p
+Y
+j=1
+p(cj|c<j, A, η)
+1
+|Qcj|
+
+×
+
+
+m
+Y
+j=0
+Γ(Nj,0 + 1)Γ(Nj,1 + 1)
+Γ(Nj,0 + Nj,1 + 2)
+
+Γ(1 + N0 −Pp
+j=1 Nj,0)
+Γ(2 + N0 −Pp
+j=1 Nj,0)
+Γ(1 + N1 −Pp
+j=1 Nj,1)
+Γ(2 + N1 −Pp
+j=1 Nj,1).
+Here, Nj,0 is the number of points captured by rule j with label 0, and Nj,1 is the number
+of points captured by rule j with label 1,
+Nj,0 = |{i : Captr(i) = j and yi = 0}|, Nj,1 = |{i : Captr(i) = j and yi = 1}|.
+The result states that for a rule list with preﬁx dp, if the upper bound on the posterior,
+Υ(dp), is not as high as the posterior of the best rule list we have seen so far, then dp is a
+bad preﬁx, which cannot lead to a MAP solution. It tells us we no longer need to consider
+rule lists starting with dp.
+11
+
+Yang, Rudin, & Seltzer
+Theorem 2 For rule list d = {dp, ap+1, ..., am, a0}, if
+Υ(dp, {(xi, yi)}n
+i=1) < v∗
+t ,
+then for α0 = 1 and α1 = 1, we have
+d ̸∈argmaxd′Posterior(d′, {(xi, yi)}n
+i=1).
+(5)
+Theorem 2 is implemented in our code in the following way: for each random restart, the
+initial rule in the list is checked against the bound of Theorem 2. If the condition Υ(d1) < v∗
+t
+holds, we throw out this initial rule and choose a new one, because that rule provably cannot
+be the ﬁrst rule in an optimal rule list. Theorem 2 provides a substantial computational
+speedup in ﬁnding high quality or optimal solutions. In some cases, it provides a full order
+of magnitude speedup. Because it has been so useful in practice, we provide illustrative
+examples.
+4.3 Demonstrations of Theorem 2
+Demonstration 1: We use the tic tac toe dataset from the UCI repository (see Bache &
+Lichman, 2013). Each observation is a tic tac toe board after the game has ended. If the
+X player wins, the label of the observation is 1, otherwise it is 0. Let us consider a rule list
+starting with the following two rules:
+If
+o
+then ...
+else if
+o
+then ...
+else if ...
+The ﬁrst rule says that the board contains an “O” in the bottom middle spot, and the rule
+says nothing about other spots. Intuitively this is a particularly bad rule, since it captures
+a lot of possible tic tac toe boards, and on its own, cannot distinguish between winning and
+losing boards for the “X” player. Similarly, the second rule also does not discriminate well.
+Thus, we expect any rule list starting with these two rules to perform poorly. We can show
+this using the theorem. On one of ten folds of the data, this rule list has a log posterior that
+is upper bounded at -272.51. From an earlier run of the algorithm, we know there is a rule
+list with a posterior of -105.012. (That rule list is provided in Table 2 and contains exactly
+one rule for each way the “X” player could have three X’s in a row on the board.) Since
+the upper bound on the posterior for this rule list (-272.51) is less than -105.012, there does
+not exist an optimal rule list starting with these two rules.
+12
+
+Scalable Bayesian Rule Lists
+Demonstration 2: In contrast with Demonstration 1, a rule list starting as follows cannot
+be excluded.
+If
+o
+o
+o
+then ...
+else if
+o
+o
+o
+then ...
+else if ...
+These ﬁrst two rules says that the “O” player has three O’s in a row, which means the “X”
+player could not have won. This preﬁx has a log posterior that is upper bounded at -35.90,
+which is higher than than -105.012. Thus we cannot exclude this preﬁx as being part of
+an optimal solution. As it turns out, there are high posterior solutions starting with this
+preﬁx. One such solution is shown in Table 3 below.
+5. Experiments
+We provide a comparison of algorithms along three dimensions: solution quality (AUC -
+area under the ROC curve), sparsity, and scalability.
+Sparsity will be measured as the
+number of leaves in a decision tree or as the number of rules in a rule list. Scalability will
+be measured in computation time. SBRL tends to achieve a useful balance between these
+three quantities.
+Let us describe the experimental setup. As baselines, we chose popular classiﬁcation
+algorithms to represent the sets of uninterpretable methods and the set of “interpretable”
+methods. To represent the class of uninterpretable methods, we chose logistic regression,
+SVM RBF, random forests (RF), and boosted decision trees (ADA). None of these methods
+are designed to yield sparse classiﬁers. They are designed to yield scalable and accurate
+classiﬁers. To represent the class of “interpretable” greedy splitting algorithms, we chose
+CART, C4.5, RIPPER, CBA, and CMAR. CART tends to yield sparse classiﬁers, whereas
+C4.5 tends to be much less interpretable. Other experiments (see Letham et al., 2015; Wang
+& Rudin, 2015b) have accuracy/interpretability comparisons to Bayesian Rule Lists and
+Falling Rule Lists, so our main eﬀort here will be to add the scalability component. We used
+the RWeka R package’s implementation of the RIPPERk algorithm, which is a generalized
+RIPPER algorithm with an optimization step repeated k times (see Cohen, 1995). For CBA,
+there are two implementations available: the original author’s and one (LUCS-KDD) from
+Frans Coenen from University of Liverpool, which is recommended by the original author.
+For CMAR, the only available implementation referred to in multiple papers is the LUCS-
+KDD implementation. For convenience, we use the LUCS-KDD java implementations of
+TCV(10 cross validation) for both CBA and CMAR. The R implementation for the other
+algorithms are readily available in CRAN. We stored the experimental results for each
+dataset and each algorithm (R and java) and used this information to plot the ﬁgures and
+tables in this section. We benchmarked using publicly available datasets after data pre-
+processing (using quantiles to represent real-valued variables and merging discrete levels
+together to avoid too many levels in one column):
+13
+
+Yang, Rudin, & Seltzer
+• the tic tac toe dataset (see Bache & Lichman, 2013), where the goal is to determine
+whether the “X” player wins (this is easy for a human who would check for three X’s
+in a row),
+• the adult dataset (see Bache & Lichman, 2013), where we aim to predict whether an
+individual makes over $50K in a year,
+• the mushroom dataset (see Bache & Lichman, 2013), where the goal is to predict
+whether a mushroom is edible (as opposed to poisonous),
+• the nursery dataset (see Bache & Lichman, 2013), where the goal is to predict whether
+a child’s application to nursey school will be in either the “very recommended” or
+“special priority” categories,
+• the telco customer churn dataset (see WatsonAnalytics), where the goal is to predict
+whether a customer will leave the service provider,
+• the titanic dataset (see Bache & Lichman, 2013), where the goal is to predict who
+survived the sinking of the Titanic.
+Evaluations of prediction quality, sparsity, and timing were done using 10-fold cross valida-
+tion.
+For creating the random starting rule list, the initial rule length was set to 1 rule (not
+including the default rule).
+The minimum and maximum rule size for the rule-mining
+algorithm were set at 1 and 2, respectively, except for the tic tac toe dataset, for which
+the maximum was set to 3. Because of the nature of the tic tac toe dataset, it is more
+interpretable to include rules of size 3 than to exclude them. For rule mining, we chose the
+minimum support of rules from (5%, 10%, 15%, etc.) so that the total number of rules was
+approximately 300.
+The prior parameters were ﬁxed at η = 1, and α = (1, 1). For the λ for each dataset,
+we ﬁrst let λ be 5, and ran SBRL once with the above parameters. Then we ﬁxed λ at the
+length of the returned rule list for that dataset, which is faster than nested cross-validation.
+For the purpose of providing a controlled experiment, the number of iterations was ﬁxed
+at 5,000 for each chain of the 20 chains of SBRL, which we ran in series on a laptop. If
+the chains were computed in parallel rather than in series, it would speed up computation
+further. It is possible that the solution quality would increase if SBRL was run for a larger
+number of iterations. Every time SBRL started building a new rule list, we checked the
+initial rule in the list to see whether the upper bound on its posterior (by Theorem 2) was
+greater than the best rule list it had found so far. If not, the rule was replaced until the
+condition was satisﬁed.
+Results for the tic tac toe dataset are shown in Figure 7, Figure 8 and Table 1. Each
+observation in this dataset is a tic tac toe board after the game has ﬁnished. If there are
+3 X’s in a row, the label of the board is 1, otherwise 0. This should not be a diﬃcult
+learning problem since there are solutions with perfect accuracy on the training set that
+generalize to the test set. Figure 7 shows the sacriﬁce in AUC made by CART and C4.5.
+Other methods (RF, SVM, logistic regression, ADA) do not give sparse solutions. In this
+ﬁgure, most of the algorithms were used in their default modes, using their own internal
+14
+
+Scalable Bayesian Rule Lists
+G
+G
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.85
+0.90
+0.95
+1.00
+Algorithms
+AUC
+Figure 7: Comparison of AUC of ROC
+among diﬀerent methods on tic tac toe
+dataset.
+Figure 8: Scatter plot of AUC against the
+number of leaves (sparsity) for the tic tac toe
+dataset for all 10 folds, for SBRL with one
+parameter setting, and CART and C4.5 with
+several parameter settings each.
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+0.044
+0.194
+0.382
+1.648
+0.023
+0.133
+9.810
+0.129
+0.084
+0.759
+Median
+0.043
+0.195
+0.356
+1.523
+0.022
+0.134
+9.744
+0.115
+0.070
+0.756
+STD
+0.004
+0.007
+0.067
+0.338
+0.001
+0.003
+0.171
+0.044
+0.044
+0.020
+Table 1: Run time on tic tac toe dataset in seconds.
+cross-validation routines. The only exceptions are CMAR and CBA, which were tuned to
+achieve the best accuracy, because their default parameters produce results not comparable
+to the other methods. This procedure of generating the plots was used for all the ﬁgures
+and tables in this section.
+Figure 8 delves further on the decision tree and SBRL models to illustrate the AUC/sparsity
+tradeoﬀ. It shows a scatter plot of AUC vs. number of leaves, where each point represents
+an evaluation of one algorithm, on one fold, with one parameter setting. For SBRL, there
+was no parameter tuning, so there are are 10 points, one for each of the ten folds. We
+tried many diﬀerent parameter settings for CART (in blue), and many diﬀerent parameter
+settings for C4.5 (in gray), none of which were able to achieve points on the eﬃcient frontier
+deﬁned by the SBRL method.
+Tables 2, 3, and 4 show the models from the the ﬁrst, second and third SBRL folds.
+SBRL’s run time was three quarters of a second on average.
+For the adult dataset, results are in Figure 9, Figure 10 and Table 5. The adult dataset
+contains 45,121 observations and 12 features, where each observation is an individual, and
+the features are census data, including demographics, income levels, and other ﬁnancial
+information.
+Here, SBRL, which was untuned and forced to be sparse, performed only
+slightly worse than several of the uninterpretable methods. Its AUC performance dominated
+those of the CART and C4.5 algorithms. As the scatter plot shows, even if CART were
+tuned on the test set, it would have performed at around the same level, perhaps slightly
+15
+
+Yang, Rudin, & Seltzer
+Rule-list
+PP
+Test
+Accu-
+racy
+if ( x3&x7&x5 ),
+0.98
+1.00
+else if ( x1&x9&x5 ),
+0.98
+1.00
+else if ( x8&x2&x5 ),
+0.98
+1.00
+else if ( x6&x3&x9 ),
+0.98
+1.00
+else if ( x4&x6&x5 ),
+0.98
+1.00
+else if ( x2&x1&x3 ),
+0.98
+1.00
+else if ( x8&x7&x9 ),
+0.98
+1.00
+else if ( x4&x1&x7 ),
+0.98
+1.00
+else ( default ),
+0.0044
+1.00
+Table 2: Example of rule list for tic tac
+toe dataset, fold 1 (CV1). PP: probability
+that the label is positive
+Rule-list
+PP
+Test
+Accu-
+racy
+if ( o9&o1&o5 ),
+0.03
+1.00
+else if ( o7&o3&o5 ),
+0.026
+1.00
+else if ( o6&o9&o3 ),
+0.037
+1.00
+else if ( o8&o2&o5 ),
+0.036
+1.00
+else if ( o4&o6&o5 ),
+0.04
+1.00
+else if ( o8&o9&o7 ),
+0.04
+1.00
+else if ( o2&o1&o3 ),
+0.03
+1.00
+else if ( o4&o7&o1 ),
+0.04
+1.00
+else ( default ),
+0.97
+0.98
+Table 3: Example of rule list for tic tac toe
+dataset, fold 2 (CV2).
+Rule-list
+PP
+Test Accuracy
+if ( x8&x9&x7 ),
+0.98
+1.00
+else if ( x6&x9&x3 ),
+0.98
+1.00
+else if ( o4&o1&o7 ),
+0.042
+1.00
+else if ( o6&o3&o9 ),
+0.043
+1.00
+else if ( x4&x7&x1 ),
+0.98
+1.00
+else if ( x2&x1&x3 ),
+0.98
+1.00
+else if ( o2&o3&o1 ),
+0.050
+1.00
+else if ( o5 ),
+0.0079
+1.00
+else if ( o3&x7 ),
+0.71
+1.00
+else if ( o8&o7&o9 ),
+0.040
+1.00
+else ( default ),
+0.99
+0.96
+Table 4: Example of rule list for tic tac toe dataset, fold 3 (CV3).
+worse than SBRL. The timing for SBRL was competitive, at around 18 seconds, where 14
+seconds were MCMC iterations. Figure 2 contains one of the rule lists we produced.
+For the mushroom dataset, results are shown in Figure 11, Figure 12 and Table 6.
+Perfect AUC scores were obtained using most of the methods we tried, with the exception
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+1.353
+238.5
+23.53
+45.71
+0.809
+0.512
+1005.9
+2.557
+3.000
+17.97
+Median
+1.406
+239.9
+23.56
+43.62
+0.813
+0.513
+1005.4
+2.520
+2.920
+18.01
+STD
+0.203
+5.693
+0.133
+4.672
+0.022
+0.011
+100.14
+0.174
+0.191
+0.171
+Table 5: Run time on adult dataset in seconds.
+16
+
+Scalable Bayesian Rule Lists
+G
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.5
+0.6
+0.7
+0.8
+0.9
+Algorithms
+AUC
+Figure 9: Comparison of AUC among
+diﬀerent methods on the adult dataset.
+Figure 10: Scatter plot of AUC against the
+number of leaves (sparsity) for the adult
+dataset for all 10 folds, for SBRL with one
+parameter setting, and CART and C4.5 with
+several parameter settings each.
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.985
+0.990
+0.995
+1.000
+Algorithms
+AUC
+Figure 11: Comparison of AUC of ROC
+among diﬀerent methods on mushroom
+dataset.
+Figure 12: Scatter plot of AUC against the
+number of leaves (sparsity) for the
+mushroom dataset for all 10 folds, for SBRL
+with one parameter setting, and CART and
+C4.5 with several parameter settings each.
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+0.791
+2.691
+1.922
+8.001
+0.132
+0.257
+30.26
+16.48
+21.25
+9.196
+Median
+0.787
+2.736
+1.988
+7.851
+0.134
+0.260
+30.45
+16.49
+21.65
+9.244
+STD
+0.026
+0.128
+0.235
+0.354
+0.010
+0.019
+0.690
+0.568
+1.027
+0.208
+Table 6: Run time on mushroom dataset in seconds.
+17
+
+Yang, Rudin, & Seltzer
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Algorithms
+AUC
+Figure 13: Comparison of AUC of ROC
+among diﬀerent methods on nursery dataset.
+Figure 14: Scatter plot of AUC against the
+number of leaves (sparsity) for the nursery
+dataset for all 10 folds, for SBRL with one
+parameter setting, and CART and C4.5 with
+several parameter settings each.
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+0.359
+10.65
+3.511
+7.709
+0.099
+0.174
+380.8
+0.212
+0.432
+3.751
+Median
+0.363
+10.70
+3.583
+7.755
+0.101
+0.206
+380.4
+0.120
+0.360
+3.806
+STD
+0.017
+0.269
+0.208
+0.146
+0.004
+0.094
+37.89
+0.245
+0.231
+0.222
+Table 7: Run time of nursery dataset in seconds.
+of untuned CART, CBA and CMAR. On the scatterplot within Figure 12, there are several
+solutions with perfect accuracy found by SBRL, tuned CART and and C4.5, of sizes between
+8 and 22 rules. The diﬀerence in posterior values between the perfect solutions of similar
+size was extremely small because of our choice of (untuned) λ. (Tuning and smaller choices
+for λ would improve computation.) Figure 1 contains one of the rule lists we produced.
+The CART tree and rule lists produced for this dataset look entirely diﬀerent.
+This is
+because SBRL views each categorical feature as a separate binary variable, whereas CART
+does not; it can split arbitrarily on categorical variables without penalty. If we had done
+additional preprocessing on the features to create more splits, we could potentially get rule
+lists that look like CART’s tree. What we got were totally diﬀerent, yet almost equally
+perfect, solutions.
+The results from the nursery dataset are shown in Figure 13, Figure 14 and Table 7.
+A similar story holds as for the previous datasets: SBRL is on the optimal frontier of
+accuracy/sparsity without tuning and with reasonable run time.
+Figure 15, Figure 16 and Table 8 show the results for the telco dataset, which contains
+7043 observations and 18 features. Similar observations hold for this dataset. The models
+from three of the ten folds are provided in Tables 9, 10 and 11. These models illustrate that
+generally, rule lists are not the same between folds, but often tend to use similar rules.
+The titanic dataset evaluation results are in Figures 17, 18 and Table 12. The titanic
+dataset contains data about 2201 passengers and crew aboard the Titanic.
+18
+
+Scalable Bayesian Rule Lists
+G
+G
+G
+G
+G
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.5
+0.6
+0.7
+0.8
+Algorithms
+AUC
+Figure 15: Comparison of AUC of ROC
+among diﬀerent methods on telco dataset.
+Figure 16: Scatter plot of AUC against the
+number of leaves (sparsity) for the telco
+dataset for all 10 folds, for SBRL with one
+parameter setting, and CART and C4.5 with
+several parameter settings each.
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+0.267
+7.468
+3.703
+7.839
+0.168
+0.250
+37.14
+8.028
+1.679
+5.239
+Median
+0.272
+7.550
+3.695
+8.726
+0.168
+0.252
+37.63
+8.050
+1.705
+5.271
+STD
+0.009
+0.207
+0.183
+0.111
+0.008
+0.017
+3.202
+0.400
+0.161
+0.149
+Table 8: Run time of telco dataset in seconds.
+Rule-list
+PP
+Test Accuracy
+if ( Contract=One year &StreamingMovies=Yes ),
+0.20
+0.82
+else if ( Contract=One year ),
+0.050
+0.96
+else if ( tenure<1year &InternetService=Fiber optic ),
+0.70
+0.71
+else if ( Contract=Two year ),
+0.029
+0.97
+else if ( InternetService=Fiber optic &OnlineSecurity=No ),
+0.48
+0.58
+else if ( OnlineBackup=No &TechSupport=No ),
+0.41
+0.61
+else ( default ),
+0.22
+0.78
+Table 9: Example of rule list for telco dataset fold 1 (CV1).
+Rule-list
+PP
+Test Accuracy
+if ( Contract=One year &StreamingMovies=Yes ),
+0.20
+0.81
+else if ( tenure<1year &InternetService=Fiber optic ),
+0.70
+0.70
+else if ( tenure<1year &OnlineBackup=No ),
+0.44
+0.57
+else if ( InternetService=Fiber optic
+&Contract=Month-to-month ),
+0.43
+0.57
+else if ( Contract=Month-to-month ),
+0.22
+0.82
+else ( default ),
+0.034
+0.97
+Table 10: Example of rule list for telco dataset fold 2 (CV2).
+19
+
+Yang, Rudin, & Seltzer
+Rule-list
+PP
+Test Accuracy
+if ( Contract=One year&StreamingMovies=Yes ),
+0.20
+0.81
+else if ( Contract=Two year ),
+0.032
+0.98
+else if ( Contract=One year ),
+0.054
+0.97
+else if ( tenure<1year&InternetService=Fiber optic ),
+0.70
+0.72
+else if ( PaymentMethod=Electronic check
+&InternetService=Fiber optic ),
+0.48
+0.45
+else ( TechSupport=No&OnlineSecurity=No ),
+0.42
+0.64
+else ( default ),
+0.22
+0.78
+Table 11: Example of rule list for telco dataset CV3.
+G
+G
+G
+LR
+SVM
+RF
+ADA
+CART
+C45
+RIPPER
+CBA
+CMAR
+SBRL
+0.65
+0.70
+0.75
+0.80
+0.85
+Algorithms
+AUC
+Figure 17: Comparison of AUC of ROC
+among diﬀerent methods on titanic dataset.
+Figure 18: Scatter plot of AUC against the
+number of leaves (sparsity) for the titanic
+dataset for all 10 folds, for SBRL with one
+parameter setting, and CART and C4.5 with
+several parameter settings each.
+Run Time
+LR
+SVM
+RF
+ADA
+CART
+C4.5
+RIPPER
+CBA
+CMAR
+SBRL
+Mean
+0.015
+0.330
+0.470
+1.343
+0.016
+0.089
+6.257
+0.005
+0.004
+0.357
+Median
+0.015
+0.332
+0.445
+1.301
+0.018
+0.088
+6.277
+0.000
+0.000
+0.359
+STD
+0.002
+0.011
+0.108
+0.145
+0.007
+0.007
+0.072
+0.009
+0.009
+0.011
+Table 12: Run time of titanic dataset in seconds.
+20
+
+Scalable Bayesian Rule Lists
+Run Time(s)
+SBRL
+CART
+(A)
+2700
+2000
+(B)
+9000
+84
+Table 13: Run time of SBRL on USCensus1990 dataset in seconds. A: 1 million data
+points and 1 thousand rules; B: 50 thousand data points and 50 thousand rules
+Figure 19: AUC plot of SBRL and
+CART on USCensus1990 for
+problem A.
+Figure 20: AUC plot of SBRL and
+CART on USCensus1990 for
+problem B.
+The results on all of these datasets are consistent. On each dataset, SBRL produces
+results that are reliable (unlike CART) and sparse (unlike C4.5). The run times are longer
+but still reasonable and also adjustable since the user can pre-determine exactly how long
+to run the method.
+6. Scalability
+We wanted to see how well SBRL could handle larger datasets. We used 1 million datapoints
+from the USCensus1990 dataset (see Bache & Lichman, 2013) and set SBRL’s parameter
+to extract ≈1 thousand rules as problem (A), and about 50 thousand data points with 50
+thousand rules as problem (B). The runtime comparison with CART is shown in Table 13.
+For problem (A) the run times are similar. For (B) SBRL is slower (2.5 hours) which is not
+prohibitive for important problems; here one can see why CART does not perform well in
+high dimensions, as it often spends less time on harder problems than is required to achieve
+better performance.
+21
+
+Yang, Rudin, & Seltzer
+7. Related Works and Discussion
+Rule learning algorithms have been developed possibly since the AQ algorithm in the 1960s
+(Michalski, 1969) and throughout the 1980’s and 90’s (Cendrowska, 1987; Quinlan, 1983;
+Clark & Niblett, 1989; Cohen, 1995; Liu, Hsu, & Ma, 1998).
+Rule lists are not very diﬀerent from decision trees in capacity; any decision tree can
+be made into a decision list simply by placing a rule in the list to represent each leaf of
+the decision tree. Rule lists are automatically a type of decision tree. Thus this method is
+really a direct competitor for CART.
+Interpretability has long since been a fundamental topic in artiﬁcial intelligence (see
+R¨uping, 2006; Bratko, 1997; Dawes, 1979; Vellido, Mart´ın-Guerrero, & Lisboa, 2012;
+Giraud-Carrier, 1998; Holte, 1993; Shmueli, 2010; Huysmans, Dejaeger, Mues, Vanthienen,
+& Baesens, 2011; Freitas, 2014). Because the rule lists created by our method are designed
+to be interpretable, one would probably not want to boost them, or combine them in other
+ways to form more complicated models. This contrasts with, for instance, Friedman and
+Popescu (2008), who linearly combine pre-mined rules.
+This work enables us to globally control decision trees in a sense, which could lead to
+more interesting styles of trees, and diﬀerent forms of interpretability. For example, one
+cannot easily construct a Falling Rule List with a greedy splitting method, but can construct
+one with a global optimization approach. A Falling Rule List (Wang & Rudin, 2015b) is a
+decision list where the probabilities of success decrease as we descend along the list. This
+means we can target the highest probability subgroup by checking only a few conditions. A
+Causal Falling Rule List (CFRL) (Wang & Rudin, 2015a) is another such example. These
+model causal eﬀects (conditional diﬀerences) rather than outcomes. The ﬁrst rule in the
+list pinpoints the subgroup with the largest treatment eﬀect. It is possible that many other
+exotic types of constrained models could be constructed in a computationally eﬃcient way
+using the ideas in this paper. One could go beyond logical models and consider also mixed
+logical/linear models (see Wang, Fujimaki, & Motohashi, 2015a).
+Rule lists and their variants are currently being used for text processing (King, Lam, &
+Roberts, 2014), discovering treatment regimes (Zhang, Laber, Tsiatis, & Davidian, 2015),
+and creating medical risk assessments (Letham et al., 2015; Souillard-Mandar, Davis, Rudin,
+Au, Libon, Swenson, Price, Lamar, & Penney, 2015), among other applications.
+There are other subﬁelds where one would pre-mine rules and use them in a classiﬁer.
+Inductive logic programming (Muggleton & De Raedt, 1994), greedy top-down decision list
+algorithms (Rivest, 1987; Sokolova, Marchand, Japkowicz, & Shawe-Taylor, 2003; Anthony,
+2005; Marchand & Sokolova, 2005; Rudin, Letham, & Madigan, 2013; Goessling & Kang,
+2015), associative classiﬁcation (Vanhoof & Depaire, 2010; Liu et al., 1998; Li, Han, & Pei,
+2001; Yin & Han, 2003) and its Bayesian counterparts (McCormick, Rudin, & Madigan,
+2012) all fall into this category. None of the methods in these ﬁelds follow the same general
+procedure as we do, where rules are fully optimized into an optimal tree using low-level
+computations, and where rules are eliminated based on theoretical motivation, as we have
+in Sections 4.
+Teleo-reactive programs (Nilsson, 1994) use a decision list structure and could beneﬁt
+from learning this structure from data.
+22
+
+Scalable Bayesian Rule Lists
+There are a series of works from the mid-1990’s on ﬁnding optimal decision trees using
+dynamic programming and search techniques (e.g., Bennett & Blue, 1996; Auer, Holte, &
+Maass, 1995; Dobkin, Fulton, Gunopulos, Kasif, & Salzberg, 1996), mainly working with
+only ﬁxed depth trees. None of these works use the systems level techniques we use to
+speed up computation. Farhangfar, Greiner, and Zinkevich (2008) use a screening step that
+reduces the number of features, using the extremly strong Na¨ıve Bayes assumption that the
+features are independent, given the class, and then uses dynamic programming to construct
+an optimal ﬁxed-depth tree. One particularly interesting work following this literature is
+that of Nijssen and Fromont (2010), which allows for pre-mined rules to form trees, but in
+a diﬀerent way than our method or associative classiﬁers. Nijssen and Fromont (2010) has
+the user pre-mine all possible leaves, enumerating all conditions leading to that leaf. (By
+contrast, in our work and in associative classiﬁcation, we mine only small conjunctions, and
+their ordered combination creates leaves.) Nijssen and Fromont (2010) warn about issues
+related to running out of memory. As a possible extension, the work proposed here could
+be modiﬁed to handle regularized empirical risk minimization, in particular it could use the
+objective of Rudin and Ertekin (2015), which is a balance between accuracy and sparsity of
+rule lists. It could also be modiﬁed to handle disjunctive normal form classiﬁers, for which
+there are now Bayesian models analogous to the ones studied in this work (Wang, Rudin,
+Doshi, Liu, Klampﬂ, & MacNeille, 2015b). Bayesian tree models may also be able to be
+constructed using our setup, where one would mine rules and create a globally optimal tree
+(Dension, Mallick, & Smith, 1998; Chipman, George, & McCulloch, 2002, 2010). It may
+be logistically more diﬃcult to code trees than lists in order to take advantage of the fast
+lower level computations, but this is worth further investigation.
+A theoretical result states that the VC (Vapnik-Chervonenkis) dimension of the set of
+rule lists created using pre-mined rules is exactly the size of the set of pre-mined rules (Rudin
+et al., 2013). This provides a connection to linear models, whose complexity is the number
+of features plus 1. That is, the VC dimension of rule lists created from |A| predeﬁned rules is
+essentially the same as that of linear models with |A| features. If some rules are eliminated
+(for instance based on the theorems in Section 4) then the VC dimension is the size of the
+set of rules that remain.
+An extension of this work (Angelino, Larus-Stone, Alabi, Seltzer, & Rudin, 2017) does
+not provide probabilistic predictions, but is able to provide a certiﬁcate of optimality to a
+globally optimal rule list. This indicates that SBRL is probably also achieving optimality;
+however, because SBRL is probabilistic, the proof of optimality is much more diﬃcult. To
+clarify: ﬁnding the optimal solution for both methods should be approximately equally
+diﬃcult, but proving optimality for SBRL is much more diﬃcult. There is a clear beneﬁt
+to SBRL’s probabilistic predictions however.
+Conclusion
+We ﬁnish by stating why/when one would want to use this particular method. SBRL is
+not meant as a competitor for black box classiﬁers such as neural networks, support vector
+machines, gradient boosting or random forests. It is useful when machine learning tools are
+used as a decision aid to humans, who need to understand the model in order to trust it and
+make data-driven decisions. SBRL is not a greedy splitting/pruning procedure like decision
+23
+
+Yang, Rudin, & Seltzer
+tree algorithms (CART, C4.5), which means that it more reliably computes high quality
+solutions, at the possible expense of additional computation time. Many of the decision
+tree methods do not compute sparse trees and do not provide interpretable models, as we
+have seen with C4.5. Our code is a strict improvement over the original Bayesian Rule
+Lists algorithm if one is looking for a maximum a posteriori solution. It is faster because
+of careful use of low level computations and theoretical bounds.

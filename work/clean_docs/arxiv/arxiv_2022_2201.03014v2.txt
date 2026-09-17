@@ -1,0 +1,2166 @@
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+1
+Glance and Focus Networks
+for Dynamic Visual Recognition
+Gao Huang∗, Member, IEEE, Yulin Wang∗, Kangchen Lv, Haojun Jiang, Wenhui Huang, Pengfei Qi,
+and Shiji Song, Senior Member, IEEE
+Abstract—Spatial redundancy widely exists in visual recognition tasks, i.e., discriminative features in an image or video frame usually
+correspond to only a subset of pixels, while the remaining regions are irrelevant to the task at hand. Therefore, static models which
+process all the pixels with an equal amount of computation result in considerable redundancy in terms of time and space consumption. In
+this paper, we formulate the image recognition problem as a sequential coarse-to-ﬁne feature learning process, mimicking the human
+visual system. Speciﬁcally, the proposed Glance and Focus Network (GFNet) ﬁrst extracts a quick global representation of the input
+image at a low resolution scale, and then strategically attends to a series of salient (small) regions to learn ﬁner features. The sequential
+process naturally facilitates adaptive inference at test time, as it can be terminated once the model is sufﬁciently conﬁdent about its
+prediction, avoiding further redundant computation. It is worth noting that the problem of locating discriminant regions in our model is
+formulated as a reinforcement learning task, thus requiring no additional manual annotations other than classiﬁcation labels. GFNet is
+general and ﬂexible as it is compatible with any off-the-shelf backbone models (such as MobileNets, EfﬁcientNets and TSM), which can
+be conveniently deployed as the feature extractor. Extensive experiments on a variety of image classiﬁcation and video recognition tasks
+and with various backbone models demonstrate the remarkable efﬁciency of our method. For example, it reduces the average latency of
+the highly efﬁcient MobileNet-V3 on an iPhone XS Max by 1.3x without sacriﬁcing accuracy. Code and pre-trained models are available at
+https://github.com/blackfeather-wang/GFNet-Pytorch.
+Index Terms—dynamic neural networks, efﬁcient deep learning, image recognition, reinforcement learning, video recognition,
+!
+1
+INTRODUCTION
+T
+HE availability of high resolution images or videos
+enabled deep learning algorithms to achieve super-
+human-level performance on many challenging vision tasks
+[1], [2], [3], [4], [5], [6]. Recent works [7], [8] show that the
+accuracy of deep models can be further boosted by scaling
+up the image resolution, e.g., to 480×480 or even higher.
+Although acquiring high quality data with modern cameras
+is easy, performing visual recognition on them proves to
+be challenging in practice, due to the high computational
+cost and high memory footprint introduced by deep neural
+networks. In real-world applications like visual recognition
+on edge devices [9], content-based image search [10] or au-
+tonomous vehicles [11], computation translates into latency
+and power consumption, which should be minimized for
+both safety and economical reasons [9], [12], [13].
+This paper aims to reduce the computational cost of high-
+resolution visual recognition from the perspective of spatial
+redundancy. In fact, deep models are shown to be able to
+perform object recognition accurately with only a few class-
+discriminative patches, such as the head of a dog or the wings
+of a bird [14], [15], [16]. These regions typically contribute
+•
+G. Huang, Y. Wang, K. Lv, H. Jiang and S. Song are with the De-
+partment of Automation, BNRist, Tsinghua University, Beijing 100084,
+China. G. Huang is also with Beijing Academy of Artiﬁcial Intelligence
+
+•
+W. Huang and P. Qi are with the China Mobile Research Insitute, Beijing
+
+∗. Equal contribution.
+2
+1
+1
+1 2
+3
+95.4%
+Eagle
+14.2%
+Husky
+71.3%
+Husky
+7.9%
+Stork
+40.6%
+Stork
+74.2%
+Stork
+~ 18.4%
+FLOPs
+~ 36.7%
+FLOPs
+~ 55.1%
+FLOPs
+…
+Easy
+Hard
+?
+?
+?
+Terminate
+?
+Continue
+Fig. 1. Examples for GFNet. “FLOPs” refers to the proportion of the
+computation required by GFNet (with 96×96 image patches) versus
+processing the entire 224×224 image.
+to a small fraction of the whole image, and thus require
+much less computational resources to process. Therefore,
+if we can dynamically identify the “class-discriminative”
+regions of each individual image, and perform efﬁcient
+inference only on these small input patches, then the
+spatial-wise computational redundancy can be signiﬁcantly
+reduced without sacriﬁcing accuracy. To implement this idea,
+©2022 IEEE. Personal use of this material is permitted. Permission from IEEE must be obtained for all other uses, in any current or future media, including
+reprinting/republishing this material for advertising or promotional purposes, creating new collective works, for resale or redistribution to servers or lists, or reuse of
+any copyrighted component of this work in other works.
+arXiv:2201.03014v2  [cs.CV]  4 Aug 2022
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+2
+we need to address two challenges: 1) how to efﬁciently
+identify class-discriminative regions (without resorting to
+additional human annotations); and 2) how to adaptively
+allocate computation to each individual image, given that
+the number/size of discriminative regions may differ across
+different inputs.
+To address the aforementioned issues, we present a two-
+stage framework, named glance and focus, which is motivated
+by the coarse-to-ﬁne recognition procedure of human visual
+systems. Speciﬁcally, the region selection operation is formu-
+lated as a sequential decision process, where at each step
+our model processes a relatively small input, producing a
+classiﬁcation prediction with a conﬁdence score as well as
+a region proposal for the next step. Each step can be done
+efﬁciently due to the reduced input size. For example, the
+computational cost of inferring a 96 × 96 image patch is only
+18% of that of processing the original 224 × 224 input. The
+whole sequential process starts with processing the full image
+in a down-sampled scale (e.g., 96 × 96), serving as the initial
+step. We call it the glance step, at which the model produces
+a quick prediction with global features. In practice, we ﬁnd
+that a large portion of images with discriminative features
+can already be correctly classiﬁed with high conﬁdence
+at the glance step, which is inline with the observation in
+[17]. When the glance step fails to produce sufﬁciently high
+conﬁdence about its prediction, it will output a proposal
+(relative location within an image) of the most discriminative
+region for the subsequent step to process. As the proposed
+region is usually a small patch of the original image with full
+resolution, we call these subsequent steps the focus stage. This
+stage proceeds progressively with iteratively localizing and
+processing the class-discriminative image regions, facilitating
+early termination in an adaptive manner, i.e., the decision
+process can be interrupted dynamically conditioned on each
+input image. As shown in Figure 1, our method allocates
+computation unevenly across different images at test time,
+leading to a signiﬁcant improvement of the overall efﬁciency.
+We refer to our method as Glance and Focus Network (GFNet).
+One notable feature of the proposed GFNet is that it is
+a general framework, wherein the classiﬁer and the region
+proposal network are treated as two independent modules.
+Therefore, any existing backbone models, such as MobileNets
+[9], [13], [18], CondenseNets [12], [19], ShufﬂeNets [20], [21]
+and EfﬁcientNets [7], can be deployed as our feature ex-
+tractors. This differentiates our method from early recurrent
+attention methods [14] which adopt pure recurrent models. In
+addition, we focus on improving the computational efﬁciency
+under the adaptive inference setting, while most existing
+works aim to improve accuracy with the ﬁxed sequence
+length.
+Besides its high computational efﬁciency, the proposed
+GFNet is appealing in several other aspects. For example, the
+memory consumption can be signiﬁcantly reduced, and it is
+independent of the original image resolution as long as we
+ﬁx the size of the focus region. Moreover, the computational
+cost of GFNet can be adjusted online without additional
+training (by simply adjusting the termination criterion). This
+enables GFNet to make full use of all available computational
+resources ﬂexibly or achieve the required performance with
+minimal power consumption – a practical requirement of
+many real-world applications such as search engines and
+mobile apps.
+We empirically validates GFNet on image classiﬁcation
+(ImageNet [1]) and video recognition tasks (Something-
+Something V1&V2 [22] and Jester [23]) with various back-
+bone models (e.g., MobileNet-V3 [18], RegNet [24], Efﬁ-
+cientNet [7] and TSM [25]). Two practical settings, i.e., the
+budgeted batch classiﬁcation setting [26], where the test
+set comes with a given computational budget, and the
+anytime prediction setting [26], [27], where the network can
+be forced to output a prediction at any given point in time,
+are considered. We also benchmark the practical speed of
+GFNet on an iPhone XS Max and a NVIDIA 2080Ti GPU.
+Experimental results show that GFNet effectively improves
+the efﬁciency of state-of-the-art networks both theoretically
+and empirically. For example, when the MobileNets-V3 and
+ResNets are used as the backbone network, GFNet yields
+up to 1.4× and 3× less Multiply-Add operations compared
+to the original models when achieving the same level of
+accuracy, respectively. Notably, the actual speedup on the
+iPhone XS Max (measured by average latency) is 1.3× and
+2.9×, respectively.
+Parts of the results in this paper were published originally
+in its conference version [28]. However, this version extends
+our earlier work in several important aspects:
+•
+We improve the reinforcement learning algorithm for
+learning the patch selection policy by proposing a
+contrast reward function (Section 4.1).
+•
+We introduce a multi-scale GFNet (MS-GFNet), allow-
+ing adjusting the patch size dynamically conditioned
+on the inputs and the computational budgets (Sections
+4.2). Empirical results indicate that MS-GFNet not
+only improves the accuracy, but also yields a more
+ﬂexible range of computational cost for online tuning.
+•
+We extend the proposed GFNet to high-resolution
+or non object-centric image recognition and video
+recognition, and report encouraging results on widely
+used benchmarks (Sections 5.3, 5.4).
+•
+We conduct experiments to verify that GFNet can
+also effectively accelerate the large-batch inference on
+GPU devices (Table 1), while the original version only
+considers the single-image inference on an iPhone.
+•
+Additional analytical results are presented, including
+the comprehensive ablation studies and a discussion
+on training hyper-parameters (Sections 5.5.2, 5.5.3).
+2
+RELATED WORK
+2.1
+Computationally efﬁcient networks
+Modern deep learning models such as convolutional neural
+networks (CNNs) usually require a large number of compu-
+tational resources. To this end, many research works focus
+on reducing the inference cost of the networks. A promising
+direction is to develop efﬁcient network architectures, such
+as MobileNets [9], [13], [18], CondenseNets [12], [19], Shuf-
+ﬂeNets [20], [21] and EfﬁcientNet [7]. Since deep networks
+typically have a considerable number of redundant weights
+[29], some other approaches focus on pruning [30], [31],
+[32], [33] or quantizing the weights [34], [35], [36]. Another
+technique is knowledge distillation [37], which trains a small
+network to reproduce the prediction of a large model. Our
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+3
+method is orthogonal to the aforementioned approaches, and
+can be combined with them to further improve the efﬁciency.
+A number of recent works improve the efﬁciency of deep
+models by adaptively changing the architecture of the network
+[38], [39]. For example, MSDNet [26] and its variants [17], [40]
+introduce a multi-scale architecture with multiple classiﬁers
+that enables it to adopt small networks for easy samples
+while switch to large models for hard ones. Another approach
+is to ensemble multiple models, and selectively execute a
+subset of them in the cascading [41], [42] or mixing [43], [44]
+paradigm. Some other works propose to dynamically skip
+unnecessary layers [45], [46], [47] or channels [48].
+2.2
+Spatial redundancy
+Recent research has revealed that considerable spatial re-
+dundancy occurs when inferring deep networks [49], [50],
+[51], [52], [53]. Several approaches have been proposed to
+reduce the redundant computation in the spatial dimension.
+The OctConv [54] reduces the spatial resolution by using
+low-frequency features. The Spatially Adaptive Computa-
+tion Time (SACT) [49] dynamically adjusts the number of
+executed layers for different image regions. The methods
+proposed in [55] and [50] skip the computation on some
+less important regions of feature maps. These works mainly
+reduce the spatial redundancy by modifying convolutional
+layers, while we propose to process the image in a sequential
+manner. Our method is general as it does not require altering
+the network architecture.
+2.3
+Visual attention models
+Our GFNet is related to the visual attention models, which
+are similar to the human perception in that human usually
+pay attention to parts of the environment to perform recogni-
+tion. Many existing works integrate the attention mechanism
+into image processing systems, especially in language-related
+tasks. For example, in image captaining and visual question
+answering, models are trained to concentrate on the related
+regions of the image when generating the word sequence
+[56], [57], [58], [59], [60]. For image recognition, the attention
+mechanism is typically exploited to extract information from
+some task-relevant regions [16], [61], [62], [63].
+One similar work to our GFNet is the recurrent visual
+attention model proposed in [14]. However, our method
+differs from it in two important aspects: 1) we adopt a ﬂexible
+and general CNN-based framework that is compatible
+with a wide variety of CNNs to achieve state-of-the-art
+computational efﬁciency, instead of sticking to a pure RNN
+model; and 2) our network focuses on performing adaptive
+inference for higher efﬁciency, and the recurrent process
+can be terminated conditioned on each input. With these
+design innovations, the proposed GFNet has achieved state-
+of-the-art performance on ImageNet in terms of both the
+theoretical computational efﬁciency and actual inference
+speed. In addition, [64] shares a similar spirit to us in
+selecting important features with reinforcement learning,
+but it is not based on CNNs nor image data.
+2.4
+Auto-zooming-in Approaches
+In particular, some existing methods propose to automatically
+identify and attend to certain informative details of the input
+1
+2
+3
+1
+2
+3
+Original Image
+(Label: Space Shuttle)
+GFNet
+(sequential
+patch selection)
+RA-CNN
+(recursive attention)
+1st Step
+1
+2
+2
+3
+3
+2nd Step
+3rd Step
+1
+2
+3
+4.1 GFLOPs
+8.2 GFLOPs
+12.3 GFLOPs
+0.8 GFLOPs
+1.6 GFLOPs
+2.4 GFLOPs
+Airplane?
+Space 
+Shuttle!
+Fig. 2. The comparison of GFNet and RA-CNN [15]. As a representative
+example, the computational cost (i.e., FLOPs) is computed based on
+the standard setting on ImageNet [1] with the ResNet-50 [3] backbone
+network, where GFNet adopts 96x96 patches. GFNet is computationally
+more efﬁcient, and can capture the class-discriminative regions in any
+shape or size ﬂexibly. In contrast, RA-CNN [15] is designed to attend to
+the discriminative patterns concentrated in a small region of the original
+images. This mechanism is tailored for the ﬁne-grained recognition task,
+but tends to be sub-optimal in more general and complex scenarios (e.g.,
+on the large-scale comprehensive visual datasets like ImageNet).
+images [15], [65], [66], [67], [68], [69], [70]. As representative
+examples, RA-CNN [15], TASN [71] and NTS-Net [72] learn
+to distinguish between the ﬁne-grained categories with subtle
+visual differences by zooming in on the discriminative local
+patterns (e.g., the afterbrain colors of birds). S3N [73] and
+MGE-CNN [74] leverage the class activation maps (CAMs)
+[75], [76] to localize and highlight the visual evidence for
+ﬁne-grained image recognition. This idea is also explored in
+the context of vehicle re-identiﬁcation [77], image translation
+[78] and zero-shot recognition [79], [80], [81].
+In this direction, a similar work to GFNet may be RA-
+CNN [15]. However, GFNet is fundamentally different from
+RA-CNN in terms of both our motivation and our technical
+contributions. First, the goal of GFNet is to improve the
+efﬁciency of deep networks. Our proposed “Glance and
+Focus” design enables GFNet to localize and leverage the
+class-discriminative image regions efﬁciently with small
+inputs (e.g., the 96x96 down-sampled images or the local
+patches, utilizing 18% of the FLOPs for processing the
+original 224x224 image). On the contrary, RA-CNN [15]
+is computationally intensive since it follows a different
+“global-to-local” principle from us, i.e., all samples need to
+be ﬁrst processed in high-resolution (e.g., 224x224), while the
+most informative region within the inputs will be cropped,
+ampliﬁed (e.g., to 224x224), and adopted as the new inputs
+recursively. Moreover, on top of our advantage in efﬁciency,
+we introduce a novel adaptive inference algorithm, which
+further signiﬁcantly reduces the overall computational cost
+for inference.
+Second, GFNet is inherently able to capture the class-
+discriminative regions in any shape or size ﬂexibly by select-
+ing a sequence of small task-relevant patches. In contrast,
+RA-CNN [15] is designed to recursively crop the informative
+sub-regions from the input image patch, narrow down the
+attention window progressively, and ﬁnally attend to the
+discriminative patterns concentrated in a small region of
+the original images. This mechanism is tailored for the ﬁne-
+grained visual recognition task, but is sub-optimal in terms of
+the more general and complex scenarios we consider (e.g., on
+the large-scale comprehensive image/video benchmarks like
+ImageNet and Something-Something V1/V2). An illustration
+of this issue is presented in Figure 2.
+Third, in our formulation, the training of the patch pro-
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+4
+Recurrent
+Networks
+ConvNets
+Feature
+Maps
+Feature
+Vectors
+Forward
+Cropping &
+Resizing
+e3
+˜x1
+Resize
+⇡
+Global Encoder
+e1
+¯e1
+⇡
+Local Encoder
+fl
+fg
+e2
+¯e2
+…
+h⇡
+2
+…
+…
+Patch Proposal
+Network
+Global Pooling
+…
+˜x3
+˜x2
+Input: Image x
+¯e3
+fc
+Classifier
+fc
+fc
+…
+hc
+2
+hc
+3
+hc
+1
+p1
+…
+fl
+Crop
+Crop
+l2
+l3
+h⇡
+1
+                         ?
+maxjp1j >⌘1
+                         ?
+maxjp2j >⌘2
+p2
+                         ?
+No
+p3
+maxjp3j >⌘3
+No
+  Output:  p1
+Yes
+  Output:  
+Yes
+p1
+  Output:  
+Yes
+p3
+p2
+No
+Fig. 3. An overview of GFNet. Given an input image x, the model iteratively processes a sequence of patches {˜x1, ˜x2, . . . }. The ﬁrst input ˜x1 is a
+low-resolution version of x, and it is processed by the global encoder fG (Glance Step). The following ones {˜x2, . . . } are high-resolution patches
+cropped from x, which are fed into the local encoder fL (Focus Stage). At each step, GFNet produces a prediction with a classiﬁer fC, as well
+as decides the location of the next image patch using a patch proposal network π. This sequential decision process is terminated once sufﬁcient
+conﬁdence is obtained.
+posal network requires exploring all potential task-relevant
+regions across the whole images, which cannot be achieved
+by the training techniques proposed in [15]. By contrast,
+we address this issue by developing a novel reinforcement
+learning based training algorithm. As we validate with
+extensive empirical results, our algorithm yields an effective
+and ﬂexible patch selection policy.
+3
+GLANCE AND FOCUS NETWORKS (GFNET)
+In this section, we introduce the details of our method. For
+the ease of understanding, here we consider the task of
+recognizing images. We will show in Section 5 that it is
+effective to adopt the same techniques for processing videos.
+As aforementioned, deep networks like CNNs are capable
+of producing accurate image classiﬁcation results with certain
+“class-discriminative” image regions, such as the face of a
+dog or the wings of a bird. Inspired by this observation, we
+propose a GFNet framework, aiming to improve the compu-
+tational efﬁciency of the models by performing computation
+on the minimal image regions to obtain a reliable prediction.
+To be speciﬁc, GFNet allocates computation adaptively and
+progressively to different areas of an image according to
+their contributions to the task of interest, while during
+inference, this process will be terminated once the network
+is adequately conﬁdent.
+3.1
+Overview
+In this subsection, we start by giving an overview of the
+proposed GFNet (as shown in Figure 3). Details of its
+components will be presented in Section 3.2.
+Given an image x with the size H ×W, our method
+processes it with a sequence of H′ × W ′ smaller inputs
+{˜x1, ˜x2, . . . }, where H′ < H, W ′ < W. These inputs are
+image patches cropped from certain locations of the image
+(except for ˜x1, which will be described later). The speciﬁc
+location of each patch is dynamically determined by the
+network using the information of all previous inputs.
+Ideally, the contributions of the inputs to classiﬁcation
+should be descending in the sequence, such that the com-
+putational resources are ﬁrst spent on the most valuable
+regions. However, given an arbitrary image, we do not have
+any speciﬁc prior knowledge on which regions are more
+important when generating the ﬁrst patch ˜x1. Therefore, we
+simply resize the original image x to H′×W ′ as ˜x1, which
+not only avoids the risk of wasting computation on less
+important regions caused by randomly localizing the initial
+region, but also provides necessary global information that
+is beneﬁcial for determining the locations of the following
+patches.
+Inference. The inference procedure of GFNet is formu-
+lated as a dynamic decision process on top of the input
+sequence {˜x1, ˜x2, . . . }. At tth step, the backbone feature
+extractor (fG or fL) receives the input ˜xt, and the model
+produces a softmax prediction pt. Then the largest entry
+of pt, i.e., maxj ptj, (treated as conﬁdence following earlier
+works [17], [26]) is compared to a pre-deﬁned threshold
+ηt. If maxj ptj > ηt, then the sequential process halts, and
+pt will be output as the ﬁnal prediction. Otherwise, the
+location of the next image patch ˜xt+1 will be decided, and
+˜xt+1 will be cropped from the image as the input at the
+(t + 1)th step. Note that the prediction pt and the location
+of ˜xt+1 are obtained using two recurrent networks, such
+that they exploit the information of all previous inputs
+{˜x1, ˜x2, . . . , ˜xt}. The maximum length of the input sequence
+is restricted to T by setting ηT = 0, while other conﬁdence
+thresholds ηt(1≤t≤T−1) are determined under the practical
+requirements for a given computational budget. Details on
+obtaining the thresholds are presented in Section 3.4.
+Training.
+During
+training,
+we
+inactivate
+early-
+terminating by setting ηt = 1(1 ≤t ≤T −1), and
+enforce all prediction pt’s (1 ≤t ≤T) to be correct with
+high conﬁdence. For patch localization, we train the network
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+5
+to select the patches that maximize the increments of the
+softmax prediction on the ground truth labels between the
+adjacent two steps. In other words, we seek to ﬁnd the most
+class-discriminative image patches that have not been seen
+by the network. This procedure exploits a policy gradient
+algorithm to address the non-differentiability.
+3.2
+The GFNet Architecture
+The proposed GFNet consists of four components: a global
+encoder fG, a local encoder fL, a classiﬁer fC and a patch
+proposal network π.
+Global encoder fG and local encoder fL are both back-
+bone networks that we utilize to extract deep representations
+from the inputs. They share the same network architecture
+but with different parameters. The former is applied to the
+resized original image ˜x1, while the later is applied to the
+selected image patches. We use two networks instead of one
+because we ﬁnd that there is a discrepancy between the scale
+of the low-resolution inputs ˜x1 and the high-resolution local
+patches, which leads to degraded performance with a single
+encoder (detailed results are given in Section 5.5).
+Classiﬁer fC is a recurrent network that aggregates
+the information from all previous inputs and produces a
+prediction at each step. We assume that the tth input ˜xt is fed
+into the encoder, obtaining the corresponding feature maps
+et. We perform the global average pooling on et to get a
+feature vector ¯et, and produce the prediction pt by
+pt = fC(¯et, hC
+t−1),
+(1)
+where hC
+t−1 is the hidden state of fC, which is updated at
+the (t −1)th step. Note that it is unnecessary to maintain the
+feature maps for the classiﬁer as classiﬁcation usually does not
+rely on the spatial information they contain. The recurrent
+classiﬁer fC and the aforementioned two encoders fG, fL are
+trained simultaneously with the following classiﬁcation loss:
+Lcls =
+1
+|Dtrain|
+X
+(x,y)∈Dtrain
+ 1
+T
+XT
+t=1 LCE(pt, y)
+
+.
+(2)
+Herein, Dtrain is the training set, y denotes the label corre-
+sponding to x and T is the maximum length of the input
+sequence. We use the standard cross-entropy loss function
+LCE(·) during training.
+Patch proposal network π is another recurrent network
+that determines the location of each image patch. Given that
+the outputs of π are used for the non-differentiable cropping
+operation, we model π as an agent and train it using the
+policy gradient method. In speciﬁc, it receives the feature
+maps et of ˜xt at tth step, and chooses a localization action
+lt+1 stochastically from a distribution parameterized by π:
+lt+1 ∼π(lt+1|et, hπ
+t−1),
+(3)
+where lt+1 ∈[0, 1]2 is formulated as the normalized co-
+ordinates of the centre of the next patch ˜xt+1. Here we
+use a Gaussian distribution during training, whose mean is
+output by π and standard deviation is pre-deﬁned as a hyper-
+parameter. At test time, we simply adopt the mean value
+as lt+1 for a deterministic inference process. We denote the
+hidden state maintained within π by hπ
+t−1, which aggregates
+the information of all past feature maps {e1, . . . , et−1}. Note
+that we do not perform any pooling on et, since the spatial
+information in the feature maps is essential for localizing
+the discriminative regions. On the other hand, we save
+the computational cost by reducing the number of feature
+channels using a 1×1 convolution. Such a design abandons
+parts of the information that are valuable for classiﬁcation
+but unnecessary for localization. The architecture of π is
+shown in Figure 4.
+conv 1x1, stride 1
+(typically 800+ 
+ channels) 
+Feature Maps et
+32 Channels
+vectorize
+Gated Recurrent 
+Unit (GRU)
+lt+1
+   Coordinates of
+the Centre of    ˜xt+1
+h⇡
+t−1
+Fig. 4. The architecture of the
+patch proposal network π.
+During training, after ob-
+taining lt+1, we crop the H′×
+W ′ area centred at lt+1 from
+the original image x as the
+next input ˜xt+1, and feed it
+into the network to produce
+the prediction pt+1. Then the
+patch proposal network π re-
+ceives a reward rt+1 for the
+action lt+1, which is deﬁned as
+the increments of the softmax
+prediction probability on the
+ground truth labels, i.e.,
+rt+1 = p(t+1)y −pty,
+(4)
+where y ∈{1, . . . , C} is the label of x among C classes. The
+goal of π is to maximize the sum of the discounted rewards:
+max
+π
+E
+XT
+t=2 γt−2rt
+
+,
+(5)
+where γ ∈(0, 1) is a pre-deﬁned discount factor. Intuitively,
+through Eq. (5), we enforce π to select the patches that enable
+the network to produce correct predictions in high conﬁdence
+with as fewer patches as possible. In essence, we train π to
+predict the location of the most beneﬁcial region for the
+image classiﬁcation at each step. Note that this procedure
+considers the previous inputs as well, since we compute the
+“increments” of the prediction probability.
+3.3
+Training Strategy
+To ensure GFNet is trained properly, we propose a 3-stage
+training scheme, where the ﬁrst two stages are indispensable,
+and the third stage is designed to further improve the
+performance.
+Stage I: At ﬁrst, we do not integrate the patch proposal
+network π into GFNet. Instead, we randomly crop the patch
+at each step with a uniform distribution over the entire input
+image, and train fG, fL and fC to minimize the classiﬁcation
+loss Lcls (Eq. (2)). In this stage, the network is trained to
+adapt to arbitrary input sequences.
+Stage II:
+We ﬁx the two encoders and the classiﬁer
+obtained from Stage I, and evoke a randomly initialized
+patch proposal network π to decide the locations of image
+patches. Then we train π using a policy gradient algorithm
+to maximize the total reward (Eq. (5)).
+Stage III: Finally, we ﬁne-tune the two encoders and
+the classiﬁer with the ﬁxed π from Stage II to improve the
+accuracy of GFNet with the learned patch selection policy.
+3.4
+Implementation Details
+Initialization of fG and fL. We initialize the local encoder
+fL using the ImageNet pre-trained models. Since the global
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+6
+encoder fG processes the resized image with lower resolution,
+we ﬁrst ﬁne-tune the ImageNet pre-trained models with all
+training samples resized to H′×W ′, and then initialize fG
+with the ﬁne-tuned parameters.
+Recurrent networks. We adopt the gated recurrent unit
+(GRU) [82] in the classiﬁer fC and the patch proposal network
+π. For MobileNets-V3 and EfﬁcientNets, we use a cascade of
+fully-connected classiﬁers for efﬁcient inference. The details
+are deferred to Appendix A.1.
+Regularizing Networks. In our implementation, we
+add a regularization term to Eq. (2), aiming to keep the
+capability of the two encoders to learn linearly separable
+representations, namely
+L′
+cls =
+1
+|Dtrain|
+X
+(x,y)∈Dtrain
+ 1
+T
+XT
+t=1 [LCE(pt, y)
++λLCE(Softmax(FCt(¯et)), y)]} ,
+(6)
+where λ > 0 is a pre-deﬁned coefﬁcient. Herein, we deﬁne a
+fully-connected layer FCt(·) for each step, and compute the
+softmax cross-entropy loss over the feature vector ¯et with
+FCt. Note that, when minimizing Eq. (2), the two encoders
+are not directly supervised since all gradients ﬂow through
+the classiﬁer fC, while Eq. (6) explicitly enforces a linearized
+deep feature space.
+Conﬁdence thresholds. One of the prominent advan-
+tages of GFNet is that both its computational cost and
+its inference latency can be tuned online according to
+the practical requirements via changing the conﬁdence
+thresholds {η1, η2, . . .}. To solve their values, we consider
+a budgeted batch classiﬁcation [26] scenario, where the model
+needs to classify a set of samples Dtest within a given com-
+putational budget B > 0. Let Accuracy(Dval, {η1, η2, . . .})
+and FLOPs(Dval, {η1, η2, . . .}) denote the accuracy and com-
+putational cost of GFNet on the validation set Dval with
+{η1, η2, . . .}. Then the thresholds can be obtained by solving
+the following optimization problem:
+maximize
+η1,η2,...
+Accuracy(Dval, {η1, η2, . . .}),
+s.t. FLOPs(Dval, {η1, η2, . . .}) ≤B.
+(7)
+Unless otherwise speciﬁed, problem (7) will be solved with
+the following procedure. We assume that the probability
+of obtaining the ﬁnal prediction at tth step is qt, and the
+corresponding computational cost or latency is Ct. Then the
+average cost for each sample can be computed as P
+t qtCt,
+leading to the constraint |Dval| P
+tqtCt ≤B. We can solve
+this constraint for a proper qt and determine the threshold ηt
+on the validation set. In our implementation, following [26],
+we let qt =z(1 −q)t−1q, where z is a normalizing constant
+to ensure P
+tqt =1, and 0<q<1 is the variable to be solved.
+Policy gradient algorithm. We implement the off-the-
+shelf proximal policy optimization (PPO) algorithm proposed
+by [83] to train the patch proposal network π. The details are
+introduced in Appendix A.2.
+4
+IMPROVED TECHNIQUES FOR GFNET
+In this section, we propose a contrastive reward function
+and a resizable patch mechanism to further boost the
+computational efﬁciency of GFNet. The former improves
+the performance of the learned patch selection policy. The
+Kite
+Piano
+Samoyed
+Balloon
+Bookstore
+Fireboat
+Fur coat
+Harp
+Handkerchief
+(a) Regular Cases
+(b) Cases where Even the Random Policy Consistently 
+Obtains Large Rewards
+Fig. 5. The value of rewards when the centre of the 2rd patch is located
+at each location in a GF-ResNet-50 (T=5, H′=W ′= 96), indicated by
+heat maps. The original images are shown on the left. We assume that
+the samples shown in (b) may confuse the learning of the patch selection
+policy using the reward proposed in Eq. (4), where all the actions will be
+encouraged.
+latter enables a single GFNet to achieve high accuracy when
+its computational cost is online tuned among a large range of
+budgets. The effectiveness of these two improved techniques
+is validated in Sections 5.2.4 and 5.2.5.
+4.1
+Contrastive Reward
+With the reward proposed in Eq. (4), we ideally hope the
+patch proposal network π can ﬁnd the patches which maxi-
+mize the conﬁdence increments. However, it is empirically
+observed that in some cases, even selecting patches randomly
+may consistently lead to large rewards. Examples are shown
+in Figure 5 (b). The color in heat maps denotes the value of
+conﬁdence increments when the centre of the second patch
+(˜x2) is located at each corresponding location.
+We assume that these instances may confuse the training
+of π, since every action will be encouraged due to its large
+reward. To alleviate this problem, we propose a contrastive
+reward function, i.e.,
+rt+1 = p(t+1)y−E˜xt+1∼RandomCrop(x)
+p(t+1)y
+ ,
+(8)
+where E˜xt+1∼RandomCrop(x)
+p(t+1)y
+
+is the expected softmax
+probability on the ground truth label when the (t + 1)th
+input ˜xt+1 is randomly cropped from the image. With Eq.
+(8), an action taken by π will be compared with the average
+effect of a random policy to determine whether it should
+be encouraged. As a consequence, only the case where
+strategically selecting patches leads to a signiﬁcant change
+of network prediction may produce the varying rewards. If
+all possible actions tend to be equally important, and hence
+learning π makes less sense, the value of rewards will be
+around zero, avoiding confusing the training process.
+4.2
+Multi-scale GFNet
+As aforementioned, the vanilla GFNet ﬁxes the size of
+patches (i.e., H′ × W ′) as a pre-deﬁned hyper-parameter.
+However, this constraint limits the ﬂexibility of a single
+GFNet to achieve high computational efﬁciency when its
+computational cost is online tuned within a large range.
+Given a small computational budget, adopting a smaller
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+7
+Exit
+Exit
+…
+Exit
+Exit
+…
+(a) GFNet
+(b) Multi-scale GFNet (MS-GFNet)
+Fig. 6. Comparisons of the vanilla GFNet and Multi-scale GFNet (MS-
+GFNet). The later allows the model to dynamically adjust the size of
+patches, such that high accuracy can be achieved with both small and
+relatively sufﬁcient computational budgets. Note that the computational
+cost of both GFNet and MS-GFNet can be adjusted online without
+additional training.
+patch size usually results in higher accuracy than using
+larger patches. However, once the available computational
+resources are relatively sufﬁcient, larger patches typically
+outperform smaller ones. The empirical results on this
+phenomenon can be found in Table 3.
+Inspired by this issue, we propose a multi-scale GFNet
+(MS-GFNet), as shown in Figure 6. At test time, after
+processing each image patch, MS-GFNet determines whether
+to output the prediction as the vanilla GFNet does. Once
+the inference proceeds, the size of the next patch will be
+selected among several candidates. Here we integrate these
+two decision steps into a single conﬁdence-based criterion,
+which we empirically ﬁnd effective. Formally, at the tth step,
+we assume that the kth candidate of patch size corresponds to
+a threshold ηk
+t . Given the prediction pt, the inference process
+of the samples with maxj ptj > maxk ηk
+t will be terminated,
+while the samples with
+max
+j
+ptj ≤ηk
+t
+and
+max
+j
+ptj > max
+l
+{ηl
+t|ηl
+t ≤ηk
+t }
+(9)
+will use kth patch size at (t + 1)th step, and repeat this proce-
+dure with {η1
+t+1, η2
+t+1, . . .}. The values of all the thresholds
+can be treated as hyper-parameters and be determined on
+the validation set following problem (7), where we adopt the
+genetic algorithm [84]. As a result, both the input sequence
+lengths and the patch sizes can be dynamically adjusted
+conditioned on the computational budgets. MS-GFNet by
+design can switch among using smaller and larger patches
+online (without additional training) to achieve relatively
+better performance with either limited or sufﬁcient computa-
+tional resources. During training, we simply randomly select
+patch sizes in all the three stages.
+The architecture of the two encoders (fG and fL) and
+the classiﬁer (fC) remains unchanged in MS-GFNet. For the
+former, most of deep networks can naturally process the
+inputs with varying sizes, while for the later, the dimension
+of the input feature vectors (¯et) does not change due to the
+global pooling. It is worth noting that the patch proposal
+network π receives the feature maps (et) in multiple sizes,
+which is intractable using the original network. To this end,
+we upsample all the feature maps to the maximum possible
+size after the 1x1 convolution in π. In addition, to provide
+the information on the sizes of the last and the next patches,
+we encode them in one-hot and concatenate them with the
+features before they are fed into the GRU.
+5
+EXPERIMENTS
+In this section, we empirically evaluate the effectiveness of
+the proposed GFNet on both image-based and video-based
+recognition tasks. Code and pre-trained models are available
+at https://github.com/blackfeather-wang/GFNet-Pytorch.
+5.1
+Setups
+5.1.1
+Datasets
+Image classiﬁcation. (1) ImageNet is a 1,000-class dataset
+from ILSVRC2012 [1], with 1.2 million images for training
+and 50,000 images for validation. We adopt the same data
+augmentation and pre-processing conﬁgurations as [3], [6],
+[85]. Unless otherwise speciﬁed, the resolution of images
+is set to 224x224. (2) The Swedish trafﬁc signs dataset [86],
+[87] consists of 747 training images and 684 test images,
+with a resolution of 960x1280. The samples are annotated
+according to the types of speed limit signs they contained or
+no speed limit. The same data augmentation techniques
+as [87] are adopted. For both datasets, we estimate the
+conﬁdence thresholds of GFNet on the training set, since
+we ﬁnd that it achieves nearly the same performance as
+cross-validation.
+Video recognition. (1) Something-Something V1&V2 [22]
+are two large-scale video recognition datasets, including 98k
+and 194k videos respectively. Both of them are annotated into
+174 human action classes (e.g., pretending to pick something
+up). (2) Jester [23] is a large-scale action recognition dataset
+consisting of 148,092 videos in 27 categories. We use the
+ofﬁcial training-validation split for all the three datasets,
+and uniformly sample 8/12/16 frames from each video.
+We use the same data augmentation and pre-processing
+conﬁgurations as [25], [51]. During inference, we resize all
+frames to 256x256 and centre-crop them to 224x224. The
+conﬁdence thresholds are estimated on the training set.
+5.1.2
+Two Inference Settings
+We consider two settings to evaluate our method: (1) budgeted
+batch classiﬁcation [26], where the network needs to classify
+a set of test samples within a given computational budget;
+(2) anytime prediction [26], [27], where the network can be
+forced to output a prediction at any given point in time. As
+discussed in [26], these two settings are ubiquitous in many
+real-world applications. For (1), we estimate the conﬁdence
+thresholds to perform the adaptive inference as introduced
+in Section 3.4, while for (2), we assume the length of the
+input sequence is the same for all test samples.
+5.1.3
+Backbone Networks
+For image classiﬁcation, GFNet is implemented on the basis
+of several state-of-the-art CNNs, including MobileNet-V3
+[18], RegNet-Y [24], EfﬁcientNet [7], ResNet [3] and DenseNet
+[6]. These networks serve as the two deep encoders in our
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+8
+0.50
+0.75
+1.00
+1.25
+1.50
+1.75
+2.00
+average budget (in Multiply-Adds)
+×108
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+accuracy (%)
+GFNet
+MobileNets-V3
+MnasNets
+ShuﬄeNets-V2
+(a) MobileNet-V3
+2
+3
+4
+5
+6
+7
+8
+average budget (in Multiply-Adds)
+×108
+69
+70
+71
+72
+73
+74
+75
+76
+77
+GFNet
+RegNets-Y
+ShuﬄeNets-V2
+MobileNets-V2
+CondenseNets
+RegNets-X
+(b) RegNet-Y
+0.2
+0.4
+0.6
+0.8
+1.0
+average budget (in Multiply-Adds)
+×109
+73
+74
+75
+76
+77
+78
+79
+80
+GFNet
+EﬃcientNets
+MnasNets
+FBNets
+ProxylessNAS
+(c) EfﬁcientNet
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+4.5
+average budget (in Multiply-Adds)
+×109
+62
+64
+66
+68
+70
+72
+74
+76
+78
+accuracy (%)
+GFNet
+SkipNets
+SACT
+ResNets
+GoogLeNet
+(d) ResNet
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+average budget (in Multiply-Adds)
+×109
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+GFNet
+DenseNets
+(e) DenseNet
+0
+1
+2
+3
+4
+5
+6
+7
+budget (in Multiply-Adds)
+×109
+59
+61
+63
+65
+67
+69
+71
+73
+75
+GFNet
+MSDNet
+Ensemble of DenseNets
+(f) DenseNet (anytime prediction)
+Fig. 7. Top-1 accuracy v.s. Multiply-Adds on ImageNet. The proposed GFNet framework is implemented on top of state-of-the-art efﬁcient networks.
+Figures (a-e) present the results of Budgeted batch classiﬁcation, while Figures (f) shows the Anytime prediction results.
+methods. In Budgeted batch classiﬁcation, for each sort of
+CNNs, we ﬁx the maximum length of the input sequence
+T, and change the model size (width, depth or both) or the
+patch size (H′, W ′) to obtain networks that cover different
+ranges of computational budgets. Note that we always let
+H′ =W ′. We also compare GFNet with a number of highly
+competitive baselines, i.e., MnasNets [88], ShufﬂeNets-V2
+[21], MobileNets-V2 [13], CondenseNets [12], FBNets [89],
+ProxylessNAS [90], SkipNet [46], SACT [49], GoogLeNet [91]
+and MSDNet [26].
+For video recognition, we implement GFNet on top of a
+ResNet-50 with the temporal shift module (TSM) [25]. With
+the aim of introducing minimum modiﬁcations, the resizing
+and cropping operations in GFNet are performed only in
+the spatial dimension in the same way as we do on images.
+Following [25], the whole video with all frames is always
+fed into the model. We ﬁx T, and change H′, W ′ (we always
+let H′ =W ′) and the number of frames sampled from each
+video among {8, 12, 16}. The performance of several efﬁcient
+video recognition models are reported as baselines, including
+TRN [92], ECO [93] and AdaFuse [94].
+More details on both network conﬁgurations and training
+hyper-parameters are presented in Appendices A.3 and A.4.
+5.2
+Image Classiﬁcation on ImageNet
+5.2.1
+Theoretical Computational Efﬁciency
+Budgeted batch classiﬁcation results are shown in Figure
+7 (a-e). We ﬁrst plot the performance of each GFNet in
+a gray curve, and then plot the best validation accuracy
+with each budget as a black curve. It can be observed that
+GFNet signiﬁcantly improves the performance of even the
+state-of-the-art efﬁcient models with the same amount of
+computation. For example, with an average budget of 7×107
+Multiply-Adds, the GFNet based on MobileNet-V3 achieves
+a Top-1 validation accuracy of ∼71%, which outperforms
+the vanilla MobileNet-V3 by ∼2%. With EfﬁcientNets,
+GFNet generally has ∼1.4× less computation compared
+with baselines when achieving the same performance. With
+ResNets and DenseNets, GFNet reduces the number of
+required Multiply-Adds for the given test accuracy by
+approximately 2 −3× times. Moreover, the computational
+cost of our method can be tuned precisely to achieve the best
+possible performance with a given budget.
+Anytime prediction. We compare our method with
+another adaptive inference network, MSDNet [26], under
+the Anytime prediction setting in Figure 7 (f), where GFNet is
+based on a DenseNet-121. For fair comparison, here we hold
+out 50,000 training images, following [26] (we do not do so in
+Figure 7 (e), and the Budgeted batch classiﬁcation comparisons
+of GFNet and MSDNet are deferred to Appendix B.1). We
+also include the results of an ensemble of DenseNets with
+varying depth [26]. The plot shows that GFNet achieves
+∼4−10% higher accuracy than MSDNet when the budget
+ranges from 5 × 108 to 2.2 × 109 Multiply-Adds.
+5.2.2
+Practical Inference Speed
+Experiments on an iPhone. A suitable platform for the
+implementation of GFNet may be mobile applications, where
+the average inference latency and power consumption of each
+image are approximately linear in the amount of computation
+(Multiply-Adds) [18], such that reducing computational costs
+helps for both improving user experience and preserving
+battery life. To this end, we investigate the practical inference
+speed of our method on an iPhone XS Max (with Apple
+A12 Bionic) using TFLite [95]. The single-thread mode with
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+9
+4
+6
+8
+10
+12
+14
+16
+average latency (in ms)
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+accuracy (%)
+GFNet
+MobileNets-V3
+MnasNets
+MobileNets-V2
+(a) MobileNet-V3
+40
+60
+80
+100
+120
+140
+160
+180
+average latency (in ms)
+69
+70
+71
+72
+73
+74
+75
+76
+77
+GFNet
+ResNets
+DenseNets
+(b) ResNet
+Fig. 8. Top-1 accuracy v.s. inference latency (ms) on ImageNet. The inference speed is measured
+on an iPhone XS Max. We implement GFNet based on MobileNet-V3 and ResNet.
+TABLE 1
+Actual speed on GPU devices. We report the
+theoretical computational cost and the practical
+throughput when GFNet reaches the same Top-1
+accuracy as its corresponding backbone CNN.
+ResNet-50
+Average Budget
+baseline
+4.11G
+(in Multiply-Adds)
+GFNet
+2.16G↓1.90×
+Throughput
+baseline
+976 img/s
+(on NVIDIA 2080Ti)
+GFNet
+1812 img/s↑1.86×
+Average Budget
+baseline
+2.85G
+DenseNet-
+(in Multiply-Adds)
+GFNet
+1.09G↓2.61×
+-121
+Throughput
+baseline
+889 img/s
+(on NVIDIA 2080Ti)
+GFNet
+1844 img/s↑2.07×
+Average Budget
+baseline
+3.36G
+DenseNet-
+(in Multiply-Adds)
+GFNet
+1.83G↓1.84×
+-169
+Throughput
+baseline
+722 img/s
+(on NVIDIA 2080Ti)
+GFNet
+1086 img/s↑1.50×
+Fig. 9. Visualization results of the GF-ResNet-50 (T=5, H′=W ′=96). The boxes indicate the patch locations, and the color denotes whether the
+prediction is correct at current step (green: correct; red: wrong). Note that ˜x1 is the resized input image. The indices of the steps and the current
+conﬁdence on the ground truth labels (shown at the top of images) are presented in the upper left corners of boxes.
+batch size 1 is used following [9], [13], [18]. We ﬁrst measure
+the time consumption of obtaining the prediction with each
+possible length of the input sequence, and then take the
+weighted average according to the number of validation
+samples using each length. The results are shown in Figure
+8. One can observe that GFNet effectively accelerates the
+inference of both MobileNets-V3 and ResNets. For instance,
+our method reduces the required latency to achieve 75.4%
+test accuracy (MobileNets-V3-Large) by 22% (12.7ms v.s.
+16.3ms). For ResNets, GFNet generally requires 2−3× times
+lower latency to achieve the same performance as baselines.
+Experiments on GPUs. GFNet can also be leveraged to
+accelerate the inference of deep networks on GPU devices.
+Here we consider the batch inference setting, where a large
+number of test samples need to be processed using a GPU. In
+speciﬁc, the 50,000 images in the validation set of ImageNet
+are fed into the GFNet with a batch size of 128 on a single
+NVIDIA 2080Ti GPU. At each mini-batch, when the inference
+procedure reaches any exit (i.e., when producing p1, p2, . . .),
+the samples that meet the early-termination criterion will
+be output, with the remaining images continuing to be
+processed (following the Focus Stage). The throughput is
+computed by 50,000/T, where T is the total wall-clock
+time of processing all the mini-batches. The results are
+shown in Table 1. With the same computational resources,
+GFNet improves the throughput of ResNet and DenseNet by
+∼1.5−2.1× without sacriﬁcing the accuracy.
+5.2.3
+Visualization
+We show the image patches found by a ResNet-50 based
+GFNet on some of test samples in Figure 9. Samples are
+TABLE 2
+Comparisons of the contrastive reward with the original one. The results
+of three GFNets on ImageNet are reported. We present the Top-1
+accuracy after the training stage II with ﬁxed length of the input
+sequence (denoted by t).
+(a) GF-ResNet-50 (H′ =W ′ =96, T =5)
+Reward
+t = 1
+t = 2
+t = 3
+t = 4
+t = 5
+Increments
+69.62% 73.23%±0.13 74.24%±0.11 74.84%±0.18 75.25%±0.08
+Contrastive
+69.62% 73.65%±0.17 74.64%±0.06 75.14%±0.09 75.40%±0.09
+(b) GF-MobileNet-V3-Large (H′ =W ′ =128, T =3)
+Reward
+t = 1
+t = 2
+t = 3
+Increments
+70.72% 72.86%±0.06 73.43%±0.10
+Contrastive
+70.72% 73.30%±0.10 73.72%±0.03
+(c) GF-EfﬁcientNet-B2 (H′ =W ′ =128, T =4)
+Reward
+t = 1
+t = 2
+t = 3
+t = 4
+Increments
+75.39% 77.15%±0.02 77.73%±0.06 77.90%±0.03
+Contrastive
+75.39% 77.31%±0.04 77.89%±0.05 77.95%±0.03
+divided into different columns according to the number of
+inputs they require to obtain correct classiﬁcation results. One
+can observe that GFNet classiﬁes “easy” images containing
+large objects with prototypical features correctly at the Glance
+Step with high conﬁdence, while for relatively “hard” images
+which tend to be complex or non-typical, our network is
+capable of focusing on some class-discriminative regions to
+progressively improve the conﬁdence.
+5.2.4
+Effectiveness of the Contrastive Reward
+In Table 2, we present the performance of the GFNets on
+top of ResNet-50, MobileNet-V3-Large and EfﬁcientNet-B2
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+10
+TABLE 3
+Top-1 accuracy of MS-GFNet (ResNet-50) on ImageNet under the Budgeted batch classiﬁcation setting. We ﬁx the patch size of the Glance Step
+(i.e., 96x96), and consider three candidate sizes in the Focus Stage (i.e., 96x96, 128x128, 160x160). The performance of using ﬁxed patch sizes in
+the Focus Stage is also presented. The best result with each computational budget are bold-faced, which the second best result is underlined.
+Patch Size
+Average Budget (in Multiply-Adds)
+1.00G
+1.25G
+1.50G
+1.75G
+2.00G
+2.25G
+2.50G
+2.75G
+3.00G
+96x96 (ﬁxed)
+73.28%
+74.51%
+75.27%
+75.59%
+75.78%
+75.90%
+–
+–
+–
+128x128 (ﬁxed)
+72.65%
+74.40%
+75.47%
+76.07%
+76.26%
+76.39%
+76.40%
+76.40%
+76.40%
+160x160 (ﬁxed)
+72.04%
+73.58%
+74.68%
+75.48%
+76.03%
+76.44%
+76.72%
+76.83%
+76.94%
+MS-GFNet
+73.70%±0.04
+74.97%±0.06
+75.70%±0.08
+76.24%±0.07
+76.51%±0.07
+76.71%±0.08
+76.85%±0.06
+76.91%±0.05
+76.98%±0.09
+1.0
+1.5
+2.0
+2.5
+3.0
+Multiply-Adds/image
+×109
+69
+70
+71
+72
+73
+74
+75
+76
+77
+accuracy (%)
+MS-GFNet (one model)
+GFNet (two models)
+(a) ResNet
+4
+5
+6
+7
+8
+Multiply-Adds/image ×108
+77.3
+77.6
+77.9
+78.2
+78.5
+78.8
+79.1
+79.4
+79.7
+80.0
+MS-GFNet (one model)
+GFNet (two models)
+(b) EfﬁcientNet
+Fig. 10. Comparisons of MS-GFNet and the original GFNet on top of
+ResNet and EfﬁcientNet. Top-1 accuracy v.s. Multiply-Adds on ImageNet
+under the Budgeted batch classiﬁcation setting are reported.
+when the contrastive reward function proposed in Section
+4.1 is used, where we estimate the expectation in Eq. (8) with
+a single time of Monte-Carlo sampling. The results of the
+original reward is referred to as “Increments”. Different
+rewards are applied in training stage II (reinforcement
+learning) on the basis of the same stage I checkpoint. For
+a clear comparison, here we do not perform training stage
+III. One can observe that the proposed contrastive reward
+consistently improves the accuracy of all the three models,
+especially at the ﬁrst step of the focus stage (i.e., t = 2).
+5.2.5
+MS-GFNet
+The performance of MS-GFNet is presented in Table 3.
+The proposed model is compared with the vanilla GFNets
+that adopt the same patch size as it in the Glance Step
+(i.e., 96x96), but use a ﬁxed patch size in the Focus Stage
+(i.e., 96x96, 128x128, 160x160). All the models in Table 3 is
+trained with the aforementioned contrastive reward. One
+can observe that smaller patches outperforms larger ones
+when the computational budget is small, while larger patches
+achieve higher accuracy on the contrary. In contrast, MS-
+GFNet consistently outperforms the best results of ﬁxed-
+patch-size baselines with all computational budgets, which
+demonstrates the effectiveness of the proposed multi-scale
+patch mechanism. Note that MS-GFNet has the same network
+architecture with the baselines except for the slight changes in
+π, and the number of parameters is approximately identical.
+In Figure 10, we compare the vanilla GFNet and the MS-
+GFNet trained with the contrastive reward. The latter not
+only consistently outperforms the former under the same
+computational budget, but is able to achieve higher efﬁciency
+among a larger range of Multiply-Adds. This enables MS-
+GFNet to adjust its computational cost more ﬂexibly without
+additional training in realistic scenarios.
+0.0
+0.4
+0.8
+1.2
+1.6
+2.0
+average budget (in Multiply-Adds)
+£1010
+74
+75
+76
+77
+78
+79
+80
+accuracy (%)
+GFNet (ImageNet-3842)
+GFNet (ImageNet-2242)
+ResNet-50 (ImageNet-{2242, 3842, 4802})
+3.7x
+3.0x
+1.9x
+Fig. 11. Top-1 accuracy v.s. Multiply-Adds on ImageNet with varying input
+resolutions. The images are pre-processed by being resized to 2242,
+3842 or 4802. Our GFNet is implemented on top of ResNet-50.
+TABLE 4
+Results of trafﬁc sign recognition on the Swedish trafﬁc signs dataset,
+which consists of 960x1,280 road-scene images collected on real
+moving vehicles. The patch size for GFNet is set to H′ =W ′ =192, while
+“random patch” denotes randomly cropping the patches in our method.
+The best results are bold-faced. The blue numbers are based on the
+backbone network (i.e., ResNet-18). †The computational cost of GFNet
+can be adjusted online.
+Model
+Multiply-Adds
+Top-1 Accuracy
+per image
+ResNet-18
+44.7G
+89.47%
+GF-ResNet-18
+2.8G
+68.97%
+(random patch)
+GF-ResNet-18†
+1.9G↓23.5×
+89.47%
+2.8G↓16.0×
+91.50%
+5.3
+High-resolution Image Recognition
+Results on ImageNet with higher resolution. As afore-
+mentioned, leveraging high-resolution inputs signiﬁcantly
+improves the accuracy of modern deep networks. However,
+large images usually yield a high computational cost, which
+grows quadratically or sometimes even faster with respect
+to the image height (or width). One of the predominant
+advantages of our method is that GFNet can process high-
+resolution inputs efﬁciently, while preserving their gains
+in accuracy. To demonstrate this point, we pre-process
+the ImageNet dataset to obtain the images with varying
+resolutions (i.e., 2242, 3842 and 4802), and compare GFNet
+with the baselines in these scenarios, as shown in Figure
+11. The patch size of GFNet is set to 96x96/128x128 and
+160x160/192x192 for the original image size of 2242 and
+3842, respectively. The results in Figure 11 indicate that our
+method outperforms the backbone networks by increasingly
+large margins with the growing resolution of original images.
+For example, on top of the same 2242/3842 images, GF-
+ResNet-50 reduces the computational cost of ResNet-50
+by 1.9×/3.0× without sacriﬁcing the accuracy. Another
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+11
+Fig. 12. Visualization of trafﬁc sign recognition. The boxes indicate the patch locations, while the color denotes whether the prediction is correct at the
+current step (green: correct; red: wrong).
+1
+2
+3
+4
+5
+6
+7
+average budget (in Multiply-Adds)
+×1010
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+accuracy (%)
+GFNet
+TSM
+AdaFuse
+ECO
+TRN
+(a) Something-Something V1
+1
+2
+3
+4
+5
+6
+7
+average budget (in Multiply-Adds)
+×1010
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+GFNet
+TSM
+AdaFuse
+TRN
+(b) Something-Something V2
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+average budget (in Multiply-Adds) ×1010
+94.0
+94.3
+94.6
+94.9
+95.2
+95.5
+95.8
+96.1
+GFNet
+TSM
+(c) Jester
+Fig. 13. Top-1 accuracy v.s. Multiply-Adds on three video recognition benchmarks under the Budgeted batch classiﬁcation setting. GFNet is
+implemented on top of a ResNet-50 with the temporal shift module (TSM) [25].
+interesting phenomenon is that GFNet achieves higher best
+accuracies than the backbones when leveraging the same
+inputs. We tentatively attribute this to the paradigm of
+dynamic computation, which allocates more computation
+to the task-relevant regions adaptively and may learn more
+discriminative representations.
+Trafﬁc sign recognition. As a standard benchmark, the
+ImageNet dataset mainly contains the images that have
+already been centered to the relevant object by the human
+photographers. However, our GFNet does not rely on this
+assumption, and is applicable to more general scenarios, e.g.,
+where the test images may be collected in the wild without
+speciﬁed pre-processing. As a representative example, we
+present the results on the Swedish trafﬁc signs dataset in
+Table 4. The dataset consists of 960x1,280 road-scene images
+collected on real moving vehicles, and the task is to recognize
+the existence and types of the speed limit signs. Note that the
+objects of interest are generally small, diversely distributed,
+and sometimes not clear (see Figure 12 for examples). From
+Table 4, one can observe that GFNet dramatically improves
+the computational efﬁciency of the backbone network, e.g., it
+reduces the computational cost by 23.5× with the preserved
+accuracy. Several representative visualization examples are
+presented in Figure 12. We ﬁnd that GFNet is able to identify
+the existence of trafﬁc signs effectively at the Glance Step,
+and can further attend to the local regions that contain the
+signs to recognize their speciﬁc contents, in the Focus Stage.
+In addition, once GFNet fails to localize the trafﬁc signs of
+interest (e.g., due to other distracting signs), it may simply
+correct this with additional focus steps.
+5.4
+Video Recognition
+Main results. The Budgeted batch classiﬁcation results on three
+representative video-based benchmarks are shown in Figure
+13, where similar observations to image recognition can
+be obtained. GFNet is shown to signiﬁcantly improve the
+computational efﬁciency of TSM. For instance, on Something-
+Something V2, GFNet reduces the average budget for each
+video from 6.5×1010 to 2.5×1010 Multiply-Adds when reach-
+ing an accuracy of ∼61%. In addition, GFNet outperforms
+the state-of-the-art efﬁcient video recognition framework,
+AdaFuse [94], by large margins (∼1.5 −5%). Notably,
+however, GFNet is actually orthogonal to AdaFuse since the
+latter mainly focuses on improving the network architecture.
+Besides, in video recognition, the computational cost of our
+method can also be tuned online without additional training.
+Visualization. The visualization results of GFNet on
+video benchmarks are shown in Figure 14. For each video, 4
+uniformly-sampled frames are presented, and the meaning
+of annotations is the same as Figure 9. One can observe
+that GFNet is able to recognize some semantically simpler
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+12
+Fig. 14. Visualization of the GFNet on the representative videos from Something-Something V2. The boxes indicate the patch locations, and the color
+denotes whether the prediction is correct at current step (green: correct; red: wrong). Note that ˜x1 is the resized input video. The indices of the steps
+and the current conﬁdence on the ground truth labels (shown at the top of images) are presented in the upper left corners of boxes.
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+E(t)
+69
+70
+71
+72
+73
+74
+75
+76
+77
+accuracy (%)
+GF-DenseNet-201
+t
+0
+10000
+20000
+30000
+40000
+50000
+number of images
+t=1
+t=2
+t=3
+t=4
+t=5
+Fig. 15. Top-1 accuracy v.s. the expected input
+sequence length during inference, E(t), in Bud-
+geted batch classiﬁcation. The results are based
+on GF-DenseNet-201 (T=5, H′=W ′=96).
+0
+1
+2
+3
+4
+5
+6
+7
+budget (in Multiply-Adds)
+×109
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+accuracy (%)
+T=5, H′=W ′=96
+T=4, H′=W ′=96
+T=6, H′=W ′=96
+T=5, H′=W ′=128
+T=10, H′=W ′=64
+Fig. 16. Performance of GFNet with varying T and
+different patch sizes. Here we use ResNet-50 as
+the two backbones. The Anytime prediction results
+are reported.
+1×109
+1.5×109
+2×109
+2.5×109
+3×109
+average budget (in Multiply-Adds)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+proportion of the patch size
+96x96
+128x128
+160x160
+Fig. 17. The proportion of each patch size
+adopted in an MS-GFNet (ResNet-50) with
+varying computational budget. The Budgeted
+batch classiﬁcation setting is considered.
+TABLE 5
+Ablation study on the components of GFNet. We report the Top-1 accuracy of different variants with ﬁxed length of the input sequence (denoted by t).
+The best results are bold-faced.
+Variants
+t = 1
+t = 2
+t = 3
+t = 4
+t = 5
+Patch Selection
+Random Policy
+54.53%
+64.42%
+68.09%
+69.85%
+70.70%
+Random Policy + Glance Step
+69.47%
+72.32%
+73.47%
+74.04%
+74.46%
+Centre-corner Policy
+59.51%
+66.75%
+69.53%
+72.83%
+74.10%
+Centre-corner Policy + Glance Step
+69.06%
+72.94%
+73.88%
+74.47%
+75.12%
+Network
+w/o Global Encoder fG (single encoder)
+65.92%
+70.59%
+72.59%
+73.72%
+74.26%
+w/o the Glance Step (using a centre crop as ˜x1)
+59.14%
+66.70%
+70.91%
+73.71%
+74.70%
+Training
+Initializing fG w/o H′×W ′ Fine-tuning
+67.81%
+72.50%
+74.12%
+75.21%
+75.56%
+w/o Training Stage III (2-stage training)
+69.62%
+73.39%
+74.32%
+74.97%
+75.36%
+GFNet (ResNet-50, T = 5, H′ =W ′ =96)
+68.85%
+73.71%
+74.65%
+75.34%
+75.93%
+actions at the Glance Step, e.g., “removing something”, which
+mainly includes identifying the disappearance of a certain
+object. In contrast, for more difﬁcult samples, our model
+can adaptively localize and leverage some task-relevant
+video patches to understand more complex behaviors (e.g.,
+pretending to do something) or model the relationships
+between objects (e.g., the co-occurrence of two objects and
+the “next to” relationship).
+5.5
+Analytical Results
+5.5.1
+Input Sequence Length and Patch Size
+Length of input sequence. To give a deeper understanding
+of our method, we visualize the expected length of the input
+sequence E(t) during inference under the Budgeted batch
+classiﬁcation setting and the corresponding Top-1 accuracy
+on ImageNet, as shown in Figure 15. We also present the
+plots of numbers of images v.s. t at several points. It can
+be observed that the performance of GFNet is signiﬁcantly
+improved by letting images exit later in the Focus Stage,
+which is achieved by adjusting the conﬁdence thresholds
+online without additional training.
+Maximum input sequence length T and patch size.
+We show the performance of GFNet with varying T and
+different patch sizes under the Anytime prediction setting in
+Figure 16. The ﬁgure suggests that changing T does not
+signiﬁcantly affect the performance with the same amount
+of computation, while using larger patches leads to better
+performance with large computational budgets but lower
+test accuracy compared with smaller patches when the
+computational budget is insufﬁcient.
+Patch sizes in MS-GFNet. Figure 17 visualizes the
+proportion of each patch size candidate among all focus
+patches in the MS-GFNet (ResNet-50) in Table 3. Here we
+omit the Glance Step as it uses a ﬁxed patch size. The results
+show that MS-GFNet is able to switch between adopting
+small and large patches when limited and relatively sufﬁcient
+computational resources are available.
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+13
+TABLE 6
+Comparisons of different architectures of the patch proposal network π. Here “Conv.” denotes the convolutional layer. We report the ImageNet Top-1
+accuracy of GF-ResNet-50 (T=5, H′=W ′=96) with ﬁxed length of the input sequence (denoted by t). For clear comparisons, we provide the
+computational cost of representative backbone networks (with 96x96 inputs) in the last two rows. Our proposed efﬁcient policy network introduces
+negligible additional computation on top of the light-weighted backbones, but performs on par with the computationally intensive designs.
+Architecture of π.
+Multiply-Adds
+per Step
+t = 1
+t = 2
+t = 3
+t = 4
+t = 5
+Head (before GRU)
+GRU Hidden Units
+Fully-connected Layer
+1,024
+46.1M
+68.85%
+73.71%
+74.65%
+75.34%
+75.93%
+Fully-connected Layer
+512
+40.4M
+69.09%
+73.81%
+74.83%
+75.39%
+75.83%
+Fully-connected Layer
+256
+38.7M
+68.88%
+73.63%
+74.81%
+75.25%
+75.67%
+3x3 Conv. →32 Channels
+256
+5.8M
+68.89%
+73.65%
+74.81%
+75.54%
+75.75%
+1x1 Conv. →64 Channels
+256
+1.7M
+68.77%
+73.71%
+74.90%
+75.39%
+75.87%
+1x1 Conv. →32 Channels
+256
+1.1M
+68.75%
+73.77%
+74.99%
+75.54%
+75.86%
+1x1 Conv. →16 Channels
+256
+0.7M
+68.57%
+73.78%
+74.95%
+75.58%
+75.85%
+ResNet-50, Input Size: 96x96
+750.7M
+–
+MobileNet-V3-Large (1.00), Input Size: 96x96
+43.1M
+–
+TABLE 7
+Comparisons of various early-termination criterions in Budgeted batch
+classiﬁcation. Results with a GF-ResNet-50 (T=5, H′=W ′=96) are
+presented. The best Top-1 accuracy with each computational budget are
+bold-faced.
+Early-exit
+Average Budget (in Multiply-Adds)
+Criterion
+1.00G
+1.25G
+1.50G
+1.75G
+2.00G
+Random
+69.99%
+70.89%
+71.68%
+72.17%
+72.87%
+Entropy
+72.20%
+74.01%
+74.75%
+75.19%
+75.43%
+Conﬁdence 72.64%±0.08 74.38%±0.09 75.12%±0.05 75.46%±0.06 75.67%±0.03
+TABLE 8
+Effects of varying training hyper-parameters, where lr refers to the
+learning rate. The results of GF-ResNet-50 (T=5, H′=W ′=96) are
+presented as the representative examples. We report the ImageNet
+Top-1 accuracy with ﬁxed length of the input sequence (denoted by t).
+The best results are bold-faced. Our adopted settings are underlined.
+Hyper-parameters
+t = 1
+t = 2
+t = 3
+t = 4
+t = 5
+λ = 0 (i.e., Eq. (2))
+68.55%
+71.87%
+73.19%
+73.52%
+73.94%
+λ = 1 (ours)
+68.85%
+73.71%
+74.65%
+75.34%
+75.93%
+λ = 2
+69.25%
+73.95%
+74.32%
+75.19%
+75.73%
+λ = 5
+69.39%
+73.98%
+74.10%
+74.51%
+74.77%
+λ = 10
+69.71%
+73.71%
+73.84%
+74.35%
+74.70%
+Initial lr = 0.001
+68.75%
+72.20%
+73.44%
+74.18%
+74.47%
+Initial lr = 0.01 (ours)
+68.85%
+73.71%
+74.65%
+75.34%
+75.93%
+Initial lr = 0.1
+68.17%
+73.58%
+74.78%
+75.00%
+75.83%
+30 Epochs
+69.02%
+73.45%
+74.74%
+75.25%
+75.55%
+60 Epochs (ours)
+68.85%
+73.71%
+74.65%
+75.34%
+75.93%
+90 Epochs
+68.43%
+74.01%
+74.49%
+75.23%
+75.85%
+5.5.2
+Ablation Study
+Effectiveness of the components. We test ablating the
+components of GFNet, and summarize the results in Table
+5. We ﬁrst consider two alternatives of the learned patch
+selection policy, namely the random policy where all patches
+are uniformly sampled from the image, and the centre-corner
+policy where the network sequentially processes the whole
+image by ﬁrst cropping the patch from the centre of the
+image, and then traversing the corners. The learned policy
+is shown to consistently outperform them. We also remove
+or alter the components of the GFNet architecture and the
+training process. One can observe that resizing the original
+image as ˜x1 (Glance Step) and adopting two encoders are both
+important techniques to achieve high accuracy, especially at
+the ﬁrst three steps.
+Architecture of the patch proposal network π. Our pro-
+posed GFNet is robust to the architecture of π. In particular,
+since π receives the discriminative deep representations
+extracted by the two encoders, a high network capacity is
+generally not necessary to process its inputs. In Table 6, we
+compare the performance of various architectures of π. The
+results suggest that a lighted-weighted convolutional layer
+with a small number of GRU hidden units achieves similar
+accuracy to the computationally more expensive designs
+of π. Our proposed architecture (i.e., Figure 4) introduces
+negligible additional computation compared to the backbone
+networks (e.g., ResNet-50 and MobileNet-V3).
+Early-termination criterion. We change the criterion
+for performing adaptive inference, and report the results
+in Table 7. Two variants are considered: (1) performing
+random termination at each step with the same proportion
+as GFNet; (2) adopting the entropy of the softmax prediction
+to determine whether to terminate the inference process. One
+can observe that our simple but effective conﬁdence-based
+criterion consistently outperforms both of them.
+5.5.3
+Sensitivity of Training Hyper-parameters
+In our experiments, three training hyper-parameters are
+tuned conditioned on the backbone networks, while other
+training conﬁgurations introduced by GFNet are ﬁxed
+(e.g., reinforcement learning). In speciﬁc, the tunable hyper-
+parameters include: (1) the coefﬁcient λ in the loss function
+(Eq. (6)); (2) the initial learning rate for the backbone
+networks in training stage I/III; (3) the number of epochs in
+training stage I/III. We study their sensitivity in Table 8.
+One can observe that a proper λ signiﬁcantly improves
+the accuracy of GFNet. However, too large λ moderately
+hurts the ﬁnal performance with a relatively long input
+sequence, in which cases the gradients from the classiﬁer fC
+may be overwhelmed in the two encoders. For the initial
+learning rate of training stage I/III, we ﬁnd that it can be
+straightforwardly set to 1/10 of the values for training the
+corresponding backbones from scratch (e.g., 0.01 for ResNet-
+50). In addition, as shown in Table 8, 60-90 training epochs
+are generally sufﬁcient to achieve the saturated performance
+of GFNet on ImageNet.
+
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+14
+Applying GFNet to new backbones/tasks. In general,
+when deploying GFNet in new scenarios, one can directly
+adopt most of our proposed training settings (e.g., with our
+released code or pre-trained models), and conﬁgure the ﬁne-
+tuning learning rate following the aforementioned rule. The
+hyper-parameter searching may be performed on λ and the
+number of training epochs, where λ = 1 and 60 epochs can
+be a good starting point or a preliminary setting for the
+straightforward implementation.
+6
+CONCLUSION
+In this paper, we introduced a Glance and Focus Network
+(GFNet) to reduce the spatial redundancy in image and video
+recognition tasks. GFNet processes a given high-resolution
+input in a sequential manner. At each step, GFNet processes
+a smaller input, which is either a down-sampled version
+of the original image/video or a cropped patch. GFNet
+progressively performs classiﬁcation as well as localizing
+discriminative regions for the next step. This procedure is ter-
+minated once sufﬁcient classiﬁcation conﬁdence is obtained,
+leading to an adaptive inference paradigm. Our method is
+compatible with a wide variety of visual backbones and is
+easy to implement on mobile devices and GPUs. Extensive
+experiments on four large-scale benchmarks showed that
+GFNet signiﬁcantly improves the computational efﬁciency
+even on top of the most state-of-the-art light-weighted CNNs.
+Future work may focus on extending the framework to
+downstream tasks such as object detection and semantic
+segmentation. It is also interesting to explore the automatic
+patch localization ability of GFNet for weakly supervised
+object localization or detection.

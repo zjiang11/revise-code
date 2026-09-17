@@ -1,0 +1,1191 @@
+Black-Box Tuning for Language-Model-as-a-Service
+Tianxiang Sun 1 Yunfan Shao 1 Hong Qian 2 Xuanjing Huang 1 Xipeng Qiu 1 3
+Abstract
+Extremely large pre-trained language models
+(PTMs) such as GPT-3 are usually released as
+a service. It allows users to design task-speciﬁc
+prompts to query the PTMs through some black-
+box APIs. In such a scenario, which we call
+Language-Model-as-a-Service (LMaaS), the gra-
+dients of PTMs are usually unavailable. Can we
+optimize the task prompts by only accessing the
+model inference APIs? This paper proposes the
+black-box tuning framework to optimize the con-
+tinuous prompt prepended to the input text via
+derivative-free optimization. Instead of optimiz-
+ing in the original high-dimensional prompt space,
+which is intractable for traditional derivative-free
+optimization, we perform optimization in a ran-
+domly generated subspace due to the low intrinsic
+dimensionality of large PTMs. The experimen-
+tal results show that the black-box tuning with
+RoBERTa on a few labeled samples not only sig-
+niﬁcantly outperforms manual prompt and GPT-
+3’s in-context learning, but also surpasses the
+gradient-based counterparts, i.e., prompt tuning
+and full model tuning.
+1. Introduction
+Scaling pre-trained language models (PTMs) has shown
+increasing power on a wide range of NLP tasks (Devlin
+et al., 2019; Raffel et al., 2020; Brown et al., 2020; Fedus
+et al., 2021; Zhang et al., 2020; 2021b; Zeng et al., 2021;
+Sun et al., 2021; Qiu et al., 2020). Extremely large PTMs
+can easily generalize to various downstream tasks with a
+few labeled samples (Brown et al., 2020). However, making
+these large PTMs beneﬁt everyone is a challenge. On the
+one hand, running such models can be very expensive or
+even infeasible for most users. On the other hand, the model
+parameters are often not open-sourced due to commercial
+1Fudan University 2East China Normal University 3Peng
+Cheng Laboratory.
+Correspondence to: Tianxiang Sun <tx-
+
+Proceedings of the 39 th International Conference on Machine
+Learning, Baltimore, Maryland, USA, PMLR 162, 2022. Copy-
+right 2022 by the author(s).
+Users
+Query 
+Response
+Server
+Mixed-Task
+Batch
+PTM Inference
+(Black-Box) 
+Task Prompt (Tunable)
+Samples
+Update Prompt
+Figure 1. Illustration of Language-Model-as-a-Service (LMaaS).
+Users can query the PTM deployed on the server through a black-
+box API. In each query, users can input a task prompt and a batch
+of texts. On the server side, the samples can be mixed in a large
+batch to be fed into the PTM. By iteratively querying the PTM
+through the black-box API, users can optimize and ﬁnally obtain
+good prompts to solve the language tasks of interest.
+considerations and the potential risk of misuse.1 Therefore,
+large PTMs such as GPT-3 (Brown et al., 2020), ERNIE
+3.0 (Sun et al., 2021) and Yuan 1.0 (Wu et al., 2021) are
+usually released as a service, allowing users to access these
+powerful models through black-box APIs.
+In this scenario, called Language-Model-as-a-Service
+(LMaaS), users can solve the language tasks of interest using
+the black-box APIs by crafting task-speciﬁc text prompts
+or including training samples in the input texts (a.k.a. in-
+context learning (Brown et al., 2020)). Due to the great
+power of the general-purpose PTMs underlying the APIs,
+such approaches can achieve considerable performance on
+simple language tasks, and therefore have powered many
+interesting applications2. However, querying large PTMs
+through hand-crafted text prompts cannot fully exploit la-
+beled data, resulting in unsatisfactory performance in many
+use cases.
+Instead of designing discrete text prompts, recently much
+effort has been devoted to continuous prompt tuning (Li
+& Liang, 2021; Hambardzumyan et al., 2021; Liu et al.,
+1https://openai.com/blog/openai-api/
+2See https://gpt3demo.com/ for examples.
+arXiv:2201.03514v4  [cs.CL]  27 Jun 2022
+
+Black-Box Tuning for Language-Model-as-a-Service
+2021b), which is to optimize the continuous prompt injected
+to the text while keeping the PTM parameters frozen. Such
+methods only require storing a small continuous prompt
+for each task, and therefore are highly deployment-efﬁcient.
+Besides, tuning the continuous prompt can be as effective
+as ﬁne-tuning the entire model when the PTM becomes
+large (Lester et al., 2021). However, in all the previous
+methods, the continuous prompts are learned through back-
+propagation, which is unavailable in the scenario of LMaaS.
+Can we optimize the task-speciﬁc continuous prompts
+when we only have access to the PTM inference API?
+Since gradients are unavailable, we can only invoke
+derivative-free optimization (DFO)3 (Kolda et al., 2003;
+Conn et al., 2009; Rios & Sahinidis, 2013). DFO involves a
+kind of optimization algorithms that do not depend on gra-
+dients, but only relies on function values (or ﬁtness values)
+of sampled solutions. However, DFO algorithms are known
+to suffer from slow convergence rate when the dimension-
+ality of the search space is high. Thus, it is intractable to
+optimize even only the continuous prompts, which can be
+tens of thousands of parameters, using DFO algorithms.
+Fortunately, recent work found that common PTMs, despite
+their large numbers of parameters, have a very low intrinsic
+dimensionality (Aghajanyan et al., 2021; Qin et al., 2021).
+That means, there exists a low-dimensional reparameteriza-
+tion that is as effective for ﬁne-tuning as the full parameter
+space. It has been demonstrated that optimizing only hun-
+dreds (Aghajanyan et al., 2021) or even dozens (Qin et al.,
+2021) of parameters can achieve non-trivial performance.
+Given that the intrinsic dimensionality of the objective func-
+tion (in our case is the forward computation of PTMs) is
+low, the optimization can be effectively solved via DFO al-
+gorithms with random embedding (Wang et al., 2016; Qian
+et al., 2016; Letham et al., 2020).
+Based on the these insights, this paper proposes the Black-
+Box Tuning (BBT) to solve various language understand-
+ing tasks by only accessing the PTM inference API. In
+particular, we manage to optimize the continuous prompt
+prepended to the input text by iteratively querying the PTM
+inference API, as brieﬂy depicted in Figure 1. To han-
+dle the high dimensionality of the continuous prompt, we
+project the original prompt space using a random linear
+projection onto a much smaller subspace and solve this
+optimization problem with some derivative-free optimizer
+in that smaller subsapce. In contrast to conventional ﬁne-
+tuning methods that can only be performed by the service
+side, black-box tuning allows users to optimize their task-
+speciﬁc prompts locally on resource-limited devices (even
+without GPUs). Our experimental results demonstrate that
+prompting RoBERTaLARGE (Liu et al., 2019) using BBT on
+3Also termed as black-box, zeroth-order or gradient-free opti-
+mization.
+a few labeled samples not only outperforms manual prompt
+and in-context learning (Brown et al., 2020), but also out-
+performs its gradient-based counterparts, namely prompt
+tuning (Lester et al., 2021) and full model tuning.
+The contribution of this paper is three folds:4
+• This paper proposes a novel scenario (LMaaS) where
+one should learn to prompt the PTMs by only accessing
+their inference APIs.
+• This paper offers a solution (BBT) for such a scenario
+to accomplish common language understanding tasks
+without access to model parameters and gradients, such
+that large-scale PTMs can better beneﬁt users.
+• Empirical results show that DFO can successfully deal
+with real-world language tasks by learning to prompt
+large-scale PTMs with more than millions of parame-
+ters. Thus, this work pioneers the work of optimizing
+large-scale PTMs through DFO methods.
+2. Background
+Large-Scale PTMs as APIs.
+It is a promising way to de-
+ploy large-scale PTMs to serve downstream applications
+by providing general-purpose APIs. For the service side,
+wrapping the computation of the PTM into an easy-to-use
+API has become a common practice (Brown et al., 2020; Sun
+et al., 2021; Wu et al., 2021). In contrast to training, the in-
+ference speed of large-scale PTMs can be highly optimized
+with acceleration techniques such as ORT and TensorRT.
+In addition, large-scale PTMs are often not open-sourced
+due to the commercial reasons and the potential risk of mis-
+use. For the user side, even if the large-scale PTMs are
+available, it is expensive or even infeasible to locally run
+them. Thus, how to exploit the PTM inference API to solve
+conventional language tasks is a promising direction.
+Intrinsic Dimensionality of PTMs.
+The intrinsic dimen-
+sionality of an objective function is the minimum number
+of parameters needed to obtain satisfactory solutions (Li
+et al., 2018). In particular, the intrinsic dimensionality in-
+dicates the lowest dimensional reparameterization that is
+as effective for optimizing as the full parameter space. Li
+et al. (2018) propose to measure the intrinsic dimensionality
+of neural networks by ﬁnding the minimal dimensionality
+of the subspace that is randomly projected from the full
+trainable parameters, in which they can optimize the neural
+networks to achieve satisfactory solutions. Aghajanyan et al.
+(2021) empirically show that large-scale pre-training implic-
+itly compresses the intrinsic dimensionality of downstream
+NLP tasks. By tuning only hundreds of parameters that
+4Our code is publicly available at https://github.com/
+txsun1997/Black-Box-Tuning
+
+Black-Box Tuning for Language-Model-as-a-Service
+are then randomly projected onto the full parameter space
+of RoBERTa, they can achieve 90% performance relative
+to full model tuning. Qin et al. (2021) show that intrinsic
+subspace on various tasks can be compressed to less than
+100 dimensions with multi-task supervision. This line of
+research, along with the work of parameter-efﬁcient tun-
+ing (Houlsby et al., 2019; Li & Liang, 2021; Lester et al.,
+2021; Sun et al., 2022; Hu et al., 2021a; He et al., 2021),
+demonstrate that PTMs can well adapt to downstream tasks
+by tuning a very small proportion of parameters, which im-
+plies the possibility of optimizing large-scale PTMs with
+derivative-free algorithms.
+Prompt-Based Learning.
+Prompt-based learning is to
+formulate downstream tasks as a (masked) language mod-
+eling task, and therefore reduces the gap between PTM
+pre-training and ﬁne-tuning (Brown et al., 2020; Schick &
+Sch¨utze, 2021a;b; Gao et al., 2021; Sun et al., 2022). For
+instance, one can use BERT (Devlin et al., 2019) to predict
+whether the sentence ”This is a fantastic movie” is positive
+or negative by appending the prompt ”It was [MASK]” and
+see if BERT predicts ”great” or ”terrible” at the masked
+position. Note that the prompt is not necessarily discrete, it
+can also be optimized efﬁciently in continuous space with
+gradient descent (Li & Liang, 2021; Hambardzumyan et al.,
+2021; Qin & Eisner, 2021; Liu et al., 2021b; Zhong et al.,
+2021). In the case of only tuning the continuous prompt
+while keeping the parameters of large PTMs untouched,
+one can retain the efﬁcient serving beneﬁts while matching
+the performance of full model tuning (Lester et al., 2021).
+Our work also proposes to optimize the continuous prompt
+while keeping the PTM parameters unchanged, but without
+gradient descent.
+Derivative-Free Optimization.
+Derivative-free optimiza-
+tion (DFO) realizes optimization only via the function val-
+ues f(x) on the sampled solutions x. Most DFO algorithms
+share a common structure of sampling-and-updating to en-
+hance the quality of solutions. Representative DFO algo-
+rithms include evolutionary algorithms (Hansen et al., 2003),
+Bayesian optimization (Shahriari et al., 2016), etc. Due
+to their ability of addressing complex optimization tasks,
+DFO algorithms have achieved many impressive applica-
+tions in automatic machine learning (Snoek et al., 2012),
+reinforcement learning (Salimans et al., 2017; Hu et al.,
+2017), objective detection (Zhang et al., 2015b), etc.
+3. Approach
+3.1. Problem Formulation
+Common language understanding tasks can be formulated
+as a classiﬁcation task, which is to predict for a batch of
+input texts X the labels Y . To solve the target language
+understanding task with a general-purpose PTM, we should
+modify X with some template (e.g., adding some trigger
+words and a special token [MASK] for BERT-like PTMs)
+and map the labels Y to some words in the PTM vocab-
+ulary (e.g., the sentiment label ”positive” can be mapped
+to ”great”). The modiﬁed inputs and labels are denoted as
+˜X and ˜Y . Assume the BERT-like PTM inference API f
+takes a continuous prompt p and a batch of modiﬁed texts
+˜X as input, and outputs the logits on the masked positions,
+i.e., ˆY = f(p; ˜X). With the output logits, we can calculate
+the loss on this batch of data, which is not necessarily to
+be differentiable. Our goal is to ﬁnd the optimal prompt
+p⋆= arg minp∈P L(f(p; ˜X), ˜Y ), where P is some search
+space of interest and L is some loss function such as nega-
+tive accuracy. The black-box function f is not available to
+the optimizer in closed form, but can be evaluated at a query
+point (p; ˜X).
+3.2. Black-Box Tuning
+As demonstrated by Lester et al. (2021), dozens of prompt to-
+kens are required to obtain a competitive performance when
+only tuning continuous prompts. Given that the embedding
+dimensionality of large-scale PTMs is usually larger than
+one thousand (e.g., the word embeddings of RoBERTaLARGE
+are 1024-dimensional), the dimensionality of the continuous
+prompt p ∈RD that we are interested to optimize can be
+tens of thousands, which makes derivative-free optimization
+intractable. To handle this high-dimensional optimization,
+since large-scale PTMs have a low intrinsic dimensional-
+ity (Aghajanyan et al., 2021; Qin et al., 2021), we manage
+to optimize z ∈Rd in a much smaller subspace (d ≪D),
+and use a random projection matrix A ∈RD×d to project z
+on the original prompt space P.
+Note that directly projecting z onto the prompt space that
+is compatible with the PTM is non-trivial. To ease the
+optimization, we instead optimize the increment of some
+initial prompt p0. For simplicity, we randomly sample n
+tokens from the PTM vocabulary as initialization. Thus, our
+objective becomes
+z⋆= arg min
+z∈Z
+L(f(Az + p0; ˜X), ˜Y ) ,
+(1)
+where Z is the search space. Previous work (Wang et al.,
+2016; Qian et al., 2016; Letham et al., 2020) in derivative-
+free optimization usually sets each entry in the random
+matrix A by sampling from some normal distribution. How-
+ever, this sampling strategy does not perform well in our
+scenario. Instead, we set values of the random matrix A by
+sampling from a uniform distribution adopted in He et al.
+(2015) (cf. Appendix A for the comparison). We restrict the
+search space to Z = [−5, 5]d.
+For the loss function L, a straightforward alternative is using
+negative accuracy. However, the reward of accuracy can be
+
+Black-Box Tuning for Language-Model-as-a-Service
+Best film ever . It was <MASK> .
+A totally boring movie ! It was <MASK> .
+You 'll probably love it . It was <MASK> .
+great
+terrible
+great
+෩𝒀
+throne
+arrow
+apple
+𝒛
+𝑨∈ℝ𝐷×𝑑
+𝑨𝒛
+𝒑𝟎
+𝒑
+Copy
+Pre-Trained Language Model Inference
+(Black-Box API)
+good:10.2 great:7.9 movie:7.1 …
+terrible:11.2 bad:9.9 boring:8.0 …
+great:9.8 love:5.2 film:3.3 …
+෡𝒀
+𝓛(෩𝒀, ෡𝒀)
+Derivative-Free Optimizer
+Best film ever . It was <MASK> .
+A totally boring movie ! It was <MASK> .
+You 'll probably love it . It was <MASK> .
+෩𝑿
+Server
+User
+Labeled Data
+Figure 2. A single iteration of the optimization. Given z ∈Rd provided by the derivative-free optimizer, we project it to the prompt
+space by a random matrix A ∈RD×d. By adding the projected prompt embeddings Az with some initial prompt embeddings p0 (in this
+illustration are the embeddings of tokens randomly sampled from the PTM’s vocabulary), we obtain the ﬁnal prompt embeddings that are
+then concatenated with the input texts ˜
+X. By calling the black-box API f, which implements the forward computation of the PTM, the
+predictions on the masked positions are obtained, i.e., ˆY = f(p; ˜
+X). With the prediction ˆY and the golden labels ˜Y at hand, we can
+calculate the loss that is used by the derivative-free optimizer to suggest a new z.
+sparse and less informative, especially when training data is
+limited. Thus, we also consider two loss functions that are
+more sensitive to predictions, i.e., cross entropy and hinge
+loss. Given the output logits ˆy over a candidate set of label
+words, and the golden label word ˜y of a certain sample, the
+cross entropy is deﬁned as
+LCE(ˆy, ˜y) = −log Softmax˜y(ˆy).
+(2)
+For hinge loss, we adopt a multi-class extension (Weston &
+Watkins, 1999),
+LHinge(ˆy, ˜y) =
+X
+i̸=˜y
+max(0, γ + ˆyi −ˆy˜y).
+(3)
+In this work we set the margin γ = 2. The performances of
+using cross entropy, hinge loss, and negative accuracy are
+compared in Figure 3.
+3.3. The CMA Evolution Strategy
+As demonstrated in Aghajanyan et al. (2021), the intrinsic
+dimensionality of PTMs like RoBERTaLARGE on various
+tasks can be hundreds. To handle optimization of such scale,
+we adopt the CMA-ES (Covariance Matrix Adaptation Evo-
+lution Strategy) (Hansen & Ostermeier, 2001; Hansen et al.,
+2003), which is a widely used evolutionary algorithm for
+non-convex black-box optimization in continuous domain.
+In particular, CMA-ES maintains a parameterized search
+distribution model, i.e., multivariate normal distribution. In
+each iteration, CMA-ES samples a population of new query
+solutions (also referred to as individuals or offspring) from
+the multivariate normal distribution model
+z(t+1)
+i
+∼m(t) + σ(t)N(0, C(t)) ,
+(4)
+where i = 1, . . . , λ and λ is the population size. m(t) ∈Rd
+is the mean vector of the search distribution at iteration step
+t, σ(t) ∈R+ is the overall standard deviation that controls
+the step length, and C(t) ∈Rd×d is the covariance matrix
+that determines the shape of the distribution ellipsoid. By
+maximizing the likelihood of successful steps, m(t), σ(t),
+C(t) are updated (cf. Hansen (2016) for more details).
+3.4. Pre-Training Prompt Embedding
+Considering that sentence-pair tasks can share the same
+template and label words, as shown in Table 1, we can pre-
+train a prompt embedding p0 on some publicly available
+NLI task (in our experiments we use the MNLI (Williams
+et al., 2018) training set) for a better initialization. For other
+classiﬁcation tasks we set p0 as word embeddings randomly
+drawn from the vocabulary of RoBERTaLARGE.
+4. Experiments
+4.1. Setup
+Dataset.
+We conduct experiments on several common
+language understanding tasks including sentiment analy-
+sis, topic classiﬁcation, natural language inference (NLI),
+
+Black-Box Tuning for Language-Model-as-a-Service
+Table 1. Statistics, manual templates, and label words used in our experiments. | Y |: number of classes.
+Category
+Dataset
+| Y |
+|Train|
+|Test|
+Type
+Template
+Label words
+single-
+sentence
+SST-2
+2
+67k
+0.9k
+sentiment
+⟨S⟩. It was [MASK].
+great, bad
+Yelp P.
+2
+560k
+38k
+sentiment
+⟨S⟩. It was [MASK].
+great, bad
+AG’s News
+4
+120k
+7.6k
+topic
+[MASK] News: ⟨S⟩
+World, Sports, Business, Tech
+DBPedia
+14
+560k
+70k
+topic
+[Category: [MASK]] ⟨S⟩
+Company, Education, Artist, Athlete, Ofﬁce,
+Transportation, Building, Natural, Village,
+Animal, Plant, Album, Film, Written
+sentence-
+pair
+MRPC
+2
+3.7k
+0.4k
+paraphrase
+⟨S1⟩? [MASK], ⟨S2⟩
+Yes, No
+RTE
+2
+2.5k
+0.3k
+NLI
+⟨S1⟩? [MASK], ⟨S2⟩
+Yes, No
+SNLI
+3
+549k
+9.8k
+NLI
+⟨S1⟩? [MASK], ⟨S2⟩
+Yes, Maybe, No
+and paraphrase. For sentiment analysis, we choose SST-
+2 (Socher et al., 2013) and Yelp polarity (Zhang et al.,
+2015a). For topic classiﬁcation, we choose AG’s News
+and DBPedia (Zhang et al., 2015a). For NLI, we choose
+SNLI (Bowman et al., 2015) and RTE (Wang et al., 2019).
+For paraphrase, we choose MRPC (Dolan & Brockett, 2005).
+The statistics, manual templates and label words of these
+datasets are shown in Table 1.
+Few-Shot Setting.
+For a broad range of users, the amount
+of labeled data can be limited, in which case they can resort
+to the deployed large PTMs due to their great power of few-
+shot learning (Brown et al., 2020). Hence, in this paper we
+conduct experiments in the few-shot setting. We randomly
+select k samples for each class to construct a k-shot training
+set Dtrain, and compose a development set Ddev by randomly
+drawing another k samples from the original training set and
+ensure that |Dtrain| = |Ddev| to simulate the true few-shot
+learning setting (Perez et al., 2021). Following Zhang et al.
+(2021a), Gao et al. (2021), and Gu et al. (2021), we use the
+original development sets as the test sets. For datasets with-
+out development sets, we use the original test sets. Hence,
+in our experiments |Dtest| ≫|Dtrain| = |Ddev|.
+Backbone Model.
+We choose RoBERTaLARGE (Liu et al.,
+2019) as our backbone model because: (1) We mainly fo-
+cus on language understanding tasks; (2) Aghajanyan et al.
+(2021) have demonstrated that RoBERTaLARGE has a very
+small intrinsic dimensionality (about hundreds) on many
+tasks. It is worth noting that generative PTMs such as
+GPT (Brown et al., 2020), T5 (Raffel et al., 2020) and
+BART (Lewis et al., 2020) are also compatible with our
+framework if we convert downstream tasks into a uniﬁed
+text-to-text format. We leave for future work the applica-
+tions of generative PTMs.
+Baselines.
+We compare our proposed black-box tuning
+with two kinds of methods: gradient-based methods and
+gradient-free methods. For gradient-based methods, we
+consider three baselines: (1) Prompt Tuning: Following
+Lester et al. (2021), we only train the continuous prompts
+Table 2. Default conﬁguration of hyper-parameters.
+Hyper-parameter
+Default
+Prompt length (L)
+50
+Subspace dimension (d)
+500
+Population size (λ)
+20
+Random projection (A)
+Uniform
+Loss function L
+Cross Entropy
+Budget (# of API calls)
+8000
+prepended to the input texts while keeping the PTM frozen.
+We use an Adam optimizer (Kingma & Ba, 2015) with learn-
+ing rate of 5e-4 and batch size of 16 for 1000 epochs. For
+fair comparison, we use the same prompt length, manual
+template, label words, and the same pre-trained prompt em-
+bedding for initialization on sentence-pair tasks as black-box
+tuning. (2) P-Tuning v2 (Liu et al., 2021a) is an improved
+variant of prompt tuning. Instead of injecting continuous
+prompts merely into the input layer, P-Tuning v2 prepends
+and optimizes continuous prompts at every layer of the PTM.
+We optimize the prompts of length 128 at each layer using
+an Adam optimizer with learning rate of 5e-4 and batch size
+of 32 for 2000 epochs. (3) Model Tuning: We ﬁne-tune
+the entire PTM on each task using an Adam optimizer with
+learning rate of 1e-5 and batch size of 16 for 200 epochs.
+For gradient-free methods, we consider three baselines: (1)
+Manual Prompt: We directly use the templates and label
+words in Table 1 to conduct zero-shot evaluation. The re-
+sults of manual prompt can be seen as initial points of our
+method. (2) In-context Learning: Following Brown et al.
+(2020), we randomly select up to 32 training samples and
+concatenate them with the input texts. (3) Feature-based
+Methods: Feature-based methods (Peters et al., 2019) is
+also a competitive baseline for LMaaS, where one can re-
+quest the features encoded by the large PTM and locally
+train a classiﬁer to accomplish the task of interest. Here we
+consider two implementations: (a) Feature-MLP: We train
+a two-layered MLP classiﬁer on the [CLS] representation
+of the PTM. (b) Feature-BiLSTM: We train a bidirectional
+LSTM (Hochreiter & Schmidhuber, 1997) on the repre-
+sentations of the sequence of tokens, followed by a linear
+classiﬁer on the top. For both implementations of feature-
+
+Black-Box Tuning for Language-Model-as-a-Service
+based methods, we use an Adam optimizer with learning
+rate of 3e-4 and batch size of 16 to train the attached clas-
+siﬁers for 1000 epochs. For black-box tuning, we give in
+Table 2 the default conﬁguration of hyper-parameters used
+in our experiments. The effect of each hyper-parameter is
+explored in § 4.3.
+4.2. Results
+Overall Comparison.
+We ﬁrst demonstrate the experi-
+mental results of black-box tuning and the baselines across
+7 datasets in Table 3. The proposed black-box tuning sig-
+niﬁcantly outperforms the other four gradient-free methods.
+We observe that in-context learning performs even worse
+than manual prompt on some tasks, and suffers from high
+variance. That means, in-context learning cannot effectively
+utilize labeled samples included in the context. Feature-
+based methods perform slightly better than manual prompt
+and in-context learning. Meanwhile, Feature-BiLSTM out-
+performs Feature-MLP due to its advantage of using more
+informative features. Surprisingly, black-box tuning also
+outperforms its gradient-based counterparts, namely prompt
+tuning, p-tuning v2, and model tuning, on average perfor-
+mance of the 7 tasks. Note that the only difference between
+prompt tuning and black-box tuning is whether we use gra-
+dient descent (i.e., Adam optimizer) or DFO algorithm (i.e.,
+CMA-ES). Based on the experimental results, we suspect
+that gradient-based optimization tends to overﬁt the small
+training data while DFO tends to ﬁnd better solutions due to
+its exploration mechanism. In addition, we ﬁnd that model
+tuning performs much better than prompt tuning and black-
+box tuning when number of classes is large (e.g., DBPedia).
+On NLI tasks (i.e., SNLI and RTE), when using pre-trained
+prompt embedding (§ 3.4), prompt tuning and black-box
+tuning signiﬁcantly outperform model tuning, which also
+conﬁrms the effectiveness of prompt pre-training (Gu et al.,
+2021) in the context of black-box tuning.
+Detailed Comparison.
+In the scenario of LMaaS, there
+are many other factors to be considered. In Table 4 we com-
+pare black-box tuning and the baseline methods in terms
+of deployment efﬁciency, viability of as-a-service, training
+time, memory usage on the user side and the server side, and
+the amount of data to be uploaded and downloaded. Model
+tuning is not deployment-efﬁcient because it needs to main-
+tain a copy of the entire model for each user. Gradient-based
+methods cannot make the PTM serve as a service due to
+the requirement of gradients. Feature-based methods and
+black-box tuning are suitable for LMaaS. However, feature-
+based methods cannot achieve competitive results when
+labeled data is limited. Therefore, among all the considered
+methods, only black-box tuning can achieve satisfactory
+performance while maintaining reasonable training time,
+memory footprint, and network load. Unlike gradient-based
+methods, in which the optimization cost is proportional to
+the size of the PTM, the optimization cost of black-box
+tuning is decoupled from the scale of the PTM, and only
+relies on the subspace dimensionality. For fair compari-
+son of training time, we perform early stopping for all the
+compared methods, i.e., we stop learning if the development
+accuracy does not increase after 1000 steps. All the methods
+are implemented with PyTorch (Paszke et al., 2019) and ex-
+perimented on a single NVIDIA GTX 3090 GPU. Note that
+the process of model inference can be further accelerated via
+better implementations (e.g., using ONNX and TensorRT).
+In Table 4 we also report the training time of black-box
+tuning using ONNX Runtime. Detailed calculation of the
+amount of data to be uploaded/downloaded can be found in
+Appendix C.
+4.3. Ablation Study
+In this section, we conduct ablation experiments on various
+hyper-parameters. To control experimental variables, we
+explore the effect of each hyper-parameter while keeping
+the other hyper-parameters as default as listed in Table 2.
+To stablize the experimental results and reduce the variance
+over different runs, we conduct ablation experiments in 64-
+shot setting. Each run is performed on the same data split
+with different random seeds. Experimental results of abla-
+tions on loss functions L, subspace dimensionality d, and
+prompt length L are demonstrated in Figure 3. Additional
+ablation studies on the effect of the random projection A,
+the effect of the population size λ, and the ablations in the
+16-shot setting are in Appendix A.
+For each ablation, we show results under different budget,
+which is measured by the number of PTM inference API
+calls. In each API call, one can provide a continuous prompt
+p and query the results of the PTM forward computation
+on a batch of training data. In our few-shot setting, we can
+put all the training data into one batch, and therefore the
+objective function to be optimized is deterministic instead
+of stochastic.
+CMA-ES vs. Adam.
+We compare our used derivative-
+free optimizer, CMA-ES, with a competitive ﬁrst-order opti-
+mizer, Adam (Kingma & Ba, 2015). For fair comparison,
+we update the continuous prompt using Adam with the gra-
+dients over the entire training data (i.e., batch size equals
+to |Dtrain|). We use learning rate of 1e-3 for Adam opti-
+mizer. As shown in the top row of Figure 3, Adam optimizer
+achieves faster convergence on both SST-2 and AG’s News
+due to the gradients it used. On the development sets, Adam
+performs slight worse than CMA-ES with cross entropy on
+SST-2 but better on AG’s News. But as demonstrated in Ta-
+ble 3, using Adam optimizer performs worse than CMA-ES
+on the average performance across seven task test sets.
+
+Black-Box Tuning for Language-Model-as-a-Service
+Table 3. Overall comparison on various language understanding tasks. We report mean and standard deviation of performance over 3
+different splits (§ 4.1). All of the results are obtained with pre-trained RoBERTaLARGE in 16-shot (per class) setting.
+Method
+SST-2
+Yelp P.
+AG’s News
+DBPedia
+MRPC
+SNLI
+RTE
+Avg.
+acc
+acc
+acc
+acc
+F1
+acc
+acc
+Gradient-Based Methods
+Prompt Tuning
+68.23 ±3.78
+61.02 ±6.65
+84.81 ±0.66
+87.75 ±1.48
+51.61 ±8.67
+36.13 ±1.51
+54.69 ±3.79
+63.46
++ Pre-trained prompt
+/
+/
+/
+/
+77.48 ±4.85
+64.55 ±2.43
+77.13 ±0.83
+74.42
+P-Tuning v2
+64.33 ±3.05
+92.63 ±1.39
+83.46 ±1.01
+97.05 ±0.41
+68.14 ±3.89
+36.89 ±0.79
+50.78 ±2.28
+70.47
+Model Tuning
+85.39 ±2.84
+91.82 ±0.79
+86.36 ±1.85
+97.98 ±0.14
+77.35 ±5.70
+54.64 ±5.29
+58.60 ±6.21
+78.88
+Gradient-Free Methods
+Manual Prompt
+79.82
+89.65
+76.96
+41.33
+67.40
+31.11
+51.62
+62.56
+In-Context Learning
+79.79 ±3.06
+85.38 ±3.92
+62.21 ±13.46
+34.83 ±7.59
+45.81 ±6.67
+47.11 ±0.63
+60.36 ±1.56
+59.36
+Feature-MLP
+64.80 ±1.78
+79.20 ±2.26
+70.77 ±0.67
+87.78 ±0.61
+68.40 ±0.86
+42.01 ±0.33
+53.43 ±1.57
+66.63
+Feature-BiLSTM
+65.95 ±0.99
+74.68 ±0.10
+77.28 ±2.83
+90.37 ±3.10
+71.55 ±7.10
+46.02 ±0.38
+52.17 ±0.25
+68.29
+Black-Box Tuning
+89.56 ±0.25
+91.50 ±0.16
+81.51 ±0.79
+87.80 ±1.53
+61.56 ±4.34
+46.58 ±1.33
+52.59 ±2.21
+73.01
++ Pre-trained prompt
+/
+/
+/
+/
+75.51 ±5.54
+83.83 ±0.21
+77.62 ±1.30
+83.90
+Table 4. Comparison of deployment efﬁciency, viability of as-a-service, test accuracy, training time, memory footprint, and the amount of
+data to be uploaded/downloaded. ⋆indicates the training time of the implementation with ONNX Runtime. All the compared methods are
+performed on the same 16-shot splits of SST-2 and AG’s News.
+Deployment-
+As-A-
+Test
+Training
+Memory Footprint
+Upload
+Download
+Efﬁcient
+Service
+Accuracy
+Time
+User
+Server
+per query
+per query
+SST-2 (max sequence length: 47)
+Prompt Tuning
+√
+×
+72.6
+15.9 mins
+-
+5.3 GB
+-
+-
+Model Tuning
+×
+×
+87.8
+9.8 mins
+-
+7.3 GB
+-
+-
+Feature-MLP
+√
+√
+63.8
+7.0 mins
+20 MB
+2.8 GB
+4 KB
+128 KB
+Feature-BiLSTM
+√
+√
+66.2
+9.3 mins
+410 MB
+2.8 GB
+4 KB
+6016 KB
+Black-Box Tuning
+√
+√
+89.4
+10.1 (6.1⋆) mins
+30 MB
+3.0 GB
+6 KB
+0.25 KB
+AG’s News (max sequence length: 107)
+Prompt Tuning
+√
+×
+84.0
+30.2 mins
+-
+7.7 GB
+-
+-
+Model Tuning
+×
+×
+88.4
+13.1 mins
+-
+7.3 GB
+-
+-
+Feature-MLP
+√
+√
+71.0
+13.5 mins
+20 MB
+3.6 GB
+20 KB
+256 KB
+Feature-BiLSTM
+√
+√
+73.1
+19.7 mins
+500 MB
+3.6 GB
+20 KB
+27392 KB
+Black-Box Tuning
+√
+√
+82.6
+21.0 (17.7⋆) mins
+30 MB
+4.6 GB
+22 KB
+1 KB
+Loss Functions.
+We consider three loss functions: cross
+entropy, hinge loss, and negative accuracy. As depicted in
+the top row of Figure 3, cross entropy and hinge loss signif-
+icantly outperform the negative accuracy. In the few-shot
+setting, the accuracy as a reward can be sparse, and cannot
+provide informative directions for optimization. On SST-
+2 and AG’s News, we obtain that cross entropy performs
+slightly better than hinge loss.
+Subspace Dimensionality.
+The subspace of dimensional-
+ity d is the space where the optimization actually performs.
+According to the intrinsic dimensionality found in Agha-
+janyan et al. (2021), we explore the subspace dimensionality
+of {100, 200, 500, 1000} within the budget of {2k, 4k, 6k,
+8k}. Accordingly, we set population size λ = 4 + 3 log(d).
+As shown in the middle row of Figure 3, the best subspace
+dimensionality can be different on different tasks (d = 200
+performs the best on SST-2 development set and d = 500
+performs the best on AG’s News development set), which
+is related to the observation that intrinsic dimensionality
+varies across different tasks (Aghajanyan et al., 2021). In
+general, a small subspace (e.g., d = 100) is hard to cover a
+good solution, while a large subspace (e.g., d = 1000) may
+lead to poor generalization.
+Prompt Length.
+Prompt length L determines the di-
+mensionality of the original parameter space (in our case
+D = L × 1024). We evaluate black-box tuning under each
+budget in {2k, 4k, 6k, 8k} while varying the prompt length
+in {10, 20, 50, 100}. As shown in the bottom row of Fig-
+ure 3, shorter prompt confers faster convergence on the
+training sets but does not yield better generalization on the
+development sets. L = 50 achieves the best accuracy on
+both SST-2 and AG’s News development sets.
+
+Black-Box Tuning for Language-Model-as-a-Service
+0
+2000
+4000
+6000
+8000
+Iterations over entire training data (|
+train|=128)
+82.5
+85.0
+87.5
+90.0
+92.5
+95.0
+97.5
+100.0
+Train accuracy (current best)
+SST-2 (train)
+Adam (cross entropy)
+CMA-ES (cross entropy)
+CMA-ES (hinge loss)
+CMA-ES (-accuracy)
+0
+2000
+4000
+6000
+8000
+Iterations over entire training data (|
+train|=128)
+77.5
+80.0
+82.5
+85.0
+87.5
+90.0
+92.5
+95.0
+Dev accuracy (current best)
+SST-2 (dev)
+Adam (cross entropy)
+CMA-ES (cross entropy)
+CMA-ES (hinge loss)
+CMA-ES (-accuracy)
+0
+2000
+4000
+6000
+8000
+Iterations over entire training data (|
+train|=128)
+75
+80
+85
+90
+95
+100
+Train accuracy (current best)
+AG's News (train)
+Adam (cross entropy)
+CMA-ES (cross entropy)
+CMA-ES (hinge loss)
+CMA-ES (-accuracy)
+0
+2000
+4000
+6000
+8000
+Iterations over entire training data (|
+train|=128)
+78
+80
+82
+84
+86
+88
+90
+Dev accuracy (current best)
+AG's News (dev)
+Adam (cross entropy)
+CMA-ES (cross entropy)
+CMA-ES (hinge loss)
+CMA-ES (-accuracy)
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+94
+95
+96
+97
+98
+99
+100
+Train accuracy (current best)
+SST-2 (train)
+d = 1000
+d = 500
+d = 200
+d = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+89
+90
+91
+92
+93
+94
+Dev accuracy (current best)
+SST-2 (dev)
+d = 1000
+d = 500
+d = 200
+d = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+84
+86
+88
+90
+92
+Train accuracy (current best)
+AG's News (train)
+d = 1000
+d = 500
+d = 200
+d = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+83
+84
+85
+86
+87
+88
+Dev accuracy (current best)
+AG's News (dev)
+d = 1000
+d = 500
+d = 200
+d = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+95
+96
+97
+98
+99
+100
+Train accuracy (current best)
+SST-2 (train)
+L = 10
+L = 20
+L = 50
+L = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+88
+89
+90
+91
+92
+93
+94
+Dev accuracy (current best)
+SST-2 (dev)
+L = 10
+L = 20
+L = 50
+L = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+82
+84
+86
+88
+90
+92
+94
+Train accuracy (current best)
+AG's News (train)
+L = 10
+L = 20
+L = 50
+L = 100
+2000
+4000
+6000
+8000
+Budget (number of API calls)
+83
+84
+85
+86
+87
+88
+Dev accuracy (current best)
+AG's News (dev)
+L = 10
+L = 20
+L = 50
+L = 100
+Figure 3. Ablations of loss function, subspace dimensionality, and prompt length. We show mean and standard deviation of performance
+over 3 runs with different random seeds. Ablations of the random projection and the population size can be found in Appendix A.
+5. Discussion and Future Work
+In this section we discuss our proposed method in the con-
+text of (1) derivative-free optimization and (2) prompt-based
+learning, respectively. By drawing comparisons with these
+two lines of research, we highlight some directions that
+could improve this work in future.
+Comparison with Previous Derivative-Free Approaches.
+Our proposed method lies in the same framework of previ-
+ous work that solves high-dimensional derivative-free op-
+timization problems via random embedding (Wang et al.,
+2016). In contrast, we set the random embedding A by
+sampling from a uniform distribution instead of normal dis-
+tributions, and use the CMA-ES to perform optimization in
+the generated subspace. In previous work, the target black-
+box functions are usually synthetic functions where only a
+few dimensions can affect the function values, and therefore
+most of the dimensions are strictly non-effective. In our real-
+world scenario, the intrinsic dimension can be approximate.
+In the context of PTMs, a more appropriate substitution for
+the term intrinsic dimensionality can be ϵ-effective dimen-
+sionality (Qian et al., 2016). Considering the relaxation
+to the intrinsic dimensionality of PTMs, more suitable ap-
+proaches such as sequential random embedding (Qian et al.,
+2016) and other more advanced methods of constructing the
+random projection matrix (Letham et al., 2020) should be
+explored in future work. Besides, the subspace generated
+by random projection can be sub-optimal. As demonstrated
+in Qin et al. (2021), training the projection A with multi-
+task supervision can result in better and smaller subspace.
+Besides, larger PTMs generally have lower intrinsic dimen-
+sionalities (Aghajanyan et al., 2021), as a result, we can use
+smaller subspace and more efﬁcient DFO algorithms such
+as Bayesian optimization on larger PTMs.
+Comparison with Previous Prompt-Based Learning Ap-
+proaches.
+From the perspective of prompt-based learning,
+our method is similar to prompt-tuning (Lester et al., 2021),
+where only the continuous prompt prepended to the input
+text is tuned, so our method also retains the beneﬁts of efﬁ-
+cient serving and mixed-task inference. In addition to the
+continuous prompt, we also insert some hard prompt tokens
+(e.g., ”It was [MASK]”) in the input text, which has been
+demonstrated to be effective in previous work (Gu et al.,
+2021) in the name of hybrid prompt tuning. Different from
+previous prompt-based learning approaches, our prompt tun-
+
+Black-Box Tuning for Language-Model-as-a-Service
+ing does not require backpropagation and gradient descent.
+Considering our used templates and label words are hand-
+crafted without trial-and-error, the performance reported in
+this paper is just a lower bound. More advanced techniques
+such as prompt engineering (Gao et al., 2021), label words
+engineering (Schick et al., 2020; Shin et al., 2020; Hu et al.,
+2021b), prompt pre-training (Gu et al., 2021), and prompt
+ensembling (Lester et al., 2021) are orthogonal to this work
+and therefore can further improve the performance. For
+simplicity, we do not integrate these methods and leave for
+future work.

@@ -1,0 +1,1037 @@
+Scalable Probabilistic Databases with
+Factor Graphs and MCMC
+Michael Wick
+University of Massachusetts
+Computer Science
+140 Governor’s Drive
+Amherst, MA
+
+Andrew McCallum
+University of Massachusetts
+Computer Science
+140 Governor’s Drive
+Amherst, MA
+
+Gerome Miklau
+University of Massachusetts
+Computer Science
+140 Governor’s Drive
+Amherst, MA
+
+ABSTRACT
+Probabilistic databases play a crucial role in the management and
+understanding of uncertain data. However, incorporating probabil-
+ities into the semantics of incomplete databases has posed many
+challenges, forcing systems to sacriﬁce modeling power, scalabil-
+ity, or restrict the class of relational algebra formula under which
+they are closed. We propose an alternative approach where the
+underlying relational database always represents a single world,
+and an external factor graph encodes a distribution over possible
+worlds; Markov chain Monte Carlo (MCMC) inference is then used
+to recover this uncertainty to a desired level of ﬁdelity. Our ap-
+proach allows the efﬁcient evaluation of arbitrary queries over prob-
+abilistic databases with arbitrary dependencies expressed by graph-
+ical models with structure that changes during inference. MCMC
+sampling provides efﬁciency by hypothesizing modiﬁcations to pos-
+sible worlds rather than generating entire worlds from scratch. Queries
+are then run over the portions of the world that change, avoiding
+the onerous cost of running full queries over each sampled world.
+A signiﬁcant innovation of this work is the connection between
+MCMC sampling and materialized view maintenance techniques:
+we ﬁnd empirically that using view maintenance techniques is sev-
+eral orders of magnitude faster than naively querying each sampled
+world. We also demonstrate our system’s ability to answer rela-
+tional queries with aggregation, and demonstrate additional scala-
+bility through the use of parallelization.
+1.
+INTRODUCTION
+A growing number of applications output large quantities of un-
+certain data. For example, sensor networks produce imprecise read-
+ings and information extraction systems (IE) produce errorful rela-
+tional records. Despite their inevitable inaccuracies, these types of
+automatic prediction systems are becoming increasingly important.
+This is evident by the sheer number of repositories culled from
+the web by IE systems: CiteSeer, REXA, DbLife, ArnetMiner,
+and Google Scholar. Probabilistic databases (PDBs) are a natu-
+ral framework for storing this uncertain output, but unfortunately
+most current PDBs do not achieve the difﬁcult balance of expres-
+.
+sivity and efﬁciency necessary to support such a range of scalable
+real-world structured prediction systems.
+Indeed, there is an inherent tension between the expressiveness
+of a representation system and the efﬁciency of query evaluation.
+Many recent approaches to probabilistic databases can be charac-
+terized as residing on either pole of this continuum. For example,
+some systems favor efﬁcient query evaluation by restricting mod-
+eling power with strict independence assumptions [8, 9, 1]. Other
+systems allow rich representations that render query evaluation in-
+tractable for a large portion of their model family [15, 29, 24, 25].
+In this paper we combine graphical models and MCMC sampling
+to provide a powerful combination of expressive freedom and efﬁ-
+cient query evaluation over arbitrary relational queries.
+Graphical models are a widely used framework for representing
+uncertainty and performing statistical inference in a myriad of ap-
+plications, including those in computational biology [26], natural
+language processing [16], computer vision [30], information ex-
+traction [21], and data integration [33]. These models are becom-
+ing even more accessible with the proliferation of many general
+purpose probabilistic programming languages [23, 19, 17]. Factor
+graphs are a particular type of representation for graphical models
+that serve as an umbrella framework for both Bayesian networks
+and Markov random ﬁelds, and are capable of representing any ex-
+ponential family probability distribution.
+Unfortunately, graphical models have been largely overlooked as
+a choice for representing uncertainty in probabilistic databases. In
+rare cases, connections have been drawn between graphical models
+and PDBs [15, 7], and only recently have they been used explicitly
+in either the representation [29], or in the mechanism for query
+evaluation [24, 25]. However, these systems are in practice severely
+limited by the #P-hard problem of query evaluation and would not
+scale to the types of sophisticated models and large data crucial to
+many real-world problems [21, 6, 33].
+We distinguish ourselves from these lines of work in several im-
+portant ways. First, we directly address the problem of intractable
+query evaluation and propose an approximate any-time approach
+that scales both to dense factor graphs and large amounts of data.
+Second, we avoid the issue of closing factor graph semantics un-
+der relational algebra operators giving us the ability to evaluate any
+relational algebra query (including aggregation). Third, we eval-
+uate our approach on a difﬁcult real-world information extraction
+problem on which exact statistical inference is intractable (even in
+the graphical model framework). We are able to achieve this with
+a query evaluation technique based on MCMC sampling. This is
+in contrast to previous sampling approaches, which use traditional
+generative Monte Carlo methods [5, 13]. The Monte Carlo sam-
+pling method of MCDB [13] requires knowing the normalization
+arXiv:1005.1934v1  [cs.DB]  11 May 2010
+
+constant for each function; unfortunately, for general factor graphs
+this problem is as difﬁcult as computing marginals (#P-hard). On
+the other hand MCMC samplers hypothesize local changes to worlds,
+avoiding the need to know the normalizer. Additionally, MCMC
+enables us to track tuples affected by local changes and we exploit
+this information to efﬁciently re-evaluate the queries—avoiding the
+need to re-run the full query from scratch over each sampled world.
+Indeed we demonstrate query evaluation on such a factor graph
+(where computing the normalization constant is intractable) and
+show that our MCMC sampler based on view maintenance tech-
+niques reduces running time by several orders of magnitude over
+the simple approach of running the full query over each hypothe-
+sized world. We also empirically demonstrate our ability to scale
+these intractable models to large datasets with tens of millions of
+tuples and show further scalability through parallelization. Finally,
+we demonstrate our evaluator’s ability to handle aggregate queries.
+After introducing related work, the rest of the paper is organized
+as follows: ﬁrst we describe our representation, introduce factor
+graphs, and use information extraction as a running pedagogical ex-
+ample and application of our approach (although it more generally
+applies to other problems that can be modeled by factor graphs).
+We then introduce query evaluation techniques, including the ma-
+terialized view maintenance approach advocated in this paper. Fi-
+nally, we present experimental results demonstrating scalability to
+both large data and highly correlated PDBs.
+2.
+RELATED WORK
+Because early theoretical work on incomplete data focuses largely
+on algebras and representation systems (e.g., [3, 12]), it was only
+natural to extend this line of thinking to probabilities [2, 34, 15,
+10, 8]. However, this extension is quite difﬁcult since the proba-
+bilities in query results must include expressions derived from the
+conﬁdence values originally embedded in the database. Systems
+meeting these theoretical conditions must overcome a set of chal-
+lenges that are often satisﬁed at the expense of modeling-power or
+understandability.
+Although there is a vast body of work on probabilistic databases,
+graphical models have largely been ignored until recently.
+The
+work of Sen et al. [24, 25] casts query evaluation as inference
+in a graphical model and BayesStore [29] makes explicit use of
+Bayesian networks to represent uncertainty in the database. While
+expressive, generative Bayesian networks have difﬁculty represent-
+ing the types of dependencies handled automatically in discrimina-
+tive models [16], motivating a database approach to linear chain
+conditional random ﬁelds [28]. We, however, present a more gen-
+eral representation based on factor graphs, an umbrella framework
+for both Bayesian networks and conditional random ﬁelds. Per-
+haps more importantly we directly address the problem of scal-
+able query evaluation in these representations—with an MCMC
+sampler—whereas previous systems based on graphical models are
+severely restricted by this bottleneck. Furthermore our approach
+can easily evaluate any relational algebra query without the need to
+close the graphical model under the semantics of each operator.
+There has also been recent interest in using sampling methods to
+estimate tuple marginals or rankings. For example, the MystiQ [5]
+system uses samplers to estimate top-k rankings [22]. Joshi and
+Jermaine apply variance reduction techniques to obtain better sam-
+ple estimates [14]. MCDB [13] employs a generative sampling ap-
+proach to hypothesize possible worlds. However, these approaches
+are based on feed-forward Monte Carlo techniques and therefore
+cannot take advantage of the Markovian nature of MCMC meth-
+ods. The MCDB system does use the concept of “tuple bundles”
+to exploit overlap across possible worlds, but this approach is dif-
+ﬁcult to implement because it requires custom query optimization
+code and redeﬁning operators over bundles of tuples (requiring over
+20,000 lines of C++ code; in contrast our approach is able to treat
+the DBMS as a blackbox and still exploit overlap between sam-
+ples). Furthermore, MCDB requires an additional pre-processing
+step to compute the overlap. In MCMC sampling, the overlap is
+determined automatically as a byproduct of the procedure. This
+allows our method to employ ideas from DBMS view materializa-
+tion technology to take advantage of the overlap between possible
+worlds. To the best of our knowledge, we are the ﬁrst Markov-
+chain Monte Carlo sampler for estimating probabilities in proba-
+bilistic databases [31]. We are also the ﬁrst to combine graphical
+models and sampling techniques into a single cohesive probabilis-
+tic database representation system.
+3.
+REPRESENTATION
+In our approach, the underlying relational database always stores
+a single possible world (a setting to all the random variables), en-
+abling us to run any relational algebra query. Database objects such
+as ﬁelds, tuples, and attributes represent random variables, how-
+ever, the factor graph expresses complex statistical relationships
+between them. As required, we can recover uncertainty to a de-
+sired level of ﬁdelity through Markov chain Monte Carlo (MCMC),
+which hypothesizes changes to random variable values that rep-
+resent samples of possible worlds. As this underlying database
+changes, we execute efﬁcient queries on the modiﬁed portions of
+worlds and obtain an increasingly accurate approximation of the
+probabilistic answers. Another advantage of a graphical model ap-
+proach is that it enables automatic learning over the database—avoiding
+the need to tune weights by hand.
+We begin by describing factor graphs and the well known pos-
+sible worlds semantics, where the uncertain database is a set of
+possible worlds W, and each w ∈W is a deterministic instance of
+the uncertain DB. Following tradition, we endow W with a proba-
+bility distribution π : W →[0, 1] s.t. P
+w∈W π(w) = 1, yielding
+a distribution over possible worlds.
+3.1
+Factor Graphs
+In our approach π is encoded by a factor graph, a highly expres-
+sive representation that can encode any exponential family proba-
+bility distribution (including Bayesian and Markov networks). In-
+deed their success in areas such as natural language processing,
+protein design, information extraction, physics, and machine vi-
+sion attest to their general representational power. Factor graphs
+can succinctly capture relationships between random variables with
+complex dependencies, making them a natural choice for relational
+data.
+Mathematically, a factor graph (parametrized by θ) is a bipar-
+tite graph whose nodes consist of the pair Gθ = ⟨V, Ψ⟩where
+V = X ∪Y is the set of random variables: X is the set of ob-
+served variables, and Y is the set hidden variables; Ψ = {ψk} is
+the set of factors.
+Random Variables
+Intuitively, random variables represent the range of values that an
+uncertain object in the database may acquire. Each hidden variable
+Yi ∈Y is associated with a domain DOM(Yi) representing the
+range of possible values for Yi. For example, the domain could be
+binary {yes,no}, enumerations {tall, grande, venti} or real-valued
+{r ∈ℜ|r ≥4}. Observed variables are ﬁxed to a particular value
+in the domain and can be considered a constant. For simplicity, and
+without loss of generality, we will assume that random variables
+are scalar-valued (vector and set valued variables can be re-written
+
+as a combination of factors and variables).
+In our notation, capital letters with a subscript (e.g., Yi, Xi) rep-
+resent a single random variable, and lowercase letters (e.g., yi)
+represent a value from the corresponding variable’s domain: yi ∈
+DOM(Yi). We use the notation Xi = xi to indicate that variable
+Xi is taking on the value xi. Finally, we use superscripts to denote
+sets (of arity represented by the superscipt): the notation Xr = xr
+means the set of variables {Xi, Xi+1, · · · , Xi+r} take on the val-
+ues (Xi = xi, Xi+1 = xi+1, · · · , Xi+r = xr+1) where it is
+implicitly assumed that xi is a value from Xi’s domain. Capital
+letters without a subscript refer to the entire variable space (Y is all
+hidden variables and X is all observables).
+Factors
+Factors model dependencies between the random variables. In fact,
+multiple factors may govern the behavior of the same variable by
+expressing preferences for certain assignments to that variable over
+others. This ﬂexible overlapping structure is powerful for modeling
+real world relational data.
+Formally, each factor ψ : xm × yn →ℜ+ maps assignments
+to subsets of observed variables xm ⊆DOM(X) and hidden vari-
+ables yn ⊆DOM(Y ) to a non-negative real-valued scalar. Intu-
+itively, factors measure the compatibility of settings to a group of
+variables, providing a measurement of the uncertainty that the par-
+ticular assignment contributes to the world. For an example, see
+Figure 1.
+Typically, factors are computed as a log-linear combination of a
+sufﬁcient statistic (or feature function) φk and corresponding pa-
+rameter θk as ψk(xm, yn) = exp (φk(xm, yn) · θk). Where φ
+are user-speciﬁed features for representing the underlying data and
+θ are corresponding real-valued weights measuring each features
+impact. There are a number of available methods from machine
+learning and statistics for automatically determining these weights
+(avoiding the need for manual tuning).
+Given the above deﬁnitions, the factor graph Gθ expresses a prob-
+ability distribution (parametrized by θ, and conditioned on X) πG :
+X × Y →[0, 1] s.t. P
+y∈DOM(Y ) πG(y|x) = 1. More speciﬁcally,
+if the graph decomposes into a set of factors Ψ (where each ψ ∈Ψ
+has a factor-speciﬁc arity of s + t) then the probability distribution
+πG is given as:
+πG(Y = y|X = x; θ) =
+1
+ZX
+Y
+ψ∈Ψ
+ψ(ys, xt)
+(1)
+where ZX = P
+y∈Y
+Qn
+k=1 ψk(ys, xt) is an input-dependent nor-
+malizing constant ensuring that the distribution sums to 1. Note
+two special cases: if X is empty then G is a Markov random ﬁeld,
+and when factors are locally normalized G is a Bayesian network.
+3.2
+Possible Worlds
+An uncertain database D is a set of relations R = {Ri} each
+with schema Sk
+i (of arity k) containing attributes Ri.a1, · · · , Ri.ak.
+Each attribute is equipped with a ﬁnite domain DOM(Ri.a1) (a
+ﬁeld is certain if its value is known, otherwise it is uncertain). A de-
+terministic tuple t for relation Ri is a realization of a value for each
+attribute t = ⟨v1, · · · , vk⟩for constants v1 ∈DOM(a1) · · · vk ∈
+DOM(ak). Let T be the set of all such tuples for all such relations
+in the database. Then the set of all (unrestricted) worlds realizable
+by this uncertain database is WD = {w | w ⊆T}.
+Let each ﬁeld in the database be a random variable whose do-
+main is the same as the ﬁeld’s attribute’s domain. A deterministic
+ﬁeld is an observed variable X and an uncertain ﬁeld is a hidden
+variable Y . Because each ﬁeld is interpreted as a random variable
+with a domain equivalent to its attribute’s, the hypothesis space of
+the random variables (X and Y ) contain the set of possible worlds.
+Deterministic factors can model constraints over arbitrary sets of
+variables by outputting 1 if the constraint is satisﬁed, and 0 if it is
+violated (rendering such a world world impossible). We then for-
+mally deﬁne W to be all possible worlds with respect to the factor
+graph’s probability distribution π:
+W = {w ∈WD | πG(w) > 0}
+(2)
+3.3
+Example
+We show two information extraction problems in Figure 1 as rep-
+resented in our approach. The top three panes show named entity
+recognition (NER), and the bottom three panes show entity resolu-
+tion (disambiguation). NER is the problem of identifying mentions
+of real-world entities in a text document; e.g., we might identify
+that “Clinton” is a person entity and “IBM” is an organization en-
+tity. The problem is usually cast as sequence labeling, where each
+input sentence is divided into a token sequence, and each word
+(token) in the sequence is treated as an observed variable with a
+corresponding hidden variable representing the label (entity type)
+that we are trying to predict. To model this problem with a fac-
+tor graph, we use factor templates to express relationships between
+different types of random variables; in our NER example, we ex-
+press three such relationships (Pane B). The ﬁrst is a relationship
+between observed strings and hidden labels at each position in the
+sequence (called the emission dependency: e.g., this models that
+the string “Clinton” is highly correlated with the label “person”).
+The second is a relationship between labels that neighbor in the se-
+quence (known as transition or 1st order Markov dependency: for
+example, it is likely that a person label will follow a person label
+because people have ﬁrst and last names), the ﬁnal dependency is
+over each label, modeling the fact that some labels are more fre-
+quent than others. Given the template speciﬁcations, the graph can
+be unrolled onto a database. Pane C shows the random variables
+and factors instantiated over the possible world initially shown in
+Pane A. The probability of this world is simply a product of all the
+factors (black boxes) illustrated in Pane C.
+The bottom row of Figure 1 shows the problem of entity resolu-
+tion. Once mentions of named entities have been identiﬁed, entity
+resolution clusters them into real-world entities. The database in
+pane C shows a single possible world, the templated factor graph
+in Pane D models relationships between the mentions, allowing de-
+pendencies over entire clusters of mentions, dependencies between
+mentions in the same cluster (modeling that mentions in clusters
+should be cohesive), and dependencies between variables in differ-
+ent clusters (modeling that mentions in separate clusters should be
+distant). Finally, Pane E shows the graph unrolled on the database;
+once again, the score of this possible world is proportional to the
+product of factors in the unrolled graph. These examples simply
+serve as an illustration, in practice we will exploit the beneﬁts of
+MCMC inference to avoid instantiating the factor graphs over the
+entire database.
+3.4
+Metropolis-Hastings
+Metropolis-Hastings (MH) [18, 11] is an extremely general MCMC
+framework used for estimating intractable probability distributions
+over large state spaces. One advantage of MCMC is that it can pro-
+duce samples from the probability distribution π without knowl-
+edge of the normalization constant ZX (which is #P-hard to com-
+pute).
+We will see in this section that Metropolis-Hastings has
+many advantages, allowing us to avoid the need to instantiate the
+
+ID
+1?
+Name
+John Smith
+1?
+J. Smith
+2?
+J. Simms
+C
+D
+E
+Cn
+Observed mention variable (mi)
+Hidden coref variable (yes/no)
+Plate: repeat structures over pattern
+Hidden Cluster Variable
+Factor
+s
+ID
+Name
+John Smith
+J. Smith
+J. Simms
+1
+1
+2
+C2
+C1
+mi
+ 
+ 
+c
+mci
+ 
+Cn
+ 
+ 
+ 
+ 
+Observed string variable (mi)
+Hidden label variable
+Plate: repeat structures over pattern
+Factor
+s
+O
+saw
+3
+3
+PER
+man
+2
+3
+O
+The
+1
+3
+Label
+String
+Tok#
+Sent#
+O?
+him
+3
+3
+PER?
+saw
+2
+3
+O?
+John
+1
+3
+Label
+String
+Tok#
+Sent#
+Se
+St
+Sb
+emissions transitions
+bias
+- Database (entity resolution)
+- Templated factor graph
+- Unrolled graph on PDB
+A
+B
+C
+- Database (NER)
+- Templated factor graph
+- Unrolled graph on PDB
+same
+different
+Figure 1: Two information extraction problems in our framework. The top row is the problem of NER and the bottom row is problem
+of entity resolution. The ﬁrst column (Panes A and C) shows a deterministic possible world for the respective problems. The second
+column (Panes B and D) shows the template speciﬁcation for a factor graph for modeling these problems. The third column (Panes
+C and E) shows the templated graph unrolled on the possible world.
+graphical model over the entire database. The basic idea is that
+MCMC can hypothesize changes to the single underlying possible
+worlds by proposing modiﬁcations to previous worlds. We describe
+MH more generally below.
+MH requires two components, a target distribution that we wish
+to sample (in our case π(w)) and a proposal distribution q(·|w)
+which conditioned on a state w probabilistically produces a new
+world w′ with probability q(w′|w). The idea is that q(·|w) is a
+distribution from which we can easily sample (in practice such dis-
+tributions are easy to construct, and even allow us to inject domain-
+speciﬁc knowledge).
+The algorithm is initialized to a possible world w0 (for example,
+randomly). Next samples are drawn from the proposal distribution
+w′ ∼q(·|w), and each sample can either be accepted or rejected
+according to a Bernoulli distribution given by parameter α:
+α(w′, w) = min
+
+1, π(w′)q(w|w′)
+π(w)q(w′|w)
+
+(3)
+The acceptance probability is determined by the product of two
+ratios: the model probability ratio π(w′)/π(w) and the proposal
+distribution ratio q(w|w′)/q(w′|w). Intuitively, the model ratio
+captures the relative likelihood of the two worlds, and the proposal
+ratio eliminates the bias introduced by the proposal distribution.
+Given the requirement that the proposal distribution can transition
+between any two worlds with positive probability in a ﬁnite num-
+ber of steps, the Metropolis-Hastings algorithm is guaranteed to
+converge to the true distribution encoded by our factor graph. Note
+that the normalization constant Z appears in both the numerator
+and denominator and cancels from the computation of α. Further,
+notice that only factors whose argument variables are changed by
+q need to be computed, and therefore only a small portion of the
+graph needs to be unrolled on the database to evaluate each pro-
+posal (for the two information extraction problems presented in the
+previous section, a proposal that modiﬁes only a constant number
+of variables requires evaluating only a constant number of factors).
+We show pseudo-code for performing a random-walk with MH in
+the appendix: Algorithm 2, and demonstrate how factors cancel.
+We remark that another important advantage of MH is that it avoids
+the need to explicitly enforce deterministic constraints because the
+proposer q is designed to transition within the space of possible
+worlds only (in this sense q is constraint-preserving). An example
+of a constraint preserving proposal distribution is the split-merge
+proposer for entity resolution, where clusters of mentions are ran-
+domly split or merged (it is easy to check that these two operations
+preserve the transitivity constraint: avoiding the need to include the
+expensive cubic number of deterministic transitivity factors).
+4.
+QUERY EVALUATION
+The main query evaluation problem we are concerned with is to
+return the set of tuples in the answer of a query Q over the uncer-
+tain database ⟨W, π⟩, along with their corresponding probabilities
+(of being in that answer). We say that a tuple t is in the answer
+of a query Q if and only if ∃w ∈W s.t. t ∈Q(w). Then, the
+probability of this event is:
+Pr[t ∈Q(W)] =
+X
+w∈W
+1t∈Q(w)π(w)
+(4)
+We can see that if a tuple occurs in the answer for all possible
+worlds, it is deterministic because Equation 4 sums to one. Sim-
+ilarly, a tuple occurring in none of the deterministic answer sets has
+zero probability and would be omitted from the answer.
+Unfortunately, Equation 4 cannot be computed tractably because
+it requires summing over the set of possible worlds. Alternatively
+we can write the marginal probabilities as the inﬁnite-sample limit
+over a set of samples S drawn from π(·|X):
+
+Pr[t ∈Q(W)] = lim
+n→∞
+1
+n
+n
+X
+i
+1t∈Q(wi∼π(·))
+(5)
+and estimate Pr[t ∈Q(WG)] by using a ﬁnite n. Given equation 5,
+one approach is to draw independent samples w ∼iid π, requiring
+a generative process that must completely instantiate each possible
+world (for example, as done in MCDB [13]). However, generating
+a possible world may be expensive in practice, motivating our ap-
+proach of using Markov-chain Monte Carlo to generate samples by
+equivalently hypothesizing modiﬁcations to possible worlds.
+There are two primary advantages of using a sampling approach
+for estimating marginals. The ﬁrst is that as n goes to inﬁnity, the
+approximation becomes correct, allowing a trade-off between time
+and ﬁdelity: intuitively some applications are time sensitive and re-
+quire only course estimates of query marginals, while in others high
+ﬁdelity is extremely important. The second important property of
+sampling methods is that they are query agnostic. That is, we need
+not concern ourselves with closing the factor-graph representation
+over every hypothetical query operator.
+For example, sampling
+methods trivially handle aggregate extensions to relational algebra
+because sampling from a graph returned as a query answer would
+be equivalent to sampling from the original graph.
+Up to this point, we have formally described our representation
+for the possible worlds, the probability distribution, and have posed
+a query evaluation problem of interest. We now focus our attention
+to solving this query evaluation problem in our framework. We
+ﬁrst overview background material, then describe a basic sampling
+method. Finally, at the end of this section, we describe the main
+algorithm of this article: Metropolis Hastings sampling with mate-
+rialized view maintenance.
+4.1
+Basic MH Query Evaluation
+We now precisely deﬁne how to use Metropolis-Hastings to ob-
+tain marginal probabilities for tuples in query answers. In particu-
+lar, we use Algorithm 2 to hypothesize a series of modiﬁcations to
+worlds. Queries are then executed over hypothesized worlds, and
+the marginal probabilities are computed according to Equation 5 .
+We should note that consecutive samples in MH are highly depen-
+dent; in situations such as ours, where collecting counts is expen-
+sive (requires executing the query), it is prudent to increase inde-
+pendence by collecting tuple counts only every k samples (a tech-
+nique known as thinning). Choosing k is an open and interesting
+domain-speciﬁc problem. We present our basic MCMC sampling
+method in Algorithm 3 (Appendix).
+Another interesting scientiﬁc question is how to inject query spe-
+ciﬁc knowledge directly into the proposal distribution. For exam-
+ple, a query might target an isolated subset of the database, then the
+proposal distribution only has to sample this subset; this can be (1)
+provided by an expert with domain-speciﬁc knowledge, (2) gener-
+ated by analyzing the structure of the graph and query, or even (3)
+learned automatically through exploration. However, thoroughly
+exploring this idea is beyond the scope of this paper.
+Finally, there is an interesting balance between the traditional
+ergodic theorems of MCMC and DBMS-sensitive cost issues aris-
+ing from disk-locality, caching, and indexing etc. For example, the
+ergodic theorems imply that every MCMC sample be used to com-
+pute an estimate. However, faced with the fact that each sample is
+non-trivial to compute (requires executing a query), we must bal-
+ance the dependency of the samples with the expected costs of the
+queries. Adaptively adjusting k to respond to these various issues
+is one type of optimization that may be applied to this problem.
+Algorithm 1 Query Evaluation with Maintenance Techniques
+1: Input:
+initial world w0,
+number of samples per query: k
+2: Initialization:
+//run full query to get initial results
+s ←Q(w0)
+//initial counts for marginals
+m ←mi =
+(
+1
+if mi ∈s
+0
+o.w.
+//initial normalizing constant for marginals
+z ←1
+w ←w0
+3: for i = 1, . . . , number of steps do
+4:
+(w′, ∆−, ∆+) ←MetropolisHastings(w,k)
+5:
+s ←s −Q′(w, ∆−) ∪Q′(w, ∆+)
+6:
+m ←mi +
+(
+1
+if mi ∈s
+0
+o.w.
+7:
+z ←z + 1
+8: end for
+9: return 1
+z m
+4.2
+MH Sampling with View Maintenance
+Often, executing queries over a relational database is an expen-
+sive resource consuming task. One way of obtaining tuple counts is
+to run the query over each sampled world; however MCMC enables
+us to do much better. Recall that consecutive samples in MCMC
+are actually dependent; in fact, as illustrated in Figure 2, a world
+w′ is the result of a small modiﬁcation to the original world w.
+We use this ﬁgure to directly motivate the relevance of material-
+ized view maintenance [4]. Rather than run the original (expensive)
+query over each consecutive sample, the query is run only once on
+the initial world, then for each subsequent sample, a modiﬁed query
+is run over the difference ∆and previous world w. That is, we can
+exploit the semantics of set operations to obtain an equivalent ex-
+pression for the same answer set. Following the work of Blakeley
+et al. [4], we recursively express the answer set as:
+Q(w′) = Q(w) −Q′(w, ∆−) ∪Q′(w, ∆+)
+(6)
+where Q′(w, ∆±) is inexpensive because |∆±| ≪|w| and Q(w)
+is inexpensive because it can be recursively expressed as repeated
+applications of Equation 6 (bottoming out at the base case of the
+initial world which is the only world that must be exhaustively
+queried).
+We discuss brieﬂy some view materialization techniques. First,
+observe that a selection σ(w′) can be re-written:
+σ(w′) ≡σ(w) −σ(∆−) ∪σ(∆+)
+and Cartesian products can similarly be re-written as:
+w′.R1 × w′.R2 ≡w.R1 × w.R2
+−w.R1 × ∆−.R2
+∪w.R1 × ∆+.R2
+where ∆−is the original setting of the tuples, ∆+ is the new set-
+ting, and the notation w.R1 is read as: relation R1 from world w.
+Traditional results from relational algebra allow joins to be rewrit-
+ten as a Cartesian product and a selection. Further, it is not difﬁcult
+to conceive how additional relational operators such as various ag-
+gregators can be re-written in terms of the sets ∆−and ∆+.
+
+In both the selection and join, the asymptotic savings can be as
+high as a full degree of a polynomial (for example if ∆is constant
+in size (as is often the case) and we lack indices over the ﬁelds
+involved in the predicates). The high-level code for our implemen-
+tation based on view materialization techniques is exhibited in Al-
+gorithm 1. In practice, the implementation also requires the use of
+auxiliary tables for storing the sets ∆−and ∆+, which are nec-
+essary for running the modiﬁed query Q′ from Equation 6. These
+tables must be updated during the course of Metropolis-Hastings,
+and additional cleaning and refreshing of the tables and multi-set
+maps are required in between deterministic query executions.
+Remark: please note that in the presence of projections (as seen in
+all of our evaluation queries), that the set-difference and set-union
+operators (from Equation 6) actually requires multiset semantics,
+because counters need to be maintained [4]. We apply the necessary
+modiﬁcations to Algorithm 1 providing additional book keeping to
+track the number of occurrences of each tuple in the set s, so that
+the operators can be properly applied.
+In practice, we handle projections in Algorithm 1 by maintaining
+the multi-set maps from tuples to counts. In line 5, set difference
+and set union are replaced with addition and subtraction operators
+to maintain map counts, and in line 6, the condition is changed to:
+count(mi) > 0.
+!-
+!+
+w
+w’
+Figure 2: w is the original world, w′ is the new world after k
+MCMC steps and ∆−⊆w is the set of tuples that were re-
+moved from w and ∆+ ⊆w′ is the set added to w′.
+5.
+EXPERIMENTS
+In this section we demonstrate the viability of our approach by
+representing the uncertain output of a real-world information ex-
+traction problem: named entity recognition (NER). However, we
+go beyond the simple linear-chain model and use a more sophis-
+ticated skip chain conditional random ﬁeld [27] to represent the
+uncertainty in both the database and NER. Skip chains and similar
+complex models achieve state-of-the-art performance in many IE
+tasks; however no current PDB is capable of modeling them be-
+cause exact marginal inference is intractable. However, we demon-
+strate that our MCMC approach effortlessly recovers the desired
+probabilities for query evaluation.
+We implement a prototype system in Scala [20], a functional ex-
+tension to Java. The system is built in coordination with our graph-
+ical model library for imperatively deﬁned factor graphs, Factorie,
+[17], along with Apache Derby database drivers interfaced through
+Java’s JDBC API. We implement functionality for (1) retrieving
+tuples from disk and then instantiating the corresponding random
+variables in memory, and (2) propagating changes to random vari-
+ables back to the tuples on disk. Statistical inference (MCMC) is
+performed on variables in main memory while query execution is
+performed on disk by the DBMS. Additionally, we implement in-
+frastructure for both the naive and materialized-view maintenance
+query evaluators. As random variables are modiﬁed in main mem-
+ory, their initial and new values are tracked and written to auxiliary
+tables representing the “added” and “deleted” tuples required for
+applying the efﬁcient modiﬁed queries.
+5.1
+Application: named entity recognition
+We evaluate our probabilistic database on the real-world task of
+named entity recognition. In particular we obtain ten-million to-
+kens from 1788 New York Times articles from the year 2004. Re-
+call that the problem of named entity recognition is to label each
+token in the text document with an entity type. We label the corpus
+using CoNLL entities: “PER” (person entity such as Bill), “ORG”
+(organization such as IBM), “LOC” (location such as New York
+City), “MISC” (miscellaneous entity—none of the above), and “O”
+(not a named entity). We use BIO notation (see the appendix) to
+encode named entities more than one token in length making the
+total number of labels nine. We store the output of the ten million
+NYT tokens in a database relation called TOKEN, with attributes
+(TOK ID, DOC ID, STRING, LABEL, TRUTH) where TOK ID is
+underlined to indicate that it is the primary key, DOC ID is the doc-
+ument for which a token belongs, STRING represents the text of a
+token, LABEL is unknown for all tuples and is initialized to “O” ,
+and TRUTH is a “ground truth” that we can use to train our model1.
+Next, we deﬁne the relational factor graph (Figure 3) over the
+TOKEN relation to create our probabilistic database. In particular,
+we ﬁrst include the three factor templates described in Section 3.3:
+(1) factors between observed strings and corresponding labels, (2)
+transition factors between consecutive labels, and (3) bias factors
+over labels. Up to this point we have deﬁned the traditional lin-
+ear chain model for NER (see [16]). However, skip-chain models
+achieve much better results [27], so we include skip-edges or fac-
+tors between labels whose strings are identical. Intuitively, this fac-
+tor captures the dependency that if two tokens have the same string,
+then they have an increased likelihood of having the same label. To
+see why inference in this graph is intractable, note that the resulting
+factor graph (Figure 3) is not tree-structured.
+Now that we have deﬁned our database and factor graph, we now
+deﬁne our proposal distribution for query evaluation. Given a set
+of hidden label variables L, our proposal distribution q works as
+follows: ﬁrst a label variable is selected uniformly at random from
+L, then the label for L is randomly changed to one of the nine
+CoNLL labels {B-PER, I-PER, B-ORG, I-ORG, B-MISC, I-MISC,
+B-LOC, I-LOSC, O}. This processes is repeated for 2000 proposals
+before L is changed by loading a new batch of variables from the
+database: up to ﬁve documents worth of variables may be selected
+(documents are selected uniformly at random from the database).
+5.2
+Methodology
+We use the model and proposal distribution described in the pre-
+vious section in all experiments; we train the model using one-
+million steps of SampleRank [32], a training method based on MH.
+The method is extremely quick, learning all parameters in a matter
+of minutes. The query evaluation problems we investigate are all
+instances of the general evaluation problem described in Section 4:
+the goal is to return each tuple along with its probability of being
+in the answer set. We evaluate the accuracy of our samplers by
+measuring the squared-error loss to the ground truth query answer
+(that is, the usual element-wise squared loss). Sometimes we re-
+port the normalized squared loss, which simply scales the loss so
+that the maximum data point has a loss of 1 (this allows us to com-
+pare multiple queries on the same graph). Unless otherwise stated,
+1to estimate ground truth we used the Stanford NER system
+(nlp.stanford.edu/ner/index.shtml)
+
+we estimate the ground-truth in each problem by running our sam-
+pler for one-hundred-million proposals and collect a sample every
+ten-thousand proposals. In all experiments we evaluate the query
+every ten-thousand proposals (that is k = 10, 000 in Algorithm 3).
+a spokesman for IBM corp. said that IBM has a   …   for IBM
+Figure 3: A skip chain conditional random ﬁeld that includes
+“skip” edges, or factors between tokens with the same string.
+Bias factors over labels are omitted for clarity.
+5.3
+Scalability
+In this section we demonstrate that we are able to scale query
+evaluation to a large number of tuples even though exact infer-
+ence in the underlying graphical model (skip-chain CRF) is in-
+tractable and approximate methods such as loopy belief propaga-
+tion fail to converge for these types of graphs [27]. We additionally
+compare the materialized MCMC sampler with the basic (naive)
+MCMC sampler, demonstrating dramatic efﬁciency gains. We use
+the following simple, but non-selective query that scales linearly
+with the number of tuples (note that the DBMS lacks an index over
+the STRING ﬁeld):
+Query 1
+SELECT STRING
+FROM TOKEN
+WHERE LABEL=’B-PER’
+In Figure 4(a) we plot query evaluation time versus the number of
+tuples in the database (log scale) for both the naive and materialized
+approach (over several base ten orders of magnitude). As stated
+earlier, we have no way of obtaining the true probabilities, so we
+estimate the ground truth by sampling and then deﬁne the query
+evaluation time as the time taken to half the quad loss (squared
+error) from the initial “single-sample” deterministic approximation
+to the query.
+For small databases, the sampler based on view-maintenance
+techniques does not provide efﬁciency gains over the naive ap-
+proach. Indeed, when the database contains just 10,000 tuples, the
+two approaches perform comparably: the naive sampler is slightly
+quicker (19 seconds compared to 21 seconds) possibly due to the
+overhead involved in maintaining the auxiliary diff tables (recall
+that the size of the diff tables is roughly 10,000 tuples because there
+are that many steps between query executions). For 100,000 tuples,
+the view-based approach begins to outperform the naive approach
+(162 seconds versus 178 for naive) and quickly yields dramatic im-
+provements as the number of tuples increases. In fact, we were un-
+able to obtain the ﬁnal data-point (ten million tuples) for the naive
+sampling approach because we project it to take 227 hours to com-
+plete. In stark contrast, the sampler based on view-maintenance
+techniques takes under two-and-a-half hours on the same ten mil-
+lion tuples. We are impressed with the speed of the evaluation be-
+cause inference in skip chains CRFs is extremely difﬁcult and nor-
+mally takes hours to complete—even in the non-database setting.
+It is worth noting that for the skip-chain CRF (and the sophis-
+ticated entity-wise coreference model presented in Figure 1), the
+time to perform an MCMC walk-step is constant with respect to the
+size of the database. That is, if the proposal distribution only mod-
+iﬁes a constant number of variables, then only a constant number
+of tuples in the database are involved in computing the acceptance
+computation (see the Appendix, Section 9.2). Therefore, because
+the time to perform a single walk-step is constant with respect to
+the size of the repository, only two primary factors affect scalabil-
+ity: (1) the DBMS’s deterministic query execution time and (2) the
+number of samples required to change the database in a meaning-
+ful way. This suggests two avenues of future work for improving
+scalability even further. In particular investigating jump functions
+that better explore the space of possible worlds appears to be an
+extremely fruitful venture with high dividends.
+Next, in Figure 4(b), we plot query-evaluation error versus time
+for both query evaluators on the 1-million tuple database. Recall
+that the two approaches generate the same set of samples, but the
+naive approach is slower because it must execute the query on each
+possible world (rather than exploiting the set of modiﬁed tuples).
+Impressively, the efﬁcient evaluator nearly zeroes the error before
+the naive approach can even half the error. Also, notice how loss
+tends to decrease monotonically over time. This allows our ap-
+proach to be used as an any-time algorithm: applications that re-
+quire ﬁne probability estimates can spend more evaluation time,
+while those that are time sensitive can settle for courser estimates.
+0.01
+0.05
+0.10
+0.50
+1.00
+5.00
+10.00
+0
+200
+400
+600
+800
+Scalability of Query Evaluation (log scale)
+number of tuples (millions)
+time (minutes)
+Legend
+materialized sampling
+naive sampling
+(a) Scalability over several orders of magnitude (Query 1); x
+axis is millions of tuples in log scale and y axis is time taken to
+half squared error.
+0
+1000
+2000
+3000
+4000
+5000
+6000
+7000
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Query Evaluation Loss over Time (Query 1)
+Time (s)
+Normalized Loss (squared error)
+Legend
+Materialized Sampler
+Naive Sampler
+(b) Loss versus time comparison for the two query evaluation
+approaches. Query 1 is evaluated over one-million tuples.
+Figure 4: The beneﬁts view maintenance query evaluation.
+
+1
+2
+3
+4
+5
+6
+7
+8
+0
+500
+1000
+1500
+2000
+Parallelizing Query Evaluation
+number of branches (MCMC chains)
+squared error
+Legend
+Parallelized
+Ideal linear improvement
+Figure 5: Multiple evaluators in parallel.
+5.4
+Parallelization
+In general, sampling approaches to query evaluation can be eas-
+ily parallelized to yield impressive performance improvements. These
+performance improvements are potentially even greater in the con-
+text of our MCMC approach because parallelization provides the
+additional beneﬁt of generating samples with higher independence,
+leading to faster mixing rates. In this section we show that run-
+ning multiple query evaluators in parallel dramatically improves
+the accuracy given a ﬁxed time-span, demonstrating our system’s
+potential to satisfy high-ﬁdelity requirements in time-sensitive sit-
+uations.
+We evaluate the effects of parallelization as follows. First we
+produce eight identical copies (initial worlds) of the probabilistic
+database, each with ten million tuples. We evaluate Query 1 us-
+ing the usual set-up except we obtain the ground-truth by averaging
+eight parallel chains for ten-thousand samples each. To evaluate the
+query, we run up to eight parallel query evaluators for one-hundred
+samples (with the usual ten-thousand MCMC steps in between each
+sample), the results are plotted in Figure 5 and compared against
+the ideal linear improvement. For example, by using two chains we
+almost half the loss of the one chain evaluator. Impressively, eight
+chains reduces the error by slightly more than a factor of eight,
+demonstrating that MCMC sampling evaluation can be further im-
+proved by parallelization.
+As we can see, this simple form of parallelization is actually
+quite powerful because samples taken across multiple chains are
+much more independent than those taken within a single chain.
+This is one reason why we actually observe super-linear improve-
+ments in ﬁdelity through parallelization. These beneﬁts come at a
+relatively small cost of (1) additional hard-drive space for storing
+multiple worlds simultaneously, and (2) additional processors for
+parallelization.
+5.5
+Aggregates
+Another beneﬁt of sampling-based approaches is their ability
+to answer arbitrary relational algebra queries without the need to
+close a representation system under the necessary operators. In
+this section we empirically demonstrate that our system is capa-
+ble of answering arbitrary extensions to relational algebra such as
+aggregates. We begin with a simple aggregate query that counts
+the number of person mentions in one-million tuples worth of New
+York Times tokens.
+Query 2
+SELECT COUNT(*)
+FROM TOKEN
+WHERE LABEL=’B-PER’
+The second aggregate query retrieves documents in which the num-
+ber of person mentions is equivalent to the number of organization
+mentions within that document (again applied to one-million tu-
+ples).
+Query 3
+SELECT T.doc id
+FROM Token T
+WHERE (SELECT COUNT(*)
+FROM Token T1
+WHERE T1.label=‘B-PER’ AND T.doc id=T1.doc id)
+=(SELECT COUNT(*)
+FROM Token T1
+WHERE T1.label=‘B-ORG’ AND T.doc id=T1.doc id)
+We plot squared error loss as a function of time for these two
+queries. The ground-truth was obtained by running each query for
+ﬁve-thousand samples with the usual ten-thousand MCMC walk-
+steps between each sample. We see that Query 2 rapidly converges
+to zero loss, and Query 3 converges at a respectable rate. In fact,
+the rapid convergence of Query 2 can be explained by examining its
+answer set, which we provide in Figure 9 of the Appendix. Notice
+how the distribution is highly peaked about the center and appears
+to be normally distributed. This is not unusual for real-world data,
+and MCMC sampling is celebrated for its ability to exploit this con-
+centration of measure, leading to rapid convergence.
+0
+1000
+2000
+3000
+4000
+5000
+6000
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Aggregate Query Evaluation: Normalized Loss Over Time
+Time (s)
+Normalized Loss (squared error)
+Legend
+Query #2
+Query #3
+Figure 6: Squared loss over time time for two aggregate queries
+(Query 2 and Query 3), results reported on one-million tuples.
+6.
+CONCLUSION AND FUTURE WORK
+In this paper we proposed a framework for probabilistic databases
+that uses factor graphs to model distributions over possible worlds.
+We further advocated MCMC sampling techniques and demon-
+strated how the Markovian nature can be exploited to efﬁciently
+evaluate arbitrary relational queries in an any-time fashion.
+In future work we would like to investigate methods for auto-
+matically constructing jump functions to target speciﬁc queries.
+
+7.

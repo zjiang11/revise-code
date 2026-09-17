@@ -1,0 +1,1022 @@
+Scaling Knowledge Graph Embedding Models
+Nasrullah Sheikh
+IBM Research Almaden
+San Jose, California, US
+
+Xiao Qin
+IBM Research Almaden
+San Jose, California, US
+
+Berthold Reinwald
+IBM Research Almaden
+San Jose, California, US
+
+Chuan Lei
+Instacart
+San Francisco, California, US
+
+ABSTRACT
+Developing scalable solutions for training Graph Neural Networks
+(GNNs) for link prediction tasks is challenging due to the high
+data dependencies which entail high computational cost and huge
+memory footprint. We propose a new method for scaling training
+of knowledge graph embedding models for link prediction to ad-
+dress these challenges. Towards this end, we propose the following
+algorithmic strategies: self-sufficient partitions, constraint-based
+negative sampling, and edge mini-batch training. Both, partition-
+ing strategy and constraint-based negative sampling, avoid cross
+partition data transfer during training. In our experimental evalua-
+tion, we show that our scaling solution for GNN-based knowledge
+graph embedding models achieves a 16x speed up on benchmark
+datasets while maintaining a comparable model performance as
+non-distributed methods on standard metrics.
+1
+INTRODUCTION
+Graphs have been widely used to model and manage relational
+data [37]. Knowledge graphs (KG), as a prime example of graphs,
+model real-world objects, events, and concepts as well as various
+relations among them. Representation learning over large-scale
+knowledge graphs has been emerging as a pivotal tool to derive
+insights from graph structured data powering a wide range of
+applications such as data integration [31, 36, 39] and question an-
+swering [4, 14].
+KG embedding methods [5, 6, 20, 26, 29, 35, 41] capture the at-
+tributes of entities and structures of relations in KGs, and project
+them into a lower dimensional vector space for use in various
+downstream tasks such as vertex classification [29] and link pre-
+diction [5, 26, 29, 30, 38]. Traditional KG embedding methods learn
+various structures pattern between the entities such as symmetric,
+anti-symmetric and inverse relations. They mainly focus on the
+scoring aspect of the problem, which is to predict the legitimacy be-
+tween two entities and a particular relation type. Recently, message
+passing-based graph neural networks (GNNs) have been adopted
+to enhance the expressivity of the entity2 embeddings [29]. GNNs
+This work is licensed under the Creative Commons BY-NC-ND 4.0 International
+License. Visit https://creativecommons.org/licenses/by-nc-nd/4.0/ to view a copy of
+this license. For any use beyond those covered by this license, obtain permission by
+
+2Entity and vertex terms are used interchangeably.
+Knowledge Graph Embedding Decoder
+K-hop Message Passing-based Encoder
+V
+U
+V
+U
+relation r1
+relation r3
+relation r5
+relation r2
+Graph
+Loss
+Figure 1: A graph neural network-based knowledge graph
+embedding network architecture.
+capture the topological features of the entities such as shapes of the
+neighborhood sub-graphs which are overlooked by the traditional
+KG embedding methods. A generic GNN-based KG embedding
+neural network (Figure 1) demonstrates an encoder-decoder archi-
+tecture. The encoder generates entity embeddings using a GNN by
+aggregating neighbors’ information, and the decoder learns the re-
+lations between entities using a traditional KG embedding method.
+Such architecture enjoys the benefits from both methods promising
+to generate expressive entity and relation embeddings. However,
+it learns better embedding but at the cost of increased model com-
+plexity in terms of number of trainable parameters. For example,
+TransE[5] has 1.5 million parameters where as RGCN[29] has 3.3
+million parameters over FB15k-237 dataset with an embedding size
+of 100. The increasing number of trainable parameters leads to an
+increase in the training time.
+Besides the model complexity, the size of the modern input KGs
+has also grown exponentially. The Facebook [7] graph has billions
+of vertices and trillions of edges, and Freebase [11] has millions
+of entities and billions of edges. Iterative training on these large
+graphs may not be feasible on single node systems due to its high
+computational cost and its significantly high memory requirements
+caused by the data dependencies.
+Various distributed training frameworks [18, 43, 45] have been
+proposed to scale KG embedding methods. However, these frame-
+works apply to the traditional models (various types of decoder
+in Figure 1) with mutually independent training triplets [5, 38].
+The input data can be partitioned easily, and the models are sub-
+sequently trained in parallel. These frameworks cannot be used
+for training GNN-based KG embedding models [26, 29] due to the
+inherent dependencies on the neighborhood information (usually
+beyond 𝑛-hop with 𝑛≥2). Figure 2 shows that with larger and
+deeper neighborhoods, the average number of vertices required
+to compute an embedding rise significantly, which consequently
+leads to an increase in the number of model parameters. Thus, it
+arXiv:2201.02791v1  [cs.LG]  8 Jan 2022
+
+Nasrullah Sheikh, Xiao Qin, Berthold Reinwald, and Chuan Lei
+1-Hop
+2-Hop
+3-Hop
+0
+1
+2
+3
+4
+5
+6
+7
+Avg. number of nodes (Log scale)
+Figure 2: Average number of vertices required to compute
+the embedding of a vertex in ogb-citation2 dataset.
+requires larger computation and memory requirements. We further
+observe that the skewed distribution of vertex degrees in enterprise
+knowledge graphs leads to vertex dependencies up to tens of thou-
+sands of vertices. These dependencies make scaling GNN-based KG
+embedding models extremely challenging.
+Several distributed GNN training frameworks have been pro-
+posed primarily for the vertex classification task [21, 42]. Graph
+partitioning followed by distributed training are commonly ex-
+plored by these solutions. While a simple partitioning strategy is
+to partition the graph using either vertex-cut or edge-cut-based
+methods, and access required dependent vertices in other partitions
+remotely during training. However, with increase of the number of
+GNN layers, i.e., the number of hops, the amount of exchanges of
+neighborhood information across partitions will incur significant
+communication overhead. It is in contrast to distributed neural
+network training on non-graph structured datasets such as im-
+ages, which only incurs communication overhead due to gradients
+sharing. The exchange of neighborhood information is the main
+bottleneck in scaling GNN training. The challenge is to generate
+optimized graph partitions that reduce the required exchange of
+neighborhood information. Moreover, partitions generated from
+larger graphs are of considerable size and cannot fit in the smaller
+memory such as GPU memory. The another challenge is to train on
+these considerably larger partitions, while still taking advantage
+of GPU. DistDGL [42] introduces an edge-cut-based partitioning
+method using METIS [16], and employs a mini-batch training ap-
+proach for vertex classification. Edge-cut-based methods produce
+partitions with edge replication in multiple partitions, which may
+lead to skewed partition sizes. The larger partitions will be the strag-
+glers in the training process. We observe that partitions produced
+by METIS followed by neighborhood expansion for link predic-
+tion are approximately 33% larger than the partitions produced by
+vertex-cut based methods [27], which increases the training time
+by approximately 21%. Thus, this approach is not optimal for the
+link prediction task.
+In this paper, we propose a distributed training approach using
+GNN-based knowledge graph embedding models for link predic-
+tion. We introduce a vertex-cut method to partition the graph and
+then expand the partition to include 𝑛-hop neighbors, where 𝑛is de-
+termined by the number of convolutional layers of the GNN model.
+The partitions produced are self-sufficient, thus do not require any
+exchange of neighborhood information during distributed training,
+but at the expense of data replication and redundant computation.
+Moreover, we generate negative samples within the partition, thus
+further reducing the communication overhead. Using data parallel
+approach, we train the model in a cluster where each trainer process
+trains on a partition using edge mini-batch training strategy.
+Our main contributions are as follows.
+• To the best of our knowledge, we propose the first architecture
+for distributed GNN-based knowledge graph embedding model
+training for link prediction. We also introduce edge mini-batch
+training which allows us to train on large partitions.
+• We employ a vertex-cut-based partitioning strategy that parti-
+tions the graph into sets of disjoint edges, which we then expand
+to self-contained graph partitions by replicating 𝑛-hop dependent
+vertices and edges required for message passing.
+• We exploit the locally closed world assumption [5, 32] and em-
+ploy a constraint based negative sampling strategy to sample
+negative samples. The negative samples are drawn from within
+the partition to avoid communication overhead. The approach
+allows negative sampler to generate negative samples locally
+within the partition, thus avoiding communication cost of fetch-
+ing the negative samples from other partitions.
+• We experimentally evaluated the performance of our proposed
+system on two public datasets. Our approach achieves a speedup
+of 16x with 8 trainers without any loss on measured metrics.
+2
+BACKGROUND
+2.1
+Knowledge Graph Neural Networks
+Knowledge graph convolutional network based graph embedding
+models such as [26, 29] use a message passing framework and
+apply a relation-specific transformation on the information from
+neighbors to obtain the embedding of a head vertex. A general
+message passing framework for knowledge graph embedding can
+be expressed as:
+ℎ′
+𝑠= 𝜎
+
+Agg(𝑟,𝑡) ∈N𝑠𝑓(ℎ𝑠,𝑟,ℎ𝑡)
+
+(1)
+where 𝑓is the relation-specific transformation function applied on
+the information from neighbors, Agg is an aggregator function such
+as SUM, MEAN that is applied on the received information from
+all neighbors, 𝑁𝑠defines the neighbors of node 𝑠, 𝑟is the relation
+between 𝑠and 𝑡nodes, 𝜎is the activation function, and ℎ′𝑠is the
+new hidden representation of entity 𝑠. To prevent overfitting, the
+paper [29] introduced two techniques for regularisation: 1) Basis
+decomposition and 2) Block diagonal decomposition. In case of
+basis decomposition, the weight matrix 𝑊𝑟is obtained as a linear
+combination of smaller basis matrices 𝑉𝑏∈R𝑑×𝑑as defined below:
+𝑊𝑟=
+𝐵
+∑︁
+𝑏=1
+𝑎𝑟𝑏𝑉𝑏
+(2)
+
+Scaling Knowledge Graph Embedding Models
+where 𝑎𝑟𝑏are coefficients that depend on 𝑟.
+A knowledge graph embedding model is trained using a negative
+sampling approach. For each positive triplet𝜏∈𝑇+, a set of negative
+samples are generated by either corrupting 𝑠or 𝑡which produces a
+set of negative triplets 𝑇−. Given the set of positive and negative
+triplets 𝑇= 𝑇+ Ð𝑇−, the model is optimized on cross-entropy loss
+to learn entity and relation embeddings.
+L = 1
+|𝑇|
+∑︁
+𝜏∈𝑇
+𝑦log 𝑙 𝑔(𝜏) + (1 −𝑦)log 1 −𝑙(𝑔(𝜏))
+(3)
+where 𝜏is a training example (𝑠,𝑟,𝑡); 𝑙is the logistic sigmoid func-
+tion; 𝑦is 1 or 0 for positive or negative triplets, respectively; and 𝑔
+is a scoring function such as DistMult [38] as shown below:
+𝑔(𝑠,𝑟,𝑡) = ℎ𝑇
+𝑠M𝑟ℎ𝑡
+(4)
+where M𝑟is a diagonal matrix associated with each relation 𝑟.
+2.2
+Data Parallel Distributed Training
+In data parallel distributed training, a model is replicated to each
+compute node, and each replicated model works on a partition of the
+data independently. The distributed training must have mathemati-
+cal equivalence to the non-distributed training, i.e., the results pro-
+duced by distributed training should be same as in non-distributed
+training. There are two approaches to make replicated models con-
+sistent after each iteration: gradient sharing or parameter sharing.
+With gradient sharing, each replicated model is updated by exchang-
+ing and averaging its gradients before the optimizer step. This en-
+ables consistency across all replicated models. In case of parameter
+sharing, each replicated model shares its parameters and the model
+parameters are averaged. This step is performed after the optimizer
+step. Parameter averaging does not satisfy the mathematical equiv-
+alence requirements, which leads to a loss in model accuracy [19].
+Moreover, parameter sharing under utilizes the resources as the op-
+timizer step typically being the hard synchronization point, when
+the workers remain idle during the communication.
+The gradients can be shared using the classical parameter server
+paradigm or AllReduce. In parameter server paradigm, a machine
+is responsible for aggregating the gradients from worker machines,
+and then sending back the averaged gradients to the workers. This
+approach requires high bandwidth for gradient sharing, and the
+gradient computation and communication are non-overlapping op-
+erations. In AllReduce gradient sharing paradigm, each compute
+node performs the aggregation on a subset of parameters. Thus,
+reducing the required communication bandwidth. Moreover, gradi-
+ent computation and communication operations are overlapping.
+AllReduce is supported by several communication libraries such
+as NCCL [24], MPI [2], and GLOO [9]. PyTorch [25] provides an
+API, DistributedDataParallel for distributed data parallel training,
+which uses an AllReduce communication library for gradient shar-
+ing. Shen et al. has provided a detailed analysis of data parallel
+training in PyTorch [19]. Various libraries such as RaySGD[3] and
+Horovod[1] have been developed that provide wrappers around
+DistributedDataParallel. Besides ease of use, the libraries improve
+performance and allow efficient utilization of resources.
+Knowledge Graph
+Vertex-cut Partitioner &
+neighborhood expansion
+Partition 1
+Embedding
+Model
+Negative
+Sampler
+All Reduce
+...
+Communication Network
+Node 1
+Node 2
+Node P
+Edge mini-batch
+Node P
+Partition P
+Embedding
+Model
+Negative
+Sampler
+All Reduce
+Edge mini-batch
+Partition 2
+Embedding
+Model
+Negative
+Sampler
+All Reduce
+Edge mini-batch
+Node 2
+Figure 3: Architecture of our distributed approach for link
+prediction.
+3
+DISTRIBUTED KNOWLEDGE GRAPH
+TRAINING
+In this section, we describe our distributed learning process of GNN-
+based KG embedding models on a cluster of compute nodes with
+multi CPUs/GPUs.
+3.1
+System Overview
+The architecture3 of our proposed approach is shown in Figure 3.
+We choose the AllReduce paradigm of gradient sharing over the pa-
+rameter server approach because it incurs less communication cost,
+and computation and communication is being overlapped during
+gradient sharing. Our proposed architecture is designed to run on
+a distributed CPU/GPU cluster. Each compute node (CPU/GPU) in
+a cluster runs a replica of the model and is responsible for training
+on a partition of data using synchronous gradient descent (SGD).
+Each training process computes the gradients of the model on an
+edge mini-batch, shares and averages the gradients, and updates the
+local model. Specifically, our distributed KG embedding learning
+involves the following steps:
+(1) Partition the graph into 𝑃disjoint subsets, and then expand
+each partition to include 𝑛-hops of neighbors of each vertex in
+the partition, where 𝑛is determined by the number of graph
+convolutional layers in the embedding model. The number of
+partitions is equal to the number of compute nodes available.
+We refer to compute node as a processing unit (CPU/GPU).
+3For the purpose of the overview, we assume one compute node runs only one worker.
+
+Nasrullah Sheikh, Xiao Qin, Berthold Reinwald, and Chuan Lei
+Graph partitions along with the required features of vertices
+are assigned to a compute nodes.
+(2) One training process/worker is launched per compute node.
+During each epoch, each training process samples 𝑠negative
+samples for each positive sample in its partition. The number
+of training examples in a partition is 𝑝× (𝑠+ 1), where 𝑝is the
+number of positive samples in a partition.
+(3) Each training process implements edge mini batching for train-
+ing. A batch of 𝑏edges (positive and negative) in a partition is
+sampled. The edge mini-batch ensures that the embedding of all
+entities required for scoring the edges in the edge mini-batch is
+computed.
+(4) After the formation of an edge mini-batch, a computational
+graph is generated for message passing in the graph convolu-
+tional layers. We obtain the loss, and compute the gradients.
+The gradients are shared using AllReduce, and the model is opti-
+mized based on the averaged gradients. Our proposed approach
+can be applied to any graph embedding model which uses a
+message passing approach for graph convolution.
+The enumerated steps in the overview are described in detail in
+the following subsections.
+3.2
+Graph Partitioning
+Partitioning the input graph is an important preprocessing step in
+distributed training. The quality of partitions have a direct impact
+on the learned model quality and on scale. We apply a two-phase
+approach by first partitioning the graph and then performing the
+neighborhood expansion to make the partitions self sufficient.
+3.2.1
+Partitioning. Using edge-cut partitioning methods such as
+Metis[16], some positive edges are replicated in multiple partitions
+as shown in Fig 4(b) (e.g., Edges (0, 2), (1, 2) are present in all par-
+titions). Hence, the training on the replicated edges is repeated
+in multiple partitions which incurs additional computational cost,
+and may also negatively impact the learning process. Moreover,
+edge-cut partitioning is shown to be ineffective in balancing the
+workload of large real-world graphs [13, 40]. This load imbalance
+leads to a substantial stalling of work which increases the overall
+training time.
+Vertex cut partitioning [13, 28, 40] divides the edges into disjoint
+partitions and produces balanced partitions by minimizing the
+vertex replication. We refer to edges in a partition as core edges,
+the vertices where the graph is partitioned as replicated-vertex, and
+other vertices as core-vertex. The set of core edges form the positive
+edges for training.
+The disjoint partitions produced by vertex-cut partitions are
+more suited for the problem of link-prediction because the produced
+partitions are balanced and also the neighborhood expansion does
+not lead to graph explosion (discussed in detail in 3.2.2).
+3.2.2
+Neighborhood Expansion. Link prediction requires an up-
+dated embedding of vertices of an edge to calculate the score to
+determine the validity of an edge. As discussed in the above sec-
+tion 2.1, to compute an embedding of a vertex, a 𝑛layer GNN
+requires to have the features from the 𝑛-hop neighbors. Due to par-
+titioning, some edges will have partial neighborhood information
+available within the partition, and the other required information
+0
+2
+8
+7
+10
+1
+9
+3
+5
+6
+4
+2
+2
+1
+7
+0
+1
+0
+7
+0
+2
+8
+7
+10
+1
+4
+9
+3
+5
+6
+0
+2
+8
+7
+10
+1
+9
+3
+5
+6
+4
+2
+2
+1
+7
+0
+1
+0
+7
+4
+6
+5
+3
+Edge Cut Partitions
+Partition 1
+Partition 2
+Partition 3
+Vertex Cut Partitions
+Partition 1
+Partition 2
+Partition 3
+Replicated Vertices
+Replicated Edges
+Expanded nodes/edges
+(a) Original Graph
+(b)
+(c)
+Figure 4: Graph partitioning: edge cut and vertex cut parti-
+tions along with their neighborhood expansion.
+could be present in different partitions. We call these edges as
+boundary-edges. One possible way is to fetch this information dur-
+ing the training. But this will incur the communication cost, thus
+incurring delay in the training. We propose to make the partitions
+independent by including the missing partial neighborhood infor-
+mation of boundary-edges. We call this process as Neighborhood
+Expansion, and it is done after creating partitions. This eliminates
+the communication cost of fetching data from other partitions, but
+at the expense of the increased size of the partitions. We refer to
+these added vertices and edges as support-vertices and support-edges
+respectively. The neighborhood expansion of the graph is shown
+in Figures 4(b) and (c). It can be seen from Figure 4(b) that edge-cut
+partitions explode during Neighborhood Expansion, thus limiting
+its usability.
+3.3
+Training
+Each compute node will have a replica of the graph embedding
+model and will work on a single partition of data. The partition
+assigned to a compute node remains fixed during the entire training
+process. We generate a set of negative edges, and the combined
+set of negative edges and core edges form the set of training edges.
+We employ a edge mini-batch training approach to train the KG
+
+Scaling Knowledge Graph Embedding Models
+0
+2
+7
+1
+4
+6
+Figure 5: Edge Mini-batch
+embedding methods. The distributed training process is given in
+Algorithm 1.
+3.3.1
+Negative Sampling. In KG embedding methods, the negative
+samplers generally exploit the closed world hypothesis which con-
+siders any triplet not explicitly present in the graph as a negative
+triplet. Most of the negative triplets generated by this result are easy
+negative examples [17]. The error gradient from these samples are
+very small, hence does not help in learning. The negative samples
+space 𝑂(𝑁2) is far larger than positive samples space, thus more
+prone to generating easy negative samples.
+We propose a constraint-based negative sampling approach. Our
+proposed approach considers the core edges in a partition as the
+positive triplets and each partition is independent of other parti-
+tions. We employ a constraint that generates the negative samples
+from the core vertices of the partition based on the local world
+hypothesis. This constraint provides two advantages, 1) the embed-
+dings of entities in negative samples are not stale, and 2) it avoids
+the communication cost of querying other partitions and fetching
+data. This also reduces the sample space of negative samples as
+𝑁<< 𝑁𝑖, where 𝑁𝑖number of vertices in the 𝑖-th partition and 𝑁
+is the total number of vertices in a KG, respectively. This helps in
+minimizing the problem of generating easy negative samples.
+3.3.2
+Edge Mini-Batch. GNN training on a large dataset for vertex
+classification is done by mini-batching. In mini-batching, a set of
+vertices are randomly selected, and a computational sub-graph
+is sampled for training to obtain the embeddings of the selected
+vertices. Using a vertex sampling strategy for link prediction is
+not trivial as it does not guarantee that both vertices of an edge
+are in the sample. For this reason, we are proposing to use edge
+mini-batching for link prediction. In edge mini-batching, a batch
+of edges are sampled, and the vertices in the batch form a vertex
+set. Then, a computational graph for message passing is created
+which captures the 𝑛-hop dependencies of the sampled edge batch.
+The embeddings are learned for vertices that are in the vertex set.
+Figure 5 shows a 1-hop computational graph for an edge (0, 2), and
+message passing is done on this graph to learn the embeddings of
+vertex 0, and 2.
+3.3.3
+Model Training. For each edge mini-batch training, we gen-
+erate a computational graph from the partitioned data using the
+vertices in the graph. This computational graph is used for embed-
+ding generation for the vertices in the the edge mini-batch using
+the graph convolutional layers of the KG embedding model. This
+constitutes the forward pass of the training. In the next step, a loss
+is calculated for the set of edges in the mini-batch which subse-
+quently generates gradients. These gradients are shared among
+the training processes using AllReduce communication primitive.
+Once the gradients are shared and averaged, the training processes
+update their local model.
+Algorithm 1: Training Process on each compute node
+Input: GNNmodel, optimizer, features, gPartition, epochs
+1 𝑒𝑝𝑜𝑐ℎ←1
+2 while 𝑒𝑝𝑜𝑐ℎ≤𝑒𝑝𝑜𝑐ℎ𝑠do
+3
+𝑛𝑒𝑔𝑎𝑡𝑖𝑣𝑒𝐸𝑑𝑔𝑒𝑠←𝑛𝑒𝑔𝑎𝑡𝑖𝑣𝑒𝑆𝑎𝑚𝑝𝑙𝑒𝑟(𝑔𝑃𝑎𝑟𝑡𝑖𝑡𝑖𝑜𝑛)
+4
+while 𝑏𝑎𝑡𝑐ℎ∈𝑏𝑎𝑡𝑐ℎ𝑒𝑠(𝑛𝑒𝑔𝑎𝑡𝑖𝑣𝑒𝐸𝑑𝑔𝑒𝑠,𝑔𝑃𝑎𝑟𝑡𝑖𝑡𝑖𝑜𝑛) do
+5
+𝑐𝑔𝑟𝑎𝑝ℎ←𝑔𝑒𝑡𝐶𝑜𝑚𝑝𝑢𝑡𝑒𝐺𝑟𝑎𝑝ℎ(𝑏𝑎𝑡𝑐ℎ,𝑔𝑃𝑎𝑟𝑡𝑖𝑡𝑖𝑜𝑛)
+6
+𝑒𝑚𝑏𝑒𝑑𝑑𝑖𝑛𝑔←𝐺𝑁𝑁𝑚𝑜𝑑𝑒𝑙(𝑓𝑒𝑎𝑡𝑢𝑟𝑒𝑠,𝑐𝑔𝑟𝑎𝑝ℎ)
+7
+𝑙𝑜𝑠𝑠←𝑙𝑜𝑠𝑠(𝑒𝑚𝑏𝑒𝑑𝑑𝑖𝑛𝑔,𝑏𝑎𝑡𝑐ℎ)
+8
+𝑏𝑎𝑐𝑘𝑤𝑎𝑟𝑑(𝑙𝑜𝑠𝑠) ;
+/* Gradients are computed & shared */
+9
+𝑜𝑝𝑡𝑖𝑚𝑖𝑧𝑒𝑟.𝑠𝑡𝑒𝑝() ;
+/* The model is updated */
+10
+end
+11
+𝑒𝑝𝑜𝑐ℎ←𝑒𝑝𝑜𝑐ℎ+ 1
+12 end
+4
+EXPERIMENTAL EVALUATION
+4.1
+System Setup
+We ran our experiments on a cluster of 4 machines. Each node has
+
+running CentOS Linux 7.9.
+We use PyTorch Geometric 1.7.2 [10] as graph embedding frame-
+work and PyTorch 1.9.0 [25] as the deep learning backend frame-
+work. We use PyTorch DistributedDataParallel for distributed train-
+ing, and Gloo [9] as the backend for collective communication
+operations for GPUs and AllReduce for gradient sharing.
+4.2
+Evaluation Metrics
+The performance of link prediction in knowledge graphs is evalu-
+
+triplet 𝑝, a set of corrupted triplets is generated by either corrupting
+ℎ(ead) or 𝑡(ail). These corrupted triplets are filtered by removing the
+triplets which occur in the training data. This procedure is referred
+to as "filtered setting". Let 𝑇be the set containing a positive triplet
+𝑝and its respective corrupted triplets arranged in descending order
+of their scores, and 𝑟𝑝is the rank position of 𝑝in 𝑇. MRR in Equa-
+tion 5 is the average reciprocal rank of the positive triplets, and
+
+in first 𝑘highest ranked triplets, where 𝑁is the total number of
+positive triplets in the test set.
+𝑀𝑅𝑅= 1
+𝑁
+𝑁
+∑︁
+𝑝=1
+1
+𝑟𝑝
+(5)
+
+𝑁
+(6)
+4.3
+Datasets
+We experimented with two public benchmark datasets used for link
+prediction in KGs. The dataset statistics are summarized in Table 1.
+
+Nasrullah Sheikh, Xiao Qin, Berthold Reinwald, and Chuan Lei
+• FB15k-237 [5] is a subset of FreeBase [11] which contains
+facts extracted from Wikipedia. It consists of named entities
+and edges which determine the type of relation between
+the entities. The dataset is a benchmark for evaluating KG
+embedding methods for link prediction.
+• ogbl-citation2 [15] is a citation graph extracted from Mi-
+crosoft Academic Graph (MAG) [33]. Each vertex is asso-
+ciated with a 128-dimensional feature vector created using
+Word2Vec[23] on paper title and abstract.
+Table 1: Dataset statistics.
+Dataset
+FB15k-237
+ogbl-citation2
+# Entities
+14,541
+2,927,963
+# Relations
+237
+1
+# Features
+-
+128
+# Train edges
+272,115
+30,387,995
+# Valid edges
+17,535
+86,596
+# Test edges
+20,466
+86,596
+We use vertex-cut based partitioning (KaHIP [27, 28]) to obtain a
+disjoint subsets of training edges followed by neighborhood expan-
+sion to include all 𝑛-hop neighbors. Table 2 shows the statistics of
+the datasets after graph partitioning and neighborhood expansion.
+core edges are the average number of edges in the partitions before
+expansion, and total edges (sum of core edges and support edges) is
+the average number of edges after neighborhood expansion to 2
+hops. Replication Factor (RF) shows the quality of partitioned data
+after neighborhood expansion. It is calculated as:
+𝑅𝐹(𝑃1, 𝑃2, ..., 𝑃𝑝) =
+1
+|𝑉|
+∑︁
+𝑖∈[𝑝]
+|𝑉(𝐸𝑖)|,
+(7)
+where 𝑃𝑖is the 𝑖th partition, |𝑉| is the total number of vertices in
+the graph, 𝐸𝑖is the edges in the 𝑃𝑖partition, and 𝑉() returns the set
+of vertices in a set of edges. The Table 2 shows that size of partitions
+highly depends on the size of the graph and number of hops(𝑘) for
+expansion. For smaller graph at FB15k-237 𝑘= 2, the partition size
+is almost equal to the number of original graph, and RF increases
+drastically as number of partitions increases. This trend is not seen
+in ogbl-citation2 datasets due to its large size.
+Table 2: Partition statistics (numbers in core edges and total
+edges columns are the average and standard deviation).
+Dataset
+# partitions
+#core edges
+#total edges
+RF
+FB15k-237
+2
+136k ± 4.5k
+270k ± 3.1k
+1.98
+4
+68k ± 6.6 k
+265k ± 5.1k
+3.90
+8
+34k ± 3.2k
+263k ± 4.0k
+7.75
+ogbl-citation2
+2
+15M ± 485K
+19M ± 95k
+1.45
+4
+7.5M ± 453K
+13M ± 1.2M
+2.26
+8
+3.8M ± 189K
+10M ± 1.1M
+3.58
+4.4
+Hyperparameters
+We used a two layer RGCN [29] model as a KG embedding method
+for link prediction and trained it in a distributed setting. For FB15k-
+237 dataset, we used the same hyperparameters as described in [29]
+except the embedding size. We found out that an embedding size of
+75 dimensions produces comparable results with the original setting.
+As the dataset is small, we trained it using full edge batch. For
+ogbl-citation2 dataset, we chose an embedding size of 32, learning
+rate 0.01, dropout 0.2, 1 negative sample per positive sample, and
+basis decomposition with two basis functions for regularization.
+For fairness of comparison, we used these hyperparameters in all
+training scenarios including non-distributed training. The number
+of partitions is equivalent to the number of distributed trainer
+processes. Since, we have two GPUs per compute node, we ran two
+trainers per machine.
+4.5
+Distributed Training Results
+In this section, we present the experimental results of our proposed
+approach. We compare our proposed distributed training with a non-
+distributed training setup (1 Trainer). The non-distributed training
+process trains on the full graph data. We answer the following
+questions:
+• Does our distributed training approach have equivalence to
+non-distributed training (Accuracy)?
+• Does our distributed training approach accelerate the train-
+ing (Scalability and Effect of number of model updates)?
+• Does our partitioning strategy effectively balance the work-
+load (Effect of partitioning)?
+4.5.1
+Accuracy. We compare the performance of our distributed
+training approach with the non-distributed training setting. In case
+of distributed training, the number of trainers varies from 2 to
+8 trainers with each compute node running two trainers. Since,
+FB15k-237 is a small dataset, we performed full batch training.
+In case of ogbl-citation2, we performed mini-batch training, and
+the mini-batch size is approximately 118k. For FB15k-237 dataset,
+we follow the filtered settings for evaluations. Since the number
+of edges for dataset ogbl-citation2 is very large, the dataset has
+provided 1000 candidate negative target vertices for each test and
+validation edge for evaluation. We trained RGCN models on the
+two datasets, selected the best models and report the results on
+the test data. Ogbl-citation2 reached to maximum accuracy within
+
+benchmark dataset FB15k-237 shows that our distributed training
+approach produces similar results to the non-distributed setting
+which are also comparable to the numbers reported in the original
+RGCN paper. For the larger dataset, ogbl-citation2, we observe a
+similar trend, i.e our distributed training approach produces results
+similar to non-distributed training. The results also verify that our
+constraint-based negative sampling strategy is effective in training
+as no deterioration of the scoring metrics is observed.
+4.5.2
+Scalability. We used the same settings as described in Sec-
+tion 4.5.1 for evaluating the scalability of our approach. We did not
+apply any sampling strategy (vertex drop or edge drop) during train-
+ing. As shown in Table 3, the speed up for FB15k-237 dataset is lower
+than linear. It is because the size of the partitions are equal to the
+
+Scaling Knowledge Graph Embedding Models
+
+#Trainers
+FB15k-237
+ogbl-citation2
+MRR
+
+Ep. Time(s)/speedup
+MRR
+
+Ep. Time(m)/speedup
+1
+0.22
+0.138
+5.09/-
+0.620
+0.494
+112/-
+2
+0.22
+0.136
+4.03/1.25x
+0.621
+0.492
+44/2.54
+4
+0.21
+0.130
+3.62/1.40x
+0.620
+0.493
+16/7x
+8
+0.21
+0.124
+3.54/1.43x
+0.617
+0.494
+7/16x
+original dataset as shown in Table 2. For ogbl-citation2 dataset, we
+achieved a speedup of approximately 16x with 8 trainers compared
+to 1 trainer. We performed an in-depth analysis of the running times
+of the major computational components described in lines 4-10 of
+Algorithm 1 (getComputeGraph, GNNmodel, loss+backward+step) in
+order to quantify the contributions of these components to the over-
+all speedup. Figure 6(a,b) shows the average epoch time and average
+running time of different components in a batch. The component,
+getComputeGraph is a very compute intensive operation as it de-
+pends on the partition size. The function returns a computational
+graph for an edge mini-batch. It is essential function as the it en-
+ables us to train on large graphs. The running time of this operation
+decreases as we increase the number of trainers from 1 to 8, because
+the size of the partitions decreases. In the case of 8 partitions for
+ogbl-citation2, the size of each partition decreases by one-third
+with respect to the full graph. GNNmodel produces the embeddings
+of the vertices in an edge mini-batch. Its running time in case of
+multiple trainers is slightly higher than for 1 trainer, because we
+run 2 trainers per machine which share the same resources. The
+running time of the third block of operations (loss+backward+step)
+increases as we increase the number of trainers, because of the
+increase in communication cost for gradient sharing. The overall
+impact of these components on training time varies because the
+number of batches (forward pass and backward pass) per epoch
+decreases from 256 to 32 for 1 trainer and 8 trainers respectively.
+1 Trainer
+2 Trainers
+4 Trainers
+8 Trainers
+0
+20
+40
+60
+80
+100
+Average Epoch Time (in minutes)
+112
+44
+16
+7
+(a)
+1 Trainer
+2 Trainers
+4 Trainers
+8 Trainers
+0
+5
+10
+15
+20
+25
+Average Batch Time (in seconds)
+(b)
+getComputeGraph
+GNNmodel
+Loss+Backward+step
+ogbl-citation2 Dataset
+Figure 6: (a) Average running time per epoch; (b) average
+running time of components in batch for ogbl-citation2
+dataset (same batch size across all trainers produces 256, 128,
+64, 32 batches for 1,2,4,8 trainers respectively).
+0
+20
+40
+60
+80
+Time in Hours
+0.35
+0.40
+0.45
+0.50
+0.55
+0.60
+0.65
+MRR
+1 Trainer
+4 Trainers
+Figure 7: Convergence of distributed training on ogbl-
+citation2 dataset.
+4.5.3
+Convergence. To show the convergence of our training ap-
+proach, we used 4 trainers in a distributed setting. Figure 7 shows
+that our distributed training converges faster and attains the same
+peak MRR score achieved by non-distributed training which takes
+a lot more time to converge.
+4.5.4
+Effect of number of model updates. We study the effect of
+number of model updates on scalability. For this experiment, we
+fixed the number of batches in each epoch which in turn leads
+to a smaller batch size when going from 2 trainers to 8 trainers.
+Table 4 shows a speedup gain of 3.7x is achieved in ogbl-citation2
+dataset. This is due to the fact that the overall impact of training
+components on running time is nearly equal as the number of
+forward and backward passes are same.
+Table 4: Epoch time of RGCN on ogbl-citation2 dataset with
+fixed #model updates.
+#Vertices
+#Partitions
+Time(hrs)
+Avg. #edges per batch
+1
+1
+1.96
+118k
+1
+2
+1.30
+60k
+2
+4
+0.78
+30k
+4
+8
+0.52
+15k
+
+Nasrullah Sheikh, Xiao Qin, Berthold Reinwald, and Chuan Lei
+4.5.5
+Effect of Partitioning. We examine the effectiveness of dif-
+ferent partitioning strategies other than vertex-cut partitioning
+and their effect on running times. We used Random partitioning
+and METIS partitioning for this study. In Random partitioning, we
+randomly divide the edges into 4 partitions and then subsequently
+applied neighborhood expansion. In case of METIS, the first hop
+neighbors of vertices are the core edges of a partition. We applied
+neighborhood expansion on the partitions of vertices to include all
+𝑛-hop neighbors of vertices in each partition. Table 5 shows the
+statistics of the partitions produced using these two methods. The
+size of partitions produced by Random partitioning strategy are
+equal to the original graph, whereas in case of METIS partitions,
+the size of the partitions is bigger than the partitions produced
+using vertex cut partitioning.
+After obtaining the partitions, we trained the model with the
+same hyperparameters for the Random and Metis partitions, and
+measured the epoch times. In this experiment, we fixed the number
+of batches to 256 to have the same number of model updates in all
+different partitioning strategies. As shown in Table 2, the epoch time
+in the case of Random partitioning is equal to the non-distributed
+training. This is because the size of each partition is equal to the
+full graph. The epoch time for METIS partitions is 1.3x slower
+than vertex-cut based partitioning strategy (KaHIP). Hence, our
+partitioning strategy is aptly suited for link prediction task.
+Table 5: Partition statistics of 4 partitions using METIS and
+random partitioning; Time per epoch(in hours) on ogbl-
+citation2 dataset with 2 nodes having 2 trainers each.
+Partitioning
+#core edges
+#total edges
+Time per epoch
+KaHIP+NE
+4.1M ± 187K
+12M ± 148k
+0.78
+Metis+NE
+7.5M ± 3.0M
+16M ± 223K
+0.95
+Random+NE
+7.5M ± 0
+29M ± 1k
+1.88
+5
+RELATED WORK
+There has been a significant focus on developing frameworks [8,
+12, 18, 21, 22, 34, 42–44] for graph embeddings that provide vari-
+ous functionalities and optimizations for training existing models,
+and implementing new models in an efficient and scalable man-
+ner. These frameworks support training on mutli-gpu multi-node
+clusters. The distributed frameworks partition the input graph,
+and each compute node runs a replica of the model to train on a
+partition. Aligraph [44] provides a generic architecture on which
+various GNNs can be implemented. It consists of various compo-
+nents such as distributed graph storage and a caching strategy.
+Neugraph [21] uses a vertex-program, graph-parallel abstraction to
+express GNN algorithms. NeuGraph performs GNN training on a
+a single node, multi-gpu system. There are additional frameworks
+that focus on knowledge graph embeddings such as OpenKE [12],
+PyTorch-BigGraph(PBG) [18], and DGL-KE [43]. OpenKE[12] is
+designed as a standalone system for knowledge graph embeddings,
+and does not scale to very large graphs. Both DGL-KE [43] and
+PBG [18] are distributed frameworks for knowledge graph embed-
+ding models. However, all these three frameworks are designed for
+embedding models which are either translation-based or semantic-
+based such as TransE [5] or DistMult [38]. When computing the
+embedding of entities, these models do not require information from
+neighbors as required in GNNs. Thus, these frameworks cannot
+be used to train GNN based knowledge graph embedding mod-
+els [26, 29, 30] where nodes have dependencies up to 𝑘-hop neigh-
+bors.
+DistDGL [42] is a distributed framework for GNN training based
+on DGL [34]. It employs a mini-batch training approach to train
+large graphs, besides various other optimizations. DistDGL dis-
+tributes the graph by partitioning it using Metis [16], and the graph
+partitions along with the associated data are assigned compute
+nodes for training. The vertex data is stored in a Key-Value store
+and fetched during training. For transductive models, DistDGL
+provides a distributed sparse embedding layer and updates it us-
+ing sparse updates during training. DistDGL has shown superior
+performance in scaling models for node classification. However,
+as discussed in previous section, the edge cut partitioning based
+methods are not suitable for link prediction.
+6
+CONCLUSION
+We proposed algorithmic approaches for distributed training of
+GNN-based knowledge graph embedding models. Our approach is
+agnostic to the used knowledge graph embedding model. We used
+a vertex cut partitioning approach along with neighborhood expan-
+sion method to make the partitions self-sufficient such that no data
+is transferred across partitions during training. We introduced edge
+mini-batch training for large partitions that enables us to train on
+large partitions with limited system memory. Moreover, we applied
+constraint-based negative sampling to exploit the local partitions
+to generate the negative samples for training. Our experimental
+evaluation shows a super linear speedup on a cluster of machines
+without sacrificing model accuracy, and our approach converges
+faster than non-distributing training.

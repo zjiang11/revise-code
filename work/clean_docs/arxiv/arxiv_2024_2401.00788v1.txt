@@ -1,0 +1,1417 @@
+ASTRAIOS: Parameter-Efficient Instruction Tuning
+Code Large Language Models
+Terry Yue Zhuo 1,2
+Armel Zebaze 3∗
+Nitchakarn Suppattarachai 1
+Leandro von Werra 3
+Harm de Vries 4
+Qian Liu 5
+Niklas Muennighoff 6
+1 Monash University
+2 CSIRO’s Data61
+3 Hugging Face
+4 ServiceNow Research
+5 Sea AI Lab
+6 Contextual AI
+
+ https://github.com/bigcode-project/astraios
+Abstract
+The high cost of full-parameter fine-tuning (FFT) of Large Language Models
+(LLMs) has led to a series of parameter-efficient fine-tuning (PEFT) methods. How-
+ever, it remains unclear which methods provide the best cost-performance trade-off
+at different model scales. We introduce ASTRAIOS, a suite of 28 instruction-tuned
+OctoCoder models using 7 tuning methods and 4 model sizes up to 16 billion
+parameters. Through investigations across 5 tasks and 8 different datasets encom-
+passing both code comprehension and code generation tasks, we find that FFT
+generally leads to the best downstream performance across all scales, and PEFT
+methods differ significantly in their efficacy based on the model scale. LoRA
+usually offers the most favorable trade-off between cost and performance. Further
+investigation into the effects of these methods on both model robustness and code
+security reveals that larger models tend to demonstrate reduced robustness and
+less security. At last, we explore the relationships among updated parameters,
+cross-entropy loss, and task performance. We find that the tuning effectiveness
+observed in small models generalizes well to larger models, and the validation loss
+in instruction tuning can be a reliable indicator of overall downstream performance.
+1B
+3B
+7B
+16B
+0
+5
+10
+15
+20
+25
+30
+  (IA)3
+ 0.01%
+ LoRA
+ 0.21%
+P
+Tuning
+ 0.82%
+AdapterP
+ 1.46%
+Parallel
+ 1.52%
+AdapterH
+ 2.87%
+  FFT
+ 100%
+Figure 1: Mean task performance of ASTRAIOS models across 5 representative tasks and 8 datasets.
+We indicate the average percentage of total parameters updated for each PEFT method.
+∗The work was partially done at Hugging Face.
+arXiv:2401.00788v1  [cs.CL]  1 Jan 2024
+
+1
+Introduction
+Large language models (LLMs) (Zhao et al., 2023) trained on Code (Code LLMs) have shown
+strong performance on various software engineering tasks (Hou et al., 2023). There are three main
+model paradigms: (A) Code LLMs for code completion (Nijkamp et al., 2022; Fried et al., 2022; Li
+et al., 2023); (B) Task-specific fine-tuned Code LLMs for a single task (Hou et al., 2023); and (C)
+Instruction-tuned (Ouyang et al., 2022) Code LLMs that excel at following human instructions and
+generalizing well on unseen tasks (Wang et al., 2023b; Muennighoff et al., 2023c). Recent instruction-
+tuned Code LLMs, including WizardCoder (Luo et al., 2023) and OctoCoder (Muennighoff et al.,
+2023a), have achieved state-of-the-art performance on various tasks without task-specific fine-tuning.
+However, with the increasing parameters of Code LLMs, it becomes more expensive to perform full-
+parameter fine-tuning (FFT) to obtain instruction-tuned models. In practise, to save computational
+cost, parameter-efficient fine-tuning (PEFT) have been applied. This training strategy aims to
+achieve comparable performance to FFT by updating fewer parameters. While there are many PEFT
+methods (Ding et al., 2022), the predominant PEFT method is still LoRA, which is proposed in
+2021 (Hu et al., 2021). However, there is no empirical evidence showing LoRA remains the best for
+instruction-tuned code LLMs. In this paper, we investigate instruction-tuned code LLMs with the
+following research question: what are the best PEFT methods for Code LLMs?
+Existing analysis on PEFT methods presents several opportunities for further exploration: (1) Beyond
+Task-Specific LLMs. Most prior works (Zhou et al., 2022; Ding et al., 2023) only focus on the
+model paradigm (B), where the selected base models are fine-tuned on specific downstream tasks.
+While these studies provide insights into PEFT methods on task-specific LLMs, the transferability
+of their findings to the instruction tuning paradigm is unclear. (2) Diverse Domains. Studies on
+PEFT methods tend to evaluate in the predominant domains like vision (Sung et al., 2022; He
+et al., 2023) and text (Houlsby et al., 2019; He et al., 2021), leaving other domains like code
+underexplored. (3) Inclusive PEFT Methods. Prior investigations on PEFT mainly consider a
+limited number of methods, such as adapter-based tuning (Houlsby et al., 2019) or reparametric
+tuning (Aghajanyan et al., 2021), which does not capture the full breadth of available methods. (4)
+Multidimensional Evaluation. Previous works only consider limited evaluation on representative
+downstream tasks (Chen et al., 2022; Fu et al., 2023; Ding et al., 2023). We argue that other evaluation
+dimensions like model robustness (Han et al., 2021) and output code safety (Weidinger et al., 2021;
+Zhuo et al., 2023b; Pearce et al., 2022; Dakhel et al., 2023) are also important, especially in the era
+of LLM agents (Ouyang et al., 2022; Xie et al., 2023). (5) Scalability. Most prior PEFT work has
+only explored LLMs with insufficient scales of model sizes and training time, which makes their
+scalability questionable (Lester et al., 2021; Chen et al., 2022; Hu et al., 2023).
+To explore these identified opportunities further, we introduce ASTRAIOS, a suite of 28 instruction-
+tuned Code LLMs, which are fine-tuned with 7 tuning methods based on the StarCoder (Li et al.,
+2023) base models (1B, 3B, 7B, 16B). We instruction-tune the models based on the open-source
+dataset, CommitPackFT from OctoPack (Muennighoff et al., 2023a), to balance their downstream
+capabilities. We utilize PEFT configurations with Hugging Face’s best practices (Mangrulkar et al.,
+2022) and integrate a few PEFT methods from recent frameworks (Hu et al., 2023). We first inspect
+the scalability of different tuning methods through the lens of cross-entropy loss during instruction
+tuning. Specifically, we assess the scales of model size and training time. Our main evaluation
+focuses on 5 representative code tasks, including clone detection (Svajlenko and Roy, 2021), defect
+detection (Zhou et al., 2019), code synthesis (Muennighoff et al., 2023a), code repair Muennighoff
+et al. (2023a), and code explain (Muennighoff et al., 2023a). We further study the tuning methods
+from two aspects: model robustness (Wang et al., 2023a) and code security (Pearce et al., 2022). We
+assess how well models can generate code based on the perturbed examples and how vulnerable the
+generated code can be.
+The main experimental results can be found in Figure 1, where we observe that FFT generally leads
+to the best downstream performance across all scales. In addition, we find that PEFT methods differ
+significantly in their efficacy depending on the model scale. At 16B parameters, Parallel Adapter (He
+et al., 2021) and LoRA (Hu et al., 2021) are the most competitive methods with FFT. Meanwhile, at
+1B parameters, they are both slightly outperformed by P-Tuning and (IA)3. Thus, the choice of the
+PEFT method should be considered along with the model scale at hand. Nevertheless, LoRA usually
+offers the most favourable trade-off between cost and performance.
+2
+
+1B
+3B
+7B
+16B
+(IA)3
+LoRA
+P-Tuning
+AdapterP
+Parallel
+AdapterH
+0.0221
+0.0170
+0.0119
+0.0080
+0.3145
+0.2417
+0.1699
+0.1144
+1.1002
+0.7786
+0.6840
+0.7258
+2.1650
+1.6769
+1.1878
+0.8044
+2.2972
+1.7518
+1.2245
+0.8210
+4.2383
+3.2985
+2.3477
+1.5959
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+Updated Parameter Ratio
+Figure 2: Percentage (%) of total parameters updated for each PEFT method in ASTRAIOS models.
+Meanwhile, we also observe that larger PEFT Code LLMs perform better on code generation tasks
+while they do not show such patterns on code comprehension tasks like clone detection and defect
+detection. In addition, increasing model size improves generation task performance but exhibits
+vulnerabilities to adversarial examples and biases towards insecure code. Additionally, we investigate
+the relationships among updated parameters, cross-entropy loss, and task performance. We find that
+the final loss of small PEFT models can be extrapolated to the larger ones. We also observe strong
+correlations between final loss and overall downstream task performance. Although the instruction
+dataset we choose is general and is not directly correlated with the benchmark downstream tasks,
+we suggest that the performance on such general data can serve as a proxy for the downstream
+performance.
+2
+The ASTRAIOS Suite and Benchmark
+In this section, we document our model choices, training configurations, and evaluations in detail for
+easy reproducing our experimental results in this paper.
+2.1
+Model
+Base Model
+There are many Code LLMs available that could be a suitable base model. However,
+some of them are not fully open such as Code-Llama (Roziere et al., 2023), where the training data
+is not discussed. To maximize transparency, we select the StarCoder series as our base models.
+Concretely, four model scales including 1B, 3B, 7B and 16B parameters are selected.
+PEFT Model
+We focus on three kinds of PEFT methods (Ding et al., 2022): (1) Adapter-based
+Tuning (Houlsby et al., 2019): An early approach, which injects small-scale neural modules as
+adapters to LLMs and only tune these adapters for model adaptation. (2) Prompt-based Tuning (Li
+Table 1: Summary of tuning methods and the trainable parameters of different model scales.
+Type
+Name
+1B
+3B
+7B
+16B
+Low-Rank
+LoRA (Hu et al., 2021)
+3,588,096
+7,372,800
+12,472,320
+17,776,640
+Prompt
+P-Tuning (Liu et al., 2023)
+12,650,496
+23,882,496
+50,466,816
+113,448,960
+Adapter
+(IA)3 (Liu et al., 2022)
+251,904
+516,096
+870,912
+1,239,040
+AdapterH (Houlsby et al., 2019)
+50,331,648
+103,809,024
+176,160,768
+251,658,240
+AdapterP (Pfeiffer et al., 2020)
+25,165,824
+51,904,512
+88,080,384
+125,829,120
+Parallel (He et al., 2021)
+26,738,688
+54,263,808
+90,832,896
+128,450,560
+FFT
+FFT
+1,137,207,296
+3,043,311,104
+7,327,263,232
+15,517,456,384
+3
+
+and Liang, 2021): It wraps the original input with additional context introducing virtual task-specific
+tokens without adding layers of modules like adapters. (3) Intrinsic-rank-based Tuning (Aghajanyan
+et al., 2021): A representative method is LoRA, which assumes that the change of weights during
+model tuning has a low rank and thus low-rank changes to the matrices suffice. For all methods,
+we utilize the implementations in the open-source PEFT library2 (Mangrulkar et al., 2022) and the
+LLM-Adapters work (Hu et al., 2023) built on top of it. We benchmark 6 PEFT methods, including
+4 adapter-based, 1 prompt-based, and 1 intrinsic-rank-based tuning methods as shown in Table 1.
+We also include FFT for each model size. The ratio of updated parameters of each PEFT method is
+presented in Figure 2.
+2.2
+Instruction Tuning
+Dataset
+Following previous work, we select the dataset CommitPackFT+OASST from Oc-
+toPack (Muennighoff et al., 2023a) as the instruction tuning dataset, which helps StarCoder to
+achieve superior performance. We note that there could be other choices by utilizing other datasets
+(e.g., the publicly available dataset CodeAlpaca (Chaudhary, 2023)) . However, they usually focus on
+a certain aspect of code-related tasks and lack generality to different tasks.
+Configuration
+We train all models with a sequence length of 2048 tokens, with the batch size as 1,
+the warm-up step as 12, and the global steps as 200. We set the learning rate as 1 × 10−4 for PEFT
+models and 1 × 10−6 FFT models with a cosine scheduler in both cases. For PEFT methods, we use
+8-bit-quantized models during training (Dettmers et al., 2022).
+2.3
+Evaluation
+Code Comprehension
+To evaluate code comprehension, we select two representative tasks: clone
+detection and defect detection. Clone detection aims to identify segments of code that are either exact
+duplicates or structurally similar with variations in identifiers, literals, types, layout, and comments,
+or even more broadly similar in terms of functionality. Defect detection targets for identifying bugs,
+vulnerabilities, or antipatterns in code. We select two widely-used datasets from CodeXGLUE
+benchmark Lu et al. (2021): BigCloneBench (Svajlenko and Roy, 2021) and Devign (Zhou et al.,
+2019). As the original BigCloneBench and Devign are designed to evaluate classification models, we
+prepend additional instructions to prompt the instruction-tuned models to complete such tasks. We
+follow the evaluation settings of CodeXGLUE and use F1 and Accuracy for BigClone and Devign,
+respectively. Due to the non-trivial number of test examples in these two datasets, we sample 2,000
+from each to save costs. As BigCloneBench and Devign are in the binary classification tasks, we use
+temperature 0 for model inference to get deterministic outputs.
+Code Generation
+We use HumanEvalPack (Muennighoff et al., 2023a), a benchmark recently
+proposed that enables easy evaluation of instruction-tuned Code LLMs. The benchmark is structured
+around three core tasks in code generation, each designed to test different capabilities of the model.
+The first task, Code Synthesis, involves the model in synthesizing functional code given a function
+with a docstring detailing the desired code behavior. The second task, Code Repair, challenges the
+model to identify and fix a subtle bug in an otherwise correct code function, using provided unit tests
+as a guide. The third and final task, Code Explanation, requires the model to generate a clear and
+concise explanation for a correctly written code function. For the evaluation on HumanEvalPack, we
+
+20 outputs per test example.
+Model Robustness
+Evaluating the robustness of code generation models is crucial in understanding
+their real-world applicability and reliability. Models that can maintain high-performance levels
+despite variations and perturbations in input data are more likely to be effective in diverse and
+dynamic coding environments (Bielik and Vechev, 2020; Henkel et al., 2022; Wang et al., 2023a).
+Motivated by such model behaviors, we utilize ReCode (Wang et al., 2023a), a benchmark framework
+designed to assess the robustness of Code LLMs. We use HumanEval (Chen et al., 2021) as the
+base dataset and curated it to mimic natural variations while preserving the semantic integrity of
+the original inputs. The perturbations cover a range of transformations (Zhuo et al., 2023c) on code
+2https://github.com/huggingface/peft
+4
+
+format, function, variable names, code syntax, and docstrings. These transformations are not arbitrary
+but represent changes occurring naturally in coding practices. The quality of the perturbed data in
+ReCode is verified through human evaluation and objective similarity scores, ensuring the relevance
+and reliability of the dataset for robustness assessment. We use temperature 0.2 and 20 samples per
+
+"
+1 −n −rcs(x)
+ n
+k
+
+#
+(1)
+
+(2)
+Code Security
+One limitation of Code LLMs is their tendency to generate code with potential
+security vulnerabilities, as various studies have highlighted (Dakhel et al., 2023; Asare et al., 2023).
+In our work, we aim to empirically examine how PEFT methods can influence the security aspects
+of Code LLM outputs. We utilize the “Asleep at the Keyboard” (AATK) benchmark (Pearce et al.,
+2022), which includes 89 security-centric scenarios, to provide a comprehensive evaluation across
+three distinct dimensions: Diversity of Weakness (DoW), encompassing 18 unique vulnerability
+classes from the MITRE Common Weakness Enumeration (CWE) taxonomy, sourced from the 2021
+CWE Top 25 Most Dangerous Software Weaknesses; Diversity of Prompt (DoP), assessing responses
+to different prompts within the SQL injection vulnerability class; and Diversity of Domain (DoD),
+involving scenarios in Verilog, a hardware description language. Our analysis predominantly focuses
+on the DoW axis, comprising 54 scenarios–25 in C and 29 in Python–covering 18 CWEs. This focus
+is due to the automatic evaluation challenges associated with the other two dimensions. After filtering
+out scenarios that lack an automated test, we thoroughly examine 40 scenarios, including 23 in C and
+17 in Python. We use temperature 0.2 and 20 samples per test example for the generation.
+3
+Preliminary Study: Cross-Entropy Loss
+Cross-entropy loss has been used as the principal performance metric in training LLMs for NLP
+tasks (Brown et al., 2020; Hernandez et al., 2021; Zhang et al., 2022b). Most studies on modeling
+loss focus on either pre-training (Kaplan et al., 2020) or FFT (Chung et al., 2022). Previous studies
+have consistent findings on loss (Kaplan et al., 2020; Hoffmann et al., 2022; Aghajanyan et al., 2023):
+The final loss tends to decrease when the training computation (e.g., model sizes, training data and
+training time) increases. These observations indicate that more training time and more trainable
+model parameters can lead to better alignment with the tuning data. However, there is no systematic
+investigation for PEFT, especially for Code LLMs. Based on the updated parameters for each tuning
+method in Table 1, we hypothesize that each PEFT method has a similar trend to previous findings of
+loss. Inspired by Kaplan et al. (2020), we study the loss change for instruction tuning Code LLMs,
+varying two factors: (1) Model Size (1B - 16B); and (2) Training Time (measured in global step,
+maximum 200 steps). Due to the limited budget, We do not study how the amount of training data
+may affect the loss.
+1B
+3B
+7B
+16B
+Model Size
+0.9
+1.5
+Train Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+1B
+3B
+7B
+16B
+Model Size
+1
+1.5
+Test Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+Figure 3: Final loss across model sizes.
+5
+
+Model Size Scaling
+We present the results of final loss in Figure 3 when varying the model size
+from 1B to 16B. Our first observation is that train and test loss are well aligned, indicating that
+the models trained on the selected tuning methods are not overfitted. The second observation is
+that both train and test loss also strictly decrease when the model size increases. Although these
+observations are aligned with the aforementioned observations (Kaplan et al., 2020; Hoffmann et al.,
+2022), they show the different scales of loss change, suggesting different tuning methods may require
+different levels of power. Compared to other tuning methods, FFT demonstrates a slightly better loss
+performance than PEFT methods like LoRA and Parallel Adapter. As we notice that heavier PEFT
+methods (which update more parameters) tend to have a better final loss, we hypothesize that more
+trainable parameters in the model may result in a smaller loss, regardless of how the parameters are
+updated during training.
+25
+50
+75
+100
+125
+150
+175
+200
+Global Step
+1.4
+2
+Test Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+1B ASTRAIOS models.
+25
+50
+75
+100
+125
+150
+175
+200
+Global Step
+1.4
+2
+Test Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+3B ASTRAIOS models.
+25
+50
+75
+100
+125
+150
+175
+200
+Global Step
+1.2
+6
+Test Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+7B ASTRAIOS models.
+25
+50
+75
+100
+125
+150
+175
+200
+Global Step
+1.2
+5
+Test Loss
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+16B ASTRAIOS models.
+Figure 4: Test loss of ASTRAIOS models across training time measured by Global Step.
+Training Time Scaling
+We show the changes in test loss on the ASTRAIOS when varying the
+training time in Figure 4. We notice that the loss continues decreasing when the model is trained
+longer. Although the loss changes of (IA)3 are consistently insignificant. Notably, the loss of P-
+Tuning decreases drastically to 50 steps but behaves similarly to other prompt-based methods. In
+terms of tuning stability, we observe that P-tuning is more unstable than other methods, where the
+loss change appears to be a non-monotonic pattern. When comparing FFT against PEFT methods, we
+find that FFT tends to decrease even after 200 steps, while PEFT methods do not show a decreasing
+trend clearly. We hypothesize that it may be due to the number of updated parameters, where FFT
+updates the full parameters in the model.
+4
+Main Results: Task Performance
+As cross-entropy loss only indicates how well Code LLMs can be aligned with the training data, it
+greatly depends on the specific training content and may not serve as a reliable proxy of performance
+6
+
+Table 2: Results of ASTRAIOS models on Defect Detection and Clone Detection. The best perfor-
+mance is highlighted in bold. The second best performance is underlined.
+Method
+Defect Detection
+Clone Detection
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+LoRA
+44.15
+44.90
+49.05
+31.95
+9.30
+12.05
+14.10
+8.80
+P-Tuning
+53.70
+27.75
+40.55
+11.00
+19.27
+23.52
+13.35
+3.24
+AdapterH
+45.75
+45.80
+46.25
+41.75
+8.59
+8.17
+12.05
+8.18
+AdapterP
+45.55
+46.05
+46.85
+27.35
+8.88
+8.63
+12.05
+9.00
+Parallel
+34.50
+33.50
+52.55
+42.30
+9.55
+8.94
+10.16
+17.21
+(IA)3
+53.90
+33.55
+37.20
+23.70
+8.28
+11.76
+23.19
+8.13
+FFT
+50.80
+44.20
+48.30
+43.65
+8.34
+12.68
+8.04
+12.62
+1B
+3B
+7B
+16B
+Model Size
+10
+20
+30
+40
+50
+Accuracy
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+Figure 5: Accuracy results of ASTRAIOS models
+on Defect Detection.
+1B
+3B
+7B
+16B
+Model Size
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+22.5
+F1
+(IA)3
+AdapterH
+AdapterP
+FFT
+LoRA
+P-Tuning
+Parallel
+Figure 6: F1 results of ASTRAIOS models on
+Clone Detection.
+on various tasks of source code. Therefore, We seek to examine how well selective PEFT methods
+contribute to task performance in this section. To benchmark the performance, we leverage the
+representative code downstream tasks: (1) Defect Detection, (2) Code Clone, (3) Code Synthesis,
+(4) Code Repair and (5) Code Explanation. For the first two code comprehension tasks, there is no
+existing study stating that the larger code LLMs result in a better understanding of code. We are the
+first to study this aspect when varying the model sizes. Regarding the latter three code generation
+tasks, previous power-law studies (Kaplan et al., 2020; Hoffmann et al., 2022) have shown that
+increasing model sizes can also lead to better task performance on generation tasks. We further
+validate this finding on the PEFT settings.
+Code Comprehension
+Table 2 shows the results of the two code comprehension tasks when varying
+the model sizes. Surprisingly, as shown in Figures 5 and 6, the results of both tasks are not well
+aligned with the patterns we observe on code generation tasks. All tuning methods consistently
+behave like the inverse scaling, which has been discussed in McKenzie et al. (2023). We hypothesize
+that Code LLMs have not seen enough task-specific training data and cannot generalize to those
+unseen tasks (Yadlowsky et al., 2023). As ASTRAIOS models are pre-trained on various source
+code from GitHub repositories for next token prediction and fine-tuned on GitHub commits for code
+refinement, they may not have a profound understanding of defects and cloned code.
+Code Generation
+Table 3 demonstrates the performance on three different code generation tasks
+on the Python and Java splits in HumanEvalPack. Over the six benchmarks, we first observe that FFT
+results in consistent gains when the model parameters increase. When examining the PEFT methods,
+We find they can also provide reasonable performance scalability similar to FFT. Therefore, the lower
+test loss may lead to better performance across various downstream generation tasks for Code LLMs.
+However, we notice that the benefit of base model sizes may also differ from tasks and languages.
+For instance, 1B and 3B models typically underperform in code repair compared to code synthesis.
+When the model parameters expand to 7B and 16B, their performance across these tasks becomes
+more comparable.
+7
+
+performance is highlighted in bold. The second best performance is underlined.
+Method
+Code Synthesis
+Code Repair
+Code Explanation
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+Python
+LoRA
+17.26
+25.37
+32.01
+38.08
+3.29
+11.16
+21.74
+27.50
+20.49
+22.53
+25.34
+30.52
+P-Tuning
+15.79
+24.33
+29.39
+35.58
+1.86
+13.69
+20.34
+18.72
+9.48
+11.92
+14.60
+15.43
+AdapterH
+15.70
+23.87
+28.26
+33.29
+3.14
+15.55
+22.50
+22.28
+17.77
+22.35
+24.24
+26.07
+AdapterP
+17.04
+24.76
+30.67
+34.97
+3.69
+12.87
+19.54
+26.46
+16.07
+24.05
+22.87
+30.67
+Parallel
+15.98
+26.65
+28.81
+35.88
+4.91
+8.11
+16.13
+26.43
+19.70
+23.14
+23.93
+31.10
+(IA)3
+16.13
+25.34
+30.52
+36.80
+2.01
+14.05
+17.07
+23.60
+9.51
+11.86
+14.30
+16.19
+FFT
+16.95
+25.21
+32.38
+38.47
+3.26
+14.45
+21.40
+29.88
+15.37
+23.45
+26.13
+30.85
+Java
+LoRA
+2.84
+16.52
+24.27
+40.33
+3.72
+5.06
+13.60
+30.35
+7.07
+14.33
+14.70
+16.86
+P-Tuning
+10.67
+14.73
+20.73
+37.19
+0.00
+7.53
+11.74
+22.25
+6.07
+9.79
+17.32
+13.02
+AdapterH
+8.99
+13.45
+17.53
+33.41
+0.12
+6.89
+14.70
+24.91
+6.74
+9.57
+13.99
+14.85
+AdapterP
+10.46
+16.77
+21.28
+33.68
+3.66
+6.52
+15.40
+32.07
+6.65
+11.62
+14.15
+16.28
+Parallel
+9.60
+15.91
+21.59
+38.56
+0.49
+5.09
+8.87
+29.39
+7.62
+12.16
+14.51
+17.93
+(IA)3
+10.34
+16.46
+21.95
+39.91
+2.87
+4.54
+13.02
+25.30
+6.13
+13.99
+17.04
+15.85
+FFT
+10.18
+17.04
+23.87
+41.16
+0.00
+5.61
+16.10
+32.47
+7.16
+13.60
+15.12
+16.62
+Overall Performance
+To compare the overall task performance of different tuning methods, we
+compute the mean cumulative scores for each tuning method per model size. We present the rankings
+in Figure 1. We show that FFT remains the best regarding overall task performance, while LoRA and
+Parallel Adapter are comparable to FFT. However, there is still a huge performance gap between most
+PEFT methods and FFT, suggesting that they cannot guarantee optimal performance. Regarding the
+tuning efficiency, we use updated parameters as the metric to summarize two more findings. Firstly,
+(IA)3 is efficient enough to perform reasonably by updating much fewer parameters than the other
+PEFT methods. Secondly, we notice that AdapterP always performs better than AdapterH, even
+though AdapterH updates more model parameters. The counter-intuitive observation indicates that
+AdapterH may not be worth deploying in real-world practice.
+5
+Further Analysis
+In this section, we further study two aspects of Code LLMs beyond task performance. Specifically, we
+highlight the importance of model robustness and generated code security, which indicate real-world
+practicality. We tend to understand the trend of model behavior across tuning methods and model
+sizes.
+
+highlighted in bold. The second best performance is underlined.
+Method
+Format
+Function
+Syntax
+Docstring
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+Robust Pass
+LoRA
+28.05
+35.98
+43.29
+51.22
+12.80
+15.24
+23.78
+29.27
+8.54
+13.41
+15.85
+18.29
+10.98
+15.24
+17.68
+20.73
+P-Tuning
+18.29
+29.88
+39.63
+48.78
+7.32
+15.85
+21.34
+23.78
+6.71
+11.59
+14.02
+17.68
+6.71
+14.63
+18.29
+21.34
+AdapterH
+10.98
+34.15
+40.24
+46.95
+4.88
+14.02
+17.07
+23.78
+7.32
+11.59
+12.20
+15.85
+6.10
+12.80
+14.63
+17.68
+AdapterP
+9.76
+35.37
+43.90
+50.00
+1.22
+15.85
+21.34
+26.22
+4.88
+12.20
+14.63
+18.29
+3.05
+15.24
+19.51
+20.12
+Parallel
+26.22
+32.32
+42.68
+50.00
+10.37
+11.59
+21.95
+26.83
+7.93
+12.80
+14.63
+17.07
+8.54
+15.24
+17.68
+21.95
+(IA)3
+26.83
+33.54
+42.07
+50.61
+12.80
+17.07
+21.34
+26.83
+7.93
+12.20
+14.63
+17.07
+10.37
+15.85
+18.90
+22.56
+FFT
+20.12
+35.37
+45.73
+53.05
+5.49
+15.85
+21.34
+30.49
+7.32
+14.63
+15.85
+19.51
+6.10
+14.02
+18.90
+22.56
+Robust Change
+LoRA
+10.98
+14.63
+15.24
+15.85
+4.27
+6.10
+4.27
+6.10
+8.54
+7.93
+12.20
+17.07
+6.10
+6.10
+10.37
+14.63
+P-Tuning
+6.10
+9.76
+12.80
+17.68
+4.88
+4.27
+5.49
+7.32
+5.49
+8.54
+12.80
+13.41
+5.49
+5.49
+8.54
+9.76
+AdapterH
+0.61
+15.85
+15.85
+15.85
+5.49
+4.27
+7.32
+7.32
+3.05
+6.71
+12.20
+15.24
+4.27
+5.49
+9.76
+13.41
+AdapterP
+3.66
+14.63
+17.68
+15.85
+4.88
+4.88
+4.88
+7.93
+1.22
+8.54
+11.59
+15.85
+3.05
+5.49
+6.71
+14.02
+Parallel
+12.20
+11.59
+15.85
+15.24
+3.66
+9.15
+4.88
+7.93
+6.10
+7.93
+12.20
+17.68
+5.49
+5.49
+9.15
+12.80
+(IA)3
+10.98
+12.80
+14.02
+14.63
+3.05
+3.66
+6.71
+9.15
+7.93
+8.54
+13.41
+18.90
+5.49
+4.88
+9.15
+13.41
+FFT
+7.32
+14.02
+17.68
+15.24
+7.32
+5.49
+6.71
+7.32
+5.49
+6.71
+12.20
+18.29
+6.71
+7.32
+9.15
+15.24
+8
+
+5.1
+Model Robustness
+While the performance on downstream tasks is essential, we argue that the evaluation of model
+robustness is also necessary to characterize different tuning methods systematically. We therefore
+consider benchmarking the robustness of code synthesis, one of the most representative downstream
+tasks of source code.
+
+Among the four types of perturbation, all models perform the worst on syntax transformation,
+
+when the model size is scaled up, indicating the generation capability is consistently improved. We
+noticed that FFT may not perform better than other PEFT methods on smaller models, such as 1B
+
+that larger models will be less robust.
+1B
+3B
+7B
+16B
+0
+10
+20
+30
+40
+50
+
+AdapterH
+ 2.87%
+Parallel
+ 1.52%
+AdapterP
+ 1.46%
+P
+Tuning
+ 0.82%
+ LoRA
+ 0.21%
+  (IA)3
+ 0.01%
+  FFT
+ 100%
+
+indicate the percentage of total parameters updated for each PEFT method.
+
+similar to Section 4 and illustrate in Figure 7. We observe that FFT and LoRA do not show strong
+robustness. Instead, adapter-based tuning seems more robust while having comparable performance
+to FFT, which is similar to what Han et al. (2021) have found in NLP tasks.
+Table 5: Valid and Insecure rates of ASTRAIOS models on AATK benchmark. We note that the
+insecure rate is calculated based on the valid programs. The best performance is highlighted in bold.
+The second best performance is underlined.
+Method
+Valid% (↑)
+Insecure% (↓)
+1B
+3B
+7B
+16B
+1B
+3B
+7B
+16B
+LoRA
+85.9
+89.1
+75.9
+87.1
+23.1
+26.2
+20.9
+35.0
+P-Tuning
+70.1
+68.6
+86.8
+82.0
+32.8
+25.9
+28.1
+34.5
+AdapterH
+84.5
+90.9
+87.5
+86.8
+29.0
+26.0
+31.9
+34.1
+AdapterP
+83.9
+92.1
+82.8
+86.3
+31.7
+25.2
+26.6
+37.8
+Parallel
+88.9
+94.1
+70.0
+86.0
+30.2
+19.3
+22.3
+32.6
+(IA)3
+78.0
+62.1
+77.4
+86.6
+34.8
+25.2
+23.1
+30.4
+FFT
+82.9
+93.6
+80.1
+84.1
+22.6
+27.4
+21.2
+38.3
+9
+
+5.2
+Code Security
+Previous studies (Dakhel et al., 2023; Asare et al., 2023). have shown that Code LLMs can generate
+code with security vulnerabilities, which can be exploited by malicious users. However, few studies
+have studied different tuning methods from the output security perspective. In this experiment, we
+intend to understand how tuning methods affect the capability to generate secure code on AATK
+benchmark.
+We follow the original setting in Pearce et al. (2022) and compute the valid and insecure rates, which
+are illustrated in Table 5. When comparing the valid rate of PEFT methods, it does not show better
+performance when the model size increases, indicating that current models may not learn the program
+validity intrinsically. However, we observe that the changes in the insecure rate show that larger
+models are more likely to generate insecure code. This observation suggests that the growth of
+learning capability can result in learning more data, including insecure programs. The study on the
+insecure rate among tuning methods further shows that FFT and LoRA are still better than the other
+tuning methods regarding the security level. While the other methods have a similar insecure rate,
+P-Tuning may have more chances to generate less secure programs, which may not be suitable for
+deploying in security-sensitive scenarios.
+6
+Discussion
+In this section, we seek to conduct a preliminary analysis of the performance of Code LLMs through
+the lens of updated parameters. Specifically, we ask two questions: (1) What is the relationship
+between the updated parameters and cross-entropy loss?; and (2) Can we utilize the performance of
+loss to predict the task performance of Code LLMs?.
+106
+107
+108
+109
+1010
+Number of Updated Parameters
+1.0
+1.1
+1.2
+1.3
+1.4
+Final Train Loss
+1B
+3B
+7B
+16B
+AdapterH
+AdapterP
+(IA)3
+LoRA
+Parallel
+P-Tuning
+FFT
+106
+107
+108
+109
+1010
+Number of Updated Parameters
+1.1
+1.2
+1.3
+1.4
+1.5
+Final Test Loss
+1B
+3B
+7B
+16B
+AdapterH
+AdapterP
+(IA)3
+LoRA
+Parallel
+P-Tuning
+FFT
+Figure 8: Relationships between cross-entropy loss and the number of updated parameters.
+Loss of small models can be projected to larger ones.
+The relationship between the updated
+parameters of ASTRAIOS models and their final loss is analyzed in Figure 8. Our analysis does not
+reveal a consistent pattern across different model sizes when it comes to the correlation between
+model loss and updated parameters. However, an interesting finding is the consistency in relative loss
+performance across different model sizes when comparing various tuning methods. This consistency
+suggests that the improvements achieved by each tuning method are likely to be similar regardless of
+the model’s size. Therefore, the loss observed in smaller models, when tuned with different methods,
+can be a useful predictor for the performance of the larger models.
+Instruct-tuning loss is a strong predictor of downstream performance.
+Assuming that the model
+has been instruction-tuned already but not yet done for the evaluation, we seek to understand if we
+can utilize such loss to predict its performance on downstream tasks. Despite our instruction data
+being derived from general sources like GitHub commits and broad NLP domains, which are not
+directly aligned with the downstream tasks discussed in Section 4, we find some strong correlations.
+10
+
+12.5
+15.0
+17.5
+20.0
+22.5
+25.0
+27.5
+30.0
+Task Performance
+1.0
+1.1
+1.2
+1.3
+1.4
+Final Train Loss
+AdapterH
+AdapterP
+(IA)3
+LoRA
+Parallel
+P-Tuning
+FFT
+12.5
+15.0
+17.5
+20.0
+22.5
+25.0
+27.5
+30.0
+Task Performance
+1.1
+1.2
+1.3
+1.4
+1.5
+Final Test Loss
+AdapterH
+AdapterP
+(IA)3
+LoRA
+Parallel
+P-Tuning
+FFT
+Figure 9: Relationships between cross-entropy loss and overall task performance.
+Motivated by the aforementioned scenario, we aggregate all the data points of mean task performance
+and their corresponding final loss in Figure 9. We observe that the models with lower loss generally
+have better overall performance on downstream tasks. Specifically, the pattern is stronger on test loss
+than on train loss. We explain by the fact that the models do not learn to fit the test split and can
+present a more accurate determination of their actual performance. Our observation suggests that
+general instruction data can work as a good proxy of downstream tasks in Code LLMs, similar to the
+prior findings in NLP (Anil et al., 2023; Wei et al., 2023).
+7
+Related Work
+Code Large Language Models
+Many base Code LLMs have been proposed recently (Chen et al.,
+2021; Nijkamp et al., 2022; Fried et al., 2022; Allal et al., 2023; Zheng et al., 2023; Li et al., 2023;
+Roziere et al., 2023) mostly targeting code completion. With the help of these base Code LLMs, there
+have been extensive studies fine-tuning task-specific Code LLMs to perform software engineering
+tasks like automatic program repair (Xia and Zhang, 2023; Xia et al., 2023a), code translation (Pan
+et al., 2023) and code summarization (Wang et al., 2023b, 2022a). Later, a series of works has been
+proposed for instruction-tuning the base Code LLMs (Luo et al., 2023; Shen et al., 2023; Muennighoff
+et al., 2023a; Bai et al., 2023), aiming to enhance the generalization capabilities of these models on
+diverse tasks. As fine-tuning Code LLMs with full parameters is costly, most models have been tuned
+with LoRA (Hu et al., 2021), a parameter-efficient tuning method. In this work, we seek to answer
+how good LoRA is and if there are other comparable tuning methods.
+Model Analysis Across Scales
+Understanding why and how neural models behave is crucial
+for developing more advanced ones. Existing studies have investigated predictable patterns in the
+behavior of trained language models across scales (Kaplan et al., 2020; Henighan et al., 2020;
+Hernandez et al., 2021; Hoffmann et al., 2022; Wei et al., 2022; Muennighoff et al., 2023b; Xia et al.,
+2023b) and their learning dynamics (McGrath et al., 2022; Tirumala et al., 2022; Biderman et al.,
+2023). However, they either focus on pre-training or task-specific full-parameter fine-tuning. There is
+no attempt to understand the mechanism of parameter-efficient instruction tuning. In this paper, we
+work on this perspective and analyze Code LLMs (Wan et al., 2022; Troshin and Chirkova, 2022;
+Zhuo et al., 2023a).
+8
+Conclusion
+This work studies the parameter-efficient instruction-tuning of Code LLMs. We introduce a model
+suite consisting of 28 instruction-tuned OctoCoder across scales and PEFT methods. We characterize
+the tuning methods on representative downstream tasks, model robustness, and output security,
+highlighting the importance of understanding these models via comprehensive evaluation. We also
+discuss the relationships among updated parameters, cross-entropy loss, and task performance. We
+11
+
+hope these analyses will inspire further follow-up work on understanding the mechanism of tuning
+methods and developing new approaches.

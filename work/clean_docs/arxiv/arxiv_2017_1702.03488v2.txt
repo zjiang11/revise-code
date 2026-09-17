@@ -1,0 +1,954 @@
+Octopus: A Framework for Cost-Quality-Time Optimization in Crowdsourcing
+Karan Goel∗
+Carnegie Mellon University
+
+Shreya Rajpal∗
+Univ. of Illinois at Urbana-Champaign
+
+Mausam
+Indian Institute of Technology - Delhi
+
+Abstract
+We present OCTOPUS, an AI agent to jointly balance three
+conﬂicting task objectives on a micro-crowdsourcing market-
+place – the quality of work, total cost incurred, and time to
+completion. Previous control agents have mostly focused on
+cost-quality, or cost-time tradeoffs, but not on directly con-
+trolling all three in concert. A naive formulation of three-
+objective optimization is intractable; OCTOPUS takes a hier-
+archical POMDP approach, with three different components
+responsible for setting the pay per task, selecting the next
+task, and controlling task-level quality. We demonstrate that
+OCTOPUS signiﬁcantly outperforms existing state-of-the-art
+approaches on real experiments. We also deploy OCTOPUS
+on Amazon Mechanical Turk, showing its ability to manage
+tasks in a real-world, dynamic setting.
+Introduction
+Task control of workﬂows over micro-task crowdsourcing
+platforms, such as Amazon Mechanical Turk (AMT), has
+received signiﬁcant attention in AI literature (Weld et al.
+2015). Typically, a requester needs to balance three compet-
+ing objectives – (1) total cost, owing to payments made to
+workers for their responses (or ballots), (2) overall quality,
+usually evaluated as accuracy of the ﬁnal output, and (3) the
+total time for completing the task. These criteria are inter-
+related: increasing the pay per task attracts more workers to
+the task, thereby reducing completion time. However, it also
+exhausts the budget sooner, so requesters can afford fewer
+ballots per task, likely reducing the overall quality.
+Most prior work on crowd controllers has focused on the
+tradeoff between cost (or no. of ballots) and quality (Dai et
+al. 2013; Lin, Mausam, and Weld 2012; Bragg, Mausam,
+and Weld 2013; Kamar et al. 2013; Parameswaran et al.
+2012). A common approach is to deﬁne a Partially Observ-
+able Markov Decision Process (POMDP) per task, which
+decides on whether to get another ballot or submit the best
+answer for that task. However, this work is time-agnostic,
+and assumes that pay per ballot is given as input.
+Recent work has also studied the tradeoff between
+cost and completion time for a batch of tasks (Gao and
+∗Most work was carried out when the authors were students at
+the Indian Institute of Technology - Delhi.
+Copyright c⃝2017, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+Parameswaran 2014). They model the problem as a Markov
+Decision Process (MDP) that changes the pay per ballot, so
+that all ballots can be obtained by the given deadline in a
+cost-efﬁcient manner. However, this work assumes that the
+number of ballots needed to complete the whole batch is a
+constant known to the requester in advance.
+There is limited research on simultaneously addressing
+tradeoffs between cost, quality and latency. We know of only
+one work that studies this for the speciﬁc workﬂow for ﬁnd-
+ing max of a set of items (Venetis et al. 2012). This work as-
+sumes that latency is pay-independent – an assumption well-
+known to be incorrect (Faradani, Hartmann, and Ipeirotis
+2011; Gao and Parameswaran 2014). Under a ﬁxed latency-
+per-response assumption, they speed up the task and save
+cost by taking fewer responses. Our three-way optimization
+is for the broader case of answering a batch of tasks, and
+uses variable pricing to alter the latency of task completion,
+in line with crowdsourced marketplace dynamics.
+Building upon these strands of research, we present OC-
+TOPUS, an AI agent that can balance all three objectives
+(cost, quality, time) in concert on real crowdsourced mar-
+ketplaces, by optimizing a requester-speciﬁed, joint utility
+function for a batch of tasks. It achieves this by controlling
+both the pay per ballot and the (predicted) accuracy of each
+individual task.
+We could model the whole problem as a single POMDP,
+however, that is unlikely to scale. An alternative could be to
+use multi-objective MDPs, but they are also less tractable,
+because they produce a pareto-optimal set of solution poli-
+cies (Chatterjee, Majumdar, and Henzinger 2006). OCTO-
+PUS uses a three-component architecture – one to set the
+pay per ballot (COSTSETTER), another to choose the next
+available task (TASKSELECTOR) and a third to control each
+task’s quality (QUALITYMANAGER). A key technical nov-
+elty is in the careful modeling of the COSTSETTER’s state
+space in order to circumvent intractability – the state space
+contains aggregate statistics regarding completion levels of
+all tasks, so that it can decide the next best pay to set.
+We perform extensive experiments using both simulated
+and real data, as well as online experiments on AMT.
+Since no existing system performs direct 3-way optimiza-
+tion in crowdsourced marketplaces, our experiments com-
+pare against existing state-of-the art approaches that opti-
+mize 2 of the 3 objectives. We ﬁnd that in most settings,
+arXiv:1702.03488v2  [cs.AI]  15 Aug 2017
+
+OCTOPUS simultaneously outperforms, or is at par with mul-
+tiple variants of these baselines. Our contributions are:
+1. We describe OCTOPUS, a novel framework to address
+cost-quality-time optimization for a batch of tasks in a
+crowdsourced marketplace setting. It contains three com-
+ponents that set the pay per ballot, select the next task
+and control each task’s quality. A key technical novelty
+is the use of aggregate statistics of all tasks in the state
+space design for the COSTSETTER, ensuring tractability
+for real-time deployment.
+2. OCTOPUS consistently performs at par with or better than
+state-of-the-art baselines, yielding up to 37% reward im-
+provements on real data.
+3. We deploy OCTOPUS on AMT and demonstrate that it is
+able to optimize utility effectively in a live, online exper-
+iment.1
+Related Work
+Cost-Quality Optimization. There is signiﬁcant work on
+getting more quality out of a ﬁxed budget. One branch of
+this research focuses on collective classiﬁcation, which de-
+velops aggregation mechanisms to infer the best output per
+task, given a static set of ballots (Whitehill et al. 2009;
+Welinder et al. 2010; Oleson et al. 2011; Welinder and
+Perona 2010). The other branch studies intelligent control,
+which dynamically decides whether to ask for a new bal-
+lot on a task, or stop and submit the answer. These include
+control of binary or multiple choice tasks (Dai et al. 2013;
+Parameswaran et al. 2012; Kamar et al. 2013), multi-label
+tasks (Bragg, Mausam, and Weld 2013), and tasks beyond
+multiple choice answers (Lin, Mausam, and Weld 2012;
+Dai, Mausam, and Weld 2011). All these works design
+agents to control a single task and assume a constant pay
+per ballot. Our work closely follows the POMDP formula-
+tion laid down in Dai et al. (2013) for binary tasks.
+Cost-Time Optimization. Increasing pay per ballot can re-
+duce completion times. Faradani et al. (2011) develop mod-
+els to ﬁnd upfront, the static price per ballot so that a desired
+deadline can be met. Gao & Parameswaran (2014) extend
+this by varying pay at discrete time-steps using an MDP.
+Both approaches assume a ﬁxed number of ballots known
+a-priori, without dynamic quality control of tasks. There
+is also some work on price-independent latency reduction
+(Haas et al. 2015).
+Cost-Quality-Time Optimization. There is limited work in
+this area. The only paper we are aware of is Venetis et al.
+(2012), which addresses cost-quality-time optimization but
+in a restrictive setting with important distinctions from our
+work: (i) they look at max-ﬁnding for a set of items, while
+our task-type is classiﬁcation; (ii) they consider latency to
+be pay-independent and ﬁxed per task, while we study the
+more realistic setting in which changing pay directly im-
+pacts workers’ desire to work on our tasks; (iii) unlike us,
+they don’t change pay per task directly, and instead, change
+the number of responses sought per task to control both cost
+1Code
+can
+be
+found
+at
+https://github.com/
+krandiash/octopus.
+and latency. Qualitatively, our work thus also highlights how
+workers perceive pay changes in a crowdsourcing market-
+place and its overall effect on task completion.
+Worker Retention. Previous work deals with incentivizing
+workers to perform more tasks via bonuses or diversiﬁcation
+(Rzeszotarski et al. 2013; Ipeirotis and Gabrilovich 2014;
+Difallah et al. 2014; Dai et al. 2015). Recently, Kobren et al.
+(2015) model the process of worker retention. We present
+empirical results that suggest worker retention plays a dom-
+inant role in determining task completion rates.
+Task Routing. Prior work deals with two issues; deciding
+which task from the batch to solve next, or which worker
+to route a task to. Ambati et al. (2011) rank tasks based on
+user preferences using a max-entropy classiﬁer. Other work
+uses low-rank matrix approximations (Karger, Oh, and Shah
+2014) for equal difﬁculty tasks. Rajpal et al. (2015) decide
+which worker pool to route a task to. Other papers study task
+routing on volunteer platforms (Bragg et al. 2014; Shahaf
+and Horvitz 2010).
+Like AMT, we assume no control on which worker picks
+a ballot job, but we select the best next task to assign to an
+incoming worker. Following (Mason and Watts 2010; Gao
+and Parameswaran 2014), we assume that worker quality is
+independent of the pay per ballot. We re-verify this for our
+data in our experiments.
+Decentralized Approaches. There is related work in decen-
+tralized Wald stopping problems (Teneketzis and Ho 1987)
+which considers how to optimize a common utility function
+given a set of agents who each make independent observa-
+tions. However, these approaches do not scale well with the
+number of agents (tasks in our setting), which can be quite
+large. There is also work in decentralized metareasoning
+(Hansen and Zilberstein 2001) to decide when to stop op-
+timizing a utility function. Metareasoning approaches typ-
+ically assume that utility is monotonically increasing over
+time, which is not true in our setting since for instance, con-
+ﬂicting ballots on a single task would decrease utility.
+Problem Deﬁnition
+A requester provides a batch of n binary tasks q ∈1 . . . n,
+each having a 0/1 response. They also provide a utility
+function U, which describes how to tradeoff cost, time and
+quality. The agent can dynamically change pay per ballot
+c, and choose a variable number of ballots per task to op-
+timize the ﬁnal objective. We study the setting where U is
+expressed as a sum of task-level utilities (U) minus cost, i.e.
+U = Pn
+q=1(Uq −Cq). Here, Cq is total money spent on q.
+We assume that answers to all tasks are to be returned to the
+requester as one single batch.
+MDP/POMDP background. An MDP models the long-
+term reward optimization problem under full observability
+and is deﬁned by a ﬁve tuple ⟨S, A, T, R, γ⟩. Here, S is
+a set of states, A a set of actions, T(s′|s, a) denotes the
+probability of transitioning to state s′ after taking action a
+in state s, and R(s, a) maps a state-action pair to a real-
+valued reward. γ is the discount factor for making inﬁnite-
+horizon MDPs well formed. A POMDP extends an MDP
+into a partially-observable setting, where the state is not fully
+
+observable and only a belief (probability distribution) over
+possible states can be maintained using observations from
+the model. A POMDP is represented as ⟨S, A, T, R, O, γ⟩
+tuple, where a new function O(o|s′, a) denotes the distribu-
+tion over observations on taking an action a and arriving in
+a new state s′. Lack of space precludes a long discussion
+of the subject – there are existing solvers for solving MDPs
+and POMDPs of reasonable sizes, e.g. (Smith and Simmons
+2012), which we use in our work.
+To formulate the problem optimally, we would need to de-
+ﬁne a single, centralized POMDP over a state containing an-
+swers and difﬁculty estimates of all individual tasks as well
+as the current pay per ballot and the current time. The ac-
+tions will include requesting a ballot on a task q, changing
+the pay, and a terminal submit action. Solving this POMDP
+would yield the optimal policy, which would decide which
+task to get ballots on next, when to change pay and when to
+submit. Since the number of tasks in a batch can be huge,
+this POMDP is unlikely to scale due to a large state and ac-
+tion space. Naive extensions to Dai et al.’s or Gao et al.’s
+state-of-the-art models for cost-quality and cost-time opti-
+mization respectively are not possible either – Dai et al.’s
+model is solved per task, whereas pay must be set based on
+progress of the whole batch of tasks; Gao et al.’s model as-
+sumes a ﬁxed number of ballots per task, and has no natural
+way to optimize quality by taking a variable number of bal-
+lots based on each task’s difﬁculty.
+Figure 1: OCTOPUS architecture.
+OCTOPUS for Three-Way Optimization
+We propose a three-component architecture (see Figure 1).
+In OCTOPUS each task has its own QUALITYMANAGER
+that decides, based on the current pay, whether it is worth
+taking another ballot for this task (light edge) or not (dark
+edge). This information is conveyed to the TASKSELEC-
+TOR, which selects an available (light) task to route to an
+incoming worker. Based on the current progress of the whole
+batch, the COSTSETTER decides what pay per ballot to set;
+this action is taken at periodic intervals. We design OCTO-
+PUS such that it can allocate tasks as and when workers ar-
+rive and works instantaneously in practice, therefore utiliz-
+ing crowdsourcing marketplaces with full parallelism.
+QualityManager
+Background. QUALITYMANAGERs follow the worker re-
+sponse model and POMDP formulation of Dai et al. (2013).
+Each worker is assumed to have an error parameter γ ∈
+(0, ∞) (γ = 0 is error-free). An average worker has error pa-
+rameter ¯γ. Each task q has an unknown true Boolean answer
+tq, and an associated difﬁculty dq ∈[0, 1] (dq = 0 is easy) –
+these are estimated using an Expectation-Maximization al-
+gorithm (Whitehill et al. 2009) as data is received. Each task
+has a prior difﬁculty distribution p(dq). A worker’s ballot for
+q depends on their γ, tq and dq.
+In Dai et al. (2013) the POMDP for q maintains a belief
+state bq over (dq, tq) state tuples. For instance bq(0.5, 1) =
+0.4 indicates a 40% belief that dq = 0.5 and the answer
+to q is 1. The POMDP has two actions; (1) request another
+ballot, or (2) mark q as completed. The POMDP policy πq
+maps every belief state to an action. Each time the POMDP
+receives another ballot, a Bayesian update is performed to
+re-estimate a new belief. For OCTOPUS, the POMDP opti-
+mizes Uq−Cq. We note that πq depends on the pay per ballot
+c: if c is smaller, the POMDP can afford more ballots. Dai
+et al.’s original model keeps c constant, but in our case the
+COSTSETTER can change it, triggering a change in πq.
+We deﬁne vq as the conﬁdence in the most probable an-
+swer for task q; vq = max(v0
+q, v1
+q) ∈[0.5, 1], where v0
+q, v1
+q
+are the current probabilities that q’s answer is 0 or 1 respec-
+tively. vq can be computed from bq by summing out dq.
+Computation of Aggregate Statistics. We now deﬁne two
+batch-level statistics, which will be a key part of the state
+space representation for the COSTSETTER.
+We ﬁrst deﬁne a normalized estimate of task quality, νq =
+2vq −1; νq normalizes vq so that it lies in [0, 1]. A high
+value of νq (near 1) indicates the POMDP’s high conﬁdence
+in its estimated answer for q, and vice versa for a low (near
+0) value. We also deﬁne a related notion of batch quality,
+¯ν =
+1
+n
+Pn
+q=1 νq, which is an aggregate statistic estimating
+the current quality for the entire batch of n tasks. Finally,
+we construct the batch quality histogram – a histogram built
+by binning tasks into equally sized bins based on their νq
+values. The bin width is denoted as ∆ν.
+The COSTSETTER also needs an estimate of the number
+of ballots remaining. We deﬁne θq(πq) as an estimate of the
+expected number of ballots that will be needed (starting from
+the current time) until task q will be marked completed. For
+notational ease we write θq to denote θq(πq). Recall that πq
+can change with a change in c. Hence θq also depends on c.
+How can we compute θq? We use a trajectory-tree ap-
+proach (similar to (Kearns, Mansour, and Ng 1999)) called
+FRONTIERFINDING. We construct a binary tree of future ob-
+servations, rooted at the current time step, where each edge
+corresponds to an observation (a worker response of 0/1).
+The node below any edge contains the belief state gener-
+ated by updating the POMDP, using the observation associ-
+ated with that edge. Each trajectory is a path from the root
+to a leaf, and is generated with an associated path proba-
+bility (using Dai et al.’s generative model assuming an av-
+erage worker). A leaf is created whenever the policy takes
+
+the ‘mark as completed’ action, or when the path probabil-
+ity drops below a threshold. θq is simply the expected length
+of a trajectory in this tree.
+We also estimate the expected ballots to completion for
+the batch: θ = Pn
+q=1 θq. θ’s role is similar to that of ¯ν – it
+is an aggregate statistic that describes how far the batch is
+from completion. It also helps in quantifying the expected
+cost of completion: if θ = 1000 and c = 3, we would expect
+to spend c · θ = 3000 units of money to complete the batch.
+In summary, we described the design of a per-task QUAL-
+ITYMANAGER. Collectively, n of these help us in estimat-
+ing two aggregated quantities, ¯ν and θ, which measure the
+overall quality, and degree of completion of the batch, re-
+spectively. All notation for this and future sections is sum-
+marized in Table 1.
+TaskSelector
+The TASKSELECTOR decides which incomplete task to as-
+sign to the next incoming worker. It must have an ‘anytime’
+behavior, i.e. it must increase utility U quickly. This is be-
+cause the time of ﬁnal submission is not in its control, and
+the batch might be submitted at any time by the COSTSET-
+TER.
+To be prepared for any contingency, the TASKSELECTOR
+uses a 1-step greedy policy over expected utility gain. We
+deﬁne each task’s priority (φq) as the difference between the
+current utility (Uq) of q and the expected utility after receiv-
+ing 1 ballot (U ′
+q) from an average worker (error rate ¯γ), given
+the current belief state bq of q’s QUALITYMANAGER. Thus,
+φq = E[U ′
+q|¯γ, bq] −Uq. TASKSELECTOR assigns the task
+with the maximum φq value to the next available worker.
+Unfortunately, Uq (and therefore U) is neither mono-
+tonic (conﬂicting ballots decrease utility) nor submodular
+(a skilled worker could arrive after an error-prone one),
+so we cannot utilize prior work on adaptive submodularity
+(Golovin and Krause 2011; Bragg et al. 2014) to guarantee
+solution quality. Providing quality bounds is left for future
+work.
+Lastly, note that the task allocation process is instanta-
+neous, as well as completely parallelized, since we don’t
+wait for a task to be returned before allocating another task.
+Given enough workers, we could get ballots on every single
+task in parallel. This is important, since it allows us to take
+full advantage of micro-task marketplaces.
+CostSetter
+The COSTSETTER is an MDP that changes c (pay per ballot)
+in order to maximize U. It uses information about the com-
+pletion level of each task to assess whether the batch of tasks
+is completing on schedule or needs to be sped up or slowed
+down. To inﬂuence the rate of completion of the batch, it sets
+c at discrete time steps τ ∈{0, ∆τ, 2∆τ, . . . }.
+The key challenge for the COSTSETTER is in deﬁning the
+state space. Ideally, as stated earlier, each task’s belief bq
+should be part of the state, but that would make computa-
+tions intractable. Instead, we approximate by using aggre-
+gate statistics over the whole batch of tasks. We describe the
+state space, actions, transition functions, and rewards of this
+MDP below.
+Symbol
+Meaning
+U
+Overall utility (requester deﬁned function)
+Uq
+Per-task utility
+c
+Pay per ballot
+C
+Total cost incurred for all tasks
+Cq
+Total cost incurred for task q
+πq
+Policy for task q’s QUALITYMANAGER
+γ, ¯γ
+Worker error parameter, average error
+dq
+Difﬁculty of task q
+tq
+True binary answer for task q
+bq
+Belief state for task q
+vq
+Probability of POMDP’s most likely true
+answer for task q
+νq
+Task quality (νq = 2vq −1)
+¯ν
+Batch quality (¯ν = 1
+n
+P
+q νq)
+θq
+Estimated number of ballots required to
+complete task q
+θ
+Estimated number of ballots required for
+completing the batch of tasks (θ = P
+q θq)
+˜θ(νq, c)
+Mapping from (νq, c) to θq for task q under π
+φq
+Priority of task q
+τmax
+Deadline
+τ
+Current Time
+∆
+Granularity (e.g. ∆τ)
+Table 1: Notation used in the paper.
+State Space. The choice of the best pay per ballot c depends
+on its current value, the current time, and the aggregate de-
+gree of completion of the batch. We choose the state to be a
+4-tuple (¯ν, θ, τ, c). Both ¯ν and θ are important for this deci-
+sion; ¯ν estimates the expected accuracy on the batch, while
+θ gives us an idea of how much more improvement in ¯ν
+is possible (at the current c). For a ﬁxed ¯ν and c, a high θ
+would indicate the presence of several unsolved tasks and
+the possibility of improving ¯ν. On the other hand, a low θ
+would indicate that most tasks are solved and there is lit-
+tle improvement possible. θ therefore captures the spread of
+the distribution of task qualities νq, while ¯ν is the mean of
+this distribution. We use this intuition later to construct the
+transition function for the COSTSETTER.
+As another example consider a case where both θ and ¯ν
+are high. This indicates that the QUALITYMANAGERs con-
+sider there be to scope for quality improvement despite the
+batch quality being high already, possibly due to very low
+c. If we did not have θ in the state, we would instead base
+our decision on the high ¯ν value, and believe that further
+improvement in utility was not possible.
+All state variables are continuous, and for tractability we
+discretize them. θ is discretized with a granularity ∆θ, ¯ν
+with a granularity ∆ν, and τ with a granularity ∆τ. We as-
+sume that c can take values {c1, c2 . . . , ck}. These values are
+deﬁned by the requester, and in practice would respect mar-
+ketplace constraints, such as minimum wages. Interestingly,
+the model is robust in that if a requester provides a very poor
+starting wage, workers will likely not pick up the task, and
+the model will subsequently respond by increasing the wage.
+
+Actions and Rewards. Every state has access to two pay-
+change actions: ↑and ↓. ↑increases ci to ci+1 while ↓does
+the opposite. The ↑and ↓actions incur no cost to the sys-
+tem. However, in practice we assign a small cost to these
+actions to prevent frequent cyclical pay-changes in a policy.
+Changing c has no impact on τ and ¯ν, but it does change
+θ, since the number of ballots remaining per task depends
+on the current pay per ballot (via the policy πq). We discuss
+how to compute this when deﬁning the transition function.
+We also have a no-change action, which increments τ by
+∆τ, along with asking workers for more ballots at c, which
+remains unchanged (for the next ∆τ duration). This is essen-
+tially a marketplace action, where we post tasks to the mar-
+ketplace with a pay per ballot equaling c. At the end of ∆τ
+minutes, we would then arrive in a new state. The cost of this
+transition (to the nearest ∆θ value) is just the amount paid
+to workers during this duration on the marketplace, equaling
+the number of ballots received during this time, multiplied
+by c.
+The ﬁnal action is a ‘terminate’ action that submits all an-
+swers to the requester. Its reward should be U based on batch
+quality and current time (cost is not needed, since that was
+already accounted in the no-change action). Unfortunately,
+the MDP has access to only the aggregate statistics, and not
+the full batch quality histogram, which is needed for com-
+puting U. We now describe a novel β-reconstruction pro-
+cedure that allows us to extrapolate the full histogram from
+aggregate statistics, useful for computing this reward as well
+as the transition function.
+β-Reconstruction. The goal is to reconstruct an approxi-
+mate batch quality histogram given the aggregate statistics, ¯ν
+and θ, and the current c. The procedure assumes that the his-
+togram can be approximated with a two parameter Beta dis-
+tribution, βλ1,λ2. Also assume that we are provided a func-
+tion ˜θ that maps a (νq, c) pair to θq; it returns the expected
+number of ballots needed for a task q given its current quality
+and pay per ballot. Note also that ˜θ will be a non-increasing
+function of ν. We now show that we can ﬁnd suitable λ1 and
+λ2 given ¯ν, θ and ˜θ.
+To compute the best ﬁt λ1, λ2 values, we solve two equa-
+tions. The 1st equation enforces that the mean of the recon-
+structed distribution is ¯ν:
+λ1
+λ1+λ2 = ¯ν. We can reparameter-
+ize βλ1,λ2 using λ1 = λ¯ν; λ2 = λ(1 −¯ν) and write it as
+βλ(¯ν). Our task now reduces to ﬁnding the best ﬁt λ. A 2nd
+equation imposes θ as an expectation over the batch quality
+distribution: ˆθ(λ) = n
+R 1
+0 ˜θ(ν, c)βλ(ν)dν ≈θ.
+Since ˜θ is computed using a POMDP policy, it will rarely
+be available in closed form. The integral above is approxi-
+mated using a numerical algorithm. The best λ is found via
+argminλ|ˆθ(λ) −θ| using a linear search, and works instan-
+taneously in practice. Having found a suitable λ value, we
+now bin all n tasks into the β distribution to recover the task
+quality histogram, as desired.
+Finally, we describe the procedure for estimation of
+˜θ(νq, c). First we calculate the corresponding vq = 0.5(νq +
+1). Intuitively, ˜θ(νq, c) assesses the number of ballots taken
+by the QUALITYMANAGER when its belief bq in the current
+answer is vq and it has difﬁculty dq. However, we haven’t
+reconstructed dq – we use the prior distribution p(d) as its
+belief on dq. To compute ˜θ(νq, c) we initiate the QUALITY-
+MANAGER’s POMDP from such a belief state, and compute
+θq under policy πq using FRONTIERFINDING.
+↑/ ↓Transitions. We now describe the transitions for ↑
+action in a given state (¯ν, θ, τ, ci) to reach (¯ν, θ′, τ, ci+1).
+As we change c, the main change is in θ. We quantify this
+change by a simple observation: regardless of pay, the num-
+ber of ballots taken until this point is ﬁxed. Suppose that
+at τ = 0 we compute the estimated number of ballots for
+the batch as θ0(ci). If we have taken x ballots till now,
+our current estimate of θ will be simply θ0(ci) −x. At
+pay ci+1, our next state’s estimate should be θ0(ci+1) −x.
+Thus, when changing pay from ci to ci+1 we can simply add
+θ0(ci+1) −θ0(ci) to compute θ′. A similar analysis works
+for the ↓action.
+No-Change Transitions. The no-change action emulates
+the setting that the tasks are posted on the platform for ∆τ
+time at pay c. Let the next state be (¯ν′, θ′, τ + ∆τ, c). Es-
+timation of ¯ν′ and θ′ requires a model of task completion.
+Similar to Gao & Parameswaran (2014), we maintain a pay-
+dependent ballot completion model, Pr(nb|∆τ, c), as the
+probability that OCTOPUS will receive nb ballots in dura-
+tion ∆τ at pay c. However, different from their work, the
+probability model combines the effects of worker arrival, re-
+tention and time taken per task (and not just arrival). Thus,
+θ will reduce by nb with probability Pr(nb|∆τ, c). The cost
+of the transition will be −c · nb. Since nb is discretized upto
+∆θ granularity, the cost will be rounded off to the nearest
+bucket.
+For updating ¯ν, we β-reconstruct the batch quality his-
+togram using the current state. We then bin n tasks into this
+histogram, and simulate the TASKSELECTOR on this recon-
+structed batch. To do this, we ﬁrst create a POMDP belief
+state for each reconstructed task by choosing ν from the his-
+togram to recover v, and using the prior difﬁculty distribu-
+tion. We then select a task, simulate a ballot using an average
+worker (¯γ) and compute the posterior belief. We continue
+until all nb ballots are used up. At the end we compute the
+¯ν′ based on the updated state of the batch. For robustness,
+we repeat this entire procedure multiple times and average
+the ¯ν values from different runs.
+Implementation Details. We construct the whole MDP
+with all transitions and rewards using simulations and β-
+reconstructions as described above. Since time can be un-
+bounded, we keep a max time τmax when deﬁning the total
+state space. We also recognize that the transition from ¯ν to
+¯ν′ depends on nb but not on any other part of the state. By
+caching a table of (¯ν, nb, ¯ν′) values once, we can save on a
+lot of simulations when computing the transition function of
+the no-change action in various states.
+We use Value Iteration to learn the policy with (¯ν =
+0, θ = n · max ˜θ(ν = 0, c = c1), τ = 0, c = c1) as our
+start state. Intuitively, we are starting at 0 quality, the maxi-
+mum possible number of ballots to completion, and the low-
+est price.
+In a real execution environment, it is possible that over
+
+Figure 2: (a) Ballots received vs. elapsed time for different
+costs (in tenths of a cent); (b) Worker error distribution for
+different costs are similar.
+time, the COSTSETTER’s aggregates diverge from the set of
+QUALITYMANAGER’s beliefs in the batch. To improve per-
+formance, we synchronize the COSTSETTER’s ¯ν and θ to
+those of the real batch after every time interval. Experimen-
+tally OCTOPUS performs well even without synchronization,
+indicating that the learned transitions are effective.
+In summary, we described the COSTSETTER, an MDP
+that keeps track of the aggregate statistics ¯ν and θ for a
+batch of n tasks, and changes pay to optimize utility U. A
+key contribution is a novel β-reconstruction procedure that
+approximates the batch quality histogram for a state.
+Experiments
+We conduct three sets of experiments: (i) experiments on
+simulated data; (ii) ofﬂine evaluation on real data; (iii) live
+experiments on Amazon MTurk (AMT).
+Model Parameters. For experiments, we initialize OCTO-
+PUS with a hard deadline utility function: Uq = −∞if
+τ < τmax; otherwise, Uq = −P for every incorrect an-
+swer and zero for a correct answer. This joint utility com-
+bines the utilities from Dai et al.’s and Gao et al.’s models.
+Here, penalty P represents how important quality is to the
+requester. Notice that since a POMDP doesn’t know whether
+it is submitting the correct answer, it cannot compute the
+utility exactly. It uses its belief to estimate expected utility
+as −P(1 −vq). This linear utility makes the reward compu-
+tations for COSTSETTER’s ‘terminate’ action simple. Given
+the ¯ν of the state, the reward is calculated as −0.5P(1 −¯ν)
+on termination.
+Having a hard deadline makes the COSTSETTER state
+space ﬁnite, since we only consider states with τ
+≤
+Figure 3: Task completion statistics for our data: (a) Reten-
+tion & Completion Rate; (b) Arrivals (Rate & Total)
+τmax. We use a time-independent Poisson process for the
+ballot completion model Pr(nb|∆τ, c). These parameters
+are illustrative – OCTOPUS can accommodate other utili-
+ties/distributions.
+Baselines. Our main goal is to compare OCTOPUS’s per-
+formance with state-of-the-art methods. However, we know
+of no algorithms that performs direct three-way optimiza-
+tion in a crowdsourced marketplace setting.2 So we compare
+against state-of-the-art methods that optimize 2 of the 3 ob-
+jectives, while giving them the added beneﬁt of our TASKS-
+ELECTOR. We compare OCTOPUS to Dai et al.’s and Gao
+et al.’s models, which are related to our work. Code was pro-
+vided by the authors.
+All comparisons are on the requester’s utility function, U
+computed against gold labels with P = 200. We normalize
+U so that OCTOPUS always has 1.0 utility, i.e. the perfor-
+mance of baselines is represented as a proportion of OCTO-
+PUS.
+Data collection. We collect data on AMT at 6 pay points us-
+ing a Twitter Sentiment dataset (Sheshadri and Lease 2013).
+Workers are asked to classify the sentiments of tweets into
+either positive or negative sentiment. At each price point
+($0.001, $0.002, . . . , $0.006 per ballot), we post 400 tweets,
+and seek 20 ballots/tweet. A single HIT contains 10 tweets
+for a worker to solve. 40 tweets are common to all prices for
+a total of 2200 tweets. Each price is posted on a different
+weekday at the same time, and remains active for 24 hours.
+This ensures consistency in data collection across prices and
+minimizes interaction between different prices.
+Figure 2a (task completion rates vs. pay) veriﬁes that
+higher pricing results in faster task completion: at 0.1 cent,
+only 5500 ballots are received even after 24 hours, whereas
+at 0.6 cents, all 8000 ballots are received within 12 hours.
+We estimate the Poisson parameters using this data.
+Worker
+Retention
+vs.
+Arrival.
+Contrary
+to
+prior
+work
+(Faradani,
+Hartmann,
+and
+Ipeirotis
+2011;
+Gao and Parameswaran 2014), we observe that the in-
+crease in task completion rate with pay is predominantly
+due to higher worker retention, rather than a higher rate or
+number of worker arrivals (possibly due to the large number
+of HITs that we sought). Figure 3a shows that both retention
+and task completion rates are highly correlated, doubling as
+price goes from 0.1 to 0.6 cents. However, Figure 3b shows
+that the worker arrival rate does not rise much. To the best
+of our knowledge, there is no prior marketplace model that
+handles both retention and arrivals.
+We also verify that worker quality is independent of pay.
+We run a K-S test for every pair of costs. We could not reject
+the null hypothesis (error rates drawn from cost-independent
+distributions) at p < 0.05 (Figure 2b).
+Simulation Experiments
+Our main aim through simulations is to assess the quality of
+β-reconstruction. We use a variety of parameter settings and
+2We don’t compare to Venetis et al. (2012) since they run a tour-
+nament for max-ﬁnding, different from our task type. They also
+don’t change pay directly or model latency as done by us.
+
+(a) Comparison to DAI.
+(b) Comparison to DAI.
+(c) Comparison to GAO.
+(d) Comparison to DAI.
+(e) Comparison to DAI.
+(f) Comparison to GAO.
+(g) Comparison to GAO.
+Figure 4: Performance of OCTOPUS on simulated data for several deadlines. (a), (c) are plots of the utility achieved. Each data
+point in (b) represents the performance averaged over all deadlines considered in (a). (d), (f) compare the accuracy achieved
+while (e), (g) compare the total cost incurred by OCTOPUS and competing baselines. Round dots on the ﬁgures denote that the
+difference between OCTOPUS and the competing baseline (whether better or worse) is statistically insigniﬁcant at that point.
+All other differences are statistically signiﬁcant.
+simulate OCTOPUS with ballot arrivals simulated accord-
+ing to a pay-dependent Poisson process, and answers gen-
+erated based on worker models. Note that this experiment
+is without any synchronization between the COSTSETTER
+state and the real batch. Figure 5a compares the θ values be-
+tween the system and the batch (for one such setting3). Even
+after 10 time intervals, and across multiple cost changes (the
+sharp drops in the curve), our tracking is extremely accurate.
+Figure 5b shows that our ¯ν tracking is extremely effective as
+well, with very little divergence from the true value. Even
+when the values do diverge in both cases, they are highly
+correlated.
+High quality tracking of θ and ¯ν are essential. If we di-
+3500 tasks with p(d) = β(2.0, 2.0), worker errors sampled
+from Γ(2.0, 0.5), P = 200, ∆τ = 15 mins, ∆θ = 10, ∆¯ν = 100.
+Figure 5: Tracking the real state using β-reconstruction in
+the COSTSETTER for the (a) θ value, and (b) ¯ν value.
+Figure 6: Comparison of the average pay/ballot against (a)
+DAI, and (b) GAO on simulated data for several deadlines.
+verge too far from the real values, we would likely optimize
+the long-term expected reward poorly. Overall, this reaf-
+ﬁrms the hypothesis that the COSTSETTER is able to capture
+the global state of the whole batch using just the aggregate
+statistics.
+Our other goal is to compare OCTOPUS’s performance
+with baselines in simulation, which we do below.
+Comparison to DAI.
+Comparing OCTOPUS with DAI
+highlights the beneﬁt of changing cost on real-world util-
+ity. Ideally, our method should be able to vary pay to match
+or exceed the utility of the static cost baselines. We run both
+OCTOPUS and DAI with deadlines ranging from 60 to 360
+minutes. We run DAI for different static pays, ranging from
+1 to 6 (measured in a tenth of a cent), allowing it to take bal-
+lots until the deadline. Statistical signiﬁcance is indicated on
+the plots.
+
+(a) Comparison to DAI.
+(b) Comparison to GAO.
+(c) Advantage of GREEDY.
+(d) Comparison to DAI.
+(e) Comparison to DAI.
+(f) Comparison to GAO.
+(g) Comparison to GAO.
+Figure 7: Performance of OCTOPUS on real data for several deadlines. (a), (c) are plots of the utility achieved. Each data point
+in (b) represents the performance averaged over all deadlines considered in (a). (d), (f) compare the accuracy achieved while (e),
+(g) compare the total cost incurred by OCTOPUS and competing baselines. Round dots on the ﬁgures denote that the difference
+between OCTOPUS and the competing baseline (whether better or worse) is statistically insigniﬁcant at that point. All other
+differences are statistically signiﬁcant.
+Figure 4 shows the comparison. OCTOPUS simultane-
+ously outperforms (or is at par with) all static cost baselines
+for every deadline, whereas each static cost baseline has a
+‘sweet spot’ range of deadlines where it does best. OCTO-
+PUS plans robustly, where despite making pricing decisions
+24 times without synchronizing for the 6 hr deadline, it still
+outperforms DAI.
+Figure 4b depicts the utility averaged
+across all deadlines as a function of task-completion rates.
+As shown, OCTOPUS is robust to different task-completion
+rates, and continues to outperform DAI on changing them.
+Figure 4d & 4e explain why OCTOPUS achieves better util-
+ity scores than DAI – it maintains very high accuracy while
+keeping costs reasonable. Qualitatively, for every deadline,
+we observe that OCTOPUS tends to have an average cost that
+is close to the best static cost.
+Comparison to GAO. Comparing with GAO allows us to
+delineate the effect of the QUALITYMANAGERs while opti-
+mizing for batch quality using aggregate statistics.
+For fairness, we augment GAO’s framework; ﬁxing r
+ballots/task up-front, and using the same worker response
+model as OCTOPUS for ballot aggregation. Figure 4c
+demonstrates OCTOPUS’s performance against GAO for dif-
+ferent values of r. OCTOPUS consistently outperforms GAO
+for all values of r and across all deadlines. OCTOPUS’s per-
+formance improves for longer deadlines, due to the higher
+quality achieved by the QUALITYMANAGER. For instance,
+OCTOPUS is around 100% better than GAO for the 6 hr
+deadline. We see that GAO-3 and OCTOPUS incur nearly the
+same cost (Figure 4g) but OCTOPUS is ∼6% better in terms
+of accuracy (Figure 4f). Examining Figure 6b reveals that
+this is in part due to OCTOPUS collecting × 1
+3 more ballots
+than GAO-3 by changing pay/ballot more intelligently.
+It is interesting to note that increasing r does not sig-
+niﬁcantly improve baseline performance. This is due to the
+fact that the QUALITYMANAGER only takes more ballots on
+tasks that really need them. For GAO the extra cost spent on
+every task is not offset by a corresponding increase in qual-
+ity, especially for tasks that are very easy (don’t require r
+ballots) or too hard (unsolved even with r ballots). In Fig-
+ure 4f & 4g, we notice that OCTOPUS once again has near-
+highest accuracy, but spends much less than GAO variants
+that have higher accuracy than OCTOPUS.
+Lastly, Figure 6 demonstrates that OCTOPUS has intu-
+itive behavior – as the deadline length increases, OCTOPUS
+spends less pay/ballot on average since more time can be
+taken to ﬁnish the batch of tasks.
+These experiments demonstrate that OCTOPUS simulta-
+neously achieves higher utility than every variant of baseline
+methods, and does so without sacriﬁcing accuracy or incur-
+ring high costs.
+Ofﬂine Experiments on Real Data
+We run extensive ofﬂine experiments on our collected data
+against the state-of-the-art baselines described earlier.
+When comparing algorithms we sample different execu-
+tion trajectories from the real data by choosing a random
+ballot for each task (since quality is cost-independent), while
+keeping ballot arrivals as per the real data. Multiple trajec-
+tories help compute statistical signiﬁcance over algorithms’
+performances. These experiments synchronize the COST-
+
+SETTER’s state with the real batch after every ∆τ time.
+We use an uninformed uniform distribution for the difﬁculty
+prior p(d).
+Figure 7a shows OCTOPUS when compared to DAI at
+different static price points, with the x-axis being different
+τmax values. Statistical signiﬁcance is marked on the plots.
+OCTOPUS outperforms most DAI costs across all deadlines,
+with upto 37% increase in real utility. No single static cost
+is able to match OCTOPUS across all deadlines. This under-
+scores the beneﬁts of changing pay dynamically based on
+current task completion. In Figure 7d & 7e, we see that OC-
+TOPUS achieves high accuracy at relatively low cost.
+Figure 7b compares OCTOPUS with GAO-r, with r denot-
+ing the static number of ballots per task. We ﬁnd that OC-
+TOPUS outperforms GAO for most deadlines. Further analy-
+sis reveals that our batch exhibits a bi-modal task difﬁculty
+distribution – no algorithm exceeds around 76% accuracy,
+while getting 70% is easy with ∼1 ballot per task (in Fig-
+ure 7f, we see a sharp jump in accuracy only when the dead-
+line is long enough to take a lot of ballots). For shorter dead-
+lines, where solving difﬁcult tasks is infeasible, GAO out-
+performs OCTOPUS slightly, since OCTOPUS optimizes with
+respect to a uniform prior. For longer deadlines, estimates
+of task difﬁculties are reﬁned by the QUALITYMANAGERs,
+and OCTOPUS gives large gains.
+Lastly, OCTOPUS outperforms TASKSELECTOR base-
+lines where GREEDY task selection is replaced by a random
+policy (RANDOM), or a single round robin followed by ran-
+dom selection (RANDOM-ROBIN), by large margins (Figure
+7c). Note also that the baselines start to converge over time,
+as the advantage of doing intelligent task selection dimin-
+ishes when nearly all tasks are run till completion.
+Overall, we ﬁnd that OCTOPUS learns robust policies,
+consistently outperforming all baselines.
+Live Online Experiments
+Lastly, we deploy OCTOPUS on AMT to test performance in
+a dynamic, online setting, as well as gain qualitative insight
+into worker behavior. In this, we keep exactly 3 HITS (of
+10 tasks each) on AMT at a time. If a worker accepts a HIT,
+another one is posted immediately – this enables greedy task
+routing while ensuring full power of worker parallelism. Af-
+ter every ∆τ mins, all available HITs are taken down and re-
+posted with the new price output by OCTOPUS. OCTOPUS’s
+policies are learned using task completion rates estimated
+from real data earlier. At runtime, querying OCTOPUS is in-
+stantaneous. We solve a batch of 500 tweets for 3 deadlines
+– 1, 2, and 4 hours. We compare against GAO-1, the best
+baseline in ofﬂine expts in Table 2.
+For the 1 hr deadline, OCTOPUS maintains pay at 0.5
+cent/ballot, before decreasing it to 0.1 cent/ballot in the last
+15 minutes. This allows OCTOPUS to receive around 1 bal-
+lot/task; more ballots stagnate U for short deadlines due to
+conﬂicting workers, and OCTOPUS prefers to save money to
+optimize utility. On the other hand, GAO maintains pay at
+0.6 cent throughout to also ensure it receives 1 ballot/task,
+but is unlucky in the responses it receives. In terms of de-
+cision making, the superiority of OCTOPUS is clear, since it
+Method
+OCTOPUS
+GAO (r = 1)
+Deadline
+Cost
+Acc.
+U
+Cost
+Acc.
+U
+1 hr
+$2.63
+74.4%
+-25.9
+$2.68
+71.4%
+-28.9
+2 hrs
+$3.17
+77.2%
+-23.1
+$1.72
+73.8%
+-26.4
+4 hrs
+$6.23
+77.4%
+-23.2
+$0.50
+74.4%
+-25.6
+Table 2: Online performance comparison of OCTOPUS and
+GAO (r = 1) for a single trial. U is shown in thousands.
+recognizes the danger posed by disagreement on task quality
+estimates.
+In the 2 hr deadline, OCTOPUS once again increases pay
+initially, but gets more ballot arrivals than expected. In re-
+sponse, after 45 minutes OCTOPUS decreases pay so that it
+can take a higher number of ballots for difﬁcult tasks, getting
+a substantial accuracy and utility improvement over GAO.
+For the 4 hr deadline, OCTOPUS is aggressive in trying to
+solve all tasks till completion. Due to the bi-modal difﬁculty
+of the tasks, workers provide several conﬂicting ballots on
+harder tasks, which the TASKSELECTOR prefers to re-route
+for utility gain. The overall accuracy increases marginally
+over the 2 hour deadline.
+Qualitatively, workers respond as predicted – ﬂocking to
+the tasks when pay was set at 0.5 cent or more, and staying
+away at very low pay. Workers respond naturally to the price
+changing algorithm; dropping out immediately if the pay is
+suddenly lowered, and coming back if it is increased once
+again. No worker complained about the ﬂuctuating pay.
+Discussion
+In this work, we focused on experiments with OCTOPUS in
+a ﬁxed time deadline setting to compare with past work. Ex-
+tension to the popular ﬁxed budget setting (where P
+q Cq
+is constrained) is simple: (i) never synchronize θ so that its
+value in any state is simply the start value of θ (which is ﬁxed
+and known) minus the ballots received, making it a proxy for
+cost incurred so far; (ii) modify the COSTSETTER’s reward
+to give a −∞reward for total cost (now computable using
+θ) exceeding the budget. Another extension involves using a
+different formulation of the QUALITYMANAGER; any algo-
+rithm that deﬁnes an appropriate policy and from which we
+can compute θ and ¯ν is suitable.
+Conclusion
+We present OCTOPUS, one of the ﬁrst AI agents for a 3-way
+optimization of total cost, work quality and completion time
+in crowdsourcing. The agent combines three different sub-
+agents that control quality per task, select the best next task
+and set pay for the whole batch. A key technical contribution
+is the computation of aggregate statistics of the quality and
+completeness of the whole batch – this is used as the state
+for best setting the next pay.
+OCTOPUS outperforms state-of-the-art baselines in a va-
+riety of simulated and real world settings, demonstrating the
+superiority of our approach. We also showcase OCTOPUS’s
+real world applicability by deploying it directly on AMT. In
+the future, we hope to develop general purpose formulations
+
+of OCTOPUS as a plug-and-play architecture for practition-
+ers.

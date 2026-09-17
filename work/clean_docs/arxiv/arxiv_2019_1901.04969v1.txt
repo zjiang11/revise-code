@@ -1,0 +1,401 @@
+Low Precision Constant Parameter CNN on FPGA
+Hah, Thiam Khean; Liew, Yeong Tat; Jason Ong
+Intel PSG
+
+Abstract—We report FPGA implementation results of low
+precision CNN convolution layers optimized for sparse and
+constant parameters. We describe techniques that amortizes the
+cost of common factor multiplication and automatically leverage
+dense hand tuned LUT structures. We apply this method to
+corner case residual blocks of Resnet on a sparse Resnet50 model
+to assess achievable utilization and frequency and demonstrate
+an effective performance of 131 and 23 TOP/chip for the corner
+case blocks. The projected performance on a multichip persistent
+implementation of all Resnet50 convolution layers is 10k im/s/chip
+at batch size 2. This is 1.37x higher than V100 GPU upper bound
+at the same batch size after normalizing for sparsity.
+I. INTRODUCTION AND RELATED WORKS
+In recent years, Convolutional Neural Networks(CNN) have
+demonstrated great efﬁcacy on computer vision tasks such
+as classiﬁcation[1], localization[2], and SRGAN[3]. Together
+with Recurrent Neural Networks(RNN), it has motivated the
+development of custom silicon for Deep Learning(DL). For
+example, GPU Tensor Core[4], TPU[5] and Graphcore[6].
+There has also been work to optimize DL on programmable
+logic. Notably, Song Han et al.[7] proposed software-hardware
+co-design. While silicon implementations must customize for
+a range of DL applications, an FPGA can customize to a single
+DL application. This enables application speciﬁc customiza-
+tion of precision, sparsity and network structure. However,
+this is not the limit of FPGA customization. FPGAs can be
+further customized to a speciﬁc instance of a DL application
+by implementing post training parameters as constants. We
+call this a Compiled CNN or RNN.
+This paper reports the results of an early investigation into
+Compiled CNNs for sparse low precision models. We also
+automate the process of converting quantized caffemodels into
+an equivalent hardware design built using efﬁcient hand tuned
+Intel FPGA WYSIWYGS. In this early work, we implemen-
+tation only the predicted corner case blocks of Resnet50.
+II. COMPILED CNN IMPLEMENTATION
+A. Resnet50 Model Sparsity and Precision
+An advantage of Compiled CNNs is its ability to exploit
+ﬁne grained parameter sparsity without overhead. Multiply-
+Accumulates (MAC) associated with constant zeros are simply
+dropped. AMC[8] showed 80% sparse Resnet50 with no
+accuracy loss. We use an 80% sparse model from Movidius[9]
+to us as a proxy. We received a pre-quantized model obtained
+using a modiﬁed version of TRN[10] as our starting point.
+In version of TRN, each output channel has one independent
+scaling factor and 6 residual terms (equivalent to INT7) are
+used to obtain an accuracy loss of just 0.22% vs FP32.
+B. Selection of Resnet Layers for Implementation
+Table I shows that the key design parameters of conv3 x
+and conv4 x are bounded by those of conv2 x and conv5 x.
+The design corners are therefore represented by conv2 x and
+conv5 x. We focus our efforts on these 2 layers to as a way to
+quickly assess the potential of Low Precision Compiled CNNs.
+TABLE I
+KEY DESIGN PARAMETERS
+Layer
+conv2 x
+conv3 x
+conv4 x
+conv5 x
+Channel Count
+64/256
+128/512
+256/1024
+512/2048
+Channel Height/Width
+56x56
+28x28
+14x14
+7x7
+Parameter Count(k)
+69
+279
+1114
+4456
+Total MACs(M)
+218
+218
+218
+218
+Total MAC/Parameter
+3136
+784
+196
+49
+C. Top Level
+Fig. 1. Resnet Residual Block Implementation
+The basic unit of design is the Resnet Residual Block(Fig 1).
+We require that this ﬁts on a single chip to keep residual short-
+cut data on chip. The top level is divided into 2 modules. The
+Kernel implements the CNN Multiply-Accumulates(MAC).
+Everything else is part of the Non Kernel(NK). The beneﬁts
+of constant parameter optimization is found mostly in the
+Kernel and we focus our efforts there. The NK is, at present,
+modestly optimized. Where needed we ﬁll the GX280 with
+several slightly modiﬁed Residual Blocks to evaluate resource
+use, frequency and routability at high utilization.
+Compiling post training parameters into FPGAs yields a
+persistent network. Therefore, we expect a multichip im-
+plementation with suitable interchip links, like, Ethernet or
+PCIE. To minimize the number of chips needed, we use bit
+serial math in the Kernel. While bit serial operations are
+slower they are also smaller and consequently more numerous.
+In theory, bit serial math does not reduce performance per
+arXiv:1901.04969v1  [cs.DC]  11 Jan 2019
+
+Logic Element(LE). In practice, it is lower because typical
+implementations are unable to use the hard adders and carry
+chains built into modern FPGAs. We will present a solution
+to overcome inefﬁciency.
+D. Non Kernel Design
+The NK module includes everything that is not part of a
+single convolutional step. This includes buffers for intermedi-
+ate feature maps, data movement between Kernels and other
+operations such as bias add, activation functions, normalization
+and rounding. It also performs the partial result accumulation
+across convolutional steps for ﬁlter sizes greater than 1x1.
+We intend to automatically generate the NK RTL in the
+future but it is currently hand coded. We have also set
+aside resources for implementing the interchip Ethernet/PCIE
+channels but have not yet done so.
+1) Buffers: The Buffers are constructed using FPGA block
+RAMs as either (a) streaming FIFOs or (b) double buffers.
+Buffer type is selected based on layer dataﬂow, FPGA resource
+allocation and time division multiplexing (TDM) of the kernel
+operation. In all cases, interchip buffers are double buffers.
+The residual shortcut shown on top of the Fig 1 may have
+an additional buffer and 1x1 kernel if needed. The buffers at
+the input and output boundary of a Residual Block is shared
+with the prior and next Residual Block respectively if they are
+on the same chip. Otherwise, the buffers also serve as the chip
+level input and output buffer.
+2) Feeder: The feeder fetches parallel data stored in the
+Buffer and serializes it to feed the bit serial Kernel as well as
+the residual shortcuts. Deserialization is not needed because
+the bit serial Kernel generates a parallel output.
+3) Accumulator: The Accumulator block adds the partial
+sums across multiple convolutional steps and is not required
+for layers with 1x1 ﬁlters. When the ﬁnal sum is ready, it
+streams the sum to the Collector block.
+4) Collector: The collector performs miscellaneous opera-
+tions such as bias addition, scaling (normalization) and ReLU.
+The last collector within each Residual block also adds the
+shortcut data. The activations are also saturated and rounded
+to 8 bits here. The design uses as many bit as necessary at other
+stages to avoid rounding/saturation elsewhere and we make use
+of constant parameter and ReLU properties to minimize the
+number of bits needed at every stage. DSP blocks used for
+scaling are shared by multiple Output Feature Maps(OFM).
+This is possible because bit serial math requires multiple
+clocks per operation while DSPs require only one.
+E. Kernel Design Compilation and Flow
+We developed a tool to automatically convert the constant
+parameters of a single convolution layer stored in a caffemodel
+into the Kernel RTL optimized for Intel Stratix 10. The
+NK consumes the RTL as a blackbox and is unaffected by
+the changes in parameter values and retraining. The Kernel
+design shown in Fig 2 is composed of the module inputs and
+outputs (Xm and Yn), the Common Factor Mass Multiplication
+(CFMM) blocks, bit serial adder tree (Add Yn) and shift right
+accumulator (Shr Acc Yn).
+Fig. 2. Kernel implementation
+1) Common Factor Mass Multiplication (CFMM) Blocks:
+We reduce the cost of multiplication by amortizing it across
+multiple operations sharing the same Common Factor(CF). To
+enable this, we refactor the computation to take a set of inputs
+from an input feature map (IFM) and perform all computations
+for it in a single pass. This turns the inputs values into a CF.
+Fig 3 shows an example, where a single input value acts as
+the CF for 2304 multiplications (3x3 ﬁlter with 256 OFM).
+Fig. 3. CFMM Common Factor
+If the multiplier values are well distributed and numerous
+relative to the number of unique products, then every product
+is likely needed and the optimal CFMM design is trivial. The
+will show that the number of unique multiplications required
+for an INT7 parameter is 32 for Compiled CNNs. This is small
+relative to the typical number of CF multiplications in CNNs
+even at 80% sparsity. We optimize the design for this case
+and allow the vendor tools to remove unused output products
+during synthesis, should they exist.
+To minimize the number of unique products to compute,
+we move the sign bit of the parameter into the adder tree.
+This equivalence classes positive and negative values and
+reduces the number of unique INT7 products to 64. Also, even
+products can be produced with a shift left of an odd product
+and constant shift lefts are free on FPGAs (costs 1 ﬂop for bit
+serial math). Thus a INT7 CFMM block only has 32 unique
+products and multiplication by 0 and 1 is free. Now note that,
+(a) when generating all products each incremental product can
+be generated using one add/sub and (b) the cost of a bit serial
+adder is about 1 ALM. Therefore, the ﬁrst order cost of a
+CFMM block only about 30 ALMs plus ﬂops. This renders
+the ALM cost of multiplication trivial. However, each product
+must still be routed to the an adder tree. This makes FPGA
+routablity a fundamental limiter on the efﬁciency of CFMM
+based multiplication.
+
+2) Adder Tree and Shift Right Accumulator: Each CFMM
+block computes a product for all OFMs for one IFM. However,
+each OFM output is a sum of the products from multiple IFMs.
+Therefore, the design requires one CFMM per IFM and one
+adder tree for each OFM to sum the products from all CFMM
+blocks. A simple example is shown in Fig 4.
+Fig. 4. OFM Adder Trees add selected constant products from CFMM Blocks
+With cheap CFMM multipliers, adder trees become the
+main consumer of ALMs. However, bit serial math is poorly
+supported by current FPGA architecture and tools. We ﬁnd
+that vendor tools implement 3:2 reduction and bit serial math
+at half the efﬁciency of parallel adds. To resolve this, we
+introduce (a) a hand tuned WYSIWYG design for Intel Stratix
+10 with (b) carry hiding. It performs a 6:3 reduction in one
+ALM stage and asymptotically uses only 3 ALMs. This is
+double the efﬁciency of vendor tools and brings the efﬁciency
+of bit serial adders back inline with parallel adders. Fig 5
+describes a 5 ALM variant of this structure for adding 12
+bits. Several variants of this design were built as hand coded
+WYSIWYG modules which are automatically instantiated
+by tools converting caffemodels to RTL. This leverages the
+efﬁciency of hand tuned designs while hiding its complexity.
+The largest variants uses 10 ALMs and add up to 27
+bits. While denser variants uses of fewer ALMs it may
+negatively impact routability and frequency. To determine the
+optimal variant, we sweep the variants with parameters such
+as pipelining and accumulator reset strategy. We ﬁnd that the
+variant in Fig 5 with one pipeline stage for every 2nd adder
+stage best meet our frequency and routability requirements.
+Also, the adder tree adds a single bit in a bit serial value ev-
+ery clock. To get the ﬁnal sum, a shift right accumulator(SRA)
+is added to the end of the adder tree. The SRA simply shifts
+right the sum of bit N and accumulates it with the sum for bit
+N+1. For efﬁciency, the adder trees perform 1’s complement
+math. A constant modiﬁer in the NK module’s bias adder
+converts the ﬁnal sum into 2’s complement for free.
+3) Multi Instance Kernels and Folding: Compiled CNNs
+requires that every parameter be hardened into the FPGA.
+Table I shows that the amount of compute per parameter differ
+by up to 64x between conv2 x and conv5 x. To maintain the
+same throughput at every layer we may need to fold (TDM)
+the kernels or use multiple instances as appropriate.
+Kernel folding is implemented using muxes. As a result, the
+almost free CFMM multiplication now requires a mux each.
+In multi instance kernels, each instance corresponds to one
+convolutional step. For efﬁciency, the multi instance Kernels
+directly sum the partial products across multiple convolutional
+steps. Fig 6 illustrates this for a 4 instance kernel with a 3x3
+ﬁlter summed into a 3x6 output slice.
+Fig. 5. 6:3 Reduction with Carry Hiding.
+This contains 2 6:3 reduction blocks(blue and yellow) and a 3 bit adder(red). Each 6:3
+reduction block adds 6 bits(A to F). E+F are simple adds. The addition of A,B,C,D
+results in 2 Carry bits (encodes the value 4) and 1 Sum bit. The half ALM to the left
+of E+F computes the 2 Carry bits and adds them. The half ALM to the right computes
+0.5*(Sum bit) and adds 2 of them to yield the Sum bit. The 3 bit adder adds the outputs
+from the 2 6:3 reduction blocks into a 4 bit sum. Subsequent stages in the adder tree uses
+parallel adders. The red lines indicate hidden carries. Here, a single half ALM performs
+2 orthogonal functions. It (a) computes the Sum bit of A+B+C+D and transmits it on
+the ALM Carry Out and (b) transmits the carry in from the previous adder on the ALM
+Sum Out. This hides the carry of a previous adder in the shadow of another computation,
+making it free. Quartus implements this verbatim and reports timing loops on false paths.
+Fig. 6. Multi-instance Kernel with 4 3x3 ﬁlters summed into a 3x6 output
+III. IMPLEMENTATION TARGETS AND RESULTS
+1) Residual Block on GX280: We implement conv2 2 and
+conv5 2 using the techniques described above. As noted, we
+require that Residual Blocks be fully contained within one
+chip. Initial experiments show that conv5 2 must be folded
+by 4x to ﬁt on GX280. Also, 8 instances of conv2 2 kernels
+at 2x the frequency of the conv5 2 layer is required to match
+their inference throughput. This is implemented as 2 conv2 2
+Kernel modules with 4 instances arranged as in Fig 6.
+The design targets and implementation results are sum-
+marized in Table II. To simulate high chip utilization we
+duplicated the conv2 2 Kernels 5 times. This is not needed
+for conv5 2. However, conv5 2 Kernels contains duplicates
+of each CFMM block to alleviate routing congestion. The
+effective TOP/Chip reports the number of effective TOPs
+which includes the beneﬁts of sparsity.
+2) Projections and Comparisons: TOP/chip of GX280 is
+an inaccurate measure of the fundamental FPGA capability.
+Compiled CNNs are DSP light and use ¡20% of the DSPs on
+DSP heavy GX280. At the same performance density, the DSP
+light GX550 would yield 131 and 23 TOP/chip for conv2 2
+and conv5 2 respectively.
+
+TABLE II
+DESIGN TARGETS AND IMPLEMENTATION RESULTS
+Target
+Actual
+Layer
+conv2
+conv5
+conv2
+conv5
+Instances/Kernel
+4
+1
+4
+1
+Folding
+1
+4
+1
+4
+Frequency(MHz)
+400
+200
+353
+156
+Chip Utilization
+76%
+67%
+ALM/Kernel(k)
+127
+620
+DSP/Kernel
+96
+256
+M20K/Kernel
+1852
+1100
+CFMM Dupe
+1
+1
+1
+2 or 4
+Effective MOPs/ALM
+80
+16
+70
+12
+GX280 Effective TOPs/Chip
+74
+15
+66
+12
+GX550 Effective TOPs/Chip*
+149
+30
+131
+23
+* : Projection
+Comparing the largest monolithic FPGA against the largest
+monolithic GPU, we see that the conv2 2 performance of
+131 TOP/chip compares favorably with NVidia V100[4] with
+a peak performance of 125 TOP/chip . Poor conv5 2 per-
+formance is the result of Kernel folding. An FPGA with
+sufﬁciently numerous ALMs would avoid the need for folding
+and result in higher TOP/chip which would likely be closer
+to those seen on conv2 2. Additionally, it should be noted
+that the use of Compiled CNNs is not all or nothing. A
+CNN partitioned into multiple chips can be implemented partly
+as Compiled CNN and partly through other means. Where
+practical, a hybrid solution may yield the optimal solution.
+Finally, we use the demonstrated implementation results to
+estimate the resource requirements for the remaining convo-
+lution layers. This was used to create a reasonable multichip
+partitioning of Resnet50(Fig 7). It is throughput balanced and
+requires at most 75Gbps links. At frequencies demonstrated
+its throughput is
+53061 image/second at batch 2. This
+corresponds to 5896 and 10612 im/s/chip on GX280 and
+GX550 respectively. The throughput of a V100 in a DGX-1
+system[11] at batch 2 is 1544 im/s/chip. If V100 can extract a
+5x efﬁciency from the 80% unstructured sparsity in the model,
+its upper bound performance would be 7720 im/s/chip. Our
+implementation is 1.37x faster than that bound.
+Fig. 7. Multi Chip Partitioning of Resnet50 (Projection)
+At submission time, the full system performance is an
+estimate and has not been validated. Additionally, it does not
+include the FC layer which we intend to ofﬂoad to the CPU.
+However, we feel that the optimistic V100 assumptions more
+than make up for it and the ability of Compiled CNNs to
+naturally exploit unstructured sparsity without overhead is a
+fundamental beneﬁt of this approach. Similarly, the ability
+to use INT7 with similar accuracy to INT8 and FP32 is a
+legitimate strength of FPGAs in general.
+IV. FUTURE WORK
+Future work may include full network implementation plus
+power and latency measurements which should account for
+inter chip link power and latency. We note that the low
+clock frequency is a positive for power. A more complete
+comparison of our work against sparse persistent GPU and
+FPGA implementations would also be useful. Finally, addi-
+tional improvements to Compiled CNNs performance through
+tools, IP design or FPGA architecture may be explored.
+V. CONCLUSION
+We proposed the use of Compiled CNNs to improve FPGA
+efﬁciency and exploit parameter sparsity during CNN inferenc-
+ing. We introduced techniques to amortize multiplication cost
+and automated tools that exploit the efﬁciency of hand tuned
+designs. We then demonstrated these techniques on sample
+corner case residual blocks of Resnet50 and use the results to
+estimate performance for all Resnet50 convolution layers. The
+projected performance on GX550 is 10612 im/s/chip which is
+1.37x higher than the V100 upper bound at the same batch
+size after normalizing for sparsity.
+ACKNOWLEDGMENT
+Authors of [9] and [10] for sparsifying and quantizing the
+Resnet50 model respectively.

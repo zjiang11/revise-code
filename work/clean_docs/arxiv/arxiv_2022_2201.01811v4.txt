@@ -1,0 +1,1545 @@
+CausalSim: A Causal Framework for Unbiased Trace-Driven Simulation
+Abdullah Alomar∗
+MIT
+
+Pouya Hamadanian∗
+MIT
+
+Arash Nasr-Esfahany∗
+MIT
+
+Anish Agarwal
+MIT
+
+Mohammad Alizadeh
+MIT
+
+Devavrat Shah
+MIT
+
+Abstract
+We present CausalSim, a causal framework for unbiased
+trace-driven simulation. Current trace-driven simulators
+assume that the interventions being simulated (e.g., a new
+algorithm) would not affect the validity of the traces. However,
+real-world traces are often biased by the choices algorithms
+make during trace collection, and hence replaying traces
+under an intervention may lead to incorrect results. CausalSim
+addresses this challenge by learning a causal model of the
+system dynamics and latent factors capturing the underlying
+system conditions during trace collection. It learns these
+models using an initial randomized control trial (RCT) under a
+ﬁxed set of algorithms, and then applies them to remove biases
+from trace data when simulating new algorithms.
+Key to CausalSim is mapping unbiased trace-driven simu-
+lation to a tensor completion problem with extremely sparse
+observations. By exploiting a basic distributional invariance
+property present in RCT data, CausalSim enables a novel ten-
+sor completion method despite the sparsity of observations.
+Our extensive evaluation of CausalSim on both real and syn-
+thetic datasets, including more than ten months of real data
+from the Puffer video streaming system shows it improves
+simulation accuracy, reducing errors by 53% and 61% on av-
+erage compared to expert-designed and supervised learning
+baselines. Moreover, CausalSim provides markedly different
+insightsaboutABRalgorithmscomparedtothebiasedbaseline
+simulator, which we validate with a real deployment.
+1
+Introduction
+Causa Latet Vis Est Notissima – The cause is hidden, but the
+result is known. (Ovid: Metamorphoses IV, 287)
+Trace-driven simulation is a widely used method for
+evaluating new ideas in systems. In contrast to full-system
+simulation (e.g.,NS3 [31]),which requires detailed knowledge
+of system characteristics (e.g., topology, trafﬁc patterns,
+hardware details, etc.), trace-driven simulation does not
+model all components of a system. Instead, it focuses on
+simulating one (or a few) components of interest, where we
+wish to experiment with an intervention, e.g., a new design,
+*Equal contribution
+algorithm, or architectural choice. To account for the effect of
+the remaining components that are not simulated, we collect
+a trace capturing their behavior and replay it while simulating
+the component of interest with the proposed intervention.
+The key assumption here is that the interventions would
+not affect the trace being replayed, which we refer to as the
+exogenous trace assumption. If this assumption does not
+hold, replaying the trace is invalid and could lead to incorrect
+simulation results. This problem has been referred to as bias
+in trace-driven (or data-driven) simulation [15,37].
+It is difﬁcult to guarantee the exogenous trace assumption
+in traces collected from real-world systems. Consider, for
+example, trace-driven simulation of adaptive bitrate (ABR)
+algorithms [35, 50, 63, 75]. It is common to use network
+throughput traces from real video streaming sessions on
+Internet paths [38, 75]. However, the throughput achieved
+when the player downloads a video chunk is caused by certain
+latent properties of the network path (e.g., the underlying
+bottleneck capacity, the number and type of competing
+ﬂows, etc.), as well as the particular choices made by the
+ABR algorithm (the bitrate chosen for each chunk). In other
+words, the trace data reﬂects the combined effect of these two
+causes and is biased by the ABR algorithms used during trace
+collection. To simulate a new algorithm, we need to tease apart
+the effect of the two causes, and predict how the trace would
+have changed under the decisions of the new algorithm.
+We present CausalSim, a causal framework for unbiased
+trace-driven simulation. CausalSim relaxes the exogenous
+trace assumption by explicitly modeling the fact that
+interventions can affect trace data. Using traces collected
+from a randomized control trial (RCT) under a ﬁxed set
+of algorithms, it infers both the latent factors capturing the
+underlying conditions of the system and a causal model of its
+dynamics, including the unknown relationship between latents,
+algorithm decisions, and observed trace data. To simulate a
+new algorithm, CausalSim ﬁrst estimates the latent factors at
+every time step of each trace. Then, it uses the estimated latent
+factors to predict the alternate evolution of the trace, actions,
+and observed variables of the component of interest, under the
+same latent conditions that were present when the trace was
+collected. This two-step process allows CausalSim to remove
+the bias in the trace data when simulating new algorithms.
+arXiv:2201.01811v4  [cs.LG]  5 May 2023
+
+CausalSim provides two beneﬁts: (i) it improves the accu-
+racy of trace-driven simulation when the intervention could af-
+fect (in possibly subtle ways) the trace data; (ii) it enables trace-
+driven simulation of systems where deﬁning an exogenous
+trace is not possible and therefore standard trace-driven simu-
+lation is not applicable. We evaluate both settings in this paper,
+by simulating ABR and heterogeneous server load balancing
+algorithms as examples for cases (i) and (ii) respectively.
+CausalSim requires training data from an RCT. Large
+network operators have increasingly invested in RCT infras-
+tructure to evaluate new ideas, but due to their low throughput
+and risk of disruptions or SLA violations [42], they can afford
+to evaluate only a fraction of proposed ideas in RCTs. Causal-
+Sim greatly extends the utility of RCT data by learning a model
+that can simulate a wide range of algorithms using traces from
+a ﬁxed set of algorithms. Periodically or whenever an operator
+believes the underlying system characteristics have changed
+signiﬁcantly, they can collect fresh data using an RCT (again,
+with the same ﬁxed set of algorithms) to retrain CausalSim.
+CausalSim’s design begins with the observation that
+unbiased trace-driven simulation can be viewed as a matrix (or
+tensor) completion problem [9, 14]. Consider a matrix M of
+traces (it is a tensor if traces are higher dimensional), with rows
+corresponding to possible actions and columns corresponding
+to different time steps in the trace data. For each column, the
+entry for one action is “revealed”; all other entries are missing.
+Our task can be viewed as recovering the missing entries.
+A signiﬁcant body of work has shown that it is possible to
+recover a matrix from sparse observations under certain as-
+sumptions about the matrix and the pattern of missing data.
+Roughly speaking, the typical assumptions that make recovery
+feasible are thatthe matrixhas lowrank,the entries revealedare
+chosen at random, and that enough entries are revealed. Low-
+rank structure is prevalent in many real-world problems [69]
+and has also been observed in network measurement data [16,
+43, 44, 60]. But unfortunately the other two assumptions do
+not hold in our problem. As we detail in §4.3, one observed
+entry per column is below the information-theoretic bound for
+low-rank matrix completion (even for rank r=1). Moreover,
+not only are the entries revealed in our problem not random,
+they depend on other entries of the matrix, since the actions
+are being taken by algorithms based on observed variables.
+To overcome these challenges, CausalSim exploits two key
+insights. First, it assumes a causal model (§3) where the latent
+factors are exogenous and are not affected by the interventions
+we want to simulate in the component of interest. This exoge-
+nous latent assumption relaxes (and is therefore implied by)
+the exogenous trace assumption in standard trace-driven simu-
+lation. For example, in ABR, it says that underlying factors like
+the bottleneck link speed on a network path are not affected by
+a user’s ABR algorithm, whereas ABR decisions can impact
+the trace that user observes (i.e., the achieved throughput).
+Second, CausalSim uses a basic property of trace data
+collected via an RCT. Since the assignment of an algorithm
+to a trace is completely random in an RCT, the distribution of
+latent factors should be the same for the traces obtained using
+different algorithms, i.e., the latent distribution is invariant
+to the algorithm. We provide conditions on the RCT data
+(e.g., in terms of the number and diversity of algorithms) that
+guarantee recoverability of the low-rank matrix using this
+invariance property (§4.2), and we operationalize this idea in
+a practical learning method that exploits the invariance using
+an adversarial neural network training technique (§5).
+We evaluate CausalSim on two use cases, ABR and server
+loadbalancing,withbothreal-worldandsyntheticdatasets,and
+further verify CausalSim’s predictions with a test in the wild on
+the Puffer [71] video streaming testbed. Our main ﬁndings are:
+1. We use CausalSim to debug and improve an ABR
+algorithm, BOLA1 [53,63]. In a ten month experiment on
+Puffer [71], BOLA1 exhibited high stalling compared to
+BBA [35], with slightly better quality. Using CausalSim,
+we tune BOLA1’s parameters via Bayesian Optimization
+and deploy our improved version on Puffer. We show that
+it improves the stall rate of this well-known algorithm by
+2.6×, achieving 0.7× the stall rate of BBA with similar
+perceptual quality. The expert-designed baseline simu-
+lator that ignores bias predicts the exact opposite: that
+the new variant should stall 1.34× the stall rate of BBA.
+This case study shows that removing bias is crucial to
+draw accurate conclusions from trace-driven simulation.
+2. Evaluation of CausalSim on more than ten months of real
+data from Puffer shows that CausalSim’s error in stall
+rate prediction is bounded to 28%, while expert-designed
+and standard supervised learning baselines have errors in
+the range of 49–68% and 29–187% respectively. Similar
+observations are also made for perceptual quality metrics
+and buffer occupancy levels.
+3. CausalSim opens up new avenues to apply trace-driven
+simulation to systems where the exogenous trace
+assumption is invalid. Using a synthetic environment
+modeling a heterogeneous server load balancing problem,
+we show how CausalSim reduces average simulation
+error by 5.1×, a stark improvement compared to a
+baseline simulator with a median error of 124.3%.
+This work does not raise any ethical issues. Our code is
+available at https://github.com/CausalSim/Unbiased-Trace-
+Driven-Simulation.
+2
+Motivation
+2.1
+Bias in Trace-Driven Simulation
+Trace-driven simulation is a widely used technique to design
+and evaluate systems. Unlike full-system simulation, it focuses
+on simulating one (or a few) components of the system while
+capturing the effect of remaining components by replaying
+a trace. For example, to simulate new ABR algorithms, it is
+common to replay network throughput traces from real Internet
+
+(a) Trace-driven simulation
+(b) CausalSim
+Figure 1: CausalSim relaxes the exogenous trace assumption
+in standard trace-driven simulation.1
+paths in a simulator modeling only the video player/server.
+As we alluded to earlier, the key assumption here is that the
+interventions being simulated would not affect the trace being
+replayed; otherwise, replaying the trace would be invalid. We
+refer to this as the exogenous trace assumption, and it is central
+to standard trace-driven simulation. Figure 1a is a visual
+depiction of the exogenous trace assumption. In the ﬁgure, a
+represents the intervention we want to simulate; for example,
+the actions taken by a new algorithm. o is the observed state
+of the component being simulated. u represents the latent state
+of the rest of the system, which we do not observe or simulate.
+Finally, m is the trace, which captures the behavior of the other
+components.2 The existence of each edge represents a causal
+effect. For example, the trace m and intervention a both affect
+o. Note the absence of the edge from a to m, which implies
+that the intervention cannot affect the trace (the exogenous
+trace assumption).
+The simulator designer must deﬁne the trace carefully to
+meet this assumption. But what happens if it does not hold, i.e.,
+there exists an edge from a to m (as in Figure 1b)? Ignoring
+the violation of exogenous trace assumption leads to biased
+simulation outcomes, as we will see next.
+2.2
+An Example Using Real-world Traces
+In this section, we use more than ten months of real-world
+data from Puffer [71], a recently deployed system for
+experimenting with video streaming protocols, to illustrate
+the issue of bias in trace-driven simulation.
+Puffer collects data from a continual Randomized Control
+Trial (RCT) that tests several Adaptive Bit Rate (ABR)
+1In general, a and u can be correlated. For example, they can both depend
+on prior latent conditions of the system. In ABR, for instance, recent latent
+path conditions are correlated with current path conditions (u), and also affect
+the action taken by the ABR algorithm (a). Correlation of a and u, however,
+does not imply a causal relationship between them. In particular, our model
+assumes exogenous latents, i.e. a does not affect u.
+2Variables in Fig. 1a can be multidimensional and vary with time.
+algorithms. In the period of interest (July 27, 2020 – June 2,
+2021), the tested algorithms include Buffer-Based Algorithm
+(BBA) [35], two versions of BOLA-BASIC (henceforth
+called BOLA) [63]3, and two versions of an algorithm called
+Fugu developed by the Puffer authors. The dataset includes
+more than 56 million chunk downloads from more than 230
+thousand streaming sessions, totaling 3.5 years of streamed
+videos. For each streaming session, it provides logs of the
+chosen chunk sizes, available chunk sizes, achieved chunk
+download throughputs, and playback buffer levels.4
+Consider a typical trace-driven simulation scenario, where
+we wish to simulate a new ABR algorithm using traces from
+previous video streaming sessions. We deﬁne such a task on
+the Puffer data as follows. We let one of the algorithms, say
+BBA, be the algorithm that we wish to simulate. We leave
+out the data for this algorithm and ask whether it is possible
+to predict its performance using the other algorithms’ traces.
+In evaluating a new ABR algorithm, we may be interested in
+various performance measurements, e.g. buffer occupancy,
+rebuffering rate, chosen bitrates, etc. Here, we focus on
+predicting the behavior of playback buffer occupancy, which is
+one of the key indicators of an ABR algorithm’s behavior [35].
+The goal of trace-driven simulation is to predict the
+trajectory of the system (e.g., buffer, bitrates, etc.) for one
+algorithm in the same underlying conditions that were present
+when a trace was collected using a different algorithm. When
+simulating algorithm B based on a trace collected using
+algorithm A, we will refer to A as the “source” algorithm and
+to B as the “target” algorithm.
+It is generally not possible to evaluate the accuracy of indi-
+vidual simulated trajectories using real-world data, because we
+do not have ground truth trajectories for the target algorithm un-
+der the same exact network conditions that were present when
+running the source algorithm. However, since the Puffer data
+was obtained using an RCT, we can evaluate predictions about
+distributional properties of the target algorithm, such as the
+distribution of the buffer occupancy achieved by the algorithm
+over the population of network paths present in the RCT.
+To summarize, our task is: predict the distribution of the
+buffer occupancy for the users assigned to BBA (the target
+algorithm) in the Puffer dataset, using only the data from the
+other (source) algorithms.
+2.2.1
+Simulation via Expert Modeling (ExpertSim)
+As our ﬁrst strawman, we build a simple trace-driven simulator
+(ExpertSim) using our knowledge of how an ABR system
+works. ExpertSim models the playback buffer dynamics for
+each step, where a step corresponds to one ABR decision and
+3BOLA1 and BOLA2 are variations on BOLA adjusted to target the
+SSIM quality metric instead of bitrate [53]. They pursue different objective
+functions and use different principles for hyperparameter adjustment.
+4We use ‘slow stream’ logs (by Puffer’s deﬁnition, streams with TCP
+delivery rates below 6Mbps) available on the Puffer website [1].
+
+0
+5
+10
+15
+10
+30
+50
+70
+Buffer Occupancy (seconds)
+CDF (%)
+CausalSim
+ExpertSim
+SLSim
+BBA (target)
+BOLA2 (source)
+(a)
+1
+2
+3
+4
+5
+10
+30
+50
+70
+Observed Throughput (Mbps)
+CDF (%)
+BBA
+BOLA2
+(b)
+Figure 2: (a) CausalSim is accurate in predicting buffer
+level distribution of BBA users, while baseline simulators’
+predictions are similar to BOLA2 users. (b) Distribution of
+achieved throughput is different in BBA and BOLA2 users.
+the download of a single video chunk. Let ˆct be the throughput
+achievedinstept (forthetth chunk)ofaparticularvideostream-
+ing session using, say, the BOLA2 algorithm. To simulate
+BBA for the same user, ExpertSim assumes that the user would
+achieve the same throughput ˆct in each step under the BBA al-
+gorithm as well. In other words, it assumes that ABR decisions
+do not affect the observed network throughput (the exogenous
+trace assumption). Under this assumption, ExpertSim models
+the evolution of the video playback buffer as follows. Let bt be
+the buffer level at the beginning of step t (before the download
+of chunk t), rt be the bitrate chosen in step t, and st be the size
+of the tth chunk implied by the chosen bitrate. Then the buffer
+at the end of step t is derived as: bt+1 =max(0,bt −st/ˆct)+T,
+where T is the chunk duration.5 Although simple, the
+assumption that throughput is an exogenous property of a
+network path is common in modelling ABR protocols. For
+example, both FastMPC [75] and FESTIVE [38] assume that
+the observed throughput does not depend on the chosen bitrate.
+Figure 2a shows the true distribution of buffer level for
+BOLA2 and BBA users in the Puffer dataset (the two dashed
+lines), as well as the distribution predicted by running BBA
+on the traces collected from BOLA2 users using ExpertSim
+(solid blue line). The predictions are inaccurate: the buffer
+distribution generated by ExpertSim is more similar to the
+buffer distribution of BOLA2 users (the source algorithm) than
+the buffer distribution of BBA users (the target algorithm).
+5The complete buffer dynamic equation is slightly more complex to handle
+cases with full buffers. Refer to §C.1 in the appendix for further clariﬁcation.
+2.2.2
+Simulation via Supervised Learning (SLSim)
+Perhaps the simple model of buffer dynamics in ExpertSim
+does notaccurately reﬂectthe actualsystem behavior. As a next
+attempt,we turn to machine learning and try to learn the system
+dynamics from data. Speciﬁcally, we use supervised learning
+to train a Neural Network (NN) that models the step-wise
+dynamics of the system. This fully connected NN includes 2
+hidden layers, each with 128 ReLU activated neurons. For each
+timestep t, the NN takes as input the buffer level before down-
+loading the tth chunk bt, the achieved throughput ˆct for chunk
+t, and the chunk size st (which depends on the birate chosen by
+ABR). The NN outputs the download time of thetth chunk, and
+the resulting buffer level bt+1. We train the NN to minimize the
+prediction error on our dataset. To avoid information leaking,
+we exclude the logs for BBA from the training data.
+Figure 2a shows the predicted buffer level distribution via
+this approach (SLSim) for BBA. As with ExpertSim, we use
+the traces collected from BOLA2 users as the source algorithm.
+The results are similar to ExpertSim; once again, the predicted
+buffer distribution is closer to that of BOLA2 than BBA.
+2.2.3
+What Went Wrong?
+To understand the limitations of ExpertSim and SLSim, we
+plot the distribution of achieved per-chunk throughput forusers
+assigned to BOLA2 and BBA in Figure 2b. Since algorithm
+selection is completely random, we would expect inherent net-
+work path properties such as bottleneck link capacity to have
+the same distribution for users assigned to different ABR algo-
+rithms. However, such an invariance should not be expected for
+achieved throughput, because even on the same path different
+ABR algorithms could achieve different throughput. For exam-
+ple, since congestion control protocols take time to discover
+available bandwidth (e.g., in slow start) or converge to their
+fair share rate when competing against other ﬂows, an ABR
+algorithm that tends to choose lower bitrates (and hence down-
+load less data per chunk) may achieve less throughput than an
+ABR algorithm that picks higher bitrates [34,64]. We can see
+this behavior in the Puffer dataset. The achieved throughput
+for BOLA2 and BBA is clearly different in Figure 2b.
+This conﬁrms that ABR algorithms cause a bias in the mea-
+sured throughput traces, and the exogenous trace property does
+not hold. To perform accurate trace-driven simulation, we need
+to account for this bias when simulating new ABR algorithms.
+2.3
+Causal Inference to the Rescue!
+If the traces were the underlying network capacity when each
+chunk was downloaded (rather than the achieved throughput),
+the exogenous trace assumption would hold and our problem
+would be simple. First, we would learn the relationship
+between network capacity and achieved throughput for
+different ABR actions using our data. Then, to simulate BBA
+for a given trace, we would start with the network capacity
+
+at each step of the trace and predict the achieved throughput
+taking into account the bitrate chosen by BBA in that step.
+This would then allow us to predict how the buffer evolves.
+This works because unlike achieved throughput, underlying
+capacity is an exogenous property of a network path and is
+not affected by the ABR actions.
+However, underlying network capacity is a latent quantity
+— we do not observe it in our traces. The key challenge is
+therefore to infer such latent quantities from observational
+data. Concretely, in our running example, we wish to estimate
+the latent factors like network capacity in each step of a trace,
+using observations such as the bitrate, the chunk size, the
+achieved throughput, etc.6
+Inferring such latent confounders and using them for
+counterfactual prediction is the core issue in the ﬁeld of causal
+inference [57, 58]. In this paper, we develop CausalSim, a
+causalframeworkforunbiasedtrace-driven simulation. Causal-
+Sim relaxes the exogenous trace assumption in trace-driven
+simulation. It explicitly models the fact that interventions can
+affect trace data (the edge from a to m in Figure 1b), and infers
+both the latent factors and a causal model of the system dynam-
+ics. This allows CausalSim to correct for the bias in trace data
+when simulating an intervention. As an illustration, Figure 2a
+shows the predicted buffer occupancy distribution when sim-
+ulating BBA on the traces of users assigned to BOLA2, using
+CausalSim. CausalSim matches the ground-truth distribution
+for BBA much more accurately than the alternatives.
+3
+Model and Problem Statement
+3.1
+Causal Model
+Consider the following discrete-time dynamical model7
+corresponding to Figure 1b:
+mt =Ftrace(at, ut),
+(1)
+ot+1 =Fsystem(ot, mt, at).
+(2)
+Here, t denotes the time index, mt is the trace, at is the
+intervention, ut is the latent factor, and ot is the observed state
+of the component of interest. The function Ftrace models the
+effect of interventions on the trace (which traditional methods
+ignore), and Fsystem models the dynamics of the component
+of interest. When the intervention changes an algorithm in the
+component of interest, at can be viewed as the action taken
+by that algorithm at time t.
+We assume that interventions do not affect the internal state
+of the rest of the system, i.e., that the latent factors are exoge-
+nous. This assumption is implicit in the dynamical system
+6For simplicity, we only mention network capacity here, but other latent
+path conditions like the number of competing ﬂows could also affect achieved
+throughput and the same reasoning applies to them.
+7This model is similar to a special type of Partially Observable Markovian
+Decision Processes (POMDPs) in which the unobserved part of the state is
+exogenous [51].
+equations, and also visualized in Figure 1b by the absence
+of the edge from a to u. Note that this is a strict relaxation
+of the exogenous trace assumption in standard trace-driven
+simulation. There, the trace itself is assumed to be unaffected
+by intervention, which also implies exogenous latent factors.
+In our running ABR example, we want to simulate the video
+player and server (components of interest) without precisely
+modeling the entire network path (the rest of the system). Each
+time step t corresponds to the download of a new chunk, and ut
+represents latent network conditions during that transmission,
+e.g., bottleneck link speed, number of ﬂows sharing the same
+network path, type of congestion control used by competing
+ﬂows, etc. At each time step, the ABR algorithm chooses a
+bitrate at, which together with ut generate mt, the achieved
+throughput when downloading a chunk. Typically, latent
+network conditions are exogenous factors, beyond the impact
+of a particular user’s actions. For instance, the bottleneck link
+speed and type of congestion control that competing ﬂows use,
+are not affected by the actions of the ABR algorithm.
+Note that the achieved throughput depends on the ABR
+action as well as the latent network conditions. Equation (1)
+captures this relationship and is the source of the bias induced
+by the ABR algorithm, which we demonstrated in §2.2.3.
+When is the model applicable? The causal model applies in
+any trace-driven simulation setting where the trace may be
+impacted by interventions. Examples include:
+• Job scheduling, where we wish to simulate a workload’s
+performance under different types of machines. The trace
+is the job performance (e.g., runtime), interventions are
+the scheduling decisions, and latent factors are intrinsic
+properties of each job (e.g., compute intensity) or latent
+aspects of the machines such as collocated interfering
+workloads.
+• Network simulation, where we wish to simulate how
+some aspect of network’s design (e.g., congestion control,
+packet scheduling, trafﬁc engineering, etc.) impacts
+application performance. The trace is an application’s
+trafﬁc pattern, the intervention is the network design,
+and latent factors are the internals of the application that
+dictate its trafﬁc demand.
+In some cases, like our running ABR example, the exoge-
+nous trace assumption may not hold exactly but still be
+roughly valid.8 Here, CausalSim removes bias and improves
+simulation accuracy. But in certain problems, ignoring the
+effect of interventions is meaningless. For example, consider
+scheduling or load balancing on heterogeneous machines
+(e.g., with different hardware capabilities). Given a trace
+of job performance on speciﬁc machines, it isn’t possible
+to merely replay the trace for new machine assignments. In
+8Even in these cases, these subtly biased simulations can produce entirely
+incorrect conclusions (§6.2).
+
+such problems, CausalSim enables trace-driven simulation
+by explicitly modeling the effect of interventions on the trace.
+When is the model invalid? Our causal model relaxes the
+exogenous trace assumption but still requires exogenous
+latents, i.e. that the latents are unaffected by the intervention.
+This won’t hold in all systems. For example, we cannot model
+the effect of network routing policies (e.g., BGP) on observed
+video streaming throughput in this way, since changing the
+path would change the latent network conditions that impact
+a video stream. Another example is simulating the effect
+of a CPU feature like the branch predictor on instruction
+throughput. Here, we can’t model the state of the instruction/-
+data caches as an exogenous latent factor, since changing the
+branch predictor can change their internal state signiﬁcantly.
+Overall, a simulation designer needs to reason about the
+causal structure of observed and latent quantities to deﬁne
+the appropriate model in the form of Equations (1) and (2).
+However, the designer does not need to precisely specify the
+meaning of the latents or the dynamics (the functions Ftrace
+and Fsystem). CausalSim learns both from observational data.
+3.2
+Problem Formulation
+We are given N trajectories, collected using K speciﬁc
+policies.9 Let Hi be the length of trajectory i ∈{1, ... , N}.
+For trajectory i, we observe (mi
+t,oi
+t,ai
+t)Hi
+t=1. We assume that
+trajectories are generated using an RCT, i.e., that each
+trajectory is assigned to one of the K policies at random.
+Our goal is to estimate the observations under an arbitrary
+given intervention (e.g., a new algorithm) for each of the N
+trajectories. Let {ui
+t}Hi
+t=1 be the exogenous latent factors for
+trajectory i. Formally, for any given trajectory i and given a
+sequence of actions { ˜ai
+t}Hi
+t=1, starting with observation oi
+1 and
+under the same sequence of latent factors {ui
+t}Hi
+t=1, we wish
+to estimate the counterfactual observations { ˜oi
+t}Hi
+t=1 that are
+consistent with Equations (1) and (2).
+This is a counterfactual estimation problem since it requires
+(i) estimating latent {ui
+t}Hi
+t=1 factors for observed trajectory i
+and using them along with the counterfactual actions { ˜ai
+t}Hi
+t=1
+to predict the counterfactual trace { ˜mi
+t}Hi
+t=1 consistent with
+Equation (1), and then (ii) using the counterfactual trace
+and actions to predict counterfactual observations { ˜oi
+t}Hi
+t=1
+consistent with Equation (2).
+For (ii), learning Fsystem is a supervised learning task
+because its inputs, (oi
+t, mi
+t, ai
+t), and output, oi
+t+1, are fully
+observed. If {ui
+t}Hi
+t=1 was observed, then (i) would also boil
+down to learning Ftrace in a supervised manner. It is the lack
+of observability of {ui
+t}Hi
+t=1 that makes our simulation task
+extremely challenging. In short, we are left with (i), the task
+of estimating { ˜mi
+t}Hi
+t=1 and learning Ftrace.
+9We use policy and algorithm interchangeably in this paper.
+4
+CausalSim: Theoretical Insights
+This section describes the theory behind CausalSim. We
+discuss how to operationalize this theory in a practical learning
+algorithm in §5. We begin by casting counterfactual estimation
+as a challenging variant of the matrix completion problem [14].
+We then formalize conditions that allow us to complete the
+matrix using a certain distributional invariance property that
+is present in data collected in an RCT.
+4.1
+Counterfactual Estimation
+as Matrix Completion
+Recall from §3.2 the task of estimating the counterfactual
+trace { ˜mi
+t}Hi
+t=1 consistent with Equation (1). In this section, we
+pose this task as a variant of the classical matrix completion
+problem. For simplicity, let action ai
+t be one of the ﬁnitely
+many options {1,...,A} for some A ≥2. Imagine an A by U
+matrix M, where rows correspond to A potential actions, and
+columns corresponds to U = ∑N
+i=1 Hi latent factors (ui
+t for
+different choices of i andt) in the dataset. To order the columns,
+we may index ui
+t as a tuple (i, t) and order these tuples in
+lexicographic order. The matrix M is called the potential
+outcome matrix in the causal inference literature [61].
+At the
+tth
+step of the
+ith
+trajectory, we
+observe
+mi
+t = Ftrace(ai
+t, ui
+t), which is the entry in M in the row
+corresponding to ai
+t and the column corresponding to ui
+t. The
+counterfactual quantities of interest, ˜mi
+t = Ftrace( ˜ai
+t, ui
+t) for
+˜ai
+t ̸= ai
+t, are the missing entries in M in the same column. In
+summary, we observe one entry per column of the matrix M
+and we wish to estimate the missing values in the matrix.
+The task of ﬁlling missing values in a matrix based on its
+partially observed entries is known as Matrix Completion [19],
+a topic that has seen tremendous progress in the past two
+decades [18, 20, 47]. However, standard matrix completion
+methods do not apply to our problem (see §4.3 for details).
+We use a distributional invariance property of data collected
+using an RCT to complete the potential outcome matrix M.
+The key observation is that, in an RCT, the latent factors for
+trajectories collected under each of the policies will have the
+same distribution. For example, in Puffer’s RCT, incoming
+users are assigned to an ABR algorithm at random. Therefore
+each ABR algorithm will “experience” the same distribution
+of underlying latent network conditions, which is precisely
+why we can compare their performance in the RCT. The same
+property helps us recover the matrix M, as we show next.
+4.2
+Exploiting RCT for Matrix Completion
+We use a minimal non-trivial example to give intuition about
+how we can exploit an RCT for matrix completion, before
+stating our main theoretical result.
+Consider a simple example where A = 2 and U = 2n, and
+the rank of potential outcome matrix M is equal to 1. Rank 1
+
+implies that M =auT for some a∈R2 and u∈R2n with Mα,β =
+aα·uβ.10 Suppose we have K =2 policies,where each policy al-
+ways chooses only one ofthe two actions. Furthermore,we con-
+sider an RCT setting. That is, the distribution of latent factors
+across trajectories assigned to both policies should be the same.
+Without loss of generality, we can re-order the columns of
+M so that the ﬁrst n columns correspond to the latent factors of
+the trajectories assigned to policy 1, and the second n columns
+are those assigned to policy 2. Then the observed entries of
+matrix M appear as
+
+M1,1
+M1,2
+...
+M1,n
+⋆
+...
+⋆
+⋆
+⋆
+⋆
+...
+⋆
+M2,n+1
+...
+M2,2n−1
+M1,2n
+
+where ⋆represents the missing values.
+Let us consider recovering the missing observation M2,1.
+For column 1, we know the observation under the ﬁrst action,
+i.e. M1,1. Due to rank 1 structure, we have
+M2,1
+M1,1
+= a2u1
+a1u1
+= a2
+a1
+.
+(3)
+Therefore, to ﬁnd M2,1 (and by a similar argument, to ﬁnd all
+missing entries of M), we need to estimate the ratio a2
+a1 .
+Due to the distributional invariance induced by RCT, the
+samples u1, ... , un (which correspond to the latent factors
+encountered by policy 1) come from the same distribution
+as the samples un+1,...,u2n (which correspond to the latent
+factors encountered by policy 2), for large enough n. Thus,
+their expected value should be equal:
+1
+n
+n
+∑
+β=1
+uβ ≈1
+n
+2n
+∑
+β=n+1
+uβ
+(4)
+Equation (4) implies
+∑n
+β=1M1,β
+∑2n
+β=n+1M2,β
+=
+∑n
+β=1a1·uβ
+∑2n
+β=n+1a2·uβ
+(5)
+≈a1
+a2
+.
+(6)
+This provides precisely the quantity of interest in Equation (3)
+based on the observed entries, enabling us to complete the
+matrix.
+Formal Result. This simple illustrative example relied on
+a convenient observational pattern (based on policies that
+always choose one action) and rank 1 structure. But the idea
+can be generalized. If the trace includes D measurements,
+Mα,β,γ ∈RA×U×D becomes a tensor rather than a matrix, where
+α, β, and γ index the actions, latent factors, and measurements,
+respectively. The following theorem provides conditions
+where completion is possible for a rank r tensor. For more
+details and the proof, refer to Appendix A.
+10Note that for readability, we are abusing notation by overloading a and
+u to refer to both the action and latent, and their encodings in the factorization.
+Theorem 4.1. We can recover all entries of M by only
+observing one D−dimensional element in each column (corre-
+sponding to one latent and action) if the following is satisﬁed:
+1. (Low-Rank Factorization) M is a low-rank tensor
+(rank = r), i.e., it admits the following factorization:
+Mα,β,γ =∑r
+ℓ=1aαℓuβℓzγℓ.
+2. (Invertibility) The factorization implies existence of a
+linear mapping from latent encoding to trace for each
+action. This linear mapping is invertible.
+3. (Sufﬁcient measurements) D≥r.
+4. (Sufﬁcient, Diverse Policies) The number of policies
+K ≥Ar, and the matrix S ∈RAr×K is full-rank where
+Sw.D:(w+1).D,x = E[m|action_index = w,policy_index =
+x]P(action_index = w|policy_index = x). Linear inde-
+pendence of columns of S can be interpreted as diversity
+among policies (Appendix A).
+4.3
+Discussion
+Why not standard tensor completion? Tensor completion
+methods [26, 41, 48, 78] make several assumptions. First,
+the tensor M must be (approximately) low rank, which
+CausalSim also requires. Low-rank structure holds in many
+real-world problems [69] and has been observed in network
+measurements, e.g., in trafﬁc matrices [16, 43, 44, 60] and
+network distance (i.e., RTT) [46, 52, 66]. As an example of
+how it emerges in the problems we study in this paper, we
+use a simple model of congestion control in Appendix C.4 to
+provide intuition about low-rank structure in ABR data.
+Second, the pattern of missing entries should be random.
+If the missing patterns is not random and depends on latent
+factors or the entries themselves [8], standard approaches
+have difﬁculty recovering the tensor. This assumption does
+not hold in trace-driven simulation. Revealed entries are
+determined by the actions taken by the policies, which often
+use recent observations to make their decisions (e.g., an ABR
+policy may use recent throughput measurements). Hence
+the revealed/missing entries in a column are not random and
+depend on the entries in previous columns.
+Third, a sufﬁcient number of entries need to be revealed.
+For example, when D = 1 (i.e., when M is a matrix), the in-
+formation theoretic lower bound to on the number of revealed
+entries needed to recover M is 4Ur −r2 [39, 70]. Thus even
+for rank r =1, it requires 4 entries per column, whereas only
+one entry per column is revealed in trace-driven simulation.
+Since the second and third assumptions do not necessarily
+hold in our setup, we cannot use existing tensor completion
+methods. However, as we argued in §4.2, exploiting the
+additional problem structure imposed by RCT data can make
+tensor completion feasible in certain conditions.
+Limitations of Theorem 4.1. The proof of Theorem 4.1
+(Appendix A) provides an analytical method for recovering
+the tensor M that generalizes the procedure described for the
+simple example in §4.2. While this provides a theoretical basis
+
+mt
+̂ut
+̂oi
+t+1
+at
+P(πt| ̂ut)
+˜at
+Latent 
+Factor 
+Extractor
++
+Policy 
+Discriminator
+̂oi
+t
+Figure 3: CausalSim Architecture
+for why tensor recovery is possible, the analytical approach
+is not practical. First, it relies on M being exactly rank r; if it
+is approximately rank r, we have found the calculation to be
+brittle. Second, it applies only to discrete action spaces. Third,
+it gives sufﬁcient conditions for recovery, but they’re not all
+necessary. One reason is that the analytical method uses only
+mean invariance, i.e. the fact that the mean of the latent factors
+is the same across all policies (as in Eq. (4)), even though RCT
+data has the stronger property that the entire distribution of
+latents does not depend on the policy. In the next section, we
+describe our practical implementation of CausalSim that uses
+learning techniques and NNs to overcome these limitations
+(at the expense of theoretical guarantees).
+5
+CausalSim: Algorithm
+CausalSim builds upon the insights presented earlier but
+replaces the factorized model with a learning algorithm based
+on NNs. For ease of notation, we will drop the trajectory index
+for all variables in the dataset, e.g. we will refer to the latent
+factor ui
+t :t ≤Hi,i≤N as ut :t ≤H.
+CausalSim architecture. As discussed, CausalSim aims
+to extract ut and learn Ftrace and Fsystem from observed
+trajectories (ot+1,ot,mt,at) : t < H. Figure 3 summarizes
+CausalSim’s algorithmic structure.
+To extract latent factors, we use a NN that takes in at and mt,
+and computes ˆut (an estimate of ut). To apply invariance on the
+extracted latents, i.e. distribution of ut being the same regard-
+less of the policy applied to it, we use a NN called the Policy
+Discriminator. This NN aims to predict the policy pertaining
+to that sample given ˆut, and if invariance is upheld, it will fail to
+do so. Unlike the analytical approach, the policy discriminator
+can enforce policy invariance on the entire latent distribution,
+potentially improving the accuracy of the estimate.
+To calculate the counterfactual traces and observations,
+we need to learn Ftrace and Fsystem. However, we can simplify
+the learning problem by merging these two into one single
+combined function. Thus, we use a NN that takes in counter-
+Algorithm 1 CausalSim Training
+1: initialize parameter vectors γ,θ,ϕ
+2: initialize hyper-parameters num_disc_it, κ
+3: initialize dataset D←{(oi,mi,ai,πi)}m
+i=1 from an RCT
+4: for each iteration do
+5:
+for num_disc_it do
+6:
+sample minibatch B←{(ol,ml,al,πl)}b
+l=1
+7:
+ul ←Eθ(ml,al) for l ∈{1,...b}
+8:
+Ldisc ←1
+bΣb
+l=1
+
+−logWγ(πl|ul)
+
+9:
+γ=γ−λγ·∇γLdisc
+10:
+end for
+11:
+sample minibatch B←{(ol+1,ol,ml,al,πl)}b
+l=1
+12:
+ul ←Eθ(ml,al) for l ∈{1,...b}
+13:
+Ldisc ←1
+bΣb
+l=1
+
+−logWγ(πl|ul)
+
+14:
+Lpred ←1
+bΣb
+l=1
+h ol+1−Pϕ(ol,al,ul)
+2i
+15:
+Ltotal ←Lpred−κ·Ldisc
+16:
+θ=θ−λθ·∇θLtotal
+17:
+ϕ=ϕ−λϕ·∇ϕLpred
+18: end for
+Discriminator
+Simulation Modules
+factual actions ˜at, observation ot and estimated latent ˆut, and
+computes counterfactual observation ˜ot+1. Of course, we can
+explicitly use separate NNs for Ftrace and Fsystem if we require
+access to the simulated trace ( ˜mt) values.
+Overall, CausalSim uses three NNs for counterfactual
+simulation; Eθ as the latent factor extractor, Wγ as the policy
+discriminator and Pϕ as the combination of Ftrace and Fsystem.
+Figure 3 depicts the structure. Training these NNs is quick;
+on an A100 Nvidia GPU, CausalSim’s time to convergence
+on 56M data points (230K streams) was less than 10 minutes,
+and each simulation step in inference (on CPU) takes less
+than 150µs. A full inference run on the same volume of data
+takes less than 6 hours on a single CPU core and less than 20
+minutes on 32 cores.
+Training procedure. CausalSim’s training procedure alter-
+nates between: (i) training the policy discriminator using a
+discrimination loss Ldisc; and (ii) training other modules using
+an aggregated loss Ltotal. Algorithm 1 provides a detailed
+pseudo code of this training procedure.
+Training the policy discriminator (Lines 5–10 in Algo-
+rithm 1). Distributional invariance means restricting the
+distribution of latent factors u to be identical across policies.
+To that end, we ﬁrst use Eθ to extract latents ˆut, and then search
+for invariance violations via a discriminator NN, a standard
+approach in the paradigm of adversarial learning [29, 68].
+Speciﬁcally, the policy discriminator aims to predict the policy
+πi that took action at from the estimated latent factor ˆut (see
+Figure 3). Towards that, we use a cross-entropy loss to train
+the policy discriminator:
+Ldisc =EB[−logWγ(π| ˆu)],
+(7)
+where the expectation is over the a sampled minibatch B from
+
+dataset D. We train the policy discriminator to minimize this
+loss, by repeating gradient decent num_disc_it times, as the
+policy discriminator needs multiple iterations to catch up to
+changes in the latent factors.
+Training simulation modules (Lines 11–17 in Algo-
+rithm 1). In this step, we need to impose consistency with
+observations, all while preserving the distributional invariance.
+Thus, we compute latent factors ˆut with Eθ and simulate the
+next step of the trajectory ˆot+1 with Pϕ. We use an aggregated
+loss to enforce consistency and invariance. This loss combines
+the negated discriminator loss with a quadratic consistency
+loss using a mixing hyper-parameter κ.
+Ltotal =EB
+h
+(ot+1−ˆot+1)2i
+−κLdisc,
+(8)
+where the expectation is over the a sampled minibatch B
+from dataset D. Here, we used a quadratic loss function, but
+one could use any consistency loss ﬁt to the speciﬁc type of
+variable (e.g. Huber loss, Cross entropy, ...).
+Note the negative sign of discriminator loss, which means
+we train these NNs to maximize discriminator loss i.e., fool
+the discriminator to ensure policy invariance. If the extracted
+latent factors are policy invariant, the policy discriminator
+should do no better at its task than guessing at random.
+Counterfactual estimation. To produce counterfactual esti-
+mates,as described above,the estimated latents ˆut are extracted
+from observed data. Using the extracted latents factors, along
+with the learned combined function Pγ, we start with o1 and
+predict counterfactual observations ˆot+1, one step at a time.
+6
+Evaluation
+We evaluate CausalSim’s ability to do accurate counterfactual
+simulation (§6.1 and §6.3) using trace data from one real-world
+and one synthetic dataset. As a rigorous proof of concept,
+we debug and improve an ill-performing ABR policy with
+CausalSim (§6.2),and verify it through deployment on a public
+ABR testing infrastructure. Our baselines are as follows:
+1. ExpertSim: Uses the analytical model described in §2.2.1.
+2. SLSim: Uses a standard supervised-learning technique to
+learn system dynamics from data, as described in §2.2.2.
+Finally, we show how CausalSim enables trace-driven
+simulation in problems where deﬁning an exogenous trace
+is not straightforward and traditional trace-driven simulation
+is not applicable (§6.4). Further supporting experiments in the
+appendix provide more details about how CausalSim operates
+(§B.1, §B.2, §B.3, §B.4, §B.5, §B.7, §C.2, §C.3, §C.4 and
+§D.1).
+6.1
+Simulation Accuracy
+We use CausalSim to predict the end performance of ABR
+policies, and compare them with ground truth data. We
+explore the same two metrics reported by Puffer to evaluate
+algorithms; 1) stall rate, which is the fraction of time a user
+spent rebuffering, i.e. paused and waiting for a new chunk
+to download; 2) average Structural Similarity Index Measure
+(SSIM) in decibels, which is a perceptual quality metric. Our
+ground truth data comes from public logs of ‘slow streams’ on
+Puffer. Whenever a client initiates a video streaming session
+in Puffer’s website, a random ABR algorithm is chosen and
+assigned to that session. Sessions are logged (buffer levels,
+chunk sizes, timestamps, download times, etc) anonymously
+and the data is available for public use. Our dataset contains
+more than 230K trajectories from an RCT during July 2020
+to June 2021, where ﬁve ABR algorithms (BBA, BOLA1,
+BOLA2, Fugu-CL, Fugu-2019) were evaluated. Exhaustive
+details of the setup and data can be found in §B.8.
+6.1.1
+Can CausalSim simulate a policy it has not seen?
+We choose one of BBA, BOLA1, and BOLA211. as the new
+policy that we want to simulate, and call it the target policy.
+The remaining four policies are called source policies. Traces
+assigned to the four source policies comprise our training
+dataset, which we use for training CausalSim and the two base-
+lines. The goal is to simulate the outcome of applying the target
+policy on trajectories assigned to any of the source policies.
+Figure 4a plots the stall rate and SSIM in the simulated
+trajectories and ground truth, denoting each target policy with
+a different color. Four source policies give us four separate
+predictions per target policy and simulator. Each point depicts
+the average of these four predictions, and the intervals show
+the minimum and maximum among the four. For either metric,
+CausalSim is the most faithful to ground truth among all
+simulators. For instance, in stall rate, CausalSim’s relative
+error spans 2 −28%, while ExpertSim spans 49 −68%
+and SLSim spans 29 −187%. CausalSim may not always
+predict the correct relative ordering among policies with close
+performance. For example, BOLA1 and BOLA2 (shown in
+orange and red) have similar performance in both stall rate and
+SSIM. CausalSim predicts that these policies are similar but it
+infers their relative ordering incorrectly. However, CausalSim
+avoids the large errors made by the baseline simulators. In
+absolute terms, its predictions are close to the ground truth.
+CausalSim also has the most consistent predictions across
+different source policies, because it removes the biases of the
+source policies. As an example, we investigate all four simula-
+tion results for BOLA1 in Figure 4b. SLSim and ExpertSim’s
+simulation results are only good when the source algorithm
+is BOLA2 (a similar algorithm to BOLA1 performance-wise).
+However, their predictions are far off from the ground truth
+for the other three source algorithms. CausalSim’s simulation
+results, on the other hand, are all close to the ground truth
+target. Appendix §B.7 demonstrates the same observation for
+other target algorithms, i.e. BBA and BOLA2.
+11We exclude Fugu as a test policy since we could not reproduce its logged
+actions (see §B.8)
+
+2
+4
+6
+8
+10
+Time Spent Stalled (%)
+15.00
+15.25
+15.50
+15.75
+Average SSIM (dB)
+Ground Truth
+CausalSim
+ExpertSim
+SLSim
+(a)
+2
+4
+6
+8
+10
+Time Spent Stalled (%)
+15.00
+15.25
+15.50
+15.75
+Average SSIM (dB)
+Ground Truth
+CausalSim
+ExpertSim
+SLSim
+(b)
+Figure 4: (a) In a real-world dataset of live video streaming,
+CausalSim is the most faithful, compared to traditional trace-
+driven (ExpertSim) or data-driven (SLSim) simulators. Colors
+indicate different target ABR algorithms. (b) Predictions
+for BOLA1, separated by the source policy. Each point
+indicates a different source ABR algorithm. ExpertSim and
+SLSim predictions carry over biases of the source data, while
+CausalSim mitigates the bias.
+6.2
+Case Study: CausalSim in the Wild
+An accurate simulator allows researchers to debug and
+improve protocols without repeated and invasive deployments.
+We shall demonstrate this with CausalSim, by improving a
+well-known ABR policy, and verifying our ﬁndings with a
+real-world deployment on Puffer.
+Recall that in the particular RCT we used in §6.1, ﬁve ABR
+algorithms (BBA, BOLA1, BOLA2, Fugu-CL, Fugu-2019)
+were evaluated. Figure 5 shows the result of this evaluation
+for BBA, BOLA1 and BOLA2, across ‘slow streams’.12
+Similar to Figure 4a, the X-axis shows the stall rate, and the
+Y-axis is the average SSIM. BOLA1 exhibited 82% more
+rebuffering compared to BBA. A revised version of BOLA1,
+called BOLA2, was deployed alongside it, since the Puffer
+12The data for this plot comes directly from Puffer [2,3].
+2.5
+2.0
+1.5
+1.0
+Time Spent Stalled (%)
+14.5
+15.0
+15.5
+Average SSIM (dB)
+BBA (Jul’20-Jun’21)
+BOLA1 (Jul’20-Jun’21)
+BOLA2 (Jul’20-Jun’21)
+BBA (Aug’22-Dec’22)
+BOLA1-CausalSim (Aug’22-Dec’22)
+Figure 5: In an experiment preceding this work, BOLA1
+exhibits high stalling. By deploying a BOLA1 variant in a later
+experimentCausalSimimprovedthestallrateby2.6×,with
+comparable quality to BBA. User population is ‘slow streams’
+and error bars denote 2.5%–97.5% conﬁdence intervals.
+team and the authors of BOLA believed the SSIM metric (in
+decibels) is incompatible with the protocol [53]. This new
+version had 12.8% less rebuffering and slightly higher quality,
+but still far too much stalling compared to BBA.
+BOLA1 is an ABR policy with two hyperparameters,
+similar to BBA, and our hypothesis was that BOLA1 uses
+sub-optimal hyperparameters. To investigate this, we used the
+logged data pertaining to that plot along with CausalSim to
+exhaustively analyze the performance of BOLA1 and BBA for
+a range of hyperparameters. Using Bayesian Optimization13,
+we explored the parameter space and created a Pareto frontier
+curve for each policy. During this process, we evaluated over
+150 different algorithms in two days, which is achievable only
+in a simulator. Each curve demonstrates the trade-off between
+quality and stall rate in that policy. Figure 6 presents the curves,
+where the left and right plots show CausalSim and ExpertSim
+predictions. For ease of comparison, we highlight where the
+original BOLA1 and BBA lie. CausalSim conﬁrms our sus-
+picion; the curve for BOLA1 is strictly better than that of BBA.
+We can revise the hyperparameters in BOLA1 for an improved
+BOLA1 variant, henceforth called ‘BOLA1-CausalSim’. We
+chose BOLA1-CausalSim, such that it would have better stall
+rate and marginally better SSIM compared to BBA.
+Interestingly, ExpertSim predicts the complete opposite.
+It predicts that not only will BBA always improve on any
+BOLA1 variant in at least one metric, but also that any BOLA1
+variant will stall more. This serves as a great opportunity
+to test CausalSim’s edge compared to traditional (biased)
+trace-driven simulation,which is used in priorwork [38,50,75].
+The results of BOLA1-CausalSim’s deployment can be seen
+in Figure 5. Considering conﬁdence intervals, it is clear that
+it stalls less than BBA; in fact, BBA stalls 43% more than
+BOLA1-CausalSim on average. The conﬁdence intervals for
+13We use a Gaussian Process prior with a Matern Kernel [54].
+
+2.5
+5.0
+14.75
+15.00
+15.25
+15.50
+CausalSim
+BBA Pareto
+BOLA1 Pareto
+BBA
+BOLA1
+BOLA1-CausalSim
+Better
+2.5
+5.0
+ExpertSim
+Time Spent Stalled (%)
+Average SSIM (dB)
+Figure 6: Pareto frontier curves for BOLA1 and BBA variants.
+CausalSim correctly predicts BOLA1’s potential, while
+ExpertSim fails to do so.
+quality are wide and will need more data to be separable14,
+but based on the ongoing trend, BOLA1-CausalSim will have
+similar quality compared to BBA.
+Our goal was to show CausalSim’s potential, and for that
+we targeted one of several plots on Puffer (‘slow streams’).
+We could have chosen a different plot to optimize on, but it
+would not affect the takeaway. Note that our opportunities
+for deployment on Puffer are limited, as other researchers
+use Puffer as well; hence we only deployed one BOLA1
+variant. Furthermore, we hoped to also compare CausalSim’s
+prediction of stall rate and quality with the deployment results,
+but the client and network population has clearly changed; as
+shown in Figure 5, BBA achieves a different SSIM value for
+the two periods of time. Since CausalSim’s predictions are
+based on data from the previous RCT, directly comparing the
+predicted values to results from the new RCT isn’t meaningful.
+However, as our results show, the old RCT data allows us to
+compare different schemes. For example, CausalSim predicts
+BBA stalls 58% more than BOLA1-CausalSim on network
+distribution of the old RCT, which is reasonably close to the
+43% observed in the new RCT (ignoring conﬁdence intervals).
+6.3
+A Closer Look at Simulated Trajectories
+For a deep dive in simulator accuracy, we focus on buffer
+occupancy level, a key indicator of ABR algorithm behavior.
+Ideally, we would like to compare simulated trajectories to
+ground truth. But this isn’t possible using real trace data,
+since it requires us to have multiple traces of different policies
+running under the exact same underlying path conditions. To
+overcome this issue, we resort to distributional evaluation.
+Puffer data is collected in an RCT setting; hence the character-
+istics of network paths assigned to each policy is the same. If
+we accurately simulate the target policy on traces assigned to
+one of the source policies, the distribution of each variable (e.g.
+14Updated plots can be found on the ‘Experimental Results’ page of the
+Puffer website [1], under "Current experiment, full contiguous duration, slow
+streams only".
+0.0
+0.3
+0.6
+0.9
+10
+30
+50
+70
+90
+CausalSim
+ExpertSim
+SLSim
+EMD
+CDF (%)
+(a)
+0.50
+0.75
+1.00
+0.1
+0.3
+0.5
+0.7
+Harder
+EMD
+Bitrate MAD (Mbps)
+(b)
+Figure 7: On average, CausalSim improves the EMD distance
+metric compared to ExpertSim and SLSim by 53% and 61%
+respectively. (a) Distribution of CausalSim, ExpertSim, and
+SLSim EMDs over all possible source/target choices. (b)
+Error (EMD) increases for baseline as simulation scenarios
+get harder, but CausalSim maintains good accuracy.
+buffer level) must be similar in the simulated trajectory and
+ground truth trace assigned to the target policy. This motivates
+using distributional similarity as our performance metric.
+To quantify the similarity of two distributions, we use
+the Earth Mover Distance (EMD) [62]. We can calculate
+EMD for one-dimensional distributions as EMD(P, Q ) =
+R +∞
+−∞|P(x) −Q (x)|dx, where P and Q are the Cumulative
+Distribution Function (CDF)s of p and q, respectively. A small
+EMD between two distributions implies that they are similar.
+Figure 7a shows the CDF of the EMD (between actual
+and simulated buffer level distributions) for CausalSim and
+baselines, over all possible source/target policy pairs. EMD
+of CausalSim is smaller than EMD of baselines across almost
+all experiments. In terms of the average EMD across all
+experiments, CausalSim bests ExpertSim and SLSim by 53%
+and 61% respectively. Figure 2a visualized differences in
+buffer level distributions for the simulation scenario where
+BOLA2 and BBA are source and target policies, respectively.
+To observe buffer level distributions for all scenarios, refer to
+Figure 9.
+In about 30% of cases, SLSim is slightly better than
+CausalSim. These cases are “easy” simulation scenarios
+where the source and target policies make similar actions
+(For more details see §B.3). In these cases, the EMD is low
+for both CausalSim and baseline simulators (<0.15), and all
+perform well. For instance, Figure 9c (in the Appendix) shows
+source, target, and simulated buffer level distribution in an
+easy scenario, where BOLA2 and BOLA1 are the target and
+source policies respectively. In this example, all simulated
+distributions match the target distribution quite well.
+Figure 7b shows where CausalSim most shines, i.e. hard
+simulation scenarios. The Y-axis is the error (EMD), and the
+X-axis is the mean absolute difference (MAD) between actions
+taken by the source policy and the target policy, in SLSim simu-
+lation. The larger the action difference, the harder the scenario
+(§B.3). Aswemovetowardharderscenarios,theerrorincreases
+
+signiﬁcantly for the baselines, while CausalSim is more robust.
+6.3.1
+Additional experiments
+We perform further evaluations of CausalSim in the ABR
+environment. Due to space constraints, we summarize these
+results here and defer details to the appendix.
+A more ﬁne-grained evaluation. In the results above, we
+evaluated the performance of CausalSim and baselines using
+the distribution of buffer occupancy across the whole popu-
+lation. One way to further validate the results is to test whether
+they will hold on carefully partitioned sub-populations.
+In §B.4, we show that this is indeed the case when the
+sub-populations are partitioned according to the Min Round
+Trip Time (RTT), a network property that is independent of
+the selected ABR algorithm in Puffer.
+Hyperparameters tuning. Counterfactual estimation (§3.2)
+is inherently an Out of Distribution (OOD) prediction task.
+Hence, typical supervised-learning hyper-parameter tuning
+methods do not work. In §B.5, we describe and evaluate
+CausalSim’s hyper-parameter tuning procedure.
+Ground truth evaluation. Real data nevercomes with ground
+truth counterfactual labels. As a result, we cannot evaluate
+CausalSim’s simulations for each time step in real data, but we
+can do this in a reproducible synthetic environment. In §C.2,
+we evaluate CausalSim using ground truth counterfactual
+labels and show that it still outperforms baselines in the Mean
+Absolute Percentage Error (MAPE) metric.15 Specﬁcally,
+CausalSim achieves an MAPE of(∼5%),whichis signiﬁcantly
+lower than both ExpertSim’s and SLSim’s (∼10%).
+6.4
+A Second Example: Server Load Balanc-
+ing
+We now focus on simulating load balancing policies with
+heterogeneous servers, where deﬁning an exogenous trace is
+not possible and therefore standard trace-driven simulation
+is not applicable. This example shows how CausalSim opens
+up new avenues in trace-driven simulation.
+We use a synthetic environment which consists of N = 8
+servers (and a queue for each) with different processing
+powers, a load balancer, and a series of jobs that need to be
+processed on these servers. Each job has a speciﬁc size which
+is unknown to the load balancer. Each server can process jobs
+at a speciﬁc rate {ri}N
+i=1, which is also unknown to the load
+balancer. The load balancer receives jobs and must assign
+them to one of N servers. Assuming the kth arriving job has
+size Sk and gets assigned to server ak, the job processing time
+will be Sk/rak. If this job is not blocked by some other job
+being processed, its latency will equal its processing time. If
+15Let ˆp = { ˆpi}N
+i=1 and p = {pi}N
+i=1 denotes the vectors of predicted and
+ground truth quantity of interest, respectively. Then, MAPE is deﬁned as
+MAPE(p,ˆp)= 100
+N ∑N
+i=1
+| ˆpi−pi|
+pi
+.
+it is blocked, and the jobs ahead of it in the queue take Tk to
+be processed, the incurred latency is Sk/rak +Tk.
+We generate a collection of 5000 trajectories each with 1000
+steps and use 16 policies in the load balancer. For a detailed
+explanation of the policies, job size generation process, and
+server processing rates, refer to §D.2.
+6.4.1
+Experiment setup
+The aim of this experiment is to evaluate whether we can
+simulate new unseen server assignment policies in this
+environment, using traces collected with other policies. Recall
+that while we observe the processing time of each job, the
+actual size of the job is not observed, i.e., it acts as the latent
+factor in this problem. For all simulators, we assume access to
+Fsystem (the queue model) and focus on the more challenging
+task of learning Ftrace and estimating the counterfactual traces
+ˆmt
+i for i≤5000, and t ≤1000. Algorithmically, this translates
+to enforcing consistency for the observed traces (mt), rather
+than the observations (ot) (see §5). The trace we collect is
+the processing time when using a source server assignment
+policy. To simulate a target server assignment policy, we need
+to estimate the processing time of a job on servers other than
+the one where its processing time was measured (without
+knowing either the job size or the server processing rates).
+Standard trace-driven simulation assumes an exogenous
+trace (job processing time), but this is the same as assuming
+servers have equal processing rates. This contradicts the prob-
+lem setup, and standard trace-driven simulation (analogous to
+ExpertSim in ABR) is not applicable to this problem. Thus, we
+compare CausalSim with SLSim simulations. SLSim (realized
+by an NN) takes as input the observed processing time and the
+target server, and its output is the processing time under the
+targeted server. However, the observed and target processing
+time are always the same in training data, and hence it is
+impossible for SLSim to learn the true dynamics (e.g., the
+server’s underlying processing power). CausalSim sidesteps
+this problem by explicitly estimating latent factors. For details
+regarding the network architecture and training details for
+both SLSim and CausalSim, refer to Table 8 in the appendix.
+Performance Metric. We compare CausalSim and SLSim
+with the underlying ground truth using the MAPE metric.
+6.4.2
+Can CausalSim Faithfully Simulate New Policies?
+As is done in the ABR case studies, we train CausalSim and
+SLSim models based on a dataset generated using all policies
+except one, which will be the target policy. We use the same
+hyper-parameter tuning approaches explained in §B.5 for
+CausalSim and §B.6 for SLSim. We carry out this evaluation
+on eight target policies. We evaluate the performance for each
+pair of source-target policies, as was done in §6.1. In total, we
+have 120 different source/target policy pairs.
+In Figure 8a and Figure 8b, we show the CDF of the MAPE
+of estimating the processing time and the latency, respectively,
+
+0
+100
+200
+300
+0
+50
+100
+Processing time MAPE (%)
+CDF (%)
+CausalSim
+SLSim
+(a)
+0
+200
+400
+0
+50
+100
+Latency MAPE (%)
+CDF (%)
+CausalSim
+SLSim
+(b)
+Figure 8: Distribution of CausalSim and SLSim MAPEs over
+all source target pairs.
+using both CausalSim and SLSim. As evident in these two
+ﬁgures, CausalSim’s error is signiﬁcantly lower than that of
+SLSim for both the processing time and latency. In particular,
+the median MAPE when estimating processing time/latency is
+24.4%/27.0% for CausalSim and 124.3%/467.8% for SLSim.
+For a complementary view, we compare the latent factors
+CausalSim extracts to the real latent job sizes and observe how
+closely they match, in §D.1 in the appendix.
+7
+Related-Work
+Data-driven simulation. Traditional packet-level simu-
+lators [21, 31, 45] tend to sacriﬁce either scalability or
+accuracy when simulating large networks. MimicNet [77]
+and DeepQueueNet [73] use machine learning to improve
+simulation speed of datacenter networks. The aforementioned
+approaches are all full-system packet-level simulators,
+whereas CausalSim focuses on trace-driven simulation of a
+speciﬁc system component and must therefore deal with latent
+factors and biases present in trace data.
+A very recent work, Veritas [17] (published on arXiv in Aug.
+2022), models trace-driven simulation for ABR as a Hidden
+Markov Model (HMM) with a known emission process. This
+is equivalent to assuming that Ftrace is known in our model (see
+Eq. (1)). Veritas uses the Viterbi algorithm to decode the latent
+factors, which are then used for counterfactual simulation.
+CausalSim solves a more general problem where Ftrace is not
+known and must be learned. It therefore requires less knowl-
+edge of the system’s latents and underlying dynamics to apply.
+On the other hand, CausalSim requires RCT data whereas
+Veritas does not. Comparing the ﬁdelity of these approaches
+using real-world ABR data would be interesting future work
+(Veritas evaluates its method in a network emulator).
+Panthon’s calibrated emulators [72] model the end-to-end
+behaviour of a network path with a simple model including
+a handful of parameters, e.g., bottleneck link rate, constant
+propagation delay, etc., which are tuned to ﬁt a collection
+of packet traces collected from this path using a variety of
+congestion control protocols. iBox [13] extends this approach
+by modeling cross-trafﬁc. CausalSim does not assume any
+known model for the dynamics of the network. Furthermore,
+it has access to only a single trace from each network path.
+Policy evaluation. Policy evaluation techniques such as
+Inverse Propensity Scoring [33] and Doubly Robust [15] aim
+to predict population-level performance statistics for a given in-
+tervention. WISE [67] builds a Causal Bayesian Network from
+the data that is able to answer interventional (what-if) queries
+about the future, but the method requires absence of latent con-
+founding variables. Sage [25] uses a Causal Bayesian Network
+model with latent factors to diagnose performance issues in
+microservice applications. It answers what-if questions about
+how interventions like changing the resources allocated to a mi-
+croservice impacts the end-to-end application latency. Trace-
+driven simulation is distinct from all these methods, in that
+it requires counterfactual predictions of how an intervention
+would have changed speciﬁc previously-measured trajectories
+rather than how it changes population-level statistics.16
+8
+Concluding Remarks
+The exogenous trace assumption is central to traditional trace-
+driven simulation. CausalSim relaxes this key assumption,
+by modeling the intervention effect on the trace and learning
+to replay the trace in an unbiased manner. We showed how
+this improves the accuracy of trace-driven simulation using
+real-world ABR data, and how CausalSim provides insights
+for algorithm improvement that are in contrast with standard
+trace-driven simulators’ predictions, which we validated in a
+real-world deployment. Furthermore, we showed how this ex-
+pands the applicability of trace-driven simulation to problems
+wheredeﬁningan exogenoustraceisnotpossiblebyapplyingit
+to heterogeneous server load balancing. We believe CausalSim
+could be applied to many other system simulation tasks.
+CausalSim opens up several interesting paths for future
+work. First, evaluating CausalSim in problems with a higher-
+dimensional latent factors would be interesting. Second, it is
+a natural next step to use CausalSim for more complex policy
+optimization methods, e.g., using reinforcement learning. Last,
+as discussed in §4.3, our theoretical analysis of CausalSim’s
+approach, i.e. exploiting the policy invariance of latent factors
+distributions, is not tight, and improving it could potentially
+relax the assumptions of our analytical method.
+9
+Acknowledgement
+WethankourshepherdKeithWinstein forin-depthsuggestions,
+and ourreviewers forinsightful comments. We thank the Puffer
+team,speciﬁcally Emily Marx and Francis Y. Yan forproviding
+us with the data we used in §6.1 and the algorithm deployment
+in §6.2. This work was supported by NSF grants 1751009
+
+program, and a gift from Intel as part of the MIT Data Systems
+and AI Lab (DSAIL). A. Alomar and D. Shah were supported
+16Appendix E provides a broader overview of the causal inference literature.
+
+in part by DSO-Singapore project, MIT-IBM project on Causal
+representation learning and NSF FODSI project.

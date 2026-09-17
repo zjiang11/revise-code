@@ -1,0 +1,1471 @@
+Under consideration for publication in Theory and Practice of Logic Programming
+1
+Exploiting Database Management Systems and
+Treewidth for Counting∗
+Johannes K. Fichte
+UC Berkeley, USA
+
+Markus Hecher
+TU Wien, Austria
+
+Patrick Thier
+TU Wien, Austria
+
+Stefan Woltran
+TU Wien, Austria
+
+submitted 1 January 2003; revised 1 January 2003; accepted 1 January 2003
+Abstract
+Bounded treewidth is one of the most cited combinatorial invariants in the literature. It was also applied
+for solving several counting problems efﬁciently. A canonical counting problem is #SAT, which asks to
+count the satisfying assignments of a Boolean formula. Recent work shows that benchmarking instances
+for #SAT often have reasonably small treewidth. This paper deals with counting problems for instances of
+small treewidth. We introduce a general framework to solve counting questions based on state-of-the-art
+database management systems (DBMSs). Our framework takes explicitly advantage of small treewidth by
+solving instances using dynamic programming (DP) on tree decompositions (TD). Therefore, we implement
+the concept of DP into a DBMS (PostgreSQL), since DP algorithms are already often given in terms of
+table manipulations in theory. This allows for elegant speciﬁcations of DP algorithms and the use of SQL to
+manipulate records and tables, which gives us a natural approach to bring DP algorithms into practice. To
+the best of our knowledge, we present the ﬁrst approach to employ a DBMS for algorithms on TDs. A key
+advantage of our approach is that DBMSs naturally allow for dealing with huge tables with a limited amount
+of main memory (RAM).
+KEYWORDS: Dynamic Programming, Parameterized Algorithmics, Bounded Treewidth, Database Systems,
+SQL, Relational Algebra, Counting
+1 Introduction
+Counting solutions is a well-known task in mathematics, computer science, and other areas
+(Chakraborty et al. 2016; Domshlak and Hoffmann 2007; Gomes et al. 2009; Sang et al. 2005).
+∗This is an extended version of a paper (Fichte et al. 2020) that appeared in the Proceedings of the 22nd International
+Symposium on Practical Aspects of Declarative Languages (PADL’20).
+arXiv:2001.04191v2  [cs.AI]  3 Feb 2021
+
+2
+Fichte et al.
+In combinatorics, for instance, one characterizes the number of solutions to problems by means
+of mathematical expressions, e.g., generating functions (Doubilet et al. 1972). One particular
+counting problem, namely model counting (#SAT) asks to output the number of solutions of a
+given Boolean formula. While we stay in the realm of model counting, the ﬁndings of this work are
+also relevant for answer set programming. This is particularly true for tight programs (using, e.g.,
+Clark’s completion (Clark 1977)), but also interesting for applications of quantitative reasoning,
+solved by programs that are compiled to SAT with the help of tools like lp2sat (Janhunen 2006) or
+lp2acyc (Bomanson et al. 2016).
+Model counting and variants thereof have already been applied for solving a variety of real-
+world applications and questions in modern society related to reasoning (Chakraborty et al. 2016;
+Choi et al. 2015; Due˜nas-Osorio et al. 2017; Xue et al. 2012). Such problems are typically
+considered very hard, since #SAT is complete for the class #P (Bacchus et al. 2003; Roth
+1996), i.e., one can simulate any problem of the polynomial hierarchy with polynomially many
+calls (Toda 1991) to a #SAT solver. Taming this high complexity is possible with techniques
+from parameterized complexity (Cygan et al. 2015). In fact, many of the publicly available #SAT
+instances show good structural properties after using regular preprocessors like pmc (Lagniez
+and Marquis 2014), see (Fichte et al. 2018b; Fichte et al. 2019). By good structural properties,
+we mean that graph representations of these instances have reasonably small treewidth. The
+measure treewidth is a structural parameter of graphs which models the closeness of the graph of
+being a tree. Treewidth is one of the most cited combinatorial invariants studied in parameterized
+complexity (Cygan et al. 2015) and was subject to algorithmics competitions (Dell et al. 2018).
+The observation, stated above, that various recent problem instances for #SAT have small
+treewidth, leads to the question whether a general framework that leverages treewidth is possible
+for counting problems. The general idea to develop such frameworks is indeed not new, since there
+are (a) specialized solvers such as dynQBF, gpuSAT, and fvs-pace (Charwat and Woltran 2019;
+Fichte et al. 2019; Kiljan and Pilipczuk 2018) as well as (b) general systems that exploit treewidth
+like D-FLAT (Bliem et al. 2016), Jatatosk (Bannach and Berndt 2019), and sequoia (Langer
+et al. 2012). Some of these systems explicitly use dynamic programming (DP) to directly exploit
+treewidth by means of so-called tree decompositions (TDs), whereas others provide some kind
+of declarative layer to model the problem (and perform decomposition and DP internally). In
+this work, we solve (counting) problems by means of explicitly speciﬁed DP algorithms, where
+essential parts of the DP algorithm are speciﬁed in form of SQL SELECT queries. The actual run
+of the DP algorithm is then delegated to our system dpdb, which employs database management
+systems (DBMSs) (Ullman 1989). This has not only the advantage of naturally describing and
+manipulating the tables that are obtained during DP, but also allows dpdb to beneﬁt from decades
+of database technology in form of the capability to deal with huge tables using a limited amount of
+main memory (RAM), dedicated database joins, query optimization, and data-dependent execution
+plans. Compared to other generic DP systems like D-FLAT (Bliem et al. 2016), our system dpdb
+uses relational algebra (SQL) for specifying DP algorithms, which is even competitive with
+specialized systems for model counting, and therefore applicable beyond rapid prototyping.
+Contribution. We implement a system dpdb for solving counting problems based on dynamic
+programming on tree decompositions, and present the following contributions. (i) Our system dpdb
+uses database management systems to handle table operations needed for performing dynamic
+programming efﬁciently. The system dpdb is written in Python and employs PostgreSQL as
+DBMS, but can work with other DBMSs easily. (ii) The architecture of dpdb allows to solve
+
+Exploiting Database Management Systems and Treewidth for Counting
+3
+general problems of bounded treewidth that can be solved by means of table operations (in
+form of relational algebra and SQL) on tree decompositions. As a result, dpdb is a generalized
+framework for dynamic programming on tree decompositions, where one only needs to specify
+the essential and problem-speciﬁc parts of dynamic programming in order to solve (counting)
+problems. (iii) Finally, we show how to solve the canonical problem #SAT with the help of dpdb,
+where it seems that the architecture of dpdb is particularly well-suited. In more detail, we compare
+the runtime of our system with state-of-the-art model counters. We observe a competitive behavior
+and promising indications for future work.
+Prior Work This is an extended version of a paper (Fichte et al. 2020) that appeared at the
+22nd International Symposium on Practical Aspects of Declarative Languages. The new material
+includes improved and extended examples as well as a detailed description of our DP algorithms
+and how these algorithms can be implemented for the system dpdb. Further, we added two new DP
+algorithms for the additional problems MAXSAT and MINIDS, to demonstrate how to use dpdb:
+The problem MAXSAT is similar to SAT, but consists of hard clauses that need to be satisﬁed as
+well as soft clauses. The goal of MAXSAT is to compute the maximum number of soft clauses
+that can be satisﬁed using only assignments that also satisfy all the hard clauses. Further, problem
+MINIDS is a popular graph problem that aims for computing for a given graph, a set of vertices
+(called independent dominating set) such that there is no edge between these vertices and all the
+other vertices of the graph have an edge to at least one of the vertices in this set. Both problems
+can be easily extended to counting, where we require to compute the number of witnessing
+solutions. Finally, we added new experimental results, where we used the most recent version 12
+of PostgreSQL as the underlying database management system, which operated on a ramdisk
+drive.
+2 Preliminaries
+We assume familiarity with the terminology of graphs and trees. For details, we refer to the
+literature and standard textbooks (Diestel 2012).
+2.1 Boolean Satisﬁability
+We deﬁne Boolean formulas and their evaluation in the usual way, cf., (Kleine B¨uning and
+Lettman 1999). A literal is a Boolean variable x or its negation ¬x. A CNF formula ϕ is a set of
+clauses interpreted as conjunction. A clause is a set of literals interpreted as disjunction. For a
+formula or clause X, we abbreviate by var(X) the variables that occur in X. An assignment of ϕ is
+a mapping I : var(ϕ) →{0,1}. The formula ϕ(I) under assignment I is obtained by removing
+every clause c from ϕ that contains a literal set to 1 by I, and removing from every remaining
+clause of ϕ all literals set to 0 by I. An assignment I is satisfying if ϕ(I) = /0. Problem #SAT asks
+to output the number of satisfying assignments of a formula.
+We also allow equality formulas, which are Boolean formulas, where variables are expressions
+using equality. In more detail: Let d be a ﬁxed constant over domain dom(v), where we call
+d term constant. Let v and v′ be variables over some domain dom(v) and dom(v′), where we
+call v and v′ term variables. Then, an equality formula β is an expression of the form v=d
+or v=v′. A term assignment J of equality formula β over term variables tvar(β) assigns each
+domain variable v ∈tvar(β) a value over domain dom(v). The Boolean formula β(J) under term
+
+4
+Fichte et al.
+d
+a
+b
+c
+{a, b, c}
+t1
+{a, d}
+t2
+{a}
+t3
+Figure 1: Graph G (left) with a TD T of graph G (right).
+assignment J is obtained as follows. First, we replace all expressions v=d in β by 1 if J(v) = d, all
+expressions v=v′ by 1 if J(v) = J(v′), and by 0 otherwise. Second, we remove from the resulting
+clauses in β(J) each clause c that contains a literal set to 1. Finally, we remove from every
+remaining clause in β(J) every literal that is set to 0. We say a term assignment J is satisfying
+if β(J) = /0.
+2.2 Tree Decomposition and Treewidth
+Treewidth is widely used for ﬁne-grained complexity analyzes and to establish algorithms that pro-
+vide tractability when bounding the treewidth. While it is only deﬁned for graphs and hence widely
+used in graph theory (Bodlaender and Koster 2008), one can deﬁne graph representations of input
+instances for a variety of problems. Dedicated techniques then allow to solve problems from many
+domains such as propositional satisﬁability (Samer and Szeider 2010), artiﬁcial intelligence (Got-
+tlob and Szeider 2007), knowledge representation (Gottlob et al. 2006), argumentation (Fichte
+et al. 2019), non-monotonic reasoning (Fichte et al. 2018), abduction in Datalog (Gottlob et al.
+2007), and databases (Grohe 2007), probabilistic inference (Dechter 1999) (under the name
+bucket elimination) including constraint satisfaction, Fourier and Gaussian elimination for solving
+linear equalities and inequalities, and combinatorial optimization. While theoretical conditional
+lower bound results seem to discourage using algorithms that exploit bounded treewidth (Pan
+and Vardi 2006; Fichte et al. 2020), dynamic programming along tree decompositions or related
+decompositions has recently been used to establish practical algorithms (Fichte et al. 2019; Dudek
+et al. 2020). An algorithm that exploits small treewidth takes a tree decomposition, which is an
+arrangement of a graph into a tree, and evaluates the problem in parts, via dynamic program-
+ming (DP) on the tree decomposition. Informally speaking, the tree decomposition provides an
+evaluation ordering, which one employs by a problem speciﬁc algorithm where the runtime of
+combinatorial hard part is bounded by a (potentially exponential) function of the treewidth w.
+Then, the underlying idea of treewidth is that it provides a measure for the closeness of a potential
+evaluation ordering which is simply a tree. Below, we provide the formal deﬁnitions of the notions
+tree decomposition and treewidth.
+A tree decomposition (TD) (Kloks 1994; Cygan et al. 2015) of a given graph G is a pair
+T = (T,χ) where T is a rooted tree and χ is a mapping which assigns to each node t ∈V(T)
+a set χ(t) ⊆V(G), called bag, such that (i) V(G) = S
+t∈V(T) χ(t) and E(G) ⊆{{u,v} | t ∈
+V(T),{u,v} ⊆χ(t)}; and (ii) for each r,s,t ∈V(T), such that s lies on the path from r to t, we
+have χ(r)∩χ(t) ⊆χ(s). We let width(T ) := maxt∈V(T) |χ(t)|−1. The treewidth tw(G) of G is
+the minimum width(T ) over all TDs T of G. For k ∈N we can compute a tree decomposition
+of width k or output that none exists in time 2Ok3 ·|V| (Bodlaender and Koster 2008).
+Example 1
+Figure 1 depicts a graph G (left) and a TD T of G (right) of width 2. The treewidth of G is also 2
+since G, contains a complete graph with 3 vertices (Kloks 1994).
+■
+
+Exploiting Database Management Systems and Treewidth for Counting
+5
+Next, we give the deﬁnition of a standard restriction for TDs, so called nice TDs. A nice TD
+ensures that one needs to consider only a small number of case distinctions in a DP algorithm later.
+For a node t ∈V(T), we say that type(t) is leaf if t has no children and χ(t) = /0; join if t has
+children t′ and t′′ with t′ ̸= t′′ and χ(t) = χ(t′) = χ(t′′); intr (“introduce”) if t has a single child t′,
+χ(t′) ⊆χ(t) and |χ(t)| = |χ(t′)|+1; rem (“removal”) if t has a single child t′, χ(t′) ⊇χ(t) and
+|χ(t′)| = |χ(t)| + 1. If for every node t ∈V(T), type(t) ∈{leaf,join,intr,rem}, then the TD is
+called nice. The conditions allow us to focus on each of the cases of our algorithms individually.
+3 Dynamic Programming on Tree Decompositions
+In the preliminaries, we gave deﬁnitions for tree decompositions and treewidth and stated a
+variety of application areas. We mentioned that treewidth is widely used as a structural measure
+to establish tractability results when we consider in addition to the input size of the instance
+also the treewidth. If we want to exploit small treewidth of an input instance by an algorithm
+in practice, one can design a so called-dynamic programming (DP) algorithm, which works as
+follows: Sub-problems are evaluated along the tree decomposition. At each node of the tree,
+information is gathered in tables. A table contains tuples of a ﬁxed form that are designed to
+ensure certain properties. Then, a table algorithm maintains these tables during a post-order
+traversal. Thereby, it handles different cases according to the node contents of the TD and it
+ensures that properties required to solve the problem in parts sustain. The size of a table depends
+on the number of items in the bag, but is allowed to be exponential in the size of a bag. Hence,
+the overall technique works in linear time in the size of the problem and exponential in the bag
+size. Intuitively, the tree decomposition ﬁxes an order in which we evaluate our problem. As a
+result, evaluating a problem along a tree decomposition allows for solving the problem at interest
+in parts, where the tree decomposition provides these parts and directs how solutions to the parts
+are supposed to be merged.
+More formally, a solver based on dynamic programming (DP) evaluates the input I in parts
+along a given TD of a graph representation G of the input. Thereby, for each node t of the
+TD, intermediate results are stored in a table τt. This is achieved by running a so-called table
+algorithm A, which is designed for a certain graph representation, and stores in τt results of
+problem parts of I , thereby considering tables τt′ for child nodes t′ of t. DP works for many
+problems P as follows.
+1. Construct a graph representation G of the given input instance I .
+2. Heuristically compute a tree decomposition T = (T,χ) of G.
+3. Traverse the nodes in V(T) in post-order, i.e., perform a bottom-up traversal of T. At every
+node t during post-order traversal, execute a table algorithm A that takes as input t, bag
+χ(t), a local instance P(t,I ) = It depending on P, as well as previously computed
+child tables of t and stores the result in τt.
+4. Interpret table τn for the root n of T in order to output the solution of I .
+When specifying a DP algorithm for a speciﬁc problem such as #SAT, it is often sufﬁcient to
+provide the data structures and the table algorithm for the speciﬁc problem as the general outline
+of the DP works the same for most problems. Hence, we focus on table algorithms and their
+description in the following.
+Next, we state the graph representation and table algorithm that we need to solve the prob-
+lem P = #SAT (Samer and Szeider 2010). First, we need the following graph representation. The
+
+6
+Fichte et al.
+Algorithm 1: Table algorithm Sat(t,χ(t),ϕt,⟨τ1,...,τℓ⟩) for solving #SAT (Samer and Szeider 2010).
+In: Node t, bag χ(t), clauses ϕt, and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {⟨/0,1⟩}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := {⟨I ∪{a 7→0},c⟩
+| ⟨I,c⟩∈τ1,ϕt(I ∪{a 7→0}) = /0}∪
+4
+⟨I ∪{a 7→1},c⟩
+| ⟨I,c⟩∈τ1,ϕt(I ∪{a 7→1}) = /0}
+5 else if type(t) = rem, and a ̸∈χ(t) is removed then
+6
+τt := {⟨I \{a 7→0,a 7→1}, ∑c∈C(I) c⟩}
+|⟨I,·⟩∈τ1}
+/* C(I) is the set that contains all counters for which assignments J are
+the same as I after we remove a from the assignment I
+*/
+7
+C(I) := {c | ⟨J,c⟩∈τ1,J \{a 7→0,a 7→1} = I \{a 7→0,a 7→1}}
+8 else if type(t) = join then
+9
+τt := {⟨I,c1 ·c2⟩
+| ⟨I,c1⟩∈τ1,⟨I,c2⟩∈τ2}
+10 return τt
+primal graph Gϕ of a formula ϕ has as vertices its variables, where two variables are joined by an
+edge if they occur together in a clause of ϕ. Given formula ϕ, a TD T = (T,χ) of Gϕ and a node t
+of T. Sometimes, we refer to the treewidth of the primal graph of a given formula by the treewidth
+of the formula. Then, we let local instance #SAT(t,ϕ) = ϕt be ϕt := {c | c ∈ϕ,var(c) ⊆χ(t)},
+which are the clauses entirely covered by χ(t).
+Table algorithm Sat as presented in Algorithm 1 shows all the cases that are needed to
+solve #SAT by means of DP over nice TDs. Each table τt consist of rows of the form ⟨I,c⟩,
+where I is an assignment of ϕt and c is a counter. Nodes t with type(t) = leaf consist of the empty
+assignment and counter 1, cf., Line 1. For a node t with introduced variable a ∈χ(t), we guess in
+Line 3 for each assignment β of the child table, whether a is set to true or to false, and ensure
+that ϕt is satisﬁed. When an atom a is removed in node t, we project assignments of child tables
+to χ(t), cf., Line 5, and sum up counters of the same assignments. For join nodes, counters of
+common assignments are multiplied, cf., Line 7. In Example 2 below, we explain the algorithm
+for a selected formula.
+Example 2
+Consider formula ϕ := {
+c1
+z
+}|
+{
+{¬a,b,c},
+c2
+z
+}|
+{
+{a,¬b,¬c},
+c3
+z }| {
+{a,d},
+c4
+z }| {
+{a,¬d}}. Satisfying assignments of for-
+mula ϕ are, e.g., {a 7→1,b 7→1,c 7→0,d 7→0}, {a 7→1,b 7→0,c 7→1,d 7→0} or {a 7→1,b 7→
+1,c 7→1,d 7→1}. In total, there are 6 satisfying assignments of ϕ. Observe that graph G of Figure 1
+depicts the primal graph Gϕ of ϕ. Intuitively, T of Figure 1 allows to evaluate formula ϕ in parts.
+Figure 2 illustrates a nice TD T ′ = (·,χ) of the primal graph Gϕ and tables τ1, ..., τ12 that are
+obtained during the execution of Sat on nodes t1,...,t12. We assume that each row in a table τt is
+identiﬁed by a number, i.e., row i corresponds to ⃗ut.i = ⟨It.i,ct.i⟩.
+Table τ1 = {⟨/0,1⟩} has type(t1) = leaf. Since type(t2) = intr, we construct table τ2 from τ1
+by taking I1.i ∪{a 7→0} and I1.i ∪{a 7→1} for each ⟨I1.i,c1.i⟩∈τ1. Then, t3 introduces c and
+t4 introduces b. ϕt1 = ϕt2 = ϕt3 = /0, but since χ(t4) ⊆var(c1) we have ϕt4 = {c1,c2} for t4. In
+consequence, for each I4.i of table τ4, we have {c1,c2}(I4.i) = /0 since Sat enforces satisﬁability
+of ϕt in node t. Since type(t5) = rem, we remove variable c from all elements in τ4 and sum up
+counters accordingly to construct τ5. Note that we have already seen all rules where c occurs
+and hence c can no longer affect interpretations during the remaining traversal. We similarly
+create τ6 = {⟨{a 7→0},3⟩,⟨{a 7→1},3⟩} and τ10 = {⟨{a 7→1},2⟩}. Since type(t11) = join, we
+
+Exploiting Database Management Systems and Treewidth for Counting
+7
+∅
+t1
+{a} t2
+{a, c} t3
+{a, b, c} t4
+{a, b} t5
+{a} t6
+∅
+t7
+{d}
+t8
+{a, d}
+t9
+{a}
+t10
+{a} t11
+∅
+t12
+T ′:
+⟨I4.i, c4.i⟩
+⟨{a 7→0, b 7→0, c 7→0}, 1⟩
+⟨{a 7→0, b 7→1, c 7→0}, 1⟩
+⟨{a 7→1, b 7→1, c 7→0}, 1⟩
+⟨{a 7→0, b 7→0, c 7→1}, 1⟩
+⟨{a 7→1, b 7→0, c 7→1}, 1⟩
+⟨{a 7→1, b 7→1, c 7→1}, 1⟩
+τ4
+i
+1
+2
+3
+4
+5
+6
+⟨I5.i, c5.i⟩
+⟨{a 7→0, b 7→0}, 2⟩
+⟨{a 7→1, b 7→0}, 1⟩
+⟨{a 7→0, b 7→1}, 1⟩
+⟨{a 7→1, b 7→1}, 2⟩
+τ5
+i
+1
+2
+3
+4
+i
+1
+2
+⟨I9.i, c9.i⟩
+⟨{a 7→1, d 7→0}, 1⟩
+⟨{a 7→1, d 7→1}, 1⟩
+τ9
+⟨I11.i, c11.i⟩
+⟨{a 7→1}, 6⟩
+τ11
+i
+1
+⟨I12.i, c12.i⟩
+⟨∅, 6⟩
+τ12
+i
+1
+i
+1
+⟨I1.i, c1.i⟩
+⟨∅, 1⟩
+τ1
+Figure 2: Selected tables obtained by DP on T ′ for ϕ of Example 2 using algorithm Sat.
+build table τ11 by taking the intersection of τ6 and τ10. Intuitively, this combines assignments
+agreeing on a, where counters are multiplied accordingly. By deﬁnition (primal graph and TDs),
+for every c ∈ϕ, variables var(c) occur together in at least one common bag. Hence, since τ12 =
+{⟨/0,6⟩}, we can reconstruct for example model {a 7→1,b 7→1,c 7→0,d 7→1} = I11.1 ∪I5.4 ∪I9.2
+of ϕ using highlighted (yellow) rows in Figure 2. On the other hand, if ϕ was unsatisﬁable, τ12
+would contain no values, i.e., τ12 = /0.
+■
+4 Dynamic Programming on Tree Decompositions Expressed in Relational Algebra
+While algorithms that run dynamic programming on bounded treewidth can be quite useful for
+efﬁcient problem solving in practice, implementations turn out to be tedious already for problems
+such as the propositional satisﬁability problem. In the following of the paper, we aim for rapid
+prototyping with dynamic programming by a declarative approach that ideally uses existing
+systems, gets parallel execution for free, and remains fairly efﬁcient.
+In the previous section, we explained that the traversal of the tree decomposition and the
+overall methodology of the procedure stays the same. But the core of dynamic programming on
+tree decompositions for various problems is mostly the speciﬁcation of the table algorithm that
+modiﬁes a table based on previously computed tables. Hence, one can often focus on the table
+algorithms and their descriptions. When recalling basics from databases 101 from undergraduate
+studies (Elmasri and Navathe 2016) and taking a closer look on Algorithm 1 above, we can
+immediately spot that we are effectively describing a query on existing data that produces a new
+table by Algorithm 1. This motivates our idea to use a database management system to execute
+the query and specify the query in SQL. Before we can proceed with our idea to use databases for
+executing DP algorithms, we take a step back and recall that the theory of SQL queries is based
+on relational algebra.
+Relational algebra allows us to describe our algorithms and later use SQL encodings for
+specifying the table algorithm. The intermediate step of stating the algorithm in a relation algebra
+description is twofold. First, we can immediately see the connection between the algorithms given
+in the literature, which allows us to use the existing algorithms without reproving all properties.
+Second, we obtain a compact mathematical description, which is not just a lengthy and technical
+SQL query that might be hard to understand to researchers from the community who are usually
+not very familiar with practical databases and the usage of query languages.
+
+8
+Fichte et al.
+4.1 Relational Algebra
+Before we start with details on our approach, we brieﬂy recall basics in relational algebra. The
+classical relational algebra was introduced by Codd (1970) as a mathematical framework for
+manipulating relations (tables). Since then, relational algebra serves as the formal background
+and theoretical basis in relational databases and their standard language SQL (Structured Query
+Language) for querying tables (Ullman 1989). In fact, in the following, we need extended
+constructs, which have not been deﬁned in the original framework by Codd, but are standard
+notions in databases nowadays (Elmasri and Navathe 2016). For the understanding later, we would
+like to mention that the SQL table model and relational algebra model slightly differ. The SQL
+table model is a bag (multiset) model, rather than a set (Garcia-Molina et al. 2009, Chapter 5).
+Below we also use extended projection and aggregation by grouping. Sometimes these are deﬁned
+on bags. We avoid this in the deﬁnitions in order to keep the algorithms close to the formal set
+based notation. Finally, we would like to emphasize that we are not using relation algebra here as
+developed by Alfred Tarski for the ﬁeld of abstract algebra, but really relational algebra as used in
+database applications and theory.
+A column a is of a certain ﬁnite domain dom(a). Then, a row r over set cols(r) of columns is a
+set of pairs of the form (a,v) with a ∈cols(r),v ∈dom(a) such that for each a ∈cols(r), there is
+exactly one v ∈dom(a) with (a,v) ∈r. In order to access the value v of an attribute a in a row r,
+we sometimes write r.a, which returns the unique value v with (a,v) ∈r. A table τ is a ﬁnite set
+of rows r over set cols(τ) := cols(r) of columns, using domain dom(τ) := S
+a∈cols(τ) dom(a). We
+deﬁne renaming of τ, given a set A of columns and a bijective mapping m : cols(τ) →A with
+dom(a) = dom(m(a)) for a ∈cols(τ), by ρm(τ) := {(m(a),v) | (a,v) ∈τ}. In SQL, renaming
+can be achieved by means of the AS keyword.
+Selection of rows in τ according to a given equality formula ϕ over term variables cols(τ) is
+deﬁned1 by σϕ(τ) := {r | r ∈τ,ϕ(ass(r)) = /0}, where function ass provides the corresponding
+term assignment of a given row r ∈τ. Selection in SQL is speciﬁed using keyword WHERE. Given
+a relation τ′ with cols(τ′)∩cols(τ) = /0. Then, we refer to the cross-join by τ ×τ′ := {r ∪r′ | r ∈
+τ,r′ ∈τ′}. Further, a θ-join (according to ϕ) corresponds to τ ▷◁ϕ τ′ := σϕ(τ ×τ′). Interestingly,
+in SQL a θ-join can be achieved by specifying the two tables (cross-join) and adding the selection
+according to ϕ by means of WHERE.
+Assume in the following a set A ⊆cols(τ) of columns. Then, we let table τ projected to A be
+given by ΠA(τ) := {rA | r ∈τ}, where rA := {(a,v) | (a,v) ∈r,a ∈A}. This concept of projection
+can be lifted to extended projection ˙ΠA,S, where we assume in addition to A, a set S of expressions
+of the form a ←f, such that a ∈cols(τ)\A, f is an arithmetic function that takes a row r ∈τ,
+and there is at most one such expression for each a ∈cols(τ) \ A in S. Formally, we deﬁne
+˙ΠA,S(τ) := {rA ∪rS | r ∈τ} with rS := {(a, f(r)) | a ∈cols(r),(a ←f) ∈S}. SQL allows to
+specify (extended) projection directly after initiating an SQL query with the keyword SELECT.
+Later, we use aggregation by grouping AG(a←g), where we assume a ∈cols(τ) \ A and a so-
+called aggregate function g : 2τ →dom(a), which intuitively takes a table of (grouped) rows.
+Therefore, we let AG(a←g)(τ) := {r∪{(a,g(τ[r]))} | r ∈ΠA(τ)}, where τ[r] := {r′ | r′ ∈τ,r ⊆r′}.
+For this purpose, we use for a set S ⊆S of integers, the functions SUM for summing up values in S,
+MIN for providing the smallest integer in S, as well as MAX for obtaining the largest integer in S,
+which are often used for aggregation in this context. The SQL standard uses projection (SELECT)
+1 We abbreviate for binary v ∈cols(τ) with dom(v) = {0,1}, v=1 by v and v=0 by ¬v.
+
+Exploiting Database Management Systems and Treewidth for Counting
+9
+to specify A as well as the aggregate function g, such that these two parts are distinguished by
+means of the keyword GROUP BY.
+Example 3
+Assume a table τ1 := {r1,r2,r3} of 2 columns a,b over Boolean domain dom(a) = dom(b) =
+{0,1}, where r1 := {(a,1),(b,1)}, r2 := {(a,0),(b,0)}, r3 := {(a,0),(b,1)}.
+τ1
+a
+b
+r1
+1
+1
+r2
+0
+0
+r3
+0
+1
+τ2
+b
+a
+r1
+1
+1
+r2
+0
+0
+r3
+1
+0
+Then, r3.a = 0 and r3.b = 1. Rows can be swapped by renaming and we let τ2 := ρ{a7→b,b7→a}τ1.
+Observe that, e.g., ρ{a7→b,b7→a}({r3}) corresponds to {{(a,1),(b,0)}}, i.e., considering r3 and
+swapping a and b. We select rows by using the selection σ. For example, if we want to select
+rows where b = 1 (colored in blue) we can use σb=1(τ1).
+τ1
+a
+b
+r1
+1
+1
+r2
+0
+0
+r3
+0
+1
+Hence, applying σb=1(τ1) results in {r1,r3}. Table τ1 can be θ-joined with τ2, but before, we
+need to have disjoint columns, which we obtain by renaming each column c to a fresh column c′
+as below by ρa7→a′,b7→b′τ2. Then, τ3 := τ1 ▷◁a=a′∧b=b′ (ρa7→a′,b7→b′τ2).
+τ1
+a
+b
+r1
+1
+1
+r2
+0
+0
+r3
+0
+1
+ρa7→a′,b7→b′(τ2)
+b’
+a’
+r1
+1
+1
+r2
+0
+0
+r3
+1
+0
+τ3
+a
+b
+b’
+a’
+r1
+1
+1
+1
+1
+r2
+0
+0
+0
+0
+Consequently, we have τ3 = {{(a,0),(a′,0),(b,0),(b′,0)},{(a,1),(a′,1),(b,1),(b′,1)}}. Ex-
+tended projection allows not only to ﬁlter certain columns, but also to add additional columns.
+As a result, if we only select column a of each row of τ1, but add a fresh column c holding the
+sum of the values for a and b, then ˙Π{a},{c←a+b}τ1 corresponds to {{(a,1),(c,2)},{(a,0),(c,0)},
+{(a,0),(c,1)}}.
+˙Π{a},{c←a+b}τ1
+a
+c
+r1
+1
+2
+r2
+0
+0
+r3
+0
+1
+Grouping τ1 according to the value of column a, where we aggregate each group by summing
+
+10
+Fichte et al.
+τ1
+a
+b
+r1
+1
+1
+r2
+0
+0
+r3
+0
+1
+{a}Gd ←τ7→SUM({r.b|r∈τ})(τ1)
+a
+d
+r1
+1
+1
+r3
+0
+1
+up the values of columns b in a fresh column d, results in {a}Gd ←τ7→SUM({r.b|r∈τ})(τ1), which
+simpliﬁes to {{(a,1),(d,1)},{(a,0),{d,1)}} as illustrated below.
+■
+4.2 Table Algorithms in Relational Algebra
+Now, we are in the position to use relational algebra instead of set theory based notions to describe
+how tables are obtained during dynamic programming. The step from set notation to relational
+algebra is driven by the observation that in these table algorithms one can identify recurring
+patterns and one mainly has to adjust problem-speciﬁc parts of it. We continue the description
+with our problem #SAT. We picture tables τt for each TD node t as relations, where τt distinguishes
+a unique column x for each x ∈χ(t). In addition, we require a column cnt for counting in #SAT,
+or a column for modeling costs or weights in case of optimization problems.
+Algorithm 2 presents a table algorithm for problem #SAT that is equivalent to Algorithm 1, but
+relies on relational algebra for computing tables. Since our description in relation algebra yields
+the same results as the set based-notation above, we omit formal correctness proofs. Nonetheless,
+we brieﬂy explain below why both notations are identical. We highlight the crucial parts by
+coloring Algorithm 1. In particular, one typically derives for nodes t with type(t) = leaf, a fresh
+initial table τt, cf., Line 1 of Algorithm 2. Then, whenever a variable a is introduced, such
+algorithms often use θ-joins with a fresh initial table for the introduced variable a. Hence, the
+new column represents the potential values for variable a. In Line 3, the selection of the θ-join is
+performed according to ϕt, i.e., corresponding to the local instance of #SAT. Further, for nodes t
+with type(t) = rem, these table algorithms typically need projection. In case of Algorithm 2,
+Line 5 also needs grouping to sum up the counters for those rows of τ1 that concur in τt. Thereby,
+rows are grouped according to values of columns χ(t) and we keep only one row per group in
+table τ, where the fresh counter cnt is the sum among all counters in τ. Finally, in Line 7 for a
+node t with type(t) = join, we use extended projection and θ-joins, where we join on the same
+truth assignments. This allows us later to leverage database technology for a usually expensive
+Algorithm 2: Table algorithm Sat′(t,χ(t),ϕt,⟨τ1,...,τℓ⟩) for solving #SAT.
+In: Node t, bag χ(t), local formula ϕt, sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {{(cnt,1)}}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := τ1 ▷◁ϕt {{(a,0)},{(a,1)}}
+4 else if type(t) = rem, and a ̸∈χ(t) is removed then
+5
+τt := χ(t)Gcnt←τ7→SUM({r.cnt|r∈τ})(Πcols(τ1)\{a}τ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),{cnt←cnt·cnt′}(τ1 ▷◁V
+u∈χ(t) u=u′ ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+
+Exploiting Database Management Systems and Treewidth for Counting
+11
+operation. Extended projection is needed for multiplying the counters of the two rows containing
+the same assignment.
+4.3 Table algorithms for selected problems
+Dynamic programming algorithms are known for a variety of problems. Standard texts in the
+area of parameterized algorithms and introductory lectures provide various speciﬁcations. For
+formal properties and detailed algorithm descriptions, we refer to other works (Bodlaender 1988),
+(Cygan et al. 2015, Chapter 7), (Dechter 1999), (Bannach and Berndt 2019). Below, we present
+the table algorithms for a selection of combinatorial problems in relational algebra notation. In
+order to simplify the presentation, we assume that the instance is given by I and that the used
+tree decomposition is nice and given by T = (T,χ). If the problem is a graph problem T is a
+TD of I , otherwise we implicitly assume that T is a TD of the primal graph of instance I . For
+graph problems I and a given node t of T, we refer to the local instance of I = G = (V,E) by
+local graph Gt and deﬁne it by Gt := (V ∩χ(t),E ∩[χ(t)× χ(t)]).
+Problem #o-COL
+Algorithm 3: Table algorithm Col(t,χ(t),Gt,⟨τ1,...,τℓ⟩) for solving #o-COL.
+In: Node t, bag χ(t), local graph Gt, and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {(cnt,1)}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := τ1 ▷◁V
+{u,v}∈E(Gt ) u̸=v {{(a,0)},{(a,1)},...,{(a,o)}}
+4 else if type(t) = rem, and a ̸∈χ(t) is removed then
+5
+τt := χ(t)Gcnt←τ7→SUM({r.cnt|r∈τ})(Πcols(τ1)\{a}τ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),{cnt←cnt·cnt′}(τ1 ▷◁V
+u∈χ(t) u=u′ ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+For a given graph instance I = G = (V,E), an o-coloring is a mapping ι : V →{1,...,o} such
+that for each edge {u,v} ∈E, we have ι(u) ̸= ι(v). Then, the problem #o-COL asks to count the
+number of o-colorings of G, whose local instance #o-COL(t,G) is the local graph Gt. The table
+algorithm for this problem #o-COL is given in Algorithm 3. Similarly to Algorithm 2, for (empty)
+leaf nodes, the counter cnt is set to 1 in Line 1. Whenever a vertex a is introduced, in Line 3, one
+of the o many color values for a are guessed and θ-joined with the table τ1 for the child node
+of t such that only colorings with different values for two adjacent vertices are kept. Similarly to
+Algorithm 2, whenever a vertex a is removed, Line 5 ensures that the column for a is removed
+and that counters cnt are summed up for rows that concur due to the removal of column a. Then,
+the case for join nodes in Line 7 is again analogous to Algorithm 2, where only rows with the
+same colorings in both child tables are kept and counters cnt are multiplied accordingly.
+Problem MINVC
+Given a graph instance I = G = (V,E), a vertex cover is a set of vertices C ⊆V of G such
+that for each edge {u,v} ∈E, we have {u,v}∩C ̸= /0. Then, MINVC asks to ﬁnd the minimum
+
+12
+Fichte et al.
+Algorithm 4: Table algorithm VC(t,χ(t),Gt,⟨τ1,...,τℓ⟩) for solving MINVC.
+In: Node t, bag χ(t), local graph Gt, and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {(card,0)}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := τ1 ▷◁V
+{u,v}∈E(Gt ) u∨v {{(a,0)},{(a,1)}}
+4 else if type(t) = rem, and a ̸∈χ(t) is removed then
+5
+τt := χ(t)Gcard←τ7→MIN({r.card+r.a|r∈τ})(Πcols(τ1)\{a}τ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),{card←card+card′}(τ1 ▷◁V
+u∈χ(t) u=u′ ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+cardinality |C| among all vertex covers C, i.e., C is such that there is no vertex cover C′ with |C′| <
+|C|. Local instance MINVC(t,G) := Gt, where the local graph Gt is deﬁned above. We use
+an additional column card for storing cardinalities. The table algorithm for solving MINVC
+is provided in Algorithm 4, where, for leaf nodes the cardinality is 0, cf., Line 1. Then, when
+introducing vertex a, we guess in Line 3 whether a shall be in the vertex cover or not, and enforce
+that for each edge of the local instance at least one of the two endpoint vertices has to be in
+the vertex cover. Note that the additional cardinality column only takes removed vertices into
+account. More precisely, when a vertex a is removed, we group in Line 5 according to the bag
+columns χ(t), where the fresh cardinality value is the minimum cardinality (plus 1 for a if a shall
+be in the vertex cover), among those rows that concur due to the removal of a. The join node is
+similar to before, but in Line 7 we additionally need to sum up the cardinalities of two adjoining
+child table rows.
+Problem MAXSAT
+Algorithm 5: Table algorithm MSat(t,χ(t),It,⟨τ1,...,τℓ⟩) for solving MAXSAT.
+In: Node t, bag χ(t), local instance It = (ϕt,ψt), and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {(card,0)}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := τ1 ▷◁ϕt {{(a,0)},{(a,1)}}
+4 else if type(t) = rem, a ̸∈χ(t) is removed, and ψ′ are removed local soft-clauses then
+5
+τt := χ(t)Gcard←τ7→MAX({r.card+Σc∈ψ′,c(ass(r))=/01|r∈τ})(Πcols(τ1)\{a}τ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),{card←card+card′}(τ1 ▷◁V
+u∈χ(t) u=u′ ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+Given Boolean formulas ϕ and ψ, an instance of problem MAXSAT is of the form I = (ϕ,ψ)
+and we assume that T is a TD of primal graph Gϕ∪ψ. A solution to MAXSAT is a satisfying
+assignment I of hard-clauses ϕ such that |{c | c ∈ψ,c(I) = /0}| is maximized, i.e., I is a satisfying
+assignment of ϕ that satisﬁes the maximum number of soft-clauses ψ among all satisfying
+assignments of ϕ. We deﬁne the local instance It := (ϕt,ψt) consisting of local formula ϕt,
+referred to by local hard-clauses and local formula ψt, called local soft-clauses.
+The table algorithm for problem MAXSAT is given in Algorithm 5, where we use column card
+
+Exploiting Database Management Systems and Treewidth for Counting
+13
+for holding satisﬁed soft-clauses. Leaf tables only hold a cardinality value of 0 as in Line 1. Then,
+similar to the table algorithm Sat′ (cf., Algorithm 2), when introducing a variable a, we guess
+the truth value and keep those rows, where local formula ϕt is satisﬁed. Whenever a variable a
+is removed in a node t, we remove column a and group rows that have common values over
+columns χ(t). Thereby, the new cardinality card for each group is the maximum among the
+values of card including the number of satisﬁed local soft-clauses ψ′ of the child node of t that
+are removed in ψt (due to removal of a). Finally, similar to Algorithm 4, a join node sums up
+cardinalities of two child rows containing the same assignment.
+Problem MINIDS
+Algorithm 6: Table algorithm IDS(t,χ(t),Gt,⟨τ1,...,τℓ⟩) for solving MINIDS.
+In: Node t, bag χ(t), local graph Gt, and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := {(card,0)}
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := ˙Πχ(t),S
+u∈χ(t){du←W
+{u,v}∈E(Gt ) du∨v,card←card}(τ1 ▷◁V
+{u,v}∈E(Gt ) ¬u∨¬v {{(a,0),(da,0)},{(a,1),(da,1)}})
+4 else if type(t) = rem, and a ̸∈χ(t) is removed then
+5
+τt := χ(t)∪{du|u∈χ(t)}Gcard←τ7→MIN({r.card+r.a|r∈τ})(Πcols(τ1)\{a,da}σdaτ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),S
+u∈χ(t){du←du∨d′u,card←card+card′}(τ1 ▷◁V
+u∈χ(t) u=u′ ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+Given a graph instance I = G = (V,E), a dominating set of G is a set of vertices D ⊆V
+of G, where each vertex v ∈V is either in D or is adjacent some vertex in D, i.e., there is a
+vertex d ∈D with {d,v} ∈E. A dominating set D is an independent dominating set of G, if there
+is no edge in E between vertices of D. Then, the problem MINIDS asks to ﬁnd the minimum
+cardinality |D| among all independent dominating sets D of G (if exists). We deﬁne local instance
+by MINIDS(t,G) := Gt.
+The table algorithm for solving MINIDS is given in Algorithm 6, where a table τt of a node t
+uses column card for cardinalities of potential dominating sets, and an additional Boolean col-
+umn du per bag vertex u ∈χ(t). Intuitively, du indicates whether vertex u is already “dominated”,
+i.e., either u is in the dominating set or u has an adjacent vertex to the dominating set. Similar to
+before, leaf nodes set cardinality card to 0, cf., Line 1. For a node t with an introduced vertex a, we
+guess in Line 3 whether a shall be in the dominating set or not (and set da to 0 or 1, respectively).
+Then, we only keep rows that are independent, i.e., a can not be in the dominating set and adjacent
+to u in edges E(Gt) of local graph Gt at the same time. Finally, values du (dominance status) for a
+and for neighbors of a are updated accordingly. When a vertex a is removed in a node t, Line 5
+only keeps rows, where da is true, i.e., a is indeed dominated, and removes columns a,da. Further,
+we group rows according to their values to χ(t)∪{du | u ∈χ(t)} and for each group we set the
+cardinality to the minimum among the cardinalities of the group rows (including a if a is in the
+set). For join nodes t, Line 7 sums up cardinalities of rows holding the same dominating set and
+treats a vertex u ∈χ(t) as dominated if it is dominated in at least one of the two rows.
+Similar to MINVC and #o-COL one can model several other (graph) problems. One could
+also think of counting the number of solutions to problem MINVC, where both a column for
+
+14
+Fichte et al.
+Algorithm 7: Template table algorithm A(t,χ(t),It,⟨τ1,...,τℓ⟩) for solving problem P.
+In: Node t, bag χ(t), local instance It, and a sequence ⟨τ1,...τℓ⟩of child tables.
+Out: Table τt.
+1 if type(t) = leaf then τt := #leafTab#
+2 else if type(t) = intr, and a∈χ(t) is introduced then
+3
+τt := ˙Πχ(t),#intrAddCols#(τ1 ▷◁#intrFilter# #intrTab#)
+4 else if type(t) = rem, and a ̸∈χ(t) is removed then
+5
+τt := χ(t)∪#remGroupCols#G#remAggr#(Πcols(τ1)\{a,#remCols#}σ#remFilter#τ1)
+6 else if type(t) = join then
+7
+τt := ˙Πχ(t),#joinAddCols#(τ1 ▷◁V
+u∈χ(t) u=u′∧#joinAddFilter# ρ S
+u∈cols(τ2)
+{u7→u′}τ2)
+8 return τt
+cardinalities and one for counting is used. There, in addition to grouping, we additionally could
+use conditions over groups where only rows are kept whose column values for card form the
+minimum within the group.
+4.4 Generalizing the Patterns of Table Algorithms
+In the previous sections, we presented the table algorithms for solving a selection of combinatorial
+problems, namely, #SAT, #o-COL, MINVC, MAXSAT, and MINIDS, by dynamic programming.
+As mentioned in Section 2.2, there are a variety of application areas where such algorithms
+allow for solving problems efﬁciently. When specifying most algorithms, we focus on the table
+algorithm A, which is executed for each node t of T of the considered tree decomposition T =
+(T,χ) and computes a new table depending on the previously computed tables at the children
+of t. From the descriptions above, it is easy to see that the algorithms effectively follow standard
+patterns. Therefore, we present a general template in Algorithm 7, where parts of table algorithms
+for problems that are typically problem-speciﬁc are replaced by colored placeholders of the
+form #placeHolder#, cf., Algorithm 2. The general template of table algorithms works for many
+problems, including decision problems, counting problems as well as optimization problems.
+The intuition behind these placeholders is as follows: For leaf nodes, the initial table (typ-
+ically empty) can be speciﬁed using #leafTab#. For introduce nodes, the potential cases for
+the introduced vertex a are given with the help of #intrTab#. Then, according to the local in-
+stance, we only keep those rows that satisfy #intrFilter#. The placeholder #intrAddCols# allows
+to add additional columns, which we often need when solving problems that involve counting
+or optimizing a value. In other words, placeholder #intrAddCols# in Line 3 of Algorithm 7 uses
+extended projection, which is needed for problems requiring changes on vertex introduction.
+Nodes, where an atom a is removed sometimes require to ﬁlter rows, which do not lead to a
+solution using #remFilter#, and to remove columns concerning a by #remCols#. Further, one of-
+tentimes needs to aggregate rows according to the values of the columns of the bag and additional
+columns (given by #remGroupCols#), where the aggregation is speciﬁed by #remAggr#. Finally,
+for join nodes, one can specify an additional ﬁlter #joinAddFilter# that goes beyond checking
+equivalence of row values in the θ-join operation. Further, depending on the problem one might
+need to add and update the values of additional columns by using extended projection in form of
+placeholder #joinAddCols#.
+Note that while the algorithms presented here assume for simplicity nice tree decompositions,
+the whole architecture does not depend on certain restrictions of TDs, or whether it is nice
+or not. Instead, a table algorithm of any TD is simply speciﬁed by handling problem-speciﬁc
+
+Exploiting Database Management Systems and Treewidth for Counting
+15
+1. Build graph G of I
+Store results
+in table τt
+E
+Apply A to local
+prob. P(t,I )
+E
+2. Create TD T of G
+2b.Create DB Tables
+done?
+no
+yes
+Visit next node t
+of T in post-order
+4. Specify Output
+E
+E
+3. Dynamic Programming for P
+Figure 3: Architecture of Dynamic Programming with Databases. Steps highlighted in red are
+provided by the system depending on the speciﬁcation of yellow and blue parts, which is given by
+the user for speciﬁc problems P. The yellow “E”s represent events that can be intercepted and
+handled by the user. The blue part concentrates on table algorithm A, where the user speciﬁes how
+SQL code is generated in a modular way.
+implementations of the placeholders of Algorithm 7, where the system following this architecture
+is responsible for interleaving and overlapping these cases within a node t. In fact, we discuss an
+implementation of a system according to this architecture next, where it is crucial to implement
+non-nice TDs to obtain higher efﬁciency.
+5 System dpdb: Dynamic Programming with Databases & SQL
+In this section, we present a general architecture to model table algorithms by means of database
+management systems. We move from relational algebra deﬁnitions to speciﬁcations of the table
+algorithms in terms of SQL queries. The overall architecture is follows the DP approach as
+presented in Section 3. It works as depicted in Figure 3 where the steps highlighted in yellow and
+blue need to be speciﬁed depending on the problem P. Steps outside Step 3 are mainly setup
+tasks, the yellow “E”s indicate events that might be needed to solve more complex problems on the
+polynomial hierarchy. For example, one could create and drop auxiliary sub-tables for each node
+during Step 3 within such events. Observe that after the generation of a TD T = (T,χ), Step 2b
+automatically creates tables τt for each node t of T, where the corresponding table columns
+of τt are speciﬁed in the blue part, i.e., within A. The default columns of such a table τt that are
+assumed in this section foresee one column for each element of the bag χ(t), where additional
+columns that are needed for solving the problem can be added. This includes additional auxiliary
+columns, which can be also counters or costs for counting or optimization, respectively. Besides
+the deﬁnition of table schemes, the blue part concerns the speciﬁcation of the table algorithm by
+means of a procedural generator template that describes how to obtain SQL code for each node t,
+thereby depending on χ(t) and on the tables for child nodes of t. This generated SQL code is then
+used internally for manipulation of tables τt during the tree decomposition traversal in Step 3 of
+dynamic programming.
+We implemented the proposed architecture of the previous section in the prototypical system
+dpdb. The system is open-source2, written in Python 3, and uses PostgreSQL as DBMS. We are
+certain that one can easily replace PostgreSQL by any other state-of-the-art relational database that
+uses SQL. In the following, we discuss implementation speciﬁcs that are crucial for a performant
+system that is still extendable and ﬂexible.
+2 Our system dpdb is available under GPL3 license at github.com/hmarkus/dp on dbs.
+
+16
+Fichte et al.
+Computing TDs. TDs are computed mainly with the library htd version 1.2 with default set-
+tings (Abseher et al. 2017), which ﬁnds TDs extremely quick also for interesting instances (Fichte
+et al. 2019) due to heuristics. Note that dpdb directly supports the TD format of recent com-
+petitions (Dell et al. 2018), i.e., one could easily replace the TD library. It is important not to
+enforce htd to compute nice TDs, as this would cause a lot of overhead later in dpdb for copying
+tables. However, in order to beneﬁt from the implementation of θ-joins, query optimization, and
+state-of-the-art database technology in general, we observed that it is crucial to limit the number
+of child nodes of every TD node. In result, when huge tables are involved, θ-joins among child
+node tables cover at most a limited number of child node tables. Hence, the query optimizer of the
+database system can still come up with meaningful execution plans depending on the contents
+of the table. Nonetheless we prefer θ-joins with more than just two tables, since binary θ-joins
+already ﬁx in which order these tables shall be combined, which already limits the query optimizer.
+Apart from this trade-off, we tried to outsource the task of joining tables to the DBMS, since the
+performance of database systems highly depends on query optimization. The actual limit, which
+is a restriction from experience and practice only, highly depends on the DBMS that is used. For
+PostgreSQL, we set a limit of at most 5 child nodes for each node of the TD, i.e., each θ-join
+covers at most 5 child tables.
+Towards non-nice TDs. Although this paper presents the algorithms for nice TDs (mainly due to
+simplicity), the system dpdb interleaves these cases as presented in Algorithm 7. More precisely,
+the system executes one query per table τt for each node t during the traversal of TD T . This
+query consists of several parts and we brieﬂy explain its parts from outside to inside in accordance
+with Algorithm 7. First of all, the inner-most part concerns the row candidates for τt consisting
+of the θ-join among all child tables of τt as in Line 7 of Algorithm 7. If there is no child node
+of t, table #leafTab# of Line 1 is used instead. Next, the result is cross-joined with #intrTab#
+for each introduced variable as in Line 3, but without using the ﬁlter #intrFilter# yet. Then, the
+result is projected by using extended projection involving χ(t) as well as both #joinAddCols#
+and #intrAddCols#. Actually, there are different conﬁgurations of how dpdb can deal with the
+resulting row candidates. For debugging (see below) one could (1) actually materialize the result in
+a table, whereas for performance reasons, one should use (2) common table expressions (CTEs or
+WITH-queries) or (3) sub-queries (nested queries), which both result in one nested SQL query per
+table τt. On top of these row candidates, selection according to #intrFilter#, cf., Line 3, is executed.
+Finally, the resulting table is plugged as table τ1 into Line 5, where in particular the result is
+grouped by using both χ(t)3 and #remGroupCols# and each group is aggregated by #remAggr#
+accordingly. It turns out that PostgreSQL can do better with sub-queries than CTEs, since we
+observed that the query optimizer oftentimes pushes (parts of) outer selections and projections
+into the sub-query if needed, which is not the case for CTEs, as discussed in the PostgreSQL
+manual (PostgreSQL Global Development Group 2020, Sec. 7.8.1). On different DBMSs or other
+vendors, e.g., Oracle, it might be better to use CTEs instead.
+Example 4
+Consider again Example 2 and Figure 1 and let us use table algorithm Sat′ with dpdb on formula ϕ
+of TD T and Option (3): sub-queries, where the row candidates are expressed via a sub-queries.
+Then, for each node ti of T , dpdb generates a view vi as well as a table τi containing in the end
+3 Actually, dpdb keeps only columns relevant for the table of the parent node of t.
+
+Exploiting Database Management Systems and Treewidth for Counting
+17
+the content of vi. Observe that each view only has one column a for each variable a of ϕ since the
+truth assignments of the other variables are not needed later. This keeps the tables compact, only
+τ1 has two rows, τ2, and τ3 have only one row. We obtain the following views.
+CREATE VIEW v1 AS SELECT a, sum(cnt) AS cnt FROM
+(WITH intrTab AS (SELECT 0 AS val UNION ALL SELECT 1)
+SELECT i1.val AS a, i2.val AS b, i3.val AS c, 1 AS cnt
+FROM intrTab i1, intrTab i2, intrTab i3)
+WHERE (NOT a OR b OR c) AND (a OR NOT b OR NOT c) GROUP BY a
+CREATE VIEW v2 AS SELECT a, sum(cnt) AS cnt FROM
+(WITH intrTab AS (SELECT 0 AS val UNION ALL SELECT 1)
+SELECT i1.val AS a, i2.val AS d, 1 AS cnt FROM intrTab i1, intrTab i2)
+WHERE (a OR d) AND (a OR NOT d) GROUP BY a
+CREATE VIEW v3 AS SELECT a, sum(cnt) AS cnt FROM
+(SELECT τ1.a, τ1.cnt * τ2.cnt AS cnt FROM τ1, τ2 WHERE τ1.a = τ2.a)
+GROUP BY a
+■
+Parallelization. A further reason to not over-restrict the number of child nodes within the TD, lies
+in parallelization. In dpdb, we compute tables in parallel along the TD, where multiple tables can
+be computed at the same time, as long as the child tables are computed. Therefore, we tried to keep
+the number of child nodes in the TD as high as possible. In our system dpdb, we currently allow
+for at most 24 worker threads for table computations and 24 database connections at the same
+time (both pooled and conﬁgurable). On top of that we have 2 additional threads and database
+connections for job assignments to workers, as well as one dedicated watcher thread for clean-up
+and connection termination, respectively.
+Logging, Debugging and Extensions. Currently, we have two versions of the dpdb system im-
+plemented. One version aims for performance and the other one tries to achieve comprehensive
+logging and easy debugging of problem (instances), thereby increasing explainability. The former
+does neither keep intermediate results nor create database tables in advance (Step 2b), as depicted
+in Figure 3, but creates tables according to an SQL SELECT statement. In the latter, we keep
+all intermediate results, we record database timestamps before and after certain nodes, provide
+statistics as, e.g., width and number of rows. Further, since for each table τt, exactly one SQL
+statement is executed for ﬁlling this table, we also have a dedicated view of the SQL SELECT
+statement, whose result is then inserted in τt. Together with the power and ﬂexibility of SQL
+queries, we observed that this helps in ﬁnding errors in the table algorithm speciﬁcations.
+Besides convient debugging, system dpdb immediately contains an extension for approximation.
+There, we restrict the table contents to a maximum number of rows. This allows for certain
+approximations on counting problems or optimization problems, where it is infeasible to compute
+the full tables. Further, dpdb foresees a dedicated randomization on these restricted number of
+rows such that we obtain different approximate results on different random seeds.
+Note that dpdb can be easily extended. Each problem can overwrite existing default behavior
+and dpdb also supports problem-speciﬁc argument parsers for each problem individually. Out-of-
+the-box, we support the formats DIMACS SAT and DIMACS graph (Liu et al. 2006) as well as
+the common format for TDs (Dell et al. 2018).
+
+18
+Fichte et al.
+Implementing table algorithms with dpdb for selected problems
+The system dpdb allows for easy prototyping of DP algorithms on TDs. In the following, we present
+the relevant parts of table algorithm implementations according to the template in Algorithm 7
+for our selection of problems below4. More precisely, we give the SQL implementations of the
+table algorithms of the previous section in form of specifying the corresponding placeholders as
+given by the template algorithm A. Thereby, we only specify the placeholders needed for solving
+the problems, i.e., placeholders of template algorithm A that are not used (empty) are left out. To
+this end, we assume in this section for each problem a not necessarily nice TD T = (T,χ) of the
+corresponding graph representation of our given instance I , as well as any node t of T and its
+child nodes t1,...,tℓ.
+Problem #SAT. Given instance formula I = ϕ. Then, the speciﬁc placeholders of the template
+for #SAT for a node t with ϕt = {{l1,1,...,l1,k1},...,{ln,1,...,ln,kn}} that are required for dpdb to
+solve the problem are as follows.
+• #leafTab#:
+SELECT 1 AS cnt
+• #intrTab#:
+SELECT 0 AS val UNION ALL SELECT 1
+• #intrFilter#:
+(l1,1 OR ... OR l1,k1) AND ... AND (ln,1 OR ... OR ln,kn)
+• #remAggr#:
+SUM(cnt) AS cnt
+• #joinAddCols#:
+τ1.cnt * ... * τℓ.cnt AS cnt
+If one compares this speciﬁcation to Algorithm 2, one sees that conceptually the same idea is given
+above. However, for efﬁciency dpdb does not rely on nice TDs. Observe that for the plain decision
+problem SAT, where the goal is to decide only the existence of a satisfying assignment for given
+formula ϕ, placeholder #leafTab# would need to return the empty table and parts #remAggr# and
+#joinAddCols# are just empty since no counter cnt is needed.
+Problem #o-COL. Recall the problem #o-COL and Algorithm 3. Let I = G = (V,E) be a
+given input graph. Then, speciﬁc implementation parts for #o-COL for a node t with E(Gt) =
+{{u1,v1},..., {un,vn}} is given as follows.
+• #leafTab#:
+SELECT 1 AS cnt
+• #intrTab#:
+SELECT 0 AS val UNION ALL ... UNION ALL SELECT o
+• #intrFilter#:
+NOT (u1 = v1) AND ... AND NOT (un = vn)
+• #remAggr#:
+SUM(cnt) AS cnt
+• #joinAddCols#:
+τ1.cnt * ... * τℓ.cnt AS cnt
+Problem MINVC. Given any input graph I = G = (V,E) of MINVC. Then, problem MINVC for
+a node t with E(Gt) = {{u1,v1},...,{un,vn}} and removed vertices χ(t)\(χ(t1)∪...∪χ(tℓ)) =
+{r1,...,rm} is speciﬁed by the following placeholders (cf., Algorithm 4).
+• #leafTab#:
+SELECT 0 AS card
+• #intrTab#:
+SELECT 0 AS val UNION ALL SELECT 1
+• #intrFilter#:
+(u1 OR v1) AND ... AND (un OR vn)
+• #remAggr#:
+MIN(card + r1 + ... + rm) AS card
+• #joinAddCols#:
+τ1.card + ... + τℓ.card AS card
+4 Prototypical implementations for problems #SAT as well as MINVC are readily available in dpdb.
+
+Exploiting Database Management Systems and Treewidth for Counting
+19
+Problem MAXSAT. Given an instance I = (ϕ,ψ) of problem MAXSAT. Then, the problem
+for a node t with local hard clauses ϕt = {{l1,1,...,l1,k1},...,{ln,1,...,ln,kn}} and local soft
+clauses ψt = {{l′
+1,1,...,l′
+1,k′
+1},...,{l′
+p,1,...,lp,k′p}} is speciﬁed by the following placeholders (cf.,
+Algorithm 5).
+• #leafTab#:
+SELECT 0 AS card
+• #intrTab#:
+SELECT 0 AS val UNION ALL SELECT 1
+• #intrFilter#:
+(l1,1 OR ... OR l1,k1) AND ... AND (ln,1 OR ... OR ln,kn)
+• #remAggr#:
+MIN(card + (l′
+1,1 OR ... OR l′
+1,k′
+1) + ... +
+(l′
+p,1 OR ... OR l′
+p,k′p)) AS card
+• #joinAddCols#:
+τ1.card + ... + τℓ.card AS card
+Problem MINIDS. Recall an instance I = G = (V,E) of problem MINIDS and table algo-
+rithm IDS as given in Algorithm 6. The implementation of table algorithm IDS for MINIDS for
+a node t assumes that E(Gt) = {{u1,v1},..., {un,vn}}. Further, we let bag χ(t) = {a1,...,ak},
+removed vertices χ(t)\(χ(t1)∪...∪χ(tℓ)) = {r1,...,rm}, and we let the wi many neighbors Ni
+of each vertex ai in G (with 1 ≤i ≤k) be given by Ni = {eai,1,...,eai,wi}. Then, the SQL imple-
+mentation can be speciﬁed as follows.
+• #leafTab#:
+SELECT 0 AS card
+• #intrTab#:
+SELECT 0 AS val, 0 AS d UNION ALL SELECT 1, 1
+• #intrFilter#:
+(NOT u1 OR NOT v1) AND ... AND (NOT un OR NOT vn)
+• #intrAddCols#:
+card, da1 OR ea1,1 OR ... OR ea1,w1 AS da1, ...
+dak OR eak,1 OR ... OR eak,wk AS dak
+• #remFilter#:
+da1 AND ... AND dak
+• #remAggr#:
+MIN(card + r1 + ... + rm) AS card
+• #remGroupCols#:
+da1, ..., dak
+• #joinAddCols#:
+τ1.card + ... + τℓ.card AS card,
+τ1.da1 OR ... OR τℓ.da1 AS da1, ...
+τ1.dak OR ... OR τℓ.dak AS dak
+Note that implementations could generate and apply parts of this speciﬁcation, as for example
+in #intrFilter# only edges that have not been checked so far in any descending node, need to be
+checked.
+Similar to MINVC, #o-COL, and MINIDS one can model several related (graph) problems.
+One could also think of counting the number of solutions to problem MAXSAT, where both, a
+column for cardinalities and one for counting is used. There, in addition to grouping with GROUP
+BY in dpdb, we additionally use the HAVING construct of SQL, where only rows are kept, whose
+column card is minimal.
+6 Experiments
+We conducted a series of experiments using publicly available benchmark sets for #SAT. Our
+tested benchmarks (Fichte et al. 2018a) are publicly available and our results are also on github at
+github.com/hmarkus/dp on dbs/tplp.
+
+20
+Fichte et al.
+6.1 Setup
+Measure & Resources. We mainly compare wall clock time and number of timeouts. In the time
+we include preprocessing time as well as decomposition time for computing a TD with a ﬁxed
+random seed. For parallel solvers we allowed access to 24 physical cores on machines. We set a
+timeout of 900 seconds and limited available RAM to 14 GB per instance and solver. However,
+since our solver dpdb is a solver using multiple threads, we restricted the results of dpdb to a total
+of 900 seconds of CPU time. While allowing for all the other (parallel) solvers more than 900
+seconds of CPU time. For dpdb, we only allowed 900 seconds of CPU time, but at the same time
+restricted to 900 seconds wall clock time.
+Benchmark Instances. We considered a selection of overall 1494 instances from various pub-
+licly available benchmark sets #SAT consisting of fre/meel benchmarks5(1480 instances),
+and c2d benchmarks6 (14 instances). We preprocessed the instances by the #SAT preproces-
+sor pmc (Lagniez and Marquis 2014), similar to results of recent work on #SAT (Fichte et al.
+2019), where it was also shown that more than 80% of the #SAT instances have primal treewidth
+below 19 after preprocessing. For preprocessing with pmc we used the recommended options
+-vivification -eliminateLit -litImplied -iterate=10 -equiv -orGate -affine,
+which ensures that model counts are preserved.
+Benchmarked system dpdb. We used PostgreSQL 12 for our system dpdb on a tmpfs-ramdisk
+(/tmp) that could grow up to at most 1 GB per run. To ensure comparability with previous
+results (Fichte et al. 2020), where we had employed PostgreSQL 9.5 for our system dpdb, we also
+considered the conﬁguration dpdb pg9 that uses the preinstalled database system PostgreSQL 9.5
+without any ramdisk at all (plain hard disk). However, we observed major performance increases
+of dpdb compared to dpdb pg9. We allow parallel execution for the database management system
+PostgreSQL with access to all cores of the benchmarking system. However, we restrict the total
+CPU time to ensure that we do not bias system resources towards dpdb.
+Other benchmarked systems. In our experimental work, we present results for the most recent
+versions of publicly available #SAT solvers, namely, c2d 2.20 (Darwiche 2004), d4 1.0 (Lagniez
+and Marquis 2017), DSHARP 1.0 (Muise et al. 2012), miniC2D 1.0.0 (Oztok and Darwiche 2015),
+cnf2eadt 1.0 (Koriche et al. 2013), bdd minisat 1.0.2 (Toda and Soh 2015), and sdd 2.0 (Darwiche
+2011), which are all based on knowledge compilation techniques. We also considered rather recent
+approximate solvers ApproxMC2, ApproxMC3 (Chakraborty et al. 2014), ganak (Sharma et al.
+2019), and sts 1.0 (Ermon et al. 2012), as well as CDCL-based solvers Cachet 1.21 (Sang et al.
+2004), sharpCDCL7, and sharpSAT 13.02 (Thurley 2006). Finally, we also included multi-core
+solvers gpusat 1.0 and gpusat 2.0 (Fichte et al. 2018b; Fichte et al. 2019), which both are based on
+dynamic programming, as well as countAntom 1.0 (Burchard et al. 2015) on 12 physical CPU cores,
+which performed better than on 24 cores. Experiments were conducted with default solver options.
+Note that we excluded distributed solvers such as dCountAntom (Burchard et al. 2016) and
+DMC (Lagniez et al. 2018) from our experimental setup. Both solvers require a cluster with
+access to the Open-MPI framework (Gabriel et al. 2004) and fast physical interconnections.
+5 See: tinyurl.com/countingbenchmarks
+6 See: reasoning.cs.ucla.edu/c2d
+7 See: tools.computational-logic.org
+
+Exploiting Database Management Systems and Treewidth for Counting
+21
+700
+800
+900
+1000
+1100
+1200
+0
+100
+200
+300
+400
+500
+600
+700
+800
+900
+1.miniC2D
+2.dpdb
+3.gpusat2
+4.d4
+5.countAntom
+6.dpdb pg9
+7.c2d
+8.ganak
+9.sharpSAT
+10.sdd
+11.sts
+12.dsharp
+13.cnf2eadt
+14.approxmc3
+15.bdd_minisat
+Figure 4: Runtime for the top 15 solvers over all #SAT instances. The x-axis refers to the number of
+instances and the y-axis depicts the runtime sorted in ascending order for each solver individually.
+Unfortunately, we do not have access to OpenMPI on our cluster. Nonetheless, our focus are
+shared-memory systems and since dpdb might well be used in a distributed setting, it leaves an
+experimental comparison between distributed solvers that also include dpdb as subsolver to future
+work.
+Benchmark Hardware. Almost all solvers were executed on a cluster of 12 nodes. Each node is
+equipped with two Intel Xeon E5-2650 CPUs consisting of 12 physical cores each at 2.2 GHz
+clock speed, 256 GB RAM and 1 TB hard disc drives (not an SSD) Seagate ST1000NM0033.
+The results were gathered on Ubuntu 16.04.1 LTS machines with disabled hyperthreading on
+kernel 4.4.0-139. As we also took into account solvers using a GPU, for gpusat1 and gpusat2 we
+used a machine equipped with a consumer GPU: Intel Core i3-3245 CPU operating at 3.4 GHz,
+16 GB RAM, and one Sapphire Pulse ITX Radeon RX 570 GPU running at 1.24 GHz with 32
+compute units, 2048 shader units, and 4GB VRAM using driver amdgpu-pro-18.30-641594 and
+OpenCL 1.2. The system operated on Ubuntu 18.04.1 LTS with kernel 4.15.0-34.
+6.2 Results
+Figure 4 illustrates the top 15 solvers, where instances are preprocessed by pmc, in a cactus-
+like plot, which provides an overview over all the benchmarked #SAT instances. The x-axis
+of these plots refers to the number of instances and the y-axis depicts the runtime sorted in
+ascending order for each solver individually. Overall, dpdb seems to be quite competitive and
+beats most of the solvers, as for example d4, countAntom, c2d, ganak, sharpSAT, dsharp, and
+approxmc. Interestingly, dpdb solves also instances, whose treewidth upper bounds are larger
+than 41. Surprisingly, dpdb pg9 shows a different runtime behavior than the other solvers. We
+believe that the reason lies in an initial overhead caused by the creation of the tables that seems
+to depend on the number of nodes of the used TD. There, I/O operations of writing from main
+memory to hard disk seem to kick in. This disadvantage is resolved if benchmarking dpdb on
+
+22
+Fichte et al.
+solver
+0-20
+21-30
+31-40
+41-50
+51-60
+>60
+best
+unique
+P
+time[h]
+preprocessed by pmc
+1.
+miniC2D
+1193
+29
+10
+2
+1
+7
+11
+0
+1242
+68.77
+2.
+dpdb
+1193
+31
+7
+2
+0
+0
+2
+1
+1233
+70.44
+3.
+gpusat2
+1196
+32
+1
+0
+0
+0
+154
+1
+1229
+71.27
+4.
+d4
+1163
+20
+10
+2
+4
+28
+33
+1
+1227
+76.86
+5.
+countAntom
+1141
+18
+10
+5
+4
+13
+102
+0
+1191
+84.39
+6.
+dpdb pg9
+1159
+19
+5
+2
+0
+0
+0
+0
+1184
+100.99
+7.
+c2d
+1124
+31
+10
+3
+3
+10
+24
+0
+1181
+84.41
+8.
+ganak
+1031
+16
+10
+2
+4
+29
+633
+0
+1092
+107.25
+9.
+sharpSAT
+1029
+16
+10
+2
+4
+30
+80
+0
+1091
+106.88
+10.
+sdd
+1014
+4
+7
+1
+0
+2
+0
+0
+1028
+124.23
+11.
+sts
+927
+4
+8
+7
+5
+52
+35
+21
+1003
+128.43
+12.
+dsharp
+853
+3
+7
+2
+0
+0
+29
+0
+865
+157.87
+13.
+cnf2eadt
+799
+3
+7
+2
+0
+7
+157
+0
+818
+170.17
+14.
+approxmc 3
+794
+3
+7
+2
+0
+6
+1
+0
+812
+173.35
+15.
+bdd minisat
+791
+4
+1
+0
+0
+0
+46
+0
+796
+175.09
+Table 1: Number of solved #SAT instances, preprocessed by pmc and grouped by intervals of
+upper bounds of the treewidth. time[h] is the cumulated wall clock time in hours, where unsolved
+instances are counted as 900 seconds.
+recent versions of PostgreSQL (version 12) and using tmpfs-ramdisks instead of plain hard disks.
+Table 1 presents more detailed runtime results, showing a solid second place for dpdb as our
+system solves the vast majority of the instances. Notably, it seems that the ganak solver is among
+the fastest on a lot of instances. We observed that ganak has the fastest runtime on 633 instances,
+when considering results of all 15 presented solvers. Assume we only have instances up to an
+upper bound8 of treewidth 35. Then, if only instances with TDs up to width 50 are considered,
+dpdb solves about the same number of instances than miniC2D solves.
+7 Final Discussion & Conclusions
+We presented a generic system dpdb for explicitly exploiting treewidth by means of dynamic
+programming on databases. The idea of dpdb is to use database management systems (DBMSs) for
+table manipulation, which makes it (i) easy and elegant to perform rapid prototyping for problems
+with DP algorithms and (ii) allows to leverage decades of database theory and database system
+tuning. It turned out that all the cases that occur in dynamic programming can be handled quite
+elegantly with plain SQL queries. Our system dpdb can be used for both decision and counting
+problems, thereby also considering optimization. We see our system particularly well-suited for
+counting problems, especially, since it was shown that for model counting (#SAT) instances of
+practical relevance typically have small treewidth (Fichte et al. 2019). In consequence, we carried
+out preliminary experiments on publicly available instances for #SAT, where we see competitive
+behavior compared to most recent solvers.
+Future Work
+Our results give rise to several research questions. We want to push towards other database systems
+and vendors. For example, we expect major improvements in commercial database management
+systems due to the availability of efﬁcient enterprise features. In particular, we expect in the
+8 These upper bounds were obtained via decomposer htd in at most two seconds.
+
+Exploiting Database Management Systems and Treewidth for Counting
+23
+DBMS Oracle that the behavior when we use different strategies on how to write and evaluate
+our SQL queries, e.g., sub-queries compared to common table expressions. Currently, we do not
+create or use any indices, as preliminary tests showed that meaningful B*tree indices are hard
+to create and creation is oftentimes too expensive. Further, the exploration of bitmap indices, as
+available in Oracle enterprise DBMS would be worth trying in our case (and for #SAT), since one
+can efﬁciently combine database columns by using extremely efﬁcient bit operations. It would
+also be interesting to investigate whether operating system features to handle memory access can
+be helpful (Fichte et al. 2020). In addition, one might consider dpdb in the setting of distributed
+algorithms such as dCountAntom (Burchard et al. 2016) and DMC (Lagniez et al. 2018).
+It might be worth to rigorously test and explore our extensions on limiting the number of
+rows per table for approximating #SAT or other counting problems, cf., (Chakraborty et al. 2016;
+Due˜nas-Osorio et al. 2017; Sharma et al. 2019) and compare to the recent winners of the newly
+established model counting competition (Fichte et al. 2020). Recent results (Hecher et al. 2020)
+indicate that by using hybrid solving and abstractions our results can also be extended to projected
+model counting (Fichte et al. 2018).
+Another interesting research direction is to study whether efﬁcient data representation tech-
+niques on DBMSs can be combined with dynamic programming in order to lift our solver to
+quantiﬁed Boolean formulas.
+It would also be interested to consider other measures such as (fractional) hypertree width (Fichte
+et al. 2020; Dzulﬁkar et al. 2019) and investigate whether tree decompositions with additional
+properties (J´egou and Terrioux 2014) or other heuristics to compute tree decompositions im-
+prove solving (Strasser 2017). Furthermore, interesting directions for future research would be to
+implement counting various problems in our framework, such as in constraint satisfaction (Du-
+rand and Mengel 2015; Khamis et al. 2016), constraint networks (J´egou and Terrioux 2014),
+argumentation (Fichte et al. 2019), description logics (Fichte et al. 2021), or epistemic logic
+programming (Hecher et al. 2020).
+System and License
+Our system dpdb is available under GPL3 license at github.com/hmarkus/dp on dbs.

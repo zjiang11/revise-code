@@ -1,0 +1,964 @@
+Non-Parametric Learning of
+Lifted Restricted Boltzmann Machines
+Navdeep Kaura,∗, Gautam Kunapulia, Sriraam Natarajana
+aThe University of Texas at Dallas
+Abstract
+We consider the problem of discriminatively learning restricted Boltzmann ma-
+chines in the presence of relational data. Unlike previous approaches that em-
+ploy a rule learner (for structure learning) and a weight learner (for parameter
+learning) sequentially, we develop a gradient-boosted approach that performs
+both simultaneously. Our approach learns a set of weak relational regression
+trees, whose paths from root to leaf are conjunctive clauses and represent the
+structure, and whose leaf values represent the parameters. When the learned
+relational regression trees are transformed into a lifted RBM, its hidden nodes
+are precisely the conjunctive clauses derived from the relational regression trees.
+This leads to a more interpretable and explainable model. Our empirical evalu-
+ations clearly demonstrate this aspect, while displaying no loss in eﬀectiveness
+of the learned models.
+Keywords:
+Restricted Boltzmann Machines, Learning Lifted Models,
+Functional Gradient Boosting
+1. Introduction
+Restricted Boltzmann Machines (RBMs,
+[1]) have emerged as one of the
+most popular probabilistic learning methods. Coupled with advances in theory
+of learning RBMs: contrastive divergence (CD,
+[2]), persistent CD [3], and
+parallel tempering [4] to name a few, their applicability has been extended to
+∗Corresponding author
+
+Preprint submitted to Journal of Approximate Reasoning
+January 29, 2020
+arXiv:2001.10070v1  [cs.LG]  9 Jan 2020
+
+a variety of tasks [5]. While successful, most of these models have been typi-
+cally used with a ﬂat feature representation (vectors, matrices, tensors) and not
+necessarily in the context of relational data. In problems where data is rela-
+tional, these approaches typically ﬂatten the data by either propositionalizing
+them or constructing embeddings that allowed them to employ standard RBMs.
+This results in the loss of “natural” interpretability that is inherent to relational
+representations, as well as a possible decline in performance due to imperfect
+propositionalization/embedding.
+Consequently, there has been recent interest in developing neural models that
+directly operate on relational data. Speciﬁcally, signiﬁcant research has been
+conducted on developing graph convolutional neural networks [6] that model
+graph data (a restricted form of relational data). Most traditional truly rela-
+tional/logical learning methods [7, 8] are capable of learning with data of sig-
+niﬁcantly greater complexity, including hypergraphs. Such representations have
+also been recently adapted to learning neural models [9, 10, 11]. One recent
+approach in this direction is Lifted RBMs [12], where relational random walks
+were learned over data (eﬀectively, randomized compound relational features)
+and then employed as input layer to an RBM.
+While reasonably successful, this method still propositionalized relational
+features by constructing two forms of data aggregates: counts and existentials.
+Motivated by this limitation, we propose a full, lifted RBM (LRBM), where the
+inherent representation is relational. Additionally, the LRBM can be learned
+without signiﬁcant feature engineering, that is, a key component of our approach
+is discovering the structure of lifted RBMs. We propose a gradient-boosting
+approach for learning both the structure and parameters of LRBMs
+simultaneously. The resulting hidden nodes are newly discovered features,
+represented as conjunctions of logical predicates.
+These hidden layers are learned using the machinery of functional-gradient
+boosting [13] on relational data. The idea is to learn a sequence of relational
+regression trees (RRTs) and then transform them to an LRBM by identifying
+appropriate transformations. There are a few salient features of our approach:
+2
+
+(1) in addition to being well-studied and widely used [14, 15, 16, 17], RRTs
+can be parallelized and adapted easily to new, real-world domains; (2) our ap-
+proach can handle hybrid data easily, which is an issue for many logical learners;
+(3) perhaps most important, our approach is explainable, unlike other neural
+models. This is due to the fact that the hidden layers of the LRBM are sim-
+ple conjunctions (paths in a tree), and can be easily interpreted as opposed to
+complex embeddings1. Finally, (4) due to the nature of our learning method,
+we learn sparser LRBMs compared to employing random walks.
+We make a few key contributions in this work: (1) as far as we are aware,
+this is the ﬁrst principled approach to learning truly lifted RBMs from relational
+data; (2) our representation ensures that the resulting RBM is interpretable and
+explainable (due to the hidden layer being simple conjunctions of logical predi-
+cates). We present (3) a gradient-boosting algorithm for simultaneously learning
+the structure and parameters of LRBMs as well as (4) a transformation pro-
+cess to construct a sparse LRBM from an ensemble of relational regression trees
+produced by gradient boosting.
+Finally, (5) our empirical evaluation clearly
+demonstrates three aspects: eﬃcacy, eﬃciency and explainability of our ap-
+proach compared to the state-of-the-art on several data sets.
+2. Background and Related Work
+Scalars are denoted in lower-case (y, w), vectors in bold face (y, w), and
+matrices in upper case (Y , W). u⊺v denotes the dot product between u and v.
+Restricted Boltzmann Machines. RBMs are stochastic neural networks consist-
+ing of a hidden layer of neurons that model the probability distribution of a
+visible layer of neurons. Speciﬁcally, discriminative RBMs [18] (Figure 1) have
+1Embedding approaches transform data from the input space to a feature space. A familiar
+example of this is Principal Components Analysis, which transforms input features to com-
+pound features via linear combination; the new features are no longer naturally interpretable.
+This is also the case with deep learning, which diminish interpretability by chaining increas-
+ingly complex feature combinations across successive layers (for example, autoencoders).
+3
+
+Figure 1: A discriminative RBMs has a dense set of connections between the visible and
+hidden layers. This ﬁgure illustrates a discriminative RBM for a binary classiﬁcation problem,
+though this model can naturally handle multi-class problems by adding additional output
+nodes (corresponding to the one-hot vectorization of the label).
+a Bernoulli input layer (also known as the visible layer, v), a Bernoulli hidden
+layer (h) and a softmax output layer (y). The joint conﬁguration (y, v, h) of
+the model has the following energy:
+E(y, v, h) = −h⊺Wv −b⊺v −c⊺h −d⊺y −h⊺Uy,
+(1)
+where W are the weights between the visible and hidden layer, U are the
+weights between the hidden and the output layer, and b, c, d are the biases in
+the visible, hidden and output layers respectively. Given a (multi-class) label
+y = ℓ, ℓ∈{1, . . . , C}, the output is a one-hot vector y = (Ic=ℓ)C
+c=1. With a
+slight abuse of notation, we denote the multi-class label of a training example
+as y, with its corresponding vectorization in bold as y. The joint probability
+distribution of the RBM can be written as: P(y, v, h) = 1
+Z e−E(y,v,h), where Z
+is normalization constant. While computing P(y, v, h) is generally intractable,
+the conditional, P(y | v), can be computed exactly:
+p(y | v) =
+exp
+
+dy + P
+j ζ(cj + Ujy + P
+k Wjkvk)
+
+X
+y∗∈{1,2,..C}
+exp
+
+dy∗+ P
+j ζ(cj + Ujy∗+ P
+k Wjkvk)
+,
+(2)
+4
+
+where ζ(a) = log(1 + ea), the softplus function.
+Our goal is to extend this
+formulation to relational domains and learn the resulting Lifted Restricted
+Boltzmann Machines (LRBMs) using functional gradient boosting.
+Functional Gradient Boosting. Functional gradient boosting (FGB), introduced
+by Friedman [13] in 2001, has recently emerged as a state-of-the-art ensemble
+method. Functional gradient boosting aims to learn a model f(·) by optimizing
+a loss function L[f] by emulating gradient descent. At iteration m, however, in-
+stead of explicitly computing the gradient ∂L[fm−1](xi, yi), FGB approximates
+the gradient using a weak regression tree2, ∆m.
+For a probabilistic model, the loss function is replaced by a (log-)likelihood
+function (L[ψ]), which is described in terms of a potential function ψ(·), which
+FGB aims to learn. FGB begins with an initial potential ψ0; intuitively, ψ0
+represents the prior of the probability distribution of target atom. This initial
+potential can be any function: a constant, a prior probability distribution or any
+function that incorporates background knowledge available prior to learning.
+At iteration m, FGB approximates the true gradient by a functional gradient
+∆m. That is, gradient boosting will attempt to identify an approximate gradient
+∆m that corrects the errors of the current potential, ψm−1. This ensures that
+the new potential ψm = ψm−1 + ∆m continues to improve. Like most boosting
+algorithms, FGB learns ∆m as a weak regression tree, and ensembles several
+such weak trees to learn a ﬁnal potential function (see Figure 2). Thus, the
+ﬁnal model is a sum of regression trees ψm = ψ0 + ∆1 + . . . + ∆m (Figure 2).
+In relational models, regression trees are replaced by relational regression
+trees (RRTs, [19]). This allows us to learn relational conditional models such
+as Relational Dependency Networks [16], Relational Logistic Regression [20],
+relational policies [14], discriminative training of undirected models [15] and
+2A weak base estimator is any model that is “simple” and underﬁts (hence, weak). From
+a machine-learning standpoint, such weak learners are high bias, low variance and easy to
+learn. Shallow decision trees are an exceptionally popular choice for weak base estimators for
+ensemble learning, owing to their algorithmic eﬃciency and interpretability.
+5
+
+Figure 2: Functional Gradient Boosting, where the loss function is mean squared error.
+even temporal models [21]. Inspired by these methods, we propose to learn the
+hidden layer of an LRBM using gradient boosting.
+Relational Neural Models. Relational Embeddings [22, 23, 24, 25, 26, 27] have
+gained popularity recently. A common theme among current approaches is to
+learn a vector representation, that is, an embedding for each relation and each
+entity present in the knowledge base. Most of these approaches also assume
+binary relations, which is a rather restrictive assumption that cannot capture
+the richness of real-world relational domains. Further, they need a large number
+of embeddings for training, especially the deep-learning-based approaches. Fi-
+nally, and possibly most concerning: many embedding approaches cannot easily
+generalize to new data, and the entire set of embeddings has to be relearned
+with new data, or for every new task.
+Approaches closest to our proposed work are relational neural networks
+[10, 11, 28, 29, 30]; these approaches also represent the structure of a neural
+network as ﬁrst-order clauses as we do. The key diﬀerence however, is that
+6
+
+in all these models, clauses have already been obtained either from an expert
+or an independent ILP system. That is to say, domain rules that make up its
+structure and the resulting neural network architectures are manually speciﬁed,
+and these approaches typically only perform parameter learning.
+Recently, relational neural networks have been proposed for vision tasks
+[31, 32, 33].
+While promising, these networks have ﬁxed, manually-speciﬁed
+structures and the nature of the relations captured between objects is also not
+interpretable or explainable. In contrast, our model learns the structure and
+parameters of neural network simultaneously. One common theme among all
+these models is that they learn latent features of relational data in their hidden
+layers, but our model, being still in its nascent stage, cannot do so yet.
+A few approaches for learning neural network on graphs exist. Graph convo-
+lutional networks [34] enable graph data to be trained directly on convolutional
+networks. Another set of popular approaches [35] train a recurrent neural net-
+work on each node of the graph by accepting the input from neighboring nodes
+until a ﬁxed point is reached. The work of Scarcelli et al. [35] extends this by
+learning embeddings for entities and relations in the relational graph.
+Recently, Pham et al. [9] proposed a neural network architecture where con-
+nections in the diﬀerent nodes of network are encoded according to given graph
+structure. RBMs have also been considered in the context of relational data.
+For instance, two tensor based models [36, 37] proposed to lift RBMs by in-
+corporating a four-order tensor into their architecture that captures interaction
+between quartet consisting of two objects, relation existing between them and
+hidden layer. Finally, our recent approach [12] learns relational random walks
+and uses the counts of the groundings as observed layer of an RBM.
+3. Boosting of Lifted RBMs
+Recall that our goal is to learn a truly lifted RBM. Consequently, both
+the hidden and observed layers of the RBM should be lifted (parameterized
+as against propositional RBMs). This is to say that, the observed layers are the
+7
+
+predicates (logical relations describing interactions) in the domain, while the
+hidden layer consists of conjunctions of predicates (logical rules) learned from
+data. Instead of a complete network, connections exist only between predicates
+and hidden nodes that are present in the conjunction. We illustrate RBM lifting
+with the following example.
+Example. Consider a movie domain that contains the entity types (variables)
+Person(P), Movie(M) and Genre(G). Predicates in this domain describe rela-
+tionships between the various entities, such as DirectedBy(M, P), ActedIn(P, M),
+InGenre(M, G) and entity resolution predicates such as SamePerson(P1, P2) and
+SameGenre(G1, G2). These predicates are the atomic domain features, fi. The
+task is to predict the nature of the collaboration between two persons P1 and P2;
+this task can be represented via the target predicate:
+Collaborated(P1, P2) =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+0,
+P1, P2 never collaborated,
+1,
+P1 worked under P2,
+2,
+P2 worked under P1,
+3,
+P1, P2 collaborated at the same level.
+To perform this 4-class classiﬁcation task, we can construct more complex lifted
+features through conjunctions of the atomic domain features. For example, con-
+sider the following lifted feature, h1:
+
+
+
+
+
+DirectedBy(M1, P1) ∧InGenre(M1, G1) ∧
+ActedIn(P2, M2) ∧InGenre(M2, G2) ∧
+¬ SameGenre(G1, G2)
+
+
+
+
+⇒( Collab(P1, P2) = 0 ). (h1)
+This lifted feature is a compound domain rule (essentially a typical conjunction
+in logic models) made up of several atomic domain features that describes one
+possible classiﬁcation condition of the target predicate. Speciﬁcally, the lifted
+feature h1 expresses the situation where two persons P1 and P2 are unlikely to
+have collaborated if they work in diﬀerent genres. Every such compound domain
+rule becomes lifted feature with a corresponding hidden node. In this example,
+8
+
+Figure 3: An example of a lifted RBM. The atomic predicates each have a corresponding
+node in the visible layer (fi).
+Atomic predicates can be used to create richer features as
+conjunctions, which are represented as hidden nodes (hj); the connections between the visible
+and hidden layers are sparse and only exist when the predicate corresponding to fi appears
+in the compound feature hj. The output layer is a one-hot vectorization of a multi-class label
+y, and has one node for each class yk. The connections between the hidden and output layers
+are dense and allow all features to contribute to reasoning over all the classes.
+we introduce two others:
+DirBy(M1, P1) ∧ActedIn(P3, M1) ∧SamePer(P3, P2) ⇒( Collab(P1, P2) = 1 ) ,
+(h2)
+ActedIn(P1, M) ∧ActedIn(P2, M) ⇒( Collab(P1, P2) = 3 ).
+(h3)
+The key intuition is that these rules, or lifted features, capture the latent
+structure of the domain and are a critical component of lifting RBMs.
+The
+layers of the lifted RBM are as follows (Figure 3):
+• Visible layer, atomic domain predicates: We create a visible node
+vi for each lifted atomic domain predicate fi. Thus, we can express any
+possible structure that can be enumerated as conjunction of these atomic
+features. In Figure 3, the visible layer consists of the ﬁve atomic predicates
+introduced above, f1, . . . , f5.
+9
+
+• Hidden layer, compound domain rule: Each of the compound features
+can be represented as a node in the hidden layer, hi. In this manner, the
+lifted RBM is able to construct and use complex structural rules to reason
+over the domain. This is similar to classical neural networks, propositional
+RBMs and deep learning, where the hidden layer neurons represent rich
+and complex feature combinations.
+The key diﬀerence from existing architectures is that the connections be-
+tween the visible and hidden layers are not dense; rather, they are ex-
+tremely sparse and depend only on the atomic predicates that appear in the
+corresponding lifted compound features. In Figure 3, the hidden node h1 is
+connected to the atomic predicate nodes f1, f2, f3 and f5, while the hidden
+node h3 is connected to only the atomic predicate node f2. This allows the
+lifted RBM to represent the domain structure in a compact manner. Fur-
+thermore, such “compression” can enable acceleration of weight learning
+as unnecessary edges are not introduced into the structure.
+• Output layer, one-hot vectorization: As mentioned above, the lifted
+RBM formulation can easily handle multi-class classiﬁcation. In this ex-
+ample, the target predicate can take 4 values as it corresponds to a 4-
+class classiﬁcation problem. This can be modelled with four output nodes
+y1, . . . , y4 through one-hot vectorization of the labels. Note that the con-
+nections between the hidden and output layers are dense.
+This is to
+ensure that all features can contribute to the classiﬁcation of all the labels.
+Furthermore, this enables the lifted RBM to reason with uncertainty. For
+example, consider the compound domain feature h1, which describes a con-
+dition for two persons to have never collaborated. By ensuring that the
+hidden-to-output connections are dense, we allow for the contribution of
+this rule to the ﬁnal prediction to be soft rather than hard. This is similar
+to how Markov logic networks learn diﬀerent rule weights to quantify the
+relative importance of the domain rules/lifted features. In a similar man-
+ner, the lifted RBM allows for reasoning under uncertainty by learning
+10
+
+the network weights to reﬂect the relative signiﬁcance of various features
+to diﬀerent labels.
+Our task now is to learn such lifted RBMs. Speciﬁcally, we propose to learn
+the structure (compound features as hidden nodes) as well as the parameters
+(weights on all the edges and biases within the nodes). This is a key novelty as
+our approach uses gradient boosting to learn sparser LRBMs, unlike the fully
+connected propositional ones. To learn an LRBM, we need to (1) formulate
+the (lifted) potential deﬁnitions, (2) derive the functional gradients, (3) trans-
+form the gradients to explainable hidden units of the RBM, and (4) learn the
+parameters of the RBM. We now present each of these steps in detail.
+3.1. Functional Gradient Boosting of Lifted RBMs
+The conditional equation (2) which is the basis of an RBM, is formulated
+for propositional data, where each feature of a training example xi is modeled
+as a node in the input layer v. We now extend this deﬁnition of the RBM to
+handle logical predicates (i.e., parameterized relations).
+Note that these lifted features (conjunctions) can be obtained in several dif-
+ferent ways: (i) as with many existing work on neuro-symbolic reasoning, these
+could be provided by a domain expert, or (ii) can be learned from data simi-
+lar to the research inside Inductive Logic Programming [38] or, (iii) performing
+random walks in the domain that result in rule structures [12], to name a few.
+Any rule induction technique could be employed in this context. In this work,
+we adapt a gradient-boosting technique. Given such lifted features (or rules)
+fk(x) on training examples x, we can rewrite equation (2) as
+p(y | x) =
+exp
+
+dy + P
+j ζ(cj + Ujy + P
+k Wjkfk(x))
+
+X
+y∗∈{1,2,..C}
+exp
+
+dy∗+ P
+j ζ(cj + Ujy∗+ P
+k Wjkfk(x))
+.
+(3)
+Contrast this expression to the propositional discriminative RBM (equation 2),
+which models p(y | v). The key diﬀerence is that the propositional features
+P
+k Wjkvk are replaced with lifted features P
+k Wjkfk(x); while features in a
+11
+
+propositional data set are just the data columns/attributes, the features in a
+relational data set are typically represented in predicate logic (as shown in
+the example above) and are rich and expressive conjunctions of objects, their
+attributes and relations between them.
+We now introduce some additional functional notation to simplify (equation
+3). Without loss of generality, we restrict our discussion to the case of binary
+targets (with labels ℓ∈{0, 1}) and note that this exposition can easily be
+extended to the case of multiple classes. For each label ℓ, we deﬁne functional
+E(xi | c, W, dℓ, Uℓ) := dℓ+
+X
+j
+ζ
+ 
+cj + Ujℓ+
+X
+k
+Wjkfk(xi)
+!
+.
+This functional represents the “energy” of the combination (xi, yi = ℓ). For
+binary classiﬁcation, (equation 3) is further simpliﬁed to
+p(yi = 1 | xi) =
+eE(xi|c,W,d1,U1)
+eE(xi|c,W,d0,U0) + eE(xi|c,W,d1,U1) .
+(4)
+This reformulation is critical for the extension of the discriminative RBM frame-
+work to relational domains as it allows us to rewrite the probability p(yi = 1 | xi)
+in terms of a functional that represents the potential and OF(xi), the observed
+features of the training example xi. One of our goals is to learn lifted features
+from the set of all possible features.
+In simpler terms, if x is the set of all
+predicates in the domain and x is the current target, then the goal is to identify
+the set of features OF(x) s.t, P(x | x) = P(x | OF(x)). In Markov network
+terminology, this refers to the Markov blanket of the corresponding variable. In
+a discriminative MLN framework, OF(x) is the set of weighted clauses in which
+the predicate x appears. We can now deﬁne the probability in (equation 4) as
+pψ (yi = 1 | OF(xi)) =
+eψ(yi=1|OF(xi))
+1 + eψ(yi=1|OF(xi)) ,
+where
+(5)
+ψ(yi = 1 | OF(xi)) = E(xi | c, W, d1, U1) −E(xi | c, W, d0, U0).
+(6)
+Note that OF(xi) does not include all the features in the domain, but only the
+speciﬁc features that are present in the hidden layer. An example of this can be
+observed in Figure 3. This LRBM consists of three lifted features ⟨h1, h2, h3⟩
+12
+
+that correspond to the three rules mentioned earlier. We can thus explicitly
+write the potential function for a lifted RBM (equation 6) in functional form as
+ψ(yi = 1 | OF(xi)) = d +
+X
+j
+log
+1 + exp (cj + Uj1 + P
+k Wjkfk(xi))
+1 + exp (cj + Uj0 + P
+k Wjkfk(xi))
+
+, (7)
+Figure 4: Weights in a lifted RBM.
+where d = d1 −d0.
+This poten-
+tial functional is parameterized by
+θ = {d, c, W, U0, U1}, consisting of
+(see Figure 4) edge weights and bi-
+ases. The edge weights to be learned
+are Wjk (between visible node corre-
+sponding to feature fk(xi) and hidden
+node hj) and Ujℓ(between hidden
+node hj and output node yℓ).
+The
+biases to be learned are cj on the hid-
+den nodes and dℓon the output nodes.
+However, instead of learning two biases d1 and d0, we can learn a single bias
+d = d1 −d0 as the functional ψ only depends on the diﬀerence (see equation
+7). Given this functional form, we can now derive a functional gradient that
+maximizes the overall log-likelihood of the data
+L({xi, yi}n
+i=1 | ψ) = log
+n
+Y
+i=1
+pψ (yi = 1 | OF(xi)) =
+n
+X
+i=1
+log pψ (yi = 1 | OF(xi)) .
+The (pointwise) functional gradient of L({xi, yi}n
+i=1 | ψ) with respect to ψ(yi =
+1 | OF(xi)) can be computed as follows,
+∂log pψ(yi = 1 | OF(xi))
+∂ψ(yi = 1 | OF(xi))
+= I(yi = 1) −P(yi = 1 | OF(xi)) := ∆i,
+where I(yi = 1) is an indicator function. The pointwise functional gradient has
+an elegant interpretation. For a positive example (I(yi = 1) = 1), the functional
+gradient ∆i aims to improve the model such that 1 −P(yi = 1) is as small as
+possible, in eﬀect pushing P(yi = 1) →1. For a negative example, (I(yi = 1) =
+0), the functional gradient ∆i aims to improve the model such that 0−P(yi = 1)
+13
+
+is as small as possible, in eﬀect pushing P(yi = 1) →0. Thus, the gradient of
+each training example xi is simply the adjustment required for the probabilities
+to match the true observed labels yi. The functional gradient derived here has a
+similar form to the functional gradients in other relational tasks such as boosting
+relational dependency networks [16] Markov logic networks [15] and relational
+policies [14] to specify a few.
+3.2. Representation of Functional Gradients for LRBMs
+Our goal now is to approximate the true functional gradient by ﬁtting a
+regression function ˆψ(x) that minimizes the squared error over the pointwise
+gradients of all the individual training examples:
+ˆψ(x) = arg min
+ψ
+n
+X
+i=1
+(ψ(xi | OF(xi)) −∆i)2.
+(8)
+We consider learning the representation of ˆψ as a sum of relational regression
+trees. The key advantage is that a relational tree can be easily interpreted and
+explained. To learn a tree to model the functional gradients, we need to change
+the typical tree learner. Speciﬁcally, the splitting criteria of the tree at each
+node is modiﬁed; to identify the next literal to add to the tree, r(x), we greedily
+search for the literal that minimizes the squared error (equation 8).
+For a tree-based representation, we employ a relational regression-tree (RRT)
+learner [19] to learn a function to approximately ﬁt the gradients on each ex-
+ample. If we learn an RRT to ﬁt ψ(xi | OF(xi)) in equation (7), each path from
+the root to a leaf can be viewed as a clause, and the leaf nodes correspond to an
+RBM that evaluates to the weight of the clause for that training example. Fig-
+ure 5 shows an RRT when learning a lifted RBM via gradient boosting for some
+target predicate t(x). The node q(x) can be any subtree that has been learned
+thusfar, and a new predicate r(x) has been identiﬁed as a viable candidate for
+splitting. On splitting, we obtain two new compound features as evidenced by
+two distinct paths from root to the two new leaf nodes. These clauses (paths)
+along with their corresponding leaf nodes identify a new structural component
+14
+
+Figure 5: A general relational regression tree for lifted RBMs when learning a target pred-
+icate t(x).
+Each path from root to leaf is a compound feature (also a logical clause
+Clauser) that enters the RBM as a hidden node hr.
+The leaf node contains the weights
+θr = {dr, cr, W r, Ur
+0 , Ur
+1 } of all edges introduced into the lifted RBM when this hidden
+node/discovered feature is introduced into the RBM structure.
+of the RBM, along with corresponding parameters
+(Clause1)
+θ1 : q(x) ∧r(x) ⇒t(x),
+(Clause2)
+θ2 : q(x) ∧¬r(x) ⇒t(x).
+Note that the clause q(·) and the predicate r(·) are expressed generally, and
+their arguments are denoted broadly as x. In practice, q(·) and r(·) can be of
+diﬀerent arities and take any possible entity types in the domain.
+3.3. Learning Relational Regression Trees
+Let us assume that we have learned a relational regression tree till q(x) in
+Figure 5.
+Now assume that, we are adding a literal r(x) to the tree at the
+left-most node of the subtree q(x).
+Let the feature corresponding to the left branch (Clause1) be f1(x) =
+I(q(x) ∧r(x)), that is, feature f1(x) = 1 for all training examples x that end
+up at the leaf θ1 and zero otherwise. Similarly, let the feature corresponding to
+the right branch (Clause2) be f2(x) = I(q(x) ∧¬r(x)). The potential function
+15
+
+ψ(yi = 1 | OF(xi)) can be written using (equation 7) as:
+ψ(yi = 1 | OF(xi)) =
+Y
+k=1,2
+"
+dk + log
+ 
+1 + exp
+ ck + U k
+1 + W kfk(xi)
+
+1 + exp
+ ck + U k
+0 + W kfk(xi)
+
+!#fk(xi)
+.
+(9)
+In this expression, when a training example xi satisﬁes Clause1, it reaches leaf
+node θ1 and consequently, we have f1(xi) = 1 and f2(xi) = 0. When a training
+example xi satisﬁes Clause2, the converse is true and we have f1(xi) = 0 and
+f2(xi) = 1. Thus, only one term is active in the expression above and delivers
+the potential corresponding to whether the training example xi is classiﬁed to
+the left leaf θ1 or the right leaf θ2. We can now substitute this expression for
+the potential in equation (9) into the loss function (8).
+The loss function is used in two ways to grow the RRTs:
+1. First, we identify the next literal to add to the tree, r(x), by greedily
+searching for the atomic domain predicate that minimizes the squared
+error. This is similar to the splitting criterion used in other lifted gradient
+boosting models such as MLN-boosting [15].
+2. Next, after splitting, we learn parameters for the newly introduced leaf
+nodes. That is, for each split of the tree at r(x), we learn θ1 = [d1, c1, W 1,
+U 1
+0 , U 1
+1 ] for the left subtree and θ2 = [d2, c2, W 2, U 2
+0 , U 2
+1 ] for the right
+subtree. We perform parameter learning via coordinate descent [39].
+3.4. LRBM-Boost Algorithm:
+We now describe LRBM-Boost algorithm (Algorithm 1) to learn structure
+and parameters of LRBM. The algorithm takes instantiated ground facts (Data)
+and training examples of target T as input and learns N regression trees that
+ﬁts the example gradients to set of trees. The algorithm starts by considering
+prior potential value ψ0 in F0, and in order to learn a new tree, it ﬁrst generates
+the regression examples, S=[(xi,yi), ∆i], in (line 4) where regression value ∆i
+(I-P) is computed by performing inference of previously learned trees. These
+regression examples S serve as input to FitRegressionTree function (line 5)
+16
+
+Algorithm 1 LRBM-Boost: Relational FGB for Lifted RBMs
+1: function LRBM-Boost(Data, T, N)
+2:
+F0 = ψ0
+▷set prior of potential function
+3:
+for 1 ≤n ≤N do
+4:
+S := GenerateExamples(Fn−1, Data, T)
+▷examples for next tree
+5:
+Fn := FitRegressionTree(S, L, T)
+▷learn regression tree
+6:
+Fn = Fn + Fn−1
+▷add new tree to existing set
+7:
+end for
+8:
+P(yi = 1 | OF(xi)) ∝exp(ψ(yi = 1| OF(xi)))
+9: end function
+10: function FitRegressionTree(S, L, T)
+11:
+Tree := CreateTree(T(X))
+▷create empty Tree
+12:
+Beam := {Root(Tree)}
+13:
+while (i ≤L) do
+▷till max clauses L is reached
+14:
+N := CurrentNodeToExpand(Beam)
+15:
+C := GeneratePotentialChildren(N)
+16:
+for each c in C do
+▷greedily search best child
+17:
+[ SL, ∆L ] := ExampleSatisfaction(N ∧c, S)
+▷left subtree
+18:
+Θc
+L := CoordinateDescent([SL, ∆L])
+▷learn LRBM params
+19:
+[ SR, ∆R ] := ExampleSatisfaction(N ∧¬c, S)
+▷right subtree
+20:
+Θc
+R := CoordinateDescent([SR, ∆R])
+▷learn LRBM params
+21:
+scorec := ComputeSSE(Θc
+L, Θc
+R, ∆L, ∆R)
+▷using eq.(8)
+22:
+end for
+23:
+ˆc := argmin
+c
+(scorec)
+24:
+AddChild(Tree, N, ˆc)
+25:
+Insert(Beam, ˆc.left, ˆc.left.score)
+26:
+Insert(Beam, ˆc.right, ˆc.right.score)
+27:
+end while
+28:
+return Tree
+29: end function
+17
+
+along with the maximum number of leaves (L) in the tree. The next tree Fn is
+then added to set of existing tree (line 6). The ﬁnal probability of LRBM can
+be computed by performing inference on all N trees in order to obtain ψ.
+FitRegressionTree function (line 10) generates a relational regression
+tree with L leaf nodes. It starts with an empty tree and greedily adds one node
+at a time to the tree. In order to add next node to the tree, it ﬁrst considers
+the current node N to expand as the one that has the best score in the beam
+(line 14). The potential children C of this node N (line 15) are constructed by
+greedily considering and scoring clauses where the parameters are learned using
+coordinate descent. Once the ˆc is determined, it is added as the leaf to the tree
+and the process is repeated.
+4. Experimental Section
+We aim to answer the following questions in our experiments:
+Q1 How does LRBM-Boost3 compare to other relational neural models?
+Q2 How does LRBM-Boost compare to other relational functional gradient
+boosting models?
+Q3 Is an ensemble of weak relational regression trees more eﬀective than a
+single strong relational regression tree for constructing Lifted RBMs?
+Q4 Can we generate an interpretable lifted RBM from the ensemble of weak
+relational regression trees learned by LRBM-Boost?
+4.1. Experimental setup
+To answer these questions, we employ seven standard SRL data sets:
+UW-CSE [40] contains information about ﬁve university domains and the
+goal is to predict whether a student is AdvisedBy a professor.
+3 https://github.com/navdeepkjohal/LRBM-Boost
+18
+
+IMDB [41] is a data set from movies domain that contains information
+about actors, directors and movies. The goal is to predict whether an actor
+WorkedUnder a director.
+CORA [42] is a standard data set for citation matching that contains eight
+predicates about details of papers, their venues, and the authors. The aim is to
+predict whether two venues represent the SameVenue.
+SPORTS is a data set garnered by crawling facts from NELL [43] containing
+details about sports teams and their players. We aim to predict whether a team
+plays a particular sport (i.e. TeamPlaysSport) in this domain.
+MUTAGENESIS [44] is data set that consists of information about molecules,
+their constituent atoms and their properties. The aim with this data set is to
+predict whether an atom is constituent in a molecule (i.e. MoleculeContainsAtom).
+YEAST2 [45] contains facts about papers published between 1950 and 2012
+about the yeast organism Saccharomyces cerevisiae. The target is whether a
+paper Cites another paper. Since this data is temporal, a recursive rule could
+potentially use the data from the future to predict the past.
+This requires
+restricting the data provided to the learning system from exposing any future
+data when predicting at the current time-step.
+WEBKB [41] contains information about webpages of students, professors,
+courses etc.
+from four universities.
+We aim to predict whether a person is
+CourseTA of a given course.
+For all data sets, we generate positive and negative examples in 1 : 2 ratio,
+perform 5-fold cross validation for every method being compared, and report
+AUC-ROC and AUC-PR on the resulting folds respectively.
+For all baseline methods, we use default settings provided by their respective
+authors. For our model, we learn 20 RRTs, each with a maximum number of 4
+leaf nodes. The learning rate of online coordinate descent was 0.05.
+4.2. Comparison of LRBM-Boost to other relational neural models
+To answer Q1, we compare our model to two recent relational neural models.
+The ﬁrst baseline is Relational RBM (RRBM-C) [12]; this approach uses relational
+19
+
+Figure 6: Comparing LRNN, RRBM-C, MLN-Boost and LRBM-Boost on AUC-ROC.
+random walks to generate relational features that describe the structure of the
+domain. In fact, it propositionalizes and aggregates counts on these relational
+random walks as features to describe each training example. It should be noted
+that a key limitation of RRBM-C is that it can only handle binary predicates; our
+approach LRBM-Boost on the other hand, can handle any arity.
+The second baseline is Lifted Relational Neural Networks (LRNN) [11]. LRNN
+mainly focuses on parameter optimization; the structure of the network is identi-
+ﬁed using a clause learner: PROGOL [46]. PROGOL generated four, eight, six, three,
+ten, ﬁve rules for Cora, Imdb, Mutagenesis, Sports, Uw-Cse and WebKB
+respectively. As LRNN cannot handle the temporal restrictions of Yeast2, we
+do not evaluate LRNN on it.
+Figures 6 and 7 present the results of this comparison on AUC-ROC and
+AUC-PR. LRBM-Boost is signiﬁcantly better than LRNN for Mutagenesis and
+Cora on both AUC-ROC and AUC-PR. Further, it also achieves better AUC-
+ROC and AUC-PR than LRNN on Sports and Uw-Cse data set. Compared to
+RRBM-C, LRBM-Boost performs better for Sports and WebKB on both AUC-
+ROC and AUC-PR. Also, our proposed model performs better on Yeast2 on
+20
+
+Figure 7: Comparing LRNN, RRBM-C, MLN-Boost and LRBM-Boost on AUC-PR.
+AUC-ROC. Q1 can be now be answered aﬃrmatively: LRBM-Boost either per-
+forms comparably to or outperforms state-of-the-art relational neural networks.
+4.3. Comparison of LRBM-Boost to other relational gradient-boosting models
+Since LRBM-Boost is a relational neural network as well as a relational boost-
+ing model, we next compare it to two state-of-the-art relational functional
+gradient-boosting baselines: MLN-Boost [15] and RDN-Boost [7]. Figures 6 and
+7 compare LRBM-Boost to MLN-Boost. LRBM-Boost performs better than MLN-
+Boost for Cora and WebKB on AUC-ROC metric. Further, it performs better
+than MLN-Boost for Imdb, Uw-Cse, Sports and WebKB on AUC-PR. For all
+the other data sets, both the models have comparable performance.
+We compare LRBM-Boost to RDN-Boost in a separate experiment, owing to
+a key diﬀerence in experimental setting. We do not convert the arity of predi-
+cates to binary; rather, we compare RDN-Boost and LRBM-Boost by maintaining
+the original arity of all the predicates. The results of this experiment on four
+domains are reported in Table 1. LRBM-Boost outperforms RDN-Boost in across
+the board, and substantially so on larger domains such as Cora. These compar-
+isons allow us to answer Q2 aﬃrmatively: LRBM-Boost performs comparably or
+21
+
+Table 1: Comparison of LRBM-Boost and RDN-Boost.
+Data Set
+Target
+Measure
+LRBM-Boost
+RDN-Boost
+Uw−Cse
+advisedBy
+AUC-ROC
+0.9719
+0.9731
+AUC-PR
+0.9158
+0.9049
+Imdb
+workedUnder
+AUC-ROC
+0.9610
+0.9499
+AUC-PR
+0.8789
+0.8537
+Cora
+SameVenue
+AUC-ROC
+0.9469
+0.8985
+AUC-PR
+0.9207
+0.8451
+WebKB
+courseTA
+AUC-ROC
+0.6142
+0.6057
+AUC-PR
+0.4553
+0.4490
+outperforms state-of-the-art SRL boosting baselines.
+4.4. Eﬀectiveness of boosting relational ensembles
+To understand the importance of boosting trees to construct an LRBM,
+we compared the performance of the ensemble of relational trees learned by
+LRBM-Boost to a single relational tree, similar to trees produced by the TILDE
+tree learner [19, 47]. For the latter, we learn a large lifted tree (of depth 10),
+construct an RBM with the hidden layer being every path from root to leaf of
+this tree and refer to it as LRBM-NoBoost.
+Table 2 compares the performance of an ensemble (ﬁrst row) vs. a single
+large tree (last row). LRBM-Boost is statistically superior on Sports, Yeast2
+and Cora on both AUC-ROC and AUC-PR and is comparable on others. This
+asserts the eﬃcacy of learning ensembles of relational trees by LRBM-Boost
+rather than learning a single tree, thus aﬃrmatively answering Q3.
+4.5. Interpretability of LRBM-Boost
+While Q1–Q3 can be answered quantitatively, Q4 requires a qualitative
+analysis.
+It should be noted that boosted relational models (here, boosted
+22
+
+Table 2: Comparison of (a) an ensemble of trees learned by LRBM-Boost, (b) an explainable
+Lifted RBM constructed from the ensemble of trees learned by LRBM-Boost and (c) learning a
+single, large, relational probability tree (LRBM-NoBoost).
+Model
+AUC
+Sports
+IMDB
+UW-CSE
+Yeast2
+Cora
+WebKB
+Ensemble
+LRBM
+ROC
+0.78±0.03
+0.95±0.05
+0.98±0.02
+0.77±0.02
+0.86±0.14
+0.63±0.05
+PR
+0.64±0.03
+0.86±0.11
+0.94±0.06
+0.64±0.03
+0.82±0.21
+0.46±0.08
+Explainable
+LRBM
+ROC
+0.75±0.01
+0.95±0.05
+0.95±0.04
+0.65±0.05
+0.80±0.19
+0.61±0.13
+PR
+0.57±0.01
+0.85±0.14
+0.89±0.06
+0.53±0.06
+0.70±0.29
+0.46±0.10
+NoBoost
+LRBM
+ROC
+0.75±0.03
+0.95±0.05
+0.98±0.02
+0.64±0.12
+0.75±0.21
+0.66±0.09
+PR
+0.61±0.01
+0.86±0.11
+0.94±0.05
+0.50±0.14
+0.61±0.30
+0.48±0.07
+LRBMs) learn and represent the underlying relational model as a sum of rela-
+tional trees. When performing inference, this ensemble of trees is not converted
+to a large SRL model as it is far more eﬃcient to aggregate the predictions of
+the individual relational trees in the ensemble.
+For LRBM-Boost, however, it is possible to convert the ensemble-of-trees
+representation into a single LRBM. This step is typically performed to endow
+the model with interpretability, explainability or for relationship discovery. For
+LRBM-Boost, this procedure is not exact, and the resulting single large LRBM
+is almost, but not exactly, equivalent to the ensemble of trees representation.
+The procedure itself is fairly straightforward:
+• learn a single RRT from the set of boosted RRTs [48] that make up the
+LRBM, that is, we empirically learn a single RRT by overﬁtting it to the
+predictions of the weak RRTs (Figure 8).
+• transform this single RRT to a lifted RBM (Figure 9); each path from
+root to leaf is a conjunction of relational features and enters the LRBM as
+a hidden node, with connections to all the output nodes and to the input
+nodes corresponding to the predicates that appear in that path.
+23
+
+Figure 8: An example of a combined lifted tree learned from ensemble of trees. To construct
+this tree, we compute the regression value of each training example by traversing through all
+the boosted trees. Now a single large tree is overﬁt to this (modiﬁed) training set to generate
+a single tree.
+Figure 9: Lifted RBM obtained from the combined tree in Figure 8. Each path along the tree
+in that ﬁgure represents the corresponding hidden node of LRBM.
+This construction leads to sparsity as it allows for only one hidden node
+to be activated for each example. Of course, using clauses instead of trees as
+with boosting MLNs [15], could relax this sparsity as needed. For our current
+domains, this restriction does not signiﬁcantly aﬀect the performance as seen in
+Table 2 showing the quantitative results of comparing the explainable LRBM
+with the original ensemble LRBM. There is no noticeable loss in performance
+24
+
+Figure 10:
+Ensemble of trees learned during training of LRBM-Boost.
+The ensemble of
+trees is generated in Sports domain where predicate P, T, Z represent plays(sports, team),
+teamplaysagainstteam(team, team) and athleteplaysforteam(athlete, team) respectively and
+target R represents teamplayssport(team, sports).
+Figure 11: Demonstration of the conversion of two lifted trees in Figure 10 to LRBM. We
+create one hidden node for each path in each regression tree.
+as the AUC values decrease marginally, if at all.
+A simpler approach to constructing an explainable LRBM to skip aggregat-
+ing the RRTs into a large tree and directly map every path in every tree to a
+hidden node in the LRBM. For instance, if the ensemble learned 20 balanced
+trees with 4 paths in each of them, the resulting LRBM has 80 lifted features.
+An example transformation is shown in Figure 11 from two trees in Figure 10.
+Note that corresponding LRBM has 8 hidden features which are conjunctions
+of the original trees. While in principle it results in an interpretable LRBM,
+this can result in a large number of hidden units and thus pruning strategies
+need to be employed, a direction that we will explore in the near future. In
+summary, it can be said that our LRBM is eﬀective and explainable allowing
+25
+
+when compared to the state-of-the-art approaches in several tasks.
+5. Conclusion
+We presented the ﬁrst learning algorithm for learning the structure of a lifted
+RBM from data. Motivated by the success of gradient-boosting, our method
+learns a set of RRTs using boosting and then transforms them to a lifted RBM.
+The advantage of this approach is that it leads to learning a fully lifted model
+that is not propositionalized using any standard approaches. We also demon-
+strated how to induce a single explainable RBM from the ensemble of trees.
+Experiments on several data sets demonstrated the eﬃcacy and eﬀectiveness
+along with the explainability of the proposed approach. Combining the diﬀer-
+ent trees in an analytical fashion is an interesting future direction. Enhancing
+the ability of the model to handle incomplete information is essential to adapt
+to real problems. Learning other distributions to learn truly hybrid models can
+lead to several adaptations on real data. Scaling to very large data sets (in the
+lines of relational embeddings) remains an exciting research direction.
+6. Acknowledgement
+The authors gratefully acknowledge the support of AFOSR award FA9550-
+18-1-0462.
+Any opinions, ﬁndings, and conclusion or recommendations ex-
+pressed in this material are those of the authors and do not necessarily reﬂect
+the view of the AFOSR or the United States government.

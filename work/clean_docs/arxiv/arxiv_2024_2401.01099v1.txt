@@ -1,0 +1,588 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+1
+Efficient Parallel Audio Generation using Group
+Masked Language Modeling
+Myeonghun Jeong Student Member, IEEE, Minchan Kim Student Member, IEEE, Joun Yeop Lee, and Nam Soo
+Kim Senior Member, IEEE
+Abstract—We present a fast and high-quality codec language
+model for parallel audio generation. While SoundStorm, a state-
+of-the-art parallel audio generation model, accelerates inference
+speed compared to autoregressive models, it still suffers from
+slow inference due to iterative sampling. To resolve this problem,
+we propose Group-Masked Language Modeling (G-MLM) and
+Group Iterative Parallel Decoding (G-IPD) for efficient parallel
+audio generation. Both the training and sampling schemes enable
+the model to synthesize high-quality audio with a small number
+of iterations by effectively modeling the group-wise conditional
+dependencies. In addition, our model employs a cross-attention-
+based architecture to capture the speaker style of the prompt
+voice and improves computational efficiency. Experimental re-
+sults demonstrate that our proposed model outperforms the
+baselines in prompt-based audio generation.
+Index Terms—Parallel audio generation, neural audio codec
+I. INTRODUCTION
+R
+ECENT development of neural audio codecs [1], [2]
+has brought significant attention to large language mod-
+els (LLM) as a promising avenue for audio generation.
+The transformer-based LLMs in Natural Language Process-
+ing (NLP) area have demonstrated their outstanding perfor-
+mance by capturing the long-term context and remarkable
+zero-shot capability through in-context learning [3], [4]. In-
+spired by this line of research, casting the audio generation
+in the continuous domain [5]–[7] to the discrete domain, by
+taking advantage of a powerful LLM, has unlocked rapid
+progress in versatile applications. Notably, [8] introduced
+an autoregressive transformer to model the discrete acoustic
+tokens, exploring its application in audio continuation tasks by
+using the audio prefix as a prompt. Furthermore, [9] and [10]
+successfully employed codec language models in zero-shot
+speech synthesis, using only a few seconds of an unseen
+prompt voice. Despite these advancements, the length of an
+acoustic token sequence generated from neural audio codecs is
+typically longer than that of natural language tokens due to its
+frame rate. This poses challenges for developing transformer-
+based discrete audio generation models that have quadratic
+runtime complexity.
+To address this issue, prior research [11]–[15] proposed
+various methods to enhance computational efficiency. For
+This work was supported by Samsung Research, Samsung Electronics
+Co.,Ltd.
+Myeonghun Jeong, Minchan Kim, and Nam Soo Kim are with the Depart-
+ment of Electrical and Computer Engineering and with the Institute of New
+Media and Communications, Seoul National University, Seoul 08826, South
+
+Joun Yeop Lee is with Samsung Research, Seoul, 06765, Republic of Korea
+
+Acoustic 
+Tokenization
+Semantic 
+Tokenization
+Group Masked Language Modeling
+HiFi-Codec
+Decoder
+Prompt 
+Network
+Prediction 
+Network
+Prompt audio
+Synthesized 
+audio
+Target audio
+Fig. 1. Overview of our proposed model
+instance, [13] and [15] suggested novel codebook patterns to
+reduce iterations in autoregressive modeling, while [14] intro-
+duced a non-autoregressive diffusion model [16] for modeling
+the continuous acoustic token embedding. SoundStorm [11],
+the primary focus of this work, introduced a confidence-based
+parallel decoding technique for modeling the discrete acoustic
+token sequence. Leveraging the characteristics of residual vec-
+tor quantization (RVQ)-based codebooks [2], the confidence-
+based parallel decoding technique significantly reduced the
+complexity of non-autoregressive models, generating acoustic
+tokens iteratively with fewer sampling passes. Although these
+approaches have somewhat improved inference speed, they
+still show slow generation due to their iterative nature.
+Motivated by this problem, we propose a fast, high-
+quality codec language model for parallel audio generation.
+As illustrated in Fig. 1, our approach focuses on semantic-
+to-acoustic token generation given prompt acoustic tokens.
+We employ HiFi-Codec [17] for acoustic tokenization and
+Wav2Vec 2.0 [18] for semantic tokenization. HiFi-Codec
+provides Group-RVQ (G-RVQ)-based acoustic tokens, facil-
+itating high-quality audio tokenization with more concise
+codebooks. Based on these G-RVQ acoustic tokens, we pro-
+pose an efficient training algorithm, Group-Masked Language
+Modeling (G-MLM), which employs group-wise conditional
+dependency. Furthermore, we propose Group-Iterative Parallel
+Decoding (G-IPD), mirroring this training procedure, and ver-
+ify that G-IPD enables our model to generate acoustic tokens
+with fewer iterations without compromising audio quality.
+Additionally, we propose a cross-attention-based prompting
+method, a computationally efficient structure for reflecting the
+speaker identity of the prompt voice.
+II. BACKGROUNDS
+A. Group Residual Vector Quantization (G-RVQ)
+Residual Vector Quantization (RVQ), employed in Sound-
+Stream [2] and Encodec [1], encodes multiple streams of
+arXiv:2401.01099v1  [eess.AS]  2 Jan 2024
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+2
+VQ
+VQ
+Latent 
+feature
+VQ
+VQ
+Fusion
+Coarse
+grained
+Fine
+grained
+𝑞0
+0
+𝑞0
+1
+𝑞1
+0
+𝑞1
+1
+𝑧1:𝐷
+2
+𝑧
+𝐷
+2+1:𝐷
+𝑞1
+0
+𝑞0
+0
+𝑞0
+1
+𝑞1
+1
+Fig. 2. Bi-group, bi-depth G-RVQ for acoustic tokenization
+discrete tokens from audio, within the framework of VQ-
+VAE [19]. RVQ compresses each audio frame through cas-
+caded quantizers, with each quantizer contributing residually
+to the encoding process, generating multi-level sequences of
+codewords. In this configuration, the initial level codebook
+retains the most fundamental audio information, and the num-
+ber of quantization levels Nq controls the trade-off between
+computational cost and coding efficiency.
+More recently, HiFi-Codec [17] introduced a Group Resid-
+ual Vector Quantization (G-RVQ) scheme, demonstrating su-
+perior performance at lower bit rates. G-RVQ divides the latent
+features extracted from the encoder into G groups and applies
+RVQ to each group with Nq levels. For example, with a target
+bitrate of R = 2000 bps and 50 output frames per second,
+resulting in r = 2000/50 = 40 bits allocated to each frame,
+and for Nq = 2 and G = 2, the total rate budget is evenly
+distributed among each Vector Quantization (VQ) layer, i.e.,
+ri = r/(Nq ∗G) = log2 N. Consequently, the codebook size
+becomes N = 2ri = 240/4 = 1024. As G-RVQ utilizes
+multiple initial levels of RVQ codebooks, it demonstrates a
+higher compression rate compared to RVQ.
+B. SoundStorm
+SoundStorm is a non-autoregressive model designed for
+translating semantic tokens into acoustic tokens. Semantic
+tokens are derived from W2V-BERT [20] to encode coherent
+semantic information, while RVQ-based acoustic tokens are
+extracted from the SoundStream [2] audio codec for encoding
+acoustic information. SoundStorm [11], comprising conformer
+blocks [21], is trained to predict masked acoustic tokens given
+the semantic tokens. The bidirectional conformer structure
+allows for acoustic token generation in an arbitrary order,
+ensuring prompt speaker and acoustic consistency. In order
+to improve the inference speed, SoundStorm applies the iter-
+ative sampling scheme of MaskGIT [22] for parallel audio
+generation. At each sampling iteration, the top-k predicted
+tokens with the highest confidence scores are kept fixed,
+while the rest are predicted again. The number of predicted
+tokens in each round is gradually increased, ensuring the
+conditional dependency between acoustic tokens and this
+process proceeds RVQ level-wise in a coarse-to-fine order.
+Although SoundStorm improves the inference speed compared
+to autoregressive models, it often compromises the speech
+quality when reducing the decoding iterations.
+III. PROPOSED METHOD
+A. Tokenization
+We perform k-means clustering for semantic tokenization
+over the 15th hidden representation of Wav2Vec 2.0 [18].
+Prompt 
+Acoustic Token Emb.
+Semantic Token Emb.
+Masked Acoustic Token Emb.
+Layernorm
+Conv. Module
+Cross-Attn Module
+FF Module
+Self-Attn. Module
+FF Module
+Layernorm
+Conv. Module
+FF Module
+Self-Attn. Module
+FF Module
+Prompt Encoder
+𝐾, 𝑉
+Head
+𝑄
+x 𝑁𝐵
+x𝑁𝐵′
+Prediction Network
+Fig. 3. Overall model architecture
+Previous research [23], [24] showed that these discrete tokens
+effectively capture semantic information, even substituting
+phonetic sequences. For acoustic tokens, we leverage the bi-
+group bi-depth G-RVQ of HiFi-Codec as illustrated in Fig. 2.
+Let x represent a waveform, and z ∈RD be a latent feature.
+The acoustic tokenization process is performed as follows:
+z1:D = Enc(x)
+[q0
+0, q0
+1, q1
+0, q1
+1] = GRV Q(z)
+qc, qf = [q0
+0, q0
+1], [q1
+0, q1
+1],
+(1)
+where qj
+g ∈{1, 2, ..., C}T represents the acoustic token se-
+quence for j-th quantizer level and g-th group. The maximum
+length and codebook size are denoted as T and C, respectively.
+We denote qc as the coarse-grained acoustic tokens and qf as
+the fine-grained acoustic tokens. Utilizing G-RVQ rather than
+RVQ can encode more abundant acoustic information, and its
+concise RVQ depth brings computational efficiency.
+B. Model Architecture
+As shown in Fig. 3 (a), our model builds upon the architec-
+ture of SoundStorm [11], employing a conformer [21] module
+and a masked language modeling approach [25]. For the input
+of the prediction network, we aggregate the embeddings of
+the semantic tokens and the corresponding frames of partially
+masked acoustic tokens. Then, our model predicts acoustic
+tokens given the prompt acoustic token embedding as a con-
+ditioning signal. The output embeddings from the prediction
+network are processed by separate heads for each RVQ level.
+To capture the speaker information of the prompt voice,
+we employ a multi-head cross-attention module [26] in the
+prediction network, as shown in Fig. 3 (a). Let e denote the
+output of the prompt encoder and h be the output of the self-
+attention in the prediction network. The key, K and value, V
+are derived from e, and the query, Q is obtained from h. The
+multi-head cross-attention module operates as follows:
+Qi = hWi
+q, Ki = eWi
+k, Vi = eWi
+v
+headi = Softmax(QiKi
+√
+d
+)Vi
+c = [head1, ..., headNh],
+(2)
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+3
+𝑠= 0
+𝑠= 𝑁!′
+𝑠= 𝑁!′ + 1
+𝑠= 𝑁!′ + 2
+𝑠= 𝑁!′ + 3
+𝑠= 0
+𝑠= 𝑁!
+𝑞!
+"
+𝑞!
+#
+𝑞!
+$
+𝑞!
+!
+𝑁" = 4 (G = 1)
+Coarse
+Fine
+Coarse-grained acoustic tokens
+Fine-grained acoustic tokens
+𝑞$
+$
+𝑞!
+$
+𝑞$
+!
+𝑞!
+!
+𝑁" = 2, 𝐺= 2
+Coarse
+Fine
+time
+(b) Group-iterative parallel decoding (G-IPD) 
+(a) Iterative parallel decoding (IPD) 
+𝑠= 1
+𝑠= 1
+RVQ tokens
+G-RVQ tokens
+𝑠= 𝑁! + 1
+⋅⋅⋅
+⋅⋅⋅
+Fig. 4. Comparison of iterative inference process: (a) SoundStorm’s IPD, and (b) proposed method’s G-IPD technique. s denotes the iteration steps.
+where Wi
+q, Wi
+k, and Wi
+v denote the linear projections for
+the key, value, and query, respectively. In (2), c represents the
+context vector summarizing the prompt voice. By leveraging
+the cross-attention mechanism [26], there are distinct advan-
+tages compared to SoundStorm. Firstly, unlike SoundStorm,
+which requires semantic tokenization of the prompt sequence,
+our model seamlessly captures prompt information using only
+acoustic tokens. This simplifies the inference process by
+eliminating the necessity for semantic tokenization of the
+prompt sequence. Secondly, our cross-attention mechanism
+strategically caches the key and value, avoiding the need
+for repetitive computation of the prompt part throughout the
+iterative sampling process. As a result, the prompt part needs
+to be calculated only once during inference while maintaining
+the prompt speaker information.
+C. Training and Inference
+To harness the full potential of G-RVQ acoustic tokens,
+we propose the Group-Masked Language Modeling (G-MLM)
+approach for training the model. In this training scenario, we
+first sample the prompt delimiter time step t ∼U[ϵ, T −1]
+to separate prompt and target sequence, where ϵ means a
+starting frame index. The tokens before t constitute the prompt
+acoustic tokens, while those after t form the target sequence
+for generation. Our core idea lies in the masking strategy
+outlined in Algorithm 1. When training the coarse-grained
+acoustic tokens qc = [q0
+0, q0
+1], we apply the cosine-scheduling
+mask [11], [22] separately to q0
+0 and q0
+1 in temporal axis,
+while masking all of the fine-grained acoustic tokens. As the
+G-RVQ tokens are extracted from the same latent feature,
+we assume that q0
+0 and q0
+1 are highly entangled. Based on
+this assumption, our inter-group masking strategy reduces the
+modeling complexity by employing the group-wise conditional
+dependency. For training fine-grained acoustic tokens, we
+apply the cosine mask to the fine-grained acoustic tokens in the
+same manner. Our model exploits RVQ-depth-wise conditional
+dependency in this step by leaving coarse-grained acoustic
+tokens unmasked. Finally, our model is trained with the cross-
+entropy loss using the ground-truth acoustic tokens as the
+target, and the loss is calculated only for the masked tokens.
+For inference, we propose the Group Iterative Parallel
+Decoding (G-IPD) technique, mirroring the G-MLM train-
+ing scheme. Fig. 4 illustrates a comparison between G-IPD
+and SoundStorm’s IPD [11]. Both techniques initially predict
+coarse-grained acoustic tokens and subsequently fine-grained
+acoustic tokens. When predicting coarse-grained acoustic to-
+kens, a confidence-based iterative sampling [11], [12], [22]
+scheme is employed. At each iteration, the predicted tokens
+with the highest confidence scores are fixed, while the rest
+are re-masked. The number of masked tokens for each round
+is gradually decreased, following cosine schedule [11]. The
+key difference from the SoundStorm [11]’s IPD is that our
+decoding scheme involves the acoustic token sequences from
+two distinct groups together in the search space for each
+iteration. Doubling the search space allows our model to
+exploit group-wise conditional dependency, resulting in fewer
+iterations without performance degradation. Furthermore, G-
+RVQ inherently encodes rich audio information even at lower
+bitrates than RVQ. This contributes to faster inference while
+keeping the audio quality. Once the coarse-grained acoustic
+tokens are generated, they are used as conditions for predicting
+fine-grained acoustic tokens in a single step.
+Algorithm 1 Masking strategy for G-MLM
+Input coarse-grained acoustic tokens qc, fine-grained acoustic
+tokens qf
+Output masked acoustic token qM
+1: l ∼Bernoulli(0.5)
+▷Sample quantization level
+2: if l = 0 then
+▷Training the coarse-grained acoustic
+tokens
+3:
+qM
+c
+= CosineMask(qc),
+4:
+qM
+f = EntireMask(qf)
+5: else
+▷Training the fine-grained acoustic tokens
+6:
+qM
+f = CosineMask(qf)
+7: end if
+8: qM = Concat(qM
+c , qM
+f )
+9: return qM
+IV. EXPERIMENTS
+In this section, we evaluate the performance of our proposed
+model in prompt-based audio generation. To assess how well
+the model captures speaker consistency, the experiments were
+carried out in two scenarios: (1) the prompt speaker and the
+target speaker are the same, and (2) the prompt speaker and the
+target speaker are different. The second scenario is identical
+to the zero-shot voice conversion. Furthermore, we compare
+the runtime of our proposed model with the baseline. Our
+synthesized audio samples are publicly available at our demo
+page: https://jmhxxi.github.io/SoundGroup-demo/.
+A. Experimental setup
+1) Implementation details: Our proposed model was trained
+for 800k iterations on 4 NVIDIA RTX8000 GPUs. The batch
+size was 128, with a gradient accumulation of 2. In this
+study, we use the open-sourced neural audio codecs from the
+AcademiCodec 1 toolkit. Acoustic tokenization was performed
+using HiFi-Codec, producing 50 frames per second, resulting
+1AcademiCodec: https://github.com/yangdongchao/AcademiCodec.
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+4
+in the target bitrate of 50 · 4 · log2 1024 = 2000 bps. Our
+proposed model was trained with all of the training datasets
+of Libri-TTS [27], and the HiFi-Codec was pretrained with the
+same datasets as in the original configuration. For evaluation,
+we used the Libri-TTS test-clean subset so that all speakers in
+the evaluation set were unseen during training. We randomly
+selected the evaluation set consisting of 720 sentences and
+20 sentences per speaker. All the speech data were sampled
+with a sampling rate of 24 kHz. For semantic tokenization, we
+used the pre-trained Wav2Vec 2.0 XLSR [28], with a total of
+512 clusters for k-means clustering, and they were temporarily
+aligned to corresponding acoustic tokens. We evaluated the
+runtime on the single NVIDIA RTX8000 GPU to compare
+inference speed.
+2) Baselines: We employed the SoundStorm model with
+the SoundStream codec as a baseline architecture. To eliminate
+data dependencies, we trained the SoundStream codec using
+the same dataset as HiFi-Codec. Following the SoundStorm
+configuration, we utilized the 6000 bps SoundStream codec
+with Nq
+= 12. We compared the SoundStorm and the
+proposed model by varying iteration numbers. During decod-
+ing, we used (16, 1, 1, ..., 1) iterations of SoundStorm for
+N = 27 and greedy sampling for N = 12. Additionally, for
+different speaker prompt settings, we employed the variational
+inference-based (VITS) [29] voice conversion model as a
+baseline. We added ECAPA-TDNN [30] as a reference encoder
+to the VITS for speaker conditioning.
+3) Evaluation metrics: We performed a Mean Opinion
+Score (MOS) test to assess synthesized speech quality, with
+17 evaluators rating naturalness. To measure intelligibility, we
+computed the Character Error Rate (CER) using a pretrained
+Whisper [31] large model in official implementation. For
+speaker similarity, Similarity Mean Opinion Score (SMOS)
+and Speaker Embedding Cosine Similarity (SECS) were used.
+For SMOS evaluation, 17 listeners assessed how well the
+generated speech captured the speaker identity of the prompt
+speech. For SECS, we quantified the cosine distance between
+the speaker embeddings of the generated and prompt speech,
+using WavLM-TDNN [32] as a pretrained speaker verification
+model.
+B. Results and Analysis
+1) Prompt-based audio generation: We present the results
+of prompt-based audio generation in Table I where Nc and
+N indicate the number of iterations for coarse acoustic tokens
+and the total number of iterations, respectively. Our proposed
+model demonstrates superior performance in all metrics com-
+pared to the SoundStorm baseline at the same number of itera-
+tions, N. Moreover, our proposed model exhibits significantly
+better performance when compared to the VITS-based model
+in different prompt speaker setting. This indicates the proposed
+model’s excellence in speaker similarity, audio quality, and
+speech intelligibility. Notably, in the case of SoundStorm,
+remarkable performance degradation was observed when N
+was reduced to 12. In contrast, our proposed model maintained
+performance even with N = 6, surpassing the performance
+of SoundStorm (N=27). The performance drop of the pro-
+posed model (N=2) was induced by the absence of G-IPD
+TABLE I
+COMPARISON OF RESULTS FOR AUDIO GENERATION. MOS AND SMOS
+ARE DESCRIBED WITH 95% CONFIDENCE INTERVALS.
+Method
+CER SECS
+MOS
+SMOS
+With Same Prompt Speaker
+Ground Truth
+0.71 0.737 4.55±0.08 4.55±0.07
+SoundStorm (N = 12)
+3.02 0.429 3.24±0.07 3.99±0.07
+SoundStorm (N = 27)
+2.87 0.437 3.83±0.07 4.10±0.08
+Proposed (Nc = 1, N = 2)
+2.90 0.412 3.06±0.07 3.63±0.08
+Proposed (Nc = 5, N = 6)
+2.69 0.475 4.06±0.07 4.30±0.07
+Proposed (Nc = 11, N = 12)
+2.57 0.476 4.27±0.07 4.42±0.07
+Proposed (Nc = 26, N = 27)
+2.36 0.487 4.49±0.06 4.47±0.06
+With Different Prompt Speaker
+VITS + Ref. (conversion)
+2.71 0.382 3.39±0.08 3.82±0.07
+SoundStorm (N = 12)
+3.23 0.381 3.54±0.08 3.86±0.08
+SoundStorm (N = 27)
+3.11 0.392 3.86±0.08 4.24±0.07
+Proposed (Nc = 1, N = 2)
+3.28 0.367 3.10±0.07 3.58±0.08
+Proposed (Nc = 5, N = 6)
+2.53 0.406 4.11±0.07 4.22±0.07
+Proposed (Nc = 11, N = 12)
+2.49 0.416 4.38±0.07 4.51±0.06
+Proposed (Nc = 26, N = 27)
+2.46 0.417 4.41±0.07 4.54±0.05
+0
+0.5
+1
+1.5
+2
+2.5
+3
+5s
+10s
+15s
+20s
+INFERENCE TIME (S)
+TARGET LENGTH
+Short prompt (3s)
+Prompt Semantic Tokenization
+SoundStorm
+Proposed Model
+0
+0.5
+1
+1.5
+2
+2.5
+3
+5s
+10s
+15s
+20s
+INFERENCE TIME (S)
+TARGET LENGTH
+Long prompt (10s)
+Prompt Semantic Tokenization
+SoundStorm
+Proposed Model
+Fig. 5.
+Comparison of inference speed. The prompt semantic tokenization
+is only used in SoundStorm’s sampling process, and presented SoundStorm’s
+runtime is evaluated without prompt semantic tokenization
+sampling, which failed to account for group-wise conditional
+dependency.
+2) Inference speed: We compared the inference speed of
+our proposed model to that of SoundStorm. For a fair com-
+parison, we fixed the total iteration number N = 27. As
+shown in Fig. 5, the proposed model is much faster than
+SoundStorm across all target and prompt lengths. Although
+the runtime of the self-attention module was dependent on
+the sequence length, our cross-attention-based architecture was
+less affected by the variations in prompt and target length.
+In particular, the runtime gap between proposed model and
+SoundStorm increase in long prompt setting, because proposed
+model avoids repetitive computation of prompt part throughout
+the inference process. As indicated in Table I, we expect
+that our proposed model can reduce N without a significant
+performance drop, resulting in much faster inference.
+V. CONCLUSION
+We have proposed a fast and high-quality codec language
+model for parallel audio generation using Group-Masked
+Language Modeling. For future work, we plan to extend our
+proposed model to support the zero-shot multi-speaker text-
+to-speech via a text-to-semantic translation model.
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2015
+5

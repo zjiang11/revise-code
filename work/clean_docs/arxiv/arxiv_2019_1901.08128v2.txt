@@ -1,0 +1,822 @@
+1
+Distillation Strategies for
+Proximal Policy Optimization
+Sam Green‡∗, Craig M. Vineyard‡, C¸ etin Kaya Koc¸∗
+‡Sandia National Laboratories, Albuquerque, New Mexico, USA
+
+∗University of California, Santa Barbara, California, USA
+
+Abstract—Vision-based deep reinforcement learning (RL) typically obtains performance beneﬁt by using high capacity and relatively
+large convolutional neural networks (CNN). However, a large network leads to higher inference costs (power, latency, silicon area, MAC
+count). Many inference optimizations have been developed for CNNs. Some optimization techniques offer theoretical efﬁciency, such
+as sparsity, but designing actual hardware to support them is difﬁcult. On the other hand, distillation is a simple general-purpose
+optimization technique which is broadly applicable for transferring knowledge from a trained, high capacity teacher network to an
+untrained, low capacity student network. DQN distillation extended the original distillation idea to transfer information stored in a high
+performance, high capacity teacher Q-function trained via the Deep Q-Learning (DQN) algorithm. Our work adapts the DQN distillation
+work to the actor-critic Proximal Policy Optimization algorithm. PPO is simple to implement and has much higher performance than the
+seminal DQN algorithm. We show that a distilled PPO student can attain far higher performance compared to a DQN teacher. We also
+show that a low capacity distilled student is generally able to outperform a low capacity agent that directly trains in the environment.
+Finally, we show that distillation, followed by “ﬁne-tuning” in the environment, enables the distilled PPO student to achieve parity with
+teacher performance. In general, the lessons learned in this work should transfer to other modern actor-critic RL algorithms.
+!
+1
+INTRODUCTION
+I
+N 2013, DeepMind famously demonstrated above-human
+levels of performance on many Atari video games using
+the end-to-end deep reinforcement learning (RL) algorithm
+Deep Q-Learning (DQN) [9]. Since then, many improved RL
+algorithms have been developed. RL is currently being ap-
+plied to diverse tasks, such as robotic manipulation, games,
+ﬁnance, medicine, and marketing. In the coming years, as
+RL applications continue to expand and task performance
+continues to increase, we foresee RL run-time efﬁciency be-
+coming a critical issue. Demand for run-time efﬁciency will
+require special algorithmic considerations and ultimately
+specialized hardware. A parallel to this claim is the success
+and breadth currently enjoyed by the ﬁeld of deep learning
+which has now entered a phase of hardware accelerator
+mass production by many industrial and academic groups.
+Distillation is a method to transfer information learned
+by a high capacity, high parameter-count teacher neural
+network into a relatively low capacity, low parameter-count
+student neural network [5]. When using distillation, all
+teacher output probabilities are used as a training signal
+for the student, versus the single label that is normally used
+during training. Distillation leverages the fact that trained
+teacher class probabilities contain more information than
+a single label. For example, if an apple is presented to a clas-
+siﬁer successfully trained to recognize images of food, then
+the classiﬁer’s class probabilities for apple, pear, peach, and
+orange most likely have some signiﬁcant value compared
+to non-round foods. Furthermore, the low probabilities for
+other non-round classes provide information about what the
+input is unlikely to be.
+The results presented in this paper extend the work
+Fig. 1: RL distillation has three phases: 1) teacher training,
+using standard RL algorithms, 2) using the trained teacher
+to interact with the environment and saving state observa-
+tions and teacher’s action probabilities into a replay buffer,
+and 3) the transfer of information stored in the replay buffer
+into student(s).
+of [13] which used distillation to train a student neural
+network to match the deep Q-network (DQN) of a teacher
+trained through the Deep Q-Learning algorithm. We refer
+to that technique as DQN distillation. A noteworthy feature
+of DQN distillation, and any variety of RL distillation in
+general, is that only the teacher is required to experience
+arXiv:1901.08128v2  [cs.LG]  30 Apr 2019
+
+2
+the environment. Once trained, the teacher may pass its
+knowledge to students, without the students being required
+to experience the environment as well, Fig. 1. Excellent
+results were obtained in [13], with the student DQNs of-
+ten matching or exceeding the performance of the teacher
+DQNs on all tasks.
+Actor-critic algorithms constitute a popular family of
+high performance deep RL algorithms. In the context of
+deep RL, actor-critic algorithms are typically composed
+of two networks: an actor network, which also serves as
+the agent’s policy, and a critic network, which serves as
+a value function during policy improvement. DQN only
+uses a value function, which is queried during run-time.
+In this work, we reexamine DQN distillation in the context
+of the Proximal Policy Optimization algorithm, which was
+developed more recently than DQN and subsequently has
+many improvements [14]. PPO was selected as our actor-
+critic algorithm because it is simple to implement and is
+widely used for a broad range of RL applications [7], [11],
+[15], [17].
+As RL becomes appropriate for real-world applica-
+tions, various “costs” to execute neural network forward-
+propagation becomes critical. Action latency, power con-
+sumption, silicon area requirements, and other design fac-
+tors must be reconciled with the fact that relatively large
+neural networks typically provide state of the art results.
+RL distillation techniques will be broadly useful for neural
+architecture design. In particular, RL distillation will allow
+a machine learning engineer to 1) design the best policy,
+given their hardware constraints, or 2) identify minimum
+hardware requirements, given a satisﬁcing agent perfor-
+mance metric. RL distillation methods provide the following
+beneﬁts:
+•
+Rapid student model exploration is enabled by the
+use of an experience replay buffer. RL distillation
+keeps a large replay buffer, which is populated with
+high quality state observations, actions, and action
+probabilities recorded by the teacher after its training
+is complete.
+•
+Faster training times via high capacity teachers. It
+has been shown that high capacity agents decrease
+training time for both deep learning and deep RL [4],
+[13].
+•
+Expensive environments, e.g. accurate physics sim-
+ulations or physical systems, may only need to be
+experienced once by the teacher. The teacher’s replay
+buffer may then be repeatedly used for ofﬂine actor
+distillation at a later date.
+2
+BACKGROUND AND RELATED WORK
+Distillation was proposed in [5] as a method to transfer
+knowledge from a trained teacher classiﬁer neural network
+into an untrained student network. There are various tech-
+niques to implement neural network distillation, and here
+we review the version most relevant to RL. Initially, assume
+a high capacity teacher classiﬁer network has been trained
+to high performance, and a smaller network is to be trained
+with distillation. Additionally, assume access to the training
+inputs X used for teacher training, but no access to class C
+training labels y ∈C. In this case, we may derive a loss func-
+tion for the student network by providing training inputs
+x ∈X to the teacher network and using its class probability
+distribution pt(x) ∈R|C| as a soft target for the student
+network’s output probability distribution pθ(x) ∈R|C|,
+where the student is parameterized by θ. The student’s loss
+is deﬁned as the distance between distributions pt(x) and
+pθ(x) and may be measured using a standard metric, such
+as Kullback-Leibler divergence:
+L(pθ(x)|pt(x)) =
+|C|
+X
+i=1
+pt,i(x) log pt,i(x)
+pθ,i(x),
+(1)
+where pt,i(x) and pθ,i(x) represent the probability for class
+i, given input x. The gradient of L may then be taken
+with respect to the student’s parameters, which may then
+be updated using gradient descent.
+As introduced by [13], distillation without labels maps
+to the RL setting. In the context of value-based algorithms
+like DQN, the output of the teacher Q-network is a vector
+of state-action values qt(s) ∈R|A|, where s is a state
+observation and A is a discrete action space. A probability
+distribution pt(s) may be obtained from the teacher by tak-
+ing the softmax of qt(s). The state observations are then also
+provided to the untrained student network parameterized
+by θ, and its (originally random) state-action values may be
+interpreted as a probability vector by taking the softmax of
+its output, giving pθ(s). The trained teacher Q-network is
+then distilled into a student network using the Kullback-
+Leibler divergence metric for the loss:
+L(pθ(s)|pt(s)) =
+|A|
+X
+i=1
+pt,i(s) log pt,i(s)
+pθ,i(s),
+(2)
+where pt,i(s) and pθ,i(s) represent the probability for action
+i, given state observation s.
+Eq. 2 would lead to low agent performance if used as
+given for DQN distillation. Recall that Q-values represent
+the expected return from state s, given that action a is
+taken, and the policy is followed thereafter. After training
+is complete, an agent makes its decisions by taking the
+action with the highest Q-value. By taking the softmax of
+the DQN, we are interpreting the Q-values as a probability
+distribution. This distribution may be relatively uniform,
+and because of the noise introduced during distillation,
+values in the student may not relatively match that of the
+teacher. Speciﬁcally, the Q-value for a suboptimal action
+in the teacher may become the highest Q-value in the stu-
+dent, and this would lead to degraded agent performance.
+The authors of [13] minimized the chance of this error by
+dividing all teacher Q-values by a temperature parameter
+τ = .01, prior to calculating the softmax. This has the
+effect of “sharpening” the teacher’s probability distribution
+in pt(s), such that the highest probability is much greater
+than the next to highest.
+After the teacher has been fully trained, a distillation
+training set is collected from the teacher into a replay buffer.
+The authors of [13] showed excellent distilled student per-
+formance across a variety of classic Atari 2600 games. Most
+signiﬁcantly, a low capacity student network, with 7% of the
+parameters relative to their teacher network, performed at
+least as well as the teacher network.
+
+3
+Breakout
+Riverraid
+Space Invaders
+Ms.Pacman
+Beamrider
+Enduro
+Freeway
+Pong
+Q*bert
+Seaquest
+Episode
+Score
+Fig. 2: Qualitative analysis of effect of policy capacity on learning rate. Red plot is high capacity, purple is medium capacity,
+and blue is low capacity. In general, high capacity policies achieved higher performance, faster than low capacity policies.
+Y-axis is game score, x-axis is number of games played. Total number of steps was ﬁxed across all games to 75 × 106 time
+steps. As detailed in the Results section, distillation allows for higher performing low capacity policies, compared to what
+they may achieve through environmental interaction alone.
+DQN
+PPO Teacher
+PPO Medium
+PPO Low
+Beamrider
+8672.4
+7500
+7018
+6958
+Breakout
+303.9
+277
+166
+187
+Enduro
+475.6
+722
+827
+948
+Freeway
+25.8
+34
+33
+34
+Ms.Pacman
+763.5
+3410
+4544
+2085
+Pong
+16.2
+21
+21
+21
+Q*bert
+4589.8
+28367
+11646
+18502
+Riverraid
+4065.3
+13916
+15601
+9408
+Seaquest
+2793.3
+2471
+1908
+2315
+S. Invaders
+1449.7
+1653
+1624
+1312
+% of DQN
+100%
+169%
+150%
+141%
+TABLE 1: Comparisons of policies trained by DQN and
+PPO. DQN results are taken from [13]. PPO Teacher, PPO
+Medium, and PPO Low refer to agents trained using PPO
+with high, medium and low capacity policies respectively.
+Policy details are given in the Implementation Details sec-
+tion. All PPO policies were trained for 75×106 environment
+time steps and evaluated for 1 × 106 time steps. “% of
+DQN” is the geometric mean of the column divided by the
+geometric mean of the DQN column. DQN and PPO Teacher
+have the same architecture. Medium and low capacities
+have 25% and 7% of the parameters as DQN and PPO
+Teacher. Note that PPO Low has a geometric mean 41%
+higher than DQN, and that higher capacity PPO policies
+tend to have higher performance than lower capacity PPO
+policies.
+PPO is an actor-critic algorithm which has stood out
+as being simple to implement and high-performance [14].
+PPO is now established as a popular baseline with which to
+compare other RL algorithms and as a preferred algorithm
+for applying RL to new tasks and for applications outside
+RL algorithm research [12], [16]. Because of the popularity
+and performance of PPO, it was selected as our actor-critic
+algorithm.
+In general, PPO learns more efﬁciently than the seminal
+DQN algorithm. Table 1 compares agents trained with DQN
+and PPO. Signiﬁcantly, PPO agents with much smaller ca-
+pacity (7%) achieved 41% higher than a high capacity DQN
+agent, when comparing geometric means.
+A motivating factor for policy distillation is that it may
+be used to increase the sample efﬁciency and optimize
+the performance of a low capacity policy. In [13] it was
+speculated that a larger network accelerates learning. In [4]
+it was observed that high capacity policies are generally able
+to learn a task better and faster than low capacity policies. In
+the context of this work, the results in Fig. 2 also show that
+high capacity policies have performance advantages. In this
+ﬁgure, the average scores for agents using three different
+policy architectures are tracked during training for 75 × 106
+time steps. All PPO agents were trained using Proximal
+Policy Optimization, as described in the Implementation
+Details section.
+Distillation has also proven to be useful for neuromor-
+phic hardware design. For example, the beneﬁts of better
+sample efﬁciency and higher student performance through
+distillation were combined in [8] for efﬁcient RL policy de-
+velopment. In this work, a high capacity policy trained with
+Double DQN, and represented by a standard convolutional
+neural network (CNN), was distilled into a student policy
+represented by a low precision spiking neural network to
+be executed on IBM’s TrueNorth architecture. As TrueNorth
+has special restrictions, e.g. binary activations and ternary
+weights, it does not use a standard SGD algorithm. In-
+stead TrueNorth uses the Energy-Efﬁcient Deep Networks
+algorithm [3] to train a student to match a teacher’s Q-
+values. Importantly, [8] demonstrates the viability of train-
+ing a teacher policy once, using one type of algorithm, and
+distilling that policy into an arbitrary number of student
+
+4
+policies, using the best training algorithm for each respec-
+tive student.
+3
+FORMULATION
+Actor distillation (AD) is an ofﬂine technique closest in
+formulation to DQN distillation, with the difference being
+that AD distills the teacher’s true actor probabilities, i.e.
+the teacher’s policy, πt into the student πθ, which are both
+functions of state observation s. Whereas DQN distillation
+transfers a proxy of the teacher’s value function into the
+student.
+AD proceeds as follows: a teacher policy πt is trained to
+maximum performance on the environment. After training,
+the trained teacher interacts with the environment during
+a collection phase which records the teacher’s state ob-
+servations and action probabilities to a replay buffer. An
+uninitialized student network πθ is then trained to mimic
+the teacher with mini-batch SGD using the replay buffer
+and a loss similar to Eq. 2:
+L(πθ(s)|πt(s)) =
+|A|
+X
+i=1
+πt(ai|s) log πt(ai|s)
+πθ(ai|s),
+(3)
+where s and πt(·|s) are stored in the replay buffer.
+πt and πθ are obtained by taking the softmax of a
+policy network logits vector. [13] obtained better results
+by dividing the teacher logits by .01, prior to taking the
+softmax. This has the effect of sharpening the teacher’s
+probabilities. This was necessary because Q-values, which
+are learned using an ϵ-greedy explore-exploit strategy, have
+undeﬁned behavior when converted to a distribution. AD
+does not require sharpening, because the teacher policy is
+stochastic anyway.
+Optionally, after distillation is complete, the student may
+be ﬁne-tuned by allowing it to interact directly with the
+environment and using a standard actor-critic algorithm.
+4
+IMPLEMENTATION DETAILS
+In this work, actor distillation was used to train students
+on 10 different Atari environments. We analyze the effect of
+AD on student performance, compared to agents with the
+same policy architecture as the student but trained directly
+on the environment with no distillation. We also analyze
+the effect of capacity on student performance, relative to
+agents with the same capacity but trained directly in the
+environment. Finally, we study the impact of allowing a
+distilled student to ﬁne-tune on the environment after dis-
+tillation is complete. Our environments are provided by
+the Arcade Learning Environment [1] and are interfaced
+with OpenAI Gym [2]. Additionally, we used PPO and
+distillation reference codes from [6] and [10].
+Our PPO architectures use a single convolutional neural
+network body, followed by two separate “heads”: one for
+the actor and one for the critic. Two student capacities were
+investigated: one with medium capacity and one with low
+capacity, both relative to the teacher’s high capacity net-
+work. In order to make a fair comparison, student network
+architectures were chosen to match those used for the DQN
+Distillation results. Network architecture details are given
+in Table 2.
+Capacity
+Layer
+Channels
+Shape
+Stride
+High
+Conv 1
+32
+8
+4
+Conv 2
+64
+4
+2
+Conv 3
+64
+3
+1
+FC 1
+n/a
+512
+n/a
+Medium
+Conv 1
+16
+8
+4
+Conv 2
+32
+4
+3
+Conv 3
+32
+3
+1
+FC 1
+n/a
+256
+n/a
+Low
+Conv 1
+8
+8
+4
+Conv 2
+16
+4
+2
+Conv 3
+16
+3
+1
+FC 1
+n/a
+128
+n/a
+TABLE 2: Architecture details of policy feature extraction
+layers. High, medium, and low capacity agents were trained
+to play Atari. All architectures had three convolutional
+layers with inputs of 84 × 84 × 4, followed by two fully
+connected layers (FC 1), followed by separate “heads”: a
+fully-connected policy layer (π) with 3–18 units, depending
+on the environment, and a critic (V ) unit with 512 units. The
+high, medium, and low capacity architectures had “bodies”
+with 1683456, 422912 (25%), and 106752 (6%) parameters,
+respectively.
+2000
+4000
+6000
+8000
+Beamrider
+400
+500
+600
+700
+800
+Enduro
+10
+25
+50
+100
+200
+400
+0
+100
+200
+300
+400
+Breakout
+10
+25
+50
+100
+200
+400
+5000
+10000
+15000
+Riverraid
+Epochs
+Score
+Fig. 3: Effects of capacity on distilled performance. Student
+policies were distilled from between 10 and 400 epochs and
+then evaluated for 1 × 106 time steps. Purple represents
+medium capacity policies and blue represents low capacity
+policies. Policies were reinitialized and distilled for each
+data point. Medium capacity policies have an advantage
+over low capacity policies when fewer epochs are used, but
+the advantage is often reduced as distillation progresses. As
+epochs increase, policies converge to maximum scores.
+For distillation and architecture baseline comparisons,
+the high (teacher), medium, and low capacity agents were
+trained for 75×106 time steps on each Atari environment. 16
+agents ran in parallel with 2048 environment steps on each
+agent between each PPO update. Generalized Advantage
+Estimation was used to calculate returns with γ = .99 and
+τ = .95. Within PPO, 10 epochs were used with batch sizes
+of 32 and clipping parameter set to .1. Adam was used
+with the stepsize set to 3 × 10−4. Unlike [13], we do not
+divide teacher probabilities by a temperature and therefore
+directly use Eq. 3 for distillation. Tuning experiments on
+
+5
+Teacher
+Medium
+Medium AD
+Medium AD tuned
+Low
+Low AD
+Low AD tuned
+Beamrider
+15548
+7500±2322
+12464
+7018±2183
+(400) 11720
+6284±1790
+10278
+5447±1867
+12174
+6958±1997
+(400) 10974
+5489±2313
+9744
+5548±1973
+Breakout
+442
+277±115
+395
+166±123
+(200) 425
+248±136
+434
+309±127
+372
+187±69
+(200) 414
+201±142
+397
+159±103
+Enduro
+983
+722±110
+1288
+827±223
+(50) 967
+656±133
+1062
+733±217
+1386
+948±181
+(400) 791
+611±141
+1376
+1013±162
+Freeway
+34
+34±1
+33
+33±0
+(10) 34
+34±1
+32
+32±0
+34
+34±0
+(10) 34
+33±1
+33
+33±0
+Ms.Pacman
+3940
+3410±333
+8140
+4544±875
+(200) 4920
+3413±355
+6500
+5041±1263
+2090
+2085±67
+(100) 4830
+3390±407
+5450
+3483±302
+Pong
+21
+21±2
+21
+21±1
+(10) 21
+20±3
+21
+19±7
+21
+21±0
+(10) 21
+19±7
+21
+21±0
+Q*bert
+30075
+28367±3651
+11675
+11646±377
+(10) 29975
+28554±3301
+22100
+20572±2209
+20775
+18502±2563
+(10) 29650
+23019±9190
+15375
+12152±1208
+Riverraid
+18980
+13916±3552
+20960
+15601±3189
+(200) 18830
+13080±3517
+18640
+13716±2874
+9910
+9408±217
+(400) 18630
+11256±3721
+18430
+15593±2674
+Seaquest
+4580
+2471±452
+1980
+1908±56
+(10) 4980
+2572±580
+6060
+3708±1144
+2480
+2315±103
+(10) 4100
+2219±465
+5940
+3550±1055
+Space Invaders
+2775
+1653±451
+3025
+1624±596
+(200) 2550
+1432±469
+2550
+1569±375
+2325
+1312±336
+(200) 2405
+1382±343
+2205
+1288±263
+% of Teacher
+100%
+88%
+94%
+100%
+84%
+85%
+89%
+% of DQN
+169%
+150%
+160%
+169%
+141%
+144%
+151%
+TABLE 3: Game scores over 1 × 106 time steps using directly-trained (Teacher, Medium, Low columns), distilled (Medium
+AD, Low AD), and distilled-then-tuned agents (Medium AD tuned, Low AD tuned). Teachers use high capacity architecture
+trained with PPO for 75 × 106 time steps. Medium and Low represent medium and low capacity architectures. AD
+represents actor distillation as described in Implementation Details section. The top row in each cell is agent’s high score
+over all games. The bottom row in each cell provides mean game score ± standard deviation. Parentheses in AD columns
+provide number of epochs used for student distillation. “% of Teacher” columns are the geometric mean of column mean
+divided by geometric mean of teacher. “% of DQN” provides geometric means of students versus those obtained through
+DQN distillation [13]. Of note, medium capacity distilled student achieved 94% of PPO-based teacher, and 160% of DQN-
+based teacher results, which were, in turn, often higher than human player scores [9]. Medium capacity students distilled
+for 10 epochs and then allowed to train using PPO directly on the environment for 20 × 106 time steps (“Medium AD
+tuned”) achieved Teacher’s level of performance. Similar analysis applies to low capacity students.
+Beamrider, Enduro, Breakout, and Riverraid were used for
+ﬁnal hyperparameter selection.
+5
+RESULTS
+5.1
+Distillation results
+After training or distillation, all agents were evaluated for
+1 × 106 time steps of game play. Depending on the agent
+and game, 1 × 106 time steps resulted in 4 to 56 episodes
+per game. Results are given in Table 3. The bottom two
+rows of the table provide the geometric mean of the student
+versus the geometric mean of the PPO-based teacher and
+the geometric mean of DQN-based teacher scores reported
+in [13]. PPO is a more advanced algorithm than DQN,
+and even our low capacity PPO-trained agent obtain scores
+much higher than the DQN teacher.
+The capacity of a student has an impact on how much
+information is transferred to a student. The medium capac-
+ity students obtain a geometric mean of 94% relative to
+the teacher, and the low capacity students obtain 85%. In
+general, then, it is beneﬁcial to use larger capacity students.
+Critically, as given in the Medium vs. Medium AD
+and Low vs. Low AD columns in Table 3, distilled stu-
+dents signiﬁcantly exceed or meet the performance of
+equal-capacity agents which were trained directly on
+the environment. Recall from Table 2 that higher capacity
+policy networks typically reach higher performance, faster
+than lower capacity networks. By using distillation we may
+exploit this fact and not be penalized by it.
+5.2
+Effect of distillation epochs
+The optimal number of epochs used for distillation depends
+on the environment. Some games, e.g. Pong and Freeway,
+required 10 epochs of distillation to reach teacher per-
+formance. Others, e.g. Breakout and Ms.Pacman, required
+hundreds of epochs. The effects of increasing the number
+of distillation epochs on student evaluation performance for
+four games is given in Fig. 3. In general, higher capacity
+policies distill with higher ﬁnal evaluation performance
+than lower capacity policies, but the performance difference
+diminishes as the number of epochs increase.
+Each data point in Fig. 3 was created by initializing a
+new student policy (with random weights) and then dis-
+tilling from between 10 and 400 epochs1, and then ﬁnally
+evaluating the distilled student for 1 × 106 time steps in
+the environment. For the sake of sample efﬁciency, it would
+be preferable to have access to a proxy metric to know
+when further distillation is unnecessary, but we leave that
+for future work.
+1. Beamrider, Breakout, Enduro, and Riverraid were the only stu-
+dents distilled for 400 epochs.
+
+6
+5.3
+Fine-tuning results
+We also studied the impact of allowing distilled students
+to learn in the environment, using standard PPO, after the
+distillation phase. Students were distilled for 10 epochs and
+then ﬁne-tuned for 20 × 106 time steps, which is 27% of
+the number of time steps used to directly train the medium
+and low capacity policies. Notably, ﬁne-tuning elevated the
+performance of the medium capacity distilled student to
+the performance of the teacher. In Table 3, the “Medium
+AD tuned” and “Low AD tuned” students have geometric
+means signiﬁcantly higher than the students which were
+only distilled and not ﬁne-tuned.
+6
+CONCLUSIONS
+Distillation is a robust and generally applicable optimization
+method. In this paper we show that distillation may be used
+successfully in conjunction with Proximal Policy Optimiza-
+tion, a popular actor-critic reinforcement learning algorithm.
+The method presented here can be used during architecture
+search for efﬁcient hardware and policy co-design.
+Speciﬁcally, a high capacity trained teacher may be used
+to collect a replay buffer of state observations from the
+environment. Then the replay buffer and teacher probabil-
+ities may be used repeatedly to experiment with different
+student architectures. This method trains a low capacity re-
+inforcement learning policy to achieve higher performance
+than it would have through direct interaction with the
+environment.
+Furthermore, if it is possible for the student to also learn
+within the environment, we show that it is beneﬁcial to ﬁrst
+perform distillation followed by ﬁne-tuning of the student.
+Distillation of policies was originally in the context of a
+neural network trained to approximate Q-values. A limita-
+tion of Q-values is the inability to represent action values
+for continuous action spaces. Actor-critic methods have no
+such limitation. Future work can extend the ideas here to
+continuous action spaces.
+The ﬁeld of deep learning has a training heuristic called
+early stopping, which can be used to prevent overﬁtting.
+Early stopping monitors error on the training set, relative
+to error on a test dataset. As epochs increase, training
+error will always decrease, however test error will reach
+a minimum, before increasing again. Early stopping may
+be beneﬁcial for distillation, but it is not clear. As may be
+seen in Fig. 3, distilled student performance is plateauing,
+but generally not dropping as epochs increase. We leave
+further investigation into this question for future work.
+ACKNOWLEDGMENT
+This work was supported by the DOE Advanced Simu-
+lation and Computing program, and the Laboratory Di-
+rected Research and Development program at Sandia Na-
+tional Laboratories. Sandia National Laboratories is a multi-
+program laboratory managed and operated by National
+Technology and Engineering Solutions of Sandia, LLC., a
+wholly owned subsidiary of Honeywell International, Inc.,
+for the U.S. Department of Energy’s National Nuclear Se-
+curity Administration under contract DE-NA-0003525. This
+paper describes objective technical results and analysis. Any
+subjective views or opinions that might be expressed in the
+paper do not necessarily represent the views of the U.S.
+Department of Energy or the United States Government.

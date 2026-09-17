@@ -1,0 +1,1032 @@
+DeepType: Multilingual Entity Linking by Neural Type System Evolution
+Jonathan Raiman
+OpenAI
+San Francisco, California
+
+Olivier Raiman
+Agilience
+Paris, France
+
+Abstract
+The wealth of structured (e.g. Wikidata) and unstructured
+data about the world available today presents an incredible
+opportunity for tomorrow’s Artiﬁcial Intelligence. So far, in-
+tegration of these two different modalities is a difﬁcult pro-
+cess, involving many decisions concerning how best to repre-
+sent the information so that it will be captured or useful, and
+hand-labeling large amounts of data. DeepType overcomes
+this challenge by explicitly integrating symbolic information
+into the reasoning process of a neural network with a type
+system. First we construct a type system, and second, we use
+it to constrain the outputs of a neural network to respect the
+symbolic structure. We achieve this by reformulating the de-
+sign problem into a mixed integer problem: create a type sys-
+tem and subsequently train a neural network with it. In this
+reformulation discrete variables select which parent-child re-
+lations from an ontology are types within the type system,
+while continuous variables control a classiﬁer ﬁt to the type
+system. The original problem cannot be solved exactly, so we
+propose a 2-step algorithm: 1) heuristic search or stochastic
+optimization over discrete variables that deﬁne a type system
+informed by an Oracle and a Learnability heuristic, 2) gradi-
+ent descent to ﬁt classiﬁer parameters. We apply DeepType to
+the problem of Entity Linking on three standard datasets (i.e.
+WikiDisamb30, CoNLL (YAGO), TAC KBP 2010) and ﬁnd
+that it outperforms all existing solutions by a wide margin,
+including approaches that rely on a human-designed type sys-
+tem or recent deep learning-based entity embeddings, while
+explicitly using symbolic information lets it integrate new en-
+tities without retraining.
+1
+Introduction
+Online encyclopedias, knowledge bases, ontologies (e.g.
+Wikipedia, Wikidata, Wordnet), alongside image and video
+datasets with their associated label and category hierarchies
+(e.g. Imagenet (Deng et al. 2009), Youtube-8M (Abu-El-
+Haija et al. 2016), Kinetics (Kay et al. 2017)) offer an un-
+precedented opportunity for incorporating symbolic repre-
+sentations within distributed and neural representations in
+Artiﬁcial Intelligence systems. Several approaches exist for
+integrating rich symbolic structures within the behavior of
+neural networks: a label hierarchy aware loss function that
+relies on the ultrametric tree distance between labels (e.g.
+it is worse to confuse sheepdogs and skyscrapers than it is
+to confuse sheepdogs and poodles) (Wu, Tygert, and LeCun
+2017), a loss function that trades off speciﬁcity for accu-
+racy by incorporating hypo/hypernymy relations (Deng et
+al. 2012), using NER types to constrain the behavior of an
+Entity Linking system (Ling, Singh, and Weld 2015), or
+more recently integrating explicit type constraints within a
+decoder’s grammar for neural semantic parsing (Krishna-
+murthy, Dasigi, and Gardner 2017). However, current ap-
+proaches face several difﬁculties:
+• Selection of the right symbolic information based on the
+utility or information gain for a target task.
+• Design of the representation for symbolic information (hi-
+erarchy, grammar, constraints).
+• Hand-labelling large amounts of data.
+DeepType overcomes these difﬁculties by explicitly in-
+tegrating symbolic information into the reasoning process
+of a neural network with a type system that is automati-
+cally designed without human effort for a target task. We
+achieve this by reformulating the design problem into a
+mixed integer problem: create a type system by selecting
+roots and edges from an ontology that serve as types in a type
+system, and subsequently train a neural network with it. The
+original problem cannot be solved exactly, so we propose a
+2-step algorithm:
+1. heuristic search or stochastic optimization over the dis-
+crete variable assignments controlling type system design,
+using an Oracle and a Learnability heuristic to ensure that
+design decisions will be easy to learn by a neural network,
+and will provide improvements on the target task,
+2. gradient descent to ﬁt classiﬁer parameters to predict the
+behavior of the type system.
+In order to validate the beneﬁts of our approach, we fo-
+cus on applying DeepType to Entity Linking (EL), the task
+of resolving ambiguous mentions of entities to their referent
+entities in a knowledge base (KB) (e.g. Wikipedia). Specif-
+ically we compare our results to state of the art systems on
+three standard datasets (WikiDisamb30, CoNLL (YAGO),
+TAC KBP 2010). We verify whether our approach can work
+in multiple languages, and whether optimization of the type
+system for a particular language generalizes to other lan-
+guages1 by training our full system in a monolingual (En-
+glish) and bilingual setup (English and French), and also
+1e.g. Do we overﬁt to a particular set of symbolic structures use-
+arXiv:1802.01021v1  [cs.CL]  3 Feb 2018
+
+evaluate our Oracle (performance upper bound) on German
+and Spanish test datasets. We compare stochastic optimiza-
+tion and heuristic search to solve our mixed integer problem
+by comparing the ﬁnal performance of systems whose type
+systems came from different search methodologies. We also
+investigate whether symbolic information is captured by us-
+ing DeepType as pretraining for Named Entity Recognition
+(NER) on two standard datasets (i.e. CoNLL 2003 (Sang and
+Meulder 2003), OntoNotes 5.0 (CoNLL 2012) (Pradhan et
+al. 2012)).
+Our key contributions in this work are as follows:
+• A system for integrating symbolic knowledge into the rea-
+soning process of a neural network through a type system,
+to constrain the behavior to respect the desired symbolic
+structure, and automatically design the type system with-
+out human effort.
+• An approach to EL that uses type constraints, reduces
+disambiguation resolution complexity from O(N 2) to
+O(N), incorporates new entities into the system with-
+out retraining, and outperforms all existing solutions by
+a wide margin.
+We release code for designing, evolving, and training neural
+type systems2. Moreover, we observe that disambiguation
+accuracy reaches 99.0% on CoNLL (YAGO) and 98.6% on
+TAC KBP 2010 when entity types are predicted by an Or-
+acle, suggesting that EL would be almost solved if we can
+improve type prediction accuracy.
+The rest of this paper is structured as follows. In Sec-
+tion 2 we introduce EL and EL with Types, in Section 3
+we describe DeepType for EL, In Section 4 we provide ex-
+perimental results for DeepType applied to EL and evidence
+of cross-lingual and cross-domain transfer of the represen-
+tation learned by a DeepType system. In Section 5 we relate
+our work to existing approaches. Conclusions and directions
+for future work are given in Section 6.
+2
+Task
+Before we deﬁne how DeepType can be used to constrain
+the outputs of a neural network using a type system, we will
+ﬁrst deﬁne the goal task of Entity Linking.
+Entity Linking
+The goal is to recover the ground truth en-
+tities in a KB referred to in a document by locating mentions
+(text spans), and for each mention properly disambiguating
+the referent entity. Commonly, a lookup table that maps each
+mention to a proposal set of entities for each mention m:
+Em = {e1, . . . , en} (e.g. “Washington” could mean Wash-
+ington, D.C. or George Washington). Disambiguation is
+ﬁnding for each mention m the a ground truth entity eGT in
+Em. Typically, disambiguation operates according to two cri-
+teria: in a large corpus, how often does a mention point to an
+entity, LinkCount(m, e), and how often does entity e1 co-
+occur with entity e2, an O(N 2) process, often named coher-
+ful only in English, or can we discover a knowledge representation
+that works across languages?
+2http://github.com/openai/deeptype
+ence (Milne and Witten 2008; Ferragina and Scaiella 2010;
+Yamada et al. 2016).
+Entity Linking with Types
+In this work we extend the EL task to associate with each
+entity a series of types (e.g. Person, Place, etc.) that if
+known, would rule out invalid answers, and therefore ease
+linking (e.g. the context now enables types to disambiguate
+“Washington”). Knowledge of the types T associated with a
+mention can also help prune entities from the the proposal
+set, to produce a constrained set: Em,T ⊆Em. In a proba-
+bilistic setting it is also possible to rank an entity e in doc-
+ument x according to its likelihood under the type system
+prediction and under the entity model:
+P(e|x) ∝Ptype(types(e)|x) · Pentity(e|x, types(e)). (1)
+In prior work, the 112 FIGER Types (Ling and Weld 2012)
+were associated with entities to combine an NER tagger with
+an EL system (Ling, Singh, and Weld 2015). In their work,
+they found that regular NER types were unhelpful, while
+ﬁner grain FIGER types improved system performance.
+3
+DeepType for Entity Linking
+DeepType is a strategy for integrating symbolic knowledge
+into the reasoning process of a neural network through a type
+system. When we apply this technique to EL, we constrain
+the behavior of an entity prediction model to respect the
+symbolic structure deﬁned by types. As an example, when
+we attempt to disambiguate “Jaguar” the beneﬁts of this ap-
+proach are apparent: our decision can be based on whether
+the predicted type is Animal or Road Vehicle as shown visu-
+ally in Figure 1.
+In this section, we will ﬁrst deﬁne key terminology, then
+explain the model and its sub-components separately.
+Terminology
+Relation
+Given some knowledge graph or feature set, a re-
+lation is a set of inheritance rules that deﬁne membership or
+exclusion from a particular group. For instance the relation
+instance of(city) selects all children of the root city
+connected by instance of as members of the group, de-
+picted by outlined boxes in Figure 2.
+Type
+In this work a type is a label deﬁned by a relation
+(e.g. IsHuman is the type applied to all children of Human
+connected by instance of).
+Type Axis
+A set of mutually exclusive types (e.g.
+IsHuman ∧IsPlant = {}).
+Type System
+A grouping of type axes, A, along with a
+type labelling function: {t1, . . . , tk} = TypeLabeler(e, A).
+For instance a type system with two axes {IsA, Topic}
+assigns to George Washington: {Person, Politics},
+and to Washington, D.C.: {Place, Geography}).
+Model
+To construct an EL system that uses type constraints we re-
+quire: a type system, the associated type classiﬁer, and a
+
+The prey saw a jaguar cross in the jungle.
+The man saw a Jaguar speed on the highway.
+Animal
+Road vehicle
+Region
+Physical Object
+1.0
+0.0
+Type Probability
+0.999
+5e-7
+2e-7
+0
+0.5
+Animal
+Road vehicle
+Region
+Physical Object
+4e-3
+4e-3
+0.35
+0.24
+Animal
+Road vehicle
+Region
+Physical Object
+0.25
+0.56
+1e-5
+2e-3
+Animal
+Road vehicle
+Region
+Physical Object
+1e-4
+3e-2
+1e-3
+0.80
+“jungle”
+“jaguar”
+“Jaguar”
+“highway”
+Sentence
+Entity
+jaguar
+Jaguar 
+jungle
+jungle
+jaguar
+Jaguar
+highway
+Highway
+Type
+Animal Road vehicle
+Region
+Music
+Animal
+Road vehicle
+Physical Object
+Film
+only link Prob.
+0.29
+0.60
+0.35
+0.17
+0.29
+0.60
+0.85
+0.04
+Prob. w/. types
+1.0
+0.0
+1.0
+0.0
+0.0
+1.0
+1.0
+0.0
+Figure 1: Example model output: “jaguar” refers to different entities depending on context. Predicting the type associated with
+each word (e.g. animal, region, etc.) helps eliminate options that do not match, and recover the true entity. Bar charts give the
+system’s belief over the type-axis “IsA”, and the table shows how types affects entity probabilities given by Wikipedia links.
+Type relation root
+Child entity, member
+non-member entity
+active edge
+…
+inactive edge
+instance of
+city
+Paris
+Fortaleza
+Alhambra
+instance of
+Mona Lisa
+located in
+instance of
+subclass of
+human 
+settlement
+neighborhood
+kibbutz
+subclass of
+Upper East Side
+instance of
+Figure 2: Deﬁning group membership with a knowledge
+graph relation: children of root (city) via edge (instance of).
+model for predicting and ranking entities given a mention.
+Instead of assuming we receive a type system, classiﬁer, en-
+tity prediction model, we will instead create the type sys-
+tem and its classiﬁer starting from a given entity predic-
+tion model and ontology with text snippets containing entity
+mentions (e.g. Wikidata and Wikipedia). For simplicity we
+use LinkCount(e, m) as our entity prediction model.
+We restrict the types in our type systems to use a set of
+parent-child relations over the ontology in Wikipedia and
+Wikidata, where each type axis has a root node r and an
+edge type g, that sets membership or exclusion from the axis
+(e.g. r = human, e = instance of, splits entities into:
+human vs. non-human3).
+We then reformulate the problem into a mixed inte-
+ger problem, where discrete variables control which roots
+r1, . . . , rk and edge types g1, . . . , gk among all roots R and
+edge types G will deﬁne type axes, while the continuous
+variables θ parametrize a classiﬁer ﬁt to the type system.
+Our goal in type system design is to select parent-child re-
+lations that a classiﬁer easily predicts, and where the types
+improve disambiguation accuracy.
+Objective
+To formally deﬁne our mixed integer problem, let us
+ﬁrst denote A as the assignment for the discrete vari-
+3Type “instance of:human” mimics the NER PER label.
+ables that deﬁne our type system (i.e. boolean variables
+deﬁning if a parent-child relation gets included in our
+type system), θ as the parameters for our entity predic-
+tion model and type classiﬁer, and Smodel(A, θ) as the
+disambiguation accuracy given a test corpus containing
+mentions M =
+
+(m0, eGT
+0
+, Em0), . . . , (mn, eGT
+n , Emn)
+	
+.
+We now assume our model produces some score for
+each proposed entity e given a mention m in a doc-
+ument D, deﬁned EntityScore(e, m, D, A, θ). The pre-
+dicted
+entity
+for
+a
+given
+mention
+is
+thus:
+e∗
+=
+argmaxe∈Em EntityScore(e, m, D, A, θ). If e∗= eGT, the
+mention is disambiguated. Our problem is thus deﬁned as:
+max
+A max
+θ
+Smodel(A, θ) =
+P
+(m,eGT,Em)∈M
+1eGT(e∗)
+|M|
+.
+(2)
+This original formulation cannot be solved exactly4. To
+make this problem tractable we propose a 2-step algorithm:
+1. Discrete Optimization of Type System: Heuristic search
+or stochastic optimization over the discrete variables of
+the type system, A, informed by a Learnability heuristic
+and an Oracle.
+2. Type classiﬁer: Gradient descent over continuous vari-
+ables θ to ﬁt type classiﬁer and entity prediction model.
+We will now explain in more detail discrete optimization
+of a type system, our heuristics (Oracle and Learnability
+heuristic), the type classiﬁer, and inference in this model.
+Discrete Optimization of a Type System
+The original objective Smodel(A, θ) cannot be solved ex-
+actly, thus we rely on heuristic search or stochastic opti-
+mization to ﬁnd suitable assignments for A. To avoid train-
+ing an entire type classiﬁer and entity prediction model for
+each evaluation of the objective function, we instead use a
+4There are ∼22.4·107 choices if each Wikipedia article can be
+a type within our type system.
+
+proxy objective J for the discrete optimization5. To ensure
+that maximizing J(A) also maximizes Smodel(A, θ), we in-
+troduce a Learnability heuristic and an Oracle that quantify
+the disambiguation power of a proposed type system, an es-
+timate of how learnable the type axes in the selected solution
+will be. We measure an upper bound for the disambiguation
+power by measuring disambiguation accuracy Soracle for a
+type classiﬁer Oracle over a test corpus.
+To ensure that the additional disambiguation power of a
+solution A translates in practice we weigh by an estimate of
+solution’s learnability Learnability(A) improvements be-
+tween Soracle and the accuracy of a system that predicts only
+according to the entity prediction model6, Sgreedy.
+Selecting a large number of type axes will provide strong
+disambiguation power, but may lead to degenerate solu-
+tions that are harder to train, slow down inference, and lack
+higher-level concepts that provide similar accuracy with less
+axes. We prevent this by adding a per type axis penalty of λ.
+Combining these three terms gives us the equation for J:
+J(A) =(Soracle −Sgreedy) · Learnability(A) +
+Sgreedy −|A| · λ.
+(3)
+Oracle
+Our Oracle is a methodology for abstracting away
+machine learning performance from the underlying repre-
+sentational power of a type system A. It operates on a test
+corpus with a set of mentions, entities, and proposal sets:
+mi, eGT
+i
+, Emi. The Oracle prunes each proposal set to only
+contain entities whose types match those of eGT
+i
+, yielding
+Em,oracle. Types fully disambiguate when |Em,oracle| = 1,
+otherwise we use the entity prediction model to select the
+right entity in the remainder set Emi,oracle:
+Oracle(m) = argmax
+e∈Em,oracle
+Pentity(e|m, types(x)).
+(4)
+If Oracle(m)
+=
+eGT, the mention is disambiguated.
+Oracle accuracy is denoted Soracle given a type sys-
+tem over a test corpus containing mentions M
+=
+
+(m0, eGT
+0
+, Em0), . . . , (mn, eGT
+n , Emn)
+	
+:
+Soracle =
+P
+(m,eGT,Em)∈M 1eGT(Oracle(m))
+|M|
+.
+(5)
+Learnability
+To ensure that disambiguation gains ob-
+tained during the discrete optimization are available when
+we train our type classiﬁer, we want to ensure that the types
+selected are easy to predict. The Learnability heuristic em-
+pirically measures the average performance of classiﬁers at
+predicting the presence of a type within some Learnability-
+speciﬁc training set.
+To efﬁciently estimate Learnability for a full type sys-
+tem we make an independence assumption and model it as
+the mean of the Learnability for each individual axis, ig-
+noring positive or negative transfer effects between differ-
+ent type axes. This assumption lets us parallelize training of
+5Training of the type classiﬁer takes ∼3 days on a Titan X Pas-
+cal, while our Oracle can run over the test set in 100ms.
+6For an entity prediction model based only on link counts, this
+means always picking the most linked entity.
+a
+jaguar
+cross the Jungle
+saw
+prey
+Word embedding
+Fully-connected layer
+concat
+dropout
+FC
+Is Animal?
+휎
+(a)
+Stacked Bi-LSTM
+dropout
+…
+Word 1
+Word n
+FC
+FC
+…
+softmax
+softmax
+Type Axis 1
+Type Axis k
+…
+(b)
+Figure 3: Text window classiﬁer in (a) serves as type Learn-
+ability estimator, while the network in (b) takes longer to
+train, but discovers long-term dependencies to predict types
+and jointly produces a distribution for multiple type axes.
+simpler classiﬁers for each type axis. We measure the area
+under its receiver operating characteristics curve (AUC) for
+each classiﬁer and compute the type system’s learnability:
+Learnability(A) =
+P
+t∈A AUC(t)
+|A|
+. We use a text window
+classiﬁer trained over windows of 10 words before and after
+a mention. Words are represented with randomly initialized
+word embeddings; the classiﬁer is illustrated in Figure 3a.
+AUC is averaged over 4 training runs for each type axis.
+Type Classiﬁer
+After the discrete optimization has completed we now have
+a type system A. We can now use this type system to label
+data in multiple languages from text snippets associated with
+the ontology7, and supervize a Type classiﬁer.
+The goal for this classiﬁer is to discover long-term de-
+pendencies in the input data that let it reliably predict types
+across many contexts and languages. For this reason we se-
+lect a bidirectional-LSTM (Lample et al. 2016) with word,
+preﬁx, and sufﬁx embeddings as done in (Andor et al. 2016).
+Our network is shown pictorially in Figure 3b. Our clas-
+siﬁer is trained to minimize the negative log likelihood of
+the per-token types for each type axis in the document D
+with L tokens: −Pk
+i=1 log Pi(ti,1, . . . , ti,L|D). When us-
+ing Wikipedia as our source of text snippets our label super-
+vision is partial8, so we make a conditional independence
+assumption about our predictions and use Softmax as our
+output activation: −Pk
+i=1
+PL
+j=1 log Pi(ti,j|wj, D).
+Inference
+At inference-time we incorporate classiﬁer belief into our
+decision process by ﬁrst running it over the full context
+and obtaining a belief over each type axis for each in-
+put word w0, . . . , wL. For each mention m covering words
+wx, . . . , wy, we obtain the type conditional probability for
+all type axes i: {Pi(·|wx, D), . . . , Pi(·|wy, D)}. In multi-
+word mentions we must combine beliefs over multiple to-
+kens x . . . y: the product of the beliefs over the mention’s
+tokens is correct but numerically unstable and slightly less
+7Wikidata’s ontology has cross-links with Wikipedia, IMDB,
+Discogs, MusicBrainz, and other encyclopaedias with snippets.
+8We obtain type labels only on the intra-wiki link anchor text.
+
+performant than max-over-time9, which we denote for the
+i-th type axis: Pi,∗(·|m, D).
+The score se,m,D,A,θ = EntityScore(e, m, D, A, θ) of
+an entity e given these conditional probability distributions
+P1,∗(·|m, D), . . . , Pk,∗(·|m, D), and the entities’ types in
+each axis t1, . . . , tk can then be combined to rank entities
+according to how predicted they were by both the entity pre-
+diction model and the type system. The chosen entity e∗
+for a mention m is chosen by taking the option that maxi-
+mizes the score among the Em possible entities; the equa-
+tion for scoring and e∗is given below, with PLink(e|m) =
+LinkCount(m,e)
+P
+j∈Em LinkCount(m,j), αi a per type axis smoothing param-
+eter, β is a smoothing parameter over all types:
+se,m,D,A,θ =PLink(e|m) ·
+
+1 −β + β ·
+( k
+Y
+i=1
+(1 −αi + αi · Pi,∗(ti|m, D))
+) 
+.
+(6)
+4
+Results
+Type System Discovery
+In the following experiments we evaluate the behavior
+of different search methodologies for type system discov-
+ery: which method best scales to large numbers of types,
+achieves high accuracy on the target EL task, and whether
+the choice of search impacts learnability by a classiﬁer or
+generalisability to held-out EL datasets.
+For the following experiments we optimize DeepType’s
+type system over a held-out set of 1000 randomly sam-
+pled articles taken from the Feb. 2017 English Wikipedia
+dump, with the Learnability heuristic text window classiﬁers
+trained only on those articles. The type classiﬁer is trained
+jointly on English and French articles, totalling 800 million
+tokens for training, 1 million tokens for validation, sampled
+equally from either language.
+We restrict roots R and edges G to the most common
+1.5·105 entities that are entity parents through wikipedia
+category or instance of edges, and eliminate type
+axes where Learnability(·) is 0, leaving 53,626 type axes.
+Human Type System Baseline
+To isolate discrete opti-
+mization from system performance and gain perspective on
+the difﬁculty and nature of the type system design we in-
+corporate a human-designed type system. Human design-
+ers have access to the full set of entities and relations
+in Wikipedia and Wikidata, and compose different inheri-
+tance rules through Boolean algebra to obtain higher level
+concepts (e.g. woman
+=
+IsHuman ∧IsFemale, or
+animal = IsTaxon∧¬{IsHuman∨IsPlant}10). The
+ﬁnal human system uses 5 type axes11, and 1218 inheritance
+rules.
+9The choice of max-over-time is empirically motivated: we
+compared product mean, min, max, and found that max was com-
+parable to mean, and slightly better than the alternatives.
+10Taxon is the general parent of living items in Wikidata.
+11IsA, Topic, Location, Continent, and Time.
+Search methodologies
+Beam Search and Greedy selection
+We iteratively con-
+struct a type system by choosing among all remaining type
+axes and evaluating whether the inclusion of a new type axis
+improves our objective: J(A ∪{tj}) > J(A). We use a
+beam size of b and stop the search when all solutions stop
+growing.
+Cross-Entropy Method
+(CEM) (Rubinstein 1999) is a
+stochastic optimization procedure applicable to the selection
+of types. We begin with a probability vector ⃗P0 set to pstart,
+and at each iteration we sample MCEM vectors ⃗s from the
+Bernoulli distribution given by ⃗Pi, and measure each sam-
+ple’s ﬁtness with Eq. 3. The NCEM highest ﬁtness elements
+are our winning population St at iteration t. Our probabili-
+ties are ﬁt to St giving Pt+1 =
+P
+⃗s∈St ⃗s
+NCEM . The optimization is
+complete when the probability vector is binary.
+Genetic Algorithm
+The best subset of type axes can
+be found by representing type axes as genes carried by
+Npopulation individuals in a population undergoing muta-
+tions and crossovers (Harvey 2009) over G generations. We
+select individuals using Eq. 3 as our ﬁtness function.
+Search Methodology Performance Impact
+To validate
+that λ controls type system size, and ﬁnd the best trade-
+off between size and accuracy, we experiment with a range
+of values and ﬁnd that accuracy grows more slowly below
+0.00007, while system size still increases.
+From this point on we keep λ = 0.00007, and we com-
+pare the number of iterations needed by different search
+methods to converge, against two baselines: the empty set
+and the mean performance of 100 randomly sampled sets of
+128 types (Table 1a). We observe that the performance of
+stochastic optimizers GA and CEM is similar to heuristic
+search, but requires orders of magnitude less function eval-
+uations.
+Next, we compare the behavior of the different search
+methods to a human designed system and state of the art ap-
+proaches on three standard datasets (i.e. WIKI-DISAMB30
+(WKD30) (Ferragina and Scaiella 2010)12, CoNLL(YAGO)
+(Hoffart et al. 2011), and TAC KBP 2010 (Ji et al. 2010)),
+along with test sets built by randomly sampling 1000 ar-
+ticles from Wikipedia’s February 2017 dump in English,
+French, German, and Spanish which were excluded from
+training the classiﬁers. Table 1c has Oracle performance for
+the different search methods on the test sets, where we re-
+port disambiguation accuracy per annotation. A LinkCount
+baseline is included that selects the mention’s most fre-
+quently linked entity13. All search techniques’ Oracle ac-
+12We apply the preprocessing and link pruning as (Ferragina and
+Scaiella 2010) to ensure the comparison is fair.
+13Note that LinkCount accuracy is stronger than the one found
+in (Ferragina and Scaiella 2010) or (Milne and Witten 2008) be-
+cause newer Wikipedia dumps improve link coverage and reduce
+link distribution noisiness.
+
+Table 1: Method comparisons. Highest value in bold, excluding oracles.
+(a) Type system discovery method comparison
+Approach
+Evals
+Accuracy
+Items
+BeamSearch
+5.12 · 107
+97.84
+130
+Greedy
+6.40 · 106
+97.83
+130
+GA
+116, 000
+96.959
+128
+CEM
+43, 000
+96.26
+89
+Random
+N/A
+92.9 ± 0.28
+128
+No types
+0
+92.10
+0
+(b) NER F1 score comparison for DeepType pretraining vs. baselines.
+Model
+CoNLL 2003
+OntoNotes
+Dev
+Test
+Dev
+Test
+Bi-LSTM
+-
+76.29
+-
+77.77
+(Chiu and Nichols 2015)
+Bi-LSTM-CNN + emb + lex
+94.31
+91.62
+84.57
+86.28
+(Chiu and Nichols 2015)
+Bi-LSTM (Ours)
+89.49
+83.40
+82.75
+81.03
+Bi-LSTM-CNN (Ours)
+90.54
+84.74
+83.17
+82.35
+Bi-LSTM-CNN (Ours) + types
+93.54
+88.67
+85.11
+83.12
+(c) Entity Linking model Comparison. Signiﬁcant improvements over prior work denoted by ∗for p < 0.05, and ∗∗for p < 0.01.
+Model
+enwiki
+frwiki
+dewiki
+eswiki
+WKD30
+CoNLL
+TAC 2010
+M&W(Milne and Witten 2008)
+84.6
+-
+-
+TagMe (Ferragina and Scaiella 2010)
+83.224
+80.711
+90.9
+-
+-
+(Globerson et al. 2016)
+-
+91.7
+87.2
+(Yamada et al. 2016)
+-
+91.5
+85.2
+NTEE (Yamada et al. 2017)
+-
+-
+87.7
+LinkCount only
+89.064∗∗
+92.013
+92.013∗∗
+89.980
+82.710
+68.614
+81.485
+Ours
+manual
+94.331∗∗
+92.967
+91.888∗∗
+93.108∗∗
+90.743∗
+manual (oracle)
+97.734
+98.026
+98.632
+98.178
+95.872
+98.217
+98.601
+greedy
+93.725∗∗
+92.984
+92.375∗∗
+94.151∗∗
+90.850∗
+greedy (oracle)
+98.002
+97.222
+97.915
+98.246
+97.293
+98.982
+98.278
+CEM
+93.707∗∗
+92.415
+92.247∗∗
+93.962∗∗
+90.302∗
+CEM (oracle)
+97.500
+96.648
+97.480
+97.599
+96.481
+99.005
+96.767
+GA
+93.684∗∗
+92.027
+92.062∗∗
+94.879∗∗
+90.312∗
+GA (oracle)
+97.297
+96.783
+97.408
+97.609
+96.268
+98.461
+96.663
+GA (English only)
+93.029∗∗
+91.743∗∗
+93.701∗∗
+-
+curacy signiﬁcantly improve over LinkCount, and achieve
+near perfect accuracy on all datasets (97-99%); furthermore
+we notice that performance between the held-out Wikipedia
+sets and standard datasets sets is similar, supporting the
+claim that the discovered type systems generalize well. We
+note that machine discovered type systems outperform hu-
+man designed systems: CEM beats the human type sys-
+tem on English Wikipedia, and all search method’s type
+systems outperform human systems on WIKI-DISAMB30,
+CoNLL(YAGO), and TAC KBP 2010.
+Search Methodology Learnability Impact
+To under-
+stand whether the type systems produced by different search
+methods can be trained similarly well we compare the type
+system built by GA, CEM, greedy, and the one constructed
+manually. EL Disambiguation accuracy is shown in Table
+1c, where we compare with recent deep-learning based ap-
+proaches (Globerson et al. 2016), or recent work by Ya-
+mada et al. for embedding word and entities (Yamada et
+al. 2016), or documents and entities (Yamada et al. 2017),
+along with count and coherence based techniques Tagme
+(Ferragina and Scaiella 2010) and Milne & Witten (Milne
+and Witten 2008). To obtain Tagme’s Feb. 2017 Wikipedia
+accuracy we query the public web API14 available in Ger-
+man and English, while other methods can be compared on
+CoNLL(YAGO) and TAC KBP 2010. Models trained on a
+human type system outperform all previous approaches to
+entity linking, while type systems discovered by machines
+lead to even higher performance on all datasets except En-
+glish Wikipedia.
+Cross-Lingual Transfer
+Type systems are deﬁned over Wikidata/Wikipedia, a multi-
+lingual knowledge base/encyclopaedia, thus type axes are
+language independent and can produce cross-lingual super-
+vision. To verify whether this cross-lingual ability is use-
+ful we train a type system on an English dataset and ver-
+ify whether it can successfully supervize French data. We
+also measure using the Oracle (performance upper bound)
+whether the type system is useful in Spanish or German. Or-
+acle performance across multiple languages does not appear
+to degrade when transferring to other languages (Table 1c).
+We also notice that training in French with an English type
+system still yields improvements over LinkCount for CEM,
+greedy, and human systems.
+14https://tagme.d4science.org/tagme/
+
+Because multi-lingual training might oversubscribe the
+model, we veriﬁed if monolingual would outperform bilin-
+gual training: we compare GA in English + French with only
+English (last row of Table 1c). Bilingual training does not
+appear to hurt, and might in fact be helpful.
+We follow-up by inspecting whether the bilingual word
+vector space led to shared representations: common nouns
+have their English-French translation close-by, while proper
+nouns do not (French and US politicians cluster separately).
+Named Entity Recognition Transfer
+The goal of our NER experiment is to verify whether Deep-
+Type produces a type sensitive language representation use-
+ful for transfer to other downstream tasks. To measure this
+we pre-train a type classiﬁer with a character-CNN and word
+embeddings as inputs, following (Kim et al. 2015), and re-
+place the output layer with a linear-chain CRF (Lample et al.
+2016) to ﬁne-tune to NER data. Our model’s F1 scores when
+transferring to the CoNLL 2003 NER task and OntoNotes
+5.0 (CoNLL 2012) split are given in Table 1b. We com-
+pare with two baselines that share the architecture but are
+not pre-trained, along with the current state of the art (Chiu
+and Nichols 2015).
+We see positive transfer on Ontonotes and CoNLL: our
+baseline Bi-LSTM strongly outperforms (Chiu and Nichols
+2015)’s baseline, while pre-training gives an additional 3-4
+F1 points, with our best model outperforming the state of
+the art on the OntoNotes development split. While our base-
+line LSTM-CRF performs better than in the literature, our
+strongest baseline (CNN+LSTM+CRF) does not match the
+state of the art with a lexicon. We ﬁnd that DeepType al-
+ways improves over baselines and partially recovers lexicon
+performance gains, but does not fully replace lexicons.
+5
+Related Work
+Neural Network Reasoning with Symbolic structures
+Several approaches exist for incorporating symbolic struc-
+tures into the reasoning process of a neural network by de-
+signing a loss function that is deﬁned with a label hierar-
+chy. In particular the work of (Deng et al. 2012) trades off
+speciﬁcity for accuracy, by leveraging the hyper/hyponymy
+relation to make a model aware of different granularity lev-
+els. Our work differs from this approach in that we design
+our type system within an ontology to meet speciﬁc accu-
+racy goals, while they make the accuracy/speciﬁcity tradeoff
+at training time, with a ﬁxed structure. More recently (Wu,
+Tygert, and LeCun 2017) use a hierarchical loss to increase
+the penalty for distant branches of a label hierarchy using the
+ultrametric tree distance. We also aim to capture the most
+important aspects of the symbolic structure and shape our
+loss function accordingly, however our loss shaping is a re-
+sult of discrete optimization and incorporates a learnability
+heuristic to choose aspects that can easily be acquired.
+A different direction for integrating structure stems from
+constraining model outputs, or enforcing a grammar. In the
+work of (Ling, Singh, and Weld 2015), the authors use
+NER and FIGER types to ensure that an EL model follows
+the constraints given by types. We also use a type system
+and constrain our model’s output, however our type system
+is task-speciﬁc and designed by a machine with a disam-
+biguation accuracy objective, and unlike the authors we ﬁnd
+that types improve accuracy. The work of (Krishnamurthy,
+Dasigi, and Gardner 2017) uses a type-aware grammar to
+constrain the decoding of a neural semantic parser. Our work
+makes use of type constraints during decoding, however the
+grammar and types in their system require human engineer-
+ing to ﬁt each individual semantic parsing task, while our
+type systems are based on online encyclopaedias and on-
+tologies, with applications beyond EL.
+Neural Entity Linking
+Current approaches to entity link-
+ing make extensive use of deep neural networks, distributed
+representations. In (Globerson et al. 2016) a neural net-
+work uses attention to focus on contextual entities to dis-
+ambiguate. While our work does not make use of attention,
+RNNs allow context information to affect disambiguation
+decisions. In the work of (Yamada et al. 2016) and (Yamada
+et al. 2017), the authors adopt a distributed representation
+of context which either models words and entities, or doc-
+uments and entities such that distances between vectors in-
+forms disambiguation. We also rely on word and document
+vectors produced by RNNs, however entities are not explic-
+itly represented in our neural network, and we use context to
+predict entity types, thereby allowing us to incorporate new
+entities without retraining.
+6
+Conclusion
+In this work we introduce DeepType, a method for integrat-
+ing symbolic knowledge into the reasoning process of a neu-
+ral network. We’ve proposed a mixed integer reformulation
+for jointly designing type systems and training a classiﬁer
+for a target task, and empirically validated that when this
+technique is applied to EL it is effective at integrating sym-
+bolic information in the neural network reasoning process.
+When pre-training with DeepType for NER, we observe im-
+proved performance over baselines and a new state of the art
+on the OntoNotes dev set, suggesting there is cross-domain
+transfer: symbolic information is incorporated in the neural
+network’s distributed representation. Furthermore we ﬁnd
+that type systems designed by machines outperform those
+designed by humans on three benchmark datasets, which
+is attributable to incorporating learnability and target task
+performance goals within the design process. Our approach
+naturally enables multilingual training, and our experiments
+show that bilingual training improves over monolingual, and
+type systems optimized for English operate at similar accu-
+racies in French, German, and Spanish, supporting the claim
+that the type system optimization leads to the discovery of
+high level cross-lingual concepts useful for knowledge rep-
+resentation. We compare different search techniques, and
+observe that stochastic optimization has comparable perfor-
+mance to heuristic search, but with orders of magnitude less
+objective function evaluations.
+The main contributions of this work are a joint formu-
+lation for designing and integrating symbolic information
+into neural networks, that enable us to constrain the out-
+
+puts to obey symbolic structure, and an approach to EL that
+uses type constraints. Our approach reduces EL resolution
+complexity from O(N 2) to O(N), while allowing new en-
+tities to be incorporated without retraining, and we ﬁnd on
+three standard datasets (WikiDisamb30, CoNLL (YAGO),
+TAC KBP 2010) that our approach outperforms all existing
+solutions by a wide margin, including approaches that rely
+on a human-designed type system (Ling, Singh, and Weld
+2015) and the more recent work by Yamada et al. for embed-
+ding words and entities (Yamada et al. 2016), or document
+and entities (Yamada et al. 2017). As a result of our experi-
+ments, we observe that disambiguation accuracy using Ora-
+cles reaches 99.0% on CoNLL (YAGO) and 98.6% on TAC
+KBP 2010, suggesting that EL would be almost solved if we
+can close the gap between type classiﬁers and the Oracle.
+The results presented in this work suggest many direc-
+tions for future research: we may test how DeepType can
+be applied to other problems where incorporating symbolic
+structure is beneﬁcial, whether making type system design
+more expressive by allowing hierarchies can help close the
+gap between model and Oracle accuracy, and seeing if addi-
+tional gains can be obtained by relaxing the classiﬁer’s con-
+ditional independence assumption.

@@ -1,0 +1,1615 @@
+Asynchronous Multi-Agent Reinforcement Learning for
+Efficient Real-Time Multi-Robot Cooperative Exploration
+Chao Yu1,2∗, Xinyi Yang1∗, Jiaxuan Gao1∗, Jiayu Chen1,2, Yunfei Li1, Jijia Liu3, Yunfei Xiang1,
+Ruixin Huang1, Huazhong Yang1, Yi Wu1,2,4†, Yu Wang1†
+1 Tsinghua University, 2 Shanghai Artificial Intelligence Laboratory, 3 Tongji University, 4 Shanghai Qi Zhi Institute
+∗Equal Contribution † Corresponding Author
+
+ABSTRACT
+We consider the problem of cooperative exploration where mul-
+tiple robots need to cooperatively explore an unknown region as
+fast as possible. Multi-agent reinforcement learning (MARL) has
+recently become a trending paradigm for solving this challenge.
+However, existing MARL-based methods adopt action-making steps
+as the metric for exploration efficiency by assuming all the agents
+are acting in a fully synchronous manner: i.e., every single agent
+produces an action simultaneously and every single action is exe-
+cuted instantaneously at each time step. Despite its mathematical
+simplicity, such a synchronous MARL formulation can be prob-
+lematic for real-world robotic applications. It can be typical that
+different robots may take slightly different wall-clock times to ac-
+complish an atomic action or even periodically get lost due to
+hardware issues. Simply waiting for every robot being ready for
+the next action can be particularly time-inefficient. Therefore, we
+propose an asynchronous MARL solution, Asynchronous Coordi-
+nation Explorer (ACE), to tackle this real-world challenge. We first
+extend a classical MARL algorithm, multi-agent PPO (MAPPO),
+to the asynchronous setting and additionally apply action-delay
+randomization to enforce the learned policy to generalize better to
+varying action delays in the real world. Moreover, each navigation
+agent is represented as a team-size-invariant CNN-based policy,
+which greatly benefits real-robot deployment by handling possible
+robot lost and allows bandwidth-efficient intra-agent communica-
+tion through low-dimensional CNN features. We first validate our
+approach in a grid-based scenario. Both simulation and real-robot
+results show that ACE reduces over 10% actual exploration time
+compared with classical approaches. We also apply our framework
+to a high-fidelity visual-based environment, Habitat, achieving 28%
+improvement in exploration efficiency.
+KEYWORDS
+Multi-Agent Reinforcement Learning, Asynchronous Decision Mak-
+ing, Cooperative Exploration
+ACM Reference Format:
+Chao Yu1,2∗, Xinyi Yang1∗, Jiaxuan Gao1∗, Jiayu Chen1,2, Yunfei Li1, Jijia Liu3,
+Yunfei Xiang1,, Ruixin Huang1, Huazhong Yang1, Yi Wu1,2,4†, Yu Wang1†, .
+2023. Asynchronous Multi-Agent Reinforcement Learning for Efficient Real-
+Time Multi-Robot Cooperative Exploration. In Proc. of the 22nd International
+Conference on Autonomous Agents and Multiagent Systems (AAMAS 2023),
+London, United Kingdom, May 29 – June 2, 2023, IFAAMAS, 15 pages.
+Proc. of the 22nd International Conference on Autonomous Agents and Multiagent Sys-
+tems (AAMAS 2023), A. Ricci, W. Yeoh, N. Agmon, B. An (eds.), May 29 – June 2, 2023,
+London, United Kingdom. © 2023 International Foundation for Autonomous Agents
+and Multiagent Systems (www.ifaamas.org). All rights reserved.
+1
+INTRODUCTION
+Exploration is a fundamental task for building intelligent robot
+systems, which has been applied in many application domains, in-
+cluding rescue [27], autonomous driving [2], drone [48], and mobile
+robots [36]. In this paper, we consider a multi-robot cooperative
+exploration task, where multiple homogeneous robots simultane-
+ously explore an unknown spatial region in a cooperative fashion.
+Learning the optimal cooperative strategies can be challenging
+due to the existence of multiple robots. These robots must effec-
+tively distribute the exploration workload so that they can always
+navigate towards different spatial regions to avoid trajectory con-
+flicts, which accordingly leads to a remarkably higher exploration
+efficiency than the single-robot setting.
+Multi-agent reinforcement learning (MARL) has been a trending
+approach to tackle this cooperative exploration challenge. RL-based
+methods directly learn neural policies end to end by interacting
+with a simulated environment for policy improvement. Compared
+with planning-based solutions [3, 38, 45] which require non-trivial
+implementation heuristics and expensive inference computation at
+execution time, RL-based methods [7, 38] provide strong represen-
+tation capabilities of complex strategies and negligible inference
+overhead once the policies are trained.
+Classical multi-agent RL algorithms typically adopt a synchro-
+nous algorithmic framework, i.e., all the agents are making actions
+at the same time, and all the actions will be executed immediately at
+each time step, leading to the next action-making step for future ac-
+tions. This process is mathematically formulated as a decentralized
+Markov decision process, which is widely adopted in multi-agent RL
+literature. Although such a mathematical framework is simple and
+elegant, it can be problematic for real-world multi-robot exploration
+tasks. For real robot systems, each actual action is never atomic
+and may take varying times to finish. These action delays can be
+more severe due to unexpected network communication traffic or
+hardware failure. Simply following the synchronous setting, i.e.,
+waiting until every robot is ready before making new actions, can
+be particularly real-time inefficient. Therefore, an ideal RL frame-
+work for real-world use should be asynchronous, i.e., whenever an
+agent finishes action execution, it should immediately generate the
+next action, and the learned strategy should effectively enable such
+an asynchronous action-making process.
+In this paper, we propose a novel asynchronous multi-agent
+RL-based solution, Asynchronous Coordination Explorer (ACE), to
+tackle the real-world multi-robot exploration task. We first extend a
+classical MARL algorithm, multi-agent PPO (MAPPO), to the asyn-
+chronous setting to effectively train the multi-agent exploration
+policy, and additionally leverage an action-delay randomization
+arXiv:2301.03398v2  [cs.RO]  11 Apr 2023
+
+technique to enable better simulation to real-world generalization.
+Moreover, we design a communication-efficient Multi-tower-CNN-
+based Policy (MCP) for each agent. In MCP, a CNN module is
+applied to each agent’s local information to extract features, and
+a fusion module combines each agent’s features to produce an ac-
+tion. During execution time, efficient intra-agent communication
+can be achieved via directly exchanging low-dimensional features
+extracted by the weight-sharing CNN module. Another benefit of
+MCP is to tackle varying team sizes, which may occur when agents
+go offline in real-world applications.
+We conduct experiments in a grid-based multi-room scenario
+both in simulation and our real-world multi-robot laboratory, where
+strategies learned by ACE significantly outperform both classical
+planning-based methods and neural policies trained by synchro-
+nous RL methods. In particular, ACE reduces 10.07% real-world
+exploration time than the synchronous RL baseline and reduces
+33.86% real-world exploration time than the fastest planning-based
+method with 2 Mecanum steering robots. Besides, we extend ACE
+to a vision-based environment, Habitat, verifying the effectiveness
+of the asynchronous training mechanism when applied to more
+complicated environments. More demonstrations can be seen on
+our website: https://sites.google.com/view/ace-aamas.
+2
+RELATED WORK
+2.1
+Cooperative Exploration
+Multi-agent cooperative exploration is an important task for build-
+ing intelligent mobile robot systems. There are a large number of
+works developing planning-based methods for this problem [13,
+45, 57], but they typically rely on manually designed heuristics [3,
+10, 54] and are limited in expressiveness to learn more complex
+cooperation strategies. Another popular line of research is deep
+MARL-based methods which leverage the expressiveness power
+of neural networks to learn non-trivial cooperative exploration
+skills [28, 49–51, 59, 69]. Note that most existing MARL-based meth-
+ods assume synchronous action execution among all the agents or
+consider atomic actions, which we believe is due to the synchro-
+nous design of most simulated RL environments. However, such
+synchronous design does not reflect the real-world multi-agent
+systems, where agents take actions at different real times due to
+network delay and unexpected hardware take-downs. We propose
+an asynchronous MARL exploration framework in this work to bet-
+ter match real-world applications. [31] considers an asynchronous
+decision-making mechanism for large-scale problems and proposes
+an improved Monte Carlo Search method to solve this problem.
+A concurrent work formulates a set of asynchronous multi-agent
+actor-critic methods that allow agents to directly optimize asyn-
+chronous policies [56], while we design an asynchronous MARL
+training framework combined with action-delay randomization.
+We also notice a recent trend of developing asynchronous simula-
+tion [22, 60], which we hope can further accelerate the advances in
+applying MARL methods to the real world.
+2.2
+Sim2real Transfer
+It is often challenging to directly deploy policies trained in simu-
+lation to the real world since there is always a mismatch between
+simulation and reality. Domain randomization is a simple but ef-
+fective technique to fill the reality gap, which creates a variety of
+simulated environments with randomized properties such as physi-
+cal dynamics [35, 42] and visual appearances [32, 43], and tries to
+train RL that can perform well among all of them. We also adopt the
+idea of domain randomization, and randomly delay the execution
+of each agent in simulation to model the uncertain delay between
+policy computation and actual action execution in the real world.
+The action delay technique is also adopted in other domains such
+as model-based RL [5] and reactive RL [44].
+2.3
+Multi-Agent Communication
+Most works in MARL only consider perfect communication where
+agents can receive messages from all other agents [12, 17, 67], but
+the requirements on communication bandwidth and transmission
+rate are costly. Recent works have begun to focus on learning effi-
+cient communication. [16, 40] learn communication protocols in
+limited-bandwidth communication channels. Some works propose
+to learn which agent to communicate with using attention mech-
+anisms [24, 30] or weight-based schedulers [26]. In our work, we
+focus on how to efficiently communicate with other agents with
+limited information to maintain perfect decision performance. We
+propose an extraction module to obtain essential features from
+high-dimensional information, which is much more efficient than
+delivering observation information directly.
+2.4
+Size-Invariant Representation
+Attention mechanism [47] is widely used in RL policy representa-
+tion to capture object-level information [15, 53, 66, 68] and repre-
+sent relations [38, 65]. In MARL, attention-based policy can also
+be applied for generalization to an arbitrary number of input enti-
+ties [15, 18, 23, 28, 37, 52, 53]. There are some other generalization
+settings in MARL, such as other-play [19], population-based train-
+ing [21, 33] and zero-shot team formation [1]. In addition, some
+training techniques are used to better deal with varying sizes of
+agents, such as evolutionary learning [11, 28] and curriculum learn-
+ing [6]. In our work, we design a Multi-tower-CNN-based Policy
+based on an attention mechanism to tackle varying team sizes.
+Parameter-sharing is a commonly used paradigm for varying team
+sizes in MARL with homogeneous agents, which is also adopted in
+this work. It learns an identical policy for each agent and helps to
+reduce nonstationarity and improve training efficiency [9, 41].
+3
+PRELIMINARY
+3.1
+Task Setup
+We study the task of real-time multi-robot cooperative exploration,
+where a team of robots aims to explore an unknown environment
+exhaustively as fast as possible. Robots can transmit local informa-
+tion to each other to avoid duplicate exploration for better efficiency.
+The real-time multi-robot task is with an asynchronous nature, i.e.,
+different robots do not take actions and receive the next-step ob-
+servations at the same time. A real robot often requires non-fixed
+time to execute an action, and unexpected hardware failure can
+cause random delays. Besides, under the standard bi-level control
+setting in robot navigation [25, 45, 57, 64], each action is a goal
+position to reach and typically requires varying number of atomic
+
+steps to accomplish, thus exacerbating the asynchronous issue. The
+asynchronous execution is not considered by classical multi-agent
+reinforcement learning (MARL) works. It is typically assumed all
+agents take actions at the same action-making step and do not take
+the action execution time into account. In the traditional MARL
+literature [62], the task is usually formulated as a decentralized
+partially observable Markov decision process (Dec-POMDP), which
+is unable to capture the asynchronous property in our setting.
+3.2
+Problem Formulation
+We model the asynchronous multi-agent cooperative exploration
+task as a decentralized partially observable Semi-Markov decision
+process (Dec-POSMDP) [31] with shared rewards. We adopt a modu-
+lar action execution scheme [4, 29] which consists of bi-level actions
+for robust deployment in real-world robot systems. A macro action
+(MA), i.e., global goal, is generated in the action-making step. Sev-
+eral atomic actions, i.e., execution actions, are followed to perform
+under the guidance of the MA.
+To avoid notation ambiguity, we use 𝑝(𝑖) to denote a parameter
+𝑝related to the i-th agent, and ¯𝑝= (𝑝(1), 𝑝(2), · · · , 𝑝(𝑛)) to denote
+joint parameters for multiple agents thereafter. A Dec-POSMDP is
+defined by a set of elements ⟨𝐷, ¯𝑈, ¯𝐵, 𝑃, ¯𝑅𝜏⟩. 𝐷= ⟨¯𝑆, ¯𝐴, ¯Ω, ¯𝑂, ¯𝑅, 𝑃,𝑛,𝛾⟩
+defines the decentralized partially observable Markov decision pro-
+cesses (Dec-POMDP), where ¯𝑆is the joint state space, ¯𝐴is joint
+atomic action space, ¯Ω is the observation space,𝑂(𝑖) (𝑜(𝑖) |𝑠,𝑎(𝑖)) de-
+notes the observation probability function for agent𝑖, ¯𝑅: ¯𝑆× ¯𝐴→R
+is the joint reward function, 𝑛is the number of agents, 𝑃is the state
+transition probability. ¯𝑈is joint macro-action space. A macro action
+𝑢(𝑖) is a high-level policy that can generate a sequence of atomic
+actions 𝑎𝑡∼𝑢(𝑖) (𝐻(𝑖)
+𝑡
+) for any 𝑡when 𝑢(𝑖) is activated, where
+𝐻(𝑖)
+𝑡
+is the individual action-observation history till 𝑡. ¯𝐵denotes
+the stop condition of MA and 𝐵(𝑖) (𝑢(𝑖)) is represented as a set of
+action-observation histories of an agent 𝑖. If 𝐻(𝑖)
+𝑡
+∈𝐵(𝑖) (𝑢(𝑖)
+𝑡
+) holds,
+𝑢(𝑖)
+𝑡
+terminates and the agent generates a new MA. ¯𝑅𝜏is the macro
+joint reward function: ¯𝑅𝜏(¯𝑠, ¯𝑢) = E
+hÍ¯𝜏𝑒𝑛𝑑
+𝑡=0 𝛾𝑡¯𝑅(¯𝑠𝑡, ¯𝑎𝑡)| ¯𝑎𝑡∼¯𝑢( ¯𝐻𝑡)
+i
+where ¯𝜏𝑒𝑛𝑑= min𝑡{𝑡: 𝐻(𝑖)
+𝑡
+∈𝐵(𝑖) (𝑢(𝑖))}.
+The solution of a Dec-POSMDP is a joint high-level decentral-
+ized policy ¯𝜙= (𝜙(1), · · · ,𝜙(𝑛)) where each 𝜙(𝑖) produces an
+MA 𝜙(𝑖) (𝐻(𝑖)
+𝑡
+) ∈𝑈(𝑖) given individual action-observation history
+𝐻(𝑖)
+𝑡
+. In the beginning of an episode, an initial MA is computed
+as: 𝑢(𝑖)
+𝑡0 = 𝜙(𝑖) (𝐻(𝑖)
+𝑡0 ). At action-making step 𝑘> 0, the agent gen-
+erates a new MA 𝑢(𝑖)
+𝑡𝑘
+= 𝜙(𝑖) (𝐻(𝑖)
+𝑡𝑘) if the stop condition is met,
+i.e. 𝐻(𝑖)
+𝑡𝑘
+∈𝐵(𝑖) (𝑢(𝑖)
+𝑡𝑘−1). Otherwise, the agent continues to use the
+previous MA: 𝑢(𝑖)
+𝑡𝑘= 𝑢(𝑖)
+𝑡𝑘−1. In the time range [𝑡𝑘,𝑡𝑘+1), the agent in-
+teracts with the environment with atomic actions sampled from MA:
+𝑎(𝑖)
+𝑡
+∼𝑢(𝑖) (𝐻(𝑖)
+𝑡
+). Finally, the goal of Dec-POSMDP is to maximize
+the accumulative discounted reward: E
+hÍ∞
+𝑘=0 𝛾𝑡𝑘¯𝑅𝜏(¯𝑠𝑡𝑘, ¯𝑢𝑡𝑘)| ¯𝜙, ¯𝑠0
+i
+where 𝑡0 = 0 and 𝑡𝑘= min𝑡{𝑡> 𝑡𝑘−1 : 𝐻(𝑖)
+𝑡
+∈𝐵(𝑖) (𝑢(𝑖)
+𝑡𝑘−1)} for
+𝑘≥1. A more detailed definition can be found in [31].
+In our asynchronous setting, 𝑡is the real time, not the discrete
+time step as in common synchronous RL. Our setting is more time-
+efficient and robust to hardware faults. Take a 2-agent case as an
+example (see Fig. 1), in the synchronous setting, the agents can only
+transmit data (blue and green arrows) and perform policy inference
+(orange arrow) after both of them have finished the previous action
+execution. The system execution speed is bottle-necked by the agent
+with the longest execution time. Worse still, the whole system will
+get stuck if one agent goes offline unexpectedly. By contrast, agents
+take actions in a distributed manner in an asynchronous setting.
+Each agent can request data from other agents and conduct policy
+inference immediately after it finishes its own action execution.
+This asynchronous setting is more time-efficient for multi-agent
+exploration tasks, and will not be blocked by dynamic changes such
+as agents going offline.
+3.3
+Connection to Conventional MARL
+In the conventional MARL literature [62], the problem formulation
+is typically under decentralized partially observable Markov deci-
+sion process (Dec-POMDP), which assumes synchronized actions.
+In this work, we also focus on the multi-agent setting and assume
+a shared reward function and dynamic transitions. However, dif-
+ferent from synchronous MARL which assumes all agents execute
+actions simultaneously, we consider the asynchronous nature in
+the practical multi-robot scenarios.
+We will adapt a popular MARL algorithm, Multi-Agent Proximal
+Policy Optimization (MAPPO) [62], from the conventional setting
+to our asynchronous setting. Conventional MAPPO follows the
+Centralized Training and Decentralized Execution (CTDE) para-
+digm, in which agents make decisions with individual observations
+and update the joint policy with global information in a centralized
+manner. Under the framework of Dec-POMDP, MAPPO requires
+all agents taking actions synchronously at each discrete time step,
+and the state transits according to actions from all agents: 𝑠𝑡∼
+𝑃(·|𝑠𝑡−1, ¯𝑎𝑡−1). It aims to find a joint policy ¯𝜋that maximizes the ac-
+cumulated discounted reward E
+hÍ∞
+𝑡=0 𝛾𝑡¯𝑅(𝑠𝑡, ¯𝑎𝑡)|𝑎(𝑖)
+𝑡
+∼𝜋(𝑖) (𝐻(𝑖)
+𝑡
+)
+i
+.
+Different from MAPPO, Async-MAPPO is designed for the asyn-
+chronous setting, where there are no centralized environment steps.
+4
+METHODOLOGY
+To better model the asynchronous nature of real-world multi-agent
+exploration problems, we present Asynchronous Coordination Ex-
+plorer (ACE). ACE consists of 3 major components: (1) Async-
+MAPPO for MARL training, (2) action-delay randomization for
+zero-shot generalization in the real world, and (3) multi-tower-
+CNN-based policy representation for efficient communication.
+4.1
+Async-MAPPO
+We extend an on-policy MARL algorithm MAPPO [61] to our asyn-
+chronous setting, which we call Async-MAPPO. The pseudo-code
+of Async-MAPPO is shown in Algo. 1. Compared with the setting
+of MAPPO, both policy execution and data collection are not nec-
+essarily time-aligned among different agents, and we implement
+the asynchronous action-making and replay buffer as follows.
+• We design a bi-level execution scheme. In ACE, agents perform
+atomic actions under the guidance of global goals (macro ac-
+tions). Instead of receiving the reward, local observation, and
+
+Figure 1: Comparison of asynchronous and synchronous action making.
+states immediately after executing an atomic action, Async-
+MAPPO accumulates the reward between action-making steps
+and only takes observation and states at each macro action.
+• We implement asynchronous buffer insertion, in contrast to
+the synchronous scheme in original MAPPO as shown in Fig. 1.
+The original MAPPO assumes synchronous execution of all the
+agents; in each time step, all the agents take actions simultane-
+ously, and the trainer waits for all the new transitions before
+inserting them into a centralized data buffer for RL training.
+In Async-MAPPO, different agents may not take actions at the
+same time (some agents may even get stuck and cannot re-
+turn new observations at all), which makes it infeasible for the
+trainer to collect transitions in the original synchronous man-
+ner. Therefore, we allow each agent to store its own transition
+data in a separate cache and periodically push the cached data
+to the centralized data buffer. We can then run the standard
+MAPPO training algorithm over this buffer.
+4.2
+Action-Delay Randomization
+When training in traditional simulators, agents can always take exe-
+cution steps synchronously without considering different action ex-
+ecution costs. Moreover, real-world action delays such as hardware
+failure and network blocking are not simulated. These problems
+cause a large gap for deploying trained agents from simulation to
+reality. To reduce this gap, we apply action-delay randomization
+during simulation. In the end of each action-making step, we force
+each agent to wait for a random period from 3 to 5 execution steps
+in grid-based environments, and from 10 to 15 execution steps in
+Habitat before querying the next macro action.
+4.3
+Multi-Tower-CNN-Based Policy
+The Multi-tower-CNN-based Policy (MCP) is utilized to generate
+macro actions, i.e., global goals in ACE. As illustrated in Fig. 3,
+MCP consists of 3 parts, i.e., a CNN-based local feature extractor,
+an attention-based relation encoder, and an action decoder.
+The local feature extractor is a weight-sharing 3-layer CNN
+and can extract a 𝐺× 𝐺× 4 feature embedding from each agent’s
+𝑆× 𝑆× 7 local information, which includes one obstacle channel,
+Algorithm 1: Async-MAPPO
+1 Initialize the policy 𝜋;
+2 while 𝑠𝑡𝑒𝑝≤𝑠𝑡𝑒𝑝𝑚𝑎𝑥do
+3
+set data buffer 𝐷= {};
+4
+for 𝑖= 1 to 𝑏𝑎𝑡𝑐ℎ_𝑠𝑖𝑧𝑒do
+5
+Reset the environment;
+6
+Create 𝑁empty caches 𝐶= [[], . . . , []];
+7
+for 𝑡= 1 to 𝑇do
+8
+for all agents 𝑖= 1 to 𝑁do
+9
+if agent 𝑖replans macro action then
+10
+𝑏←agent 𝑖’s 𝑏-th macro actions;
+11
+𝑠(𝑖)
+𝑏
+←𝑆𝑡𝑎𝑡𝑒,𝑜(𝑖)
+𝑏
+←𝑂𝑏𝑠𝑒𝑟𝑣𝑎𝑡𝑖𝑜𝑛;
+12
+𝐶𝑖+ = [𝑠(𝑖)
+𝑏−1,𝑜(𝑖)
+𝑏−1,𝑢(𝑖)
+𝑏−1, ˆ𝑅𝜏(𝑖)
+𝑏
+,𝑠(𝑖)
+𝑏,𝑜(𝑖)
+𝑏];
+13
+𝑝(𝑖)
+𝑏
+= 𝜋(𝑜(𝑖)
+𝑏);
+14
+Update macro action 𝑢(𝑖)
+𝑏
+∼𝑝(𝑖)
+𝑏;
+15
+end
+16
+Execute atomic action 𝑎(𝑖)
+𝑡
+∼𝑢(𝑖)
+𝑏;
+17
+end
+18
+end
+19
+Compute reward-to-go and insert data into 𝐷;
+20
+end
+21
+Update 𝜋on MAPPO loss;
+22 end
+one explored region channel, one-hot location channel, one trajec-
+tory channel to represent the history trace, and three agent-view
+channels of the agent’s local observation.
+The agents transmit extracted feature embedding instead of the
+raw local information, which greatly reduces communication traffic
+by 1 −𝐺×𝐺×4
+𝑆×𝑆×7 = 1 −
+4
+7𝛼2 times where 𝛼= 𝑆/𝐺. For example, we
+adopt 𝐺= 5 in grid-based environments, thus the communication
+traffic reduces ∼97% in 𝑆= 25 maps and ∼93% in 𝑆= 15 maps.
+
+Figure 2: Overview of Asynchronous Coordination Explorer (ACE).
+The relation encoder aims to aggregate the extracted feature
+maps from different agents to better capture the intra-agent in-
+teractions. In team-based exploration, an agent should not only
+spot undiscovered areas but also inter-teammates’ movement for
+better scheduling among agents. We adopt a simplified Trans-
+former [47] block as the team-size-invariant relation encoder. In-
+spired by the vision transformer model [14], we apply multi-head
+cross-attention [46] to derive a single team-size-invariant represen-
+tation of size 𝐺× 𝐺× 4, as shown in Fig. 3.
+Finally, the action decoder predicts the agent’s policy from the
+aggregated representation as a multi-variable Categorical distribu-
+tion to select a grid cell 𝑔from a plane as the global goal (𝑢𝑥,𝑢𝑦).
+Note that in Habitat, in order to produce accurate global goals, we
+adopt a spatial action space with three separate action heads, i.e.,
+two discrete region heads for choosing a grid cell 𝑔, which are the
+same as grid-based environments, and two additional continuous
+point heads for outputting a coordinate (Δ𝑥, Δ𝑦), indicating the
+relative position of the global goal within the selected region 𝑔.
+Details of MCP in Habitat can be found in Appendix A.2.
+Figure 3: Workflow of Multi-tower-CNN-based Policy (MCP),
+including a CNN-based local feature extractor, a relation en-
+coder, and an action decoder.
+4.4
+Overall Architecture
+As shown in Fig. 2, each agent observes the local information and
+requests the latest feature embedding from other agents, which
+is output by the weight-sharing local feature extractor, at each
+action-making step. That is, agents only need to transfer the low-
+dimensional feature embedding, instead of the entire local infor-
+mation. The multi-tower-CNN-based policy, which is trained by
+Async-MAPPO, generates the next macro action, i.e., global goal, at
+each action-making step, and the agent performs path planning on
+the local map according to the global goal, outputting the atomic
+action at each time step. Note that agents could go offline in multi-
+agent tasks due to unexpected network communication traffic or
+hardware failure.
+5
+ENVIRONMENT DETAILS
+Here we give details of the environments we adopted in this work,
+including the environment setting, the observation space and the
+action space of ACE, as well as the designed reward function.
+5.1
+Environment Setting
+Grid-based scenario: As shown in Fig. 4, we implement a multi-
+agent exploration task based on the GridWorld simulator [8], which
+was originally designed for synchronous settings. We consider
+two different map sizes, which are 15 × 15 with 4 ∼9 random
+rooms and 25 × 25 with 4 ∼25 random rooms. All the agents
+are uniform randomly spread over the map in the beginning. The
+local information of each robot is fed to the RL-trained policy or
+planning-based methods to generate a global goal and 𝐴★algorithm
+is utilized to plan 5 atomic actions on the local map to follow the
+global goal.
+We also set up a 15 × 15 real-world grid map which is the same
+as the grid-based simulation, and each grid is 0.31m long, as shown
+in Fig. 4. Our robots are equipped with Mecanum steering and an
+NVIDIA Jetson Nano processor. The locations and poses of robots
+are tracked by OptiTrack cameras and the Motive motion capture
+software. After training a policy in the grid-based simulator under
+15 × 15 map with random rooms, we directly deploy it to the real-
+world robot system. Each real robot executes in a distributed and
+asynchronous manner. The robot adopts a request-send mechanism
+to obtain the newest feature embedding of other agents through
+ROS topic upon finishing all atomic actions.
+Habitat: We adopt map data from the Gibson dataset [55] while
+the visual signals and dynamics are simulated by Habitat [39]. We
+follow the same environment configuration in [63] and use a pre-
+trained neural SLAM model to predict the robot pose and the local
+map. Full details of Habitat can be found in Appendix A. We also
+make sure that the birthplaces of agents are set to be close enough,
+i.e., agents are randomly scattered in a circle with a radius of 1 meter,
+so that the exploration task would be sufficiently challenging for
+learning.
+
+Figure 4: The illustration of the grid-based simulator and real-world robot system.
+5.2
+Observation Space
+The input of RL-trained MCP is an 𝑆× 𝑆image with 7 channels,
+where 𝑆is the max size of the map. The channels represent obsta-
+cles, the explored mask, the agent location, the trajectory, and three
+𝐻×𝑊agent-view. Note that each agent only maintains its locally ob-
+served information, which is memory and communication-efficient
+for real-world deployment.
+5.3
+Action Space
+The overall exploration framework is hierarchical, with a global
+goal (macro action) followed by several atomic actions towards the
+goal. The action of the policy is to generate a global goal (𝑢𝑥,𝑢𝑦)
+chosen in the map, representing a discrete grid in grid-based envi-
+ronments or a continuous location in Habitat [39]. The available
+atomic actions are moving forward, turning left, and turning right
+provided by the simulator.
+5.4
+Reward Function
+The team-based reward function is the sum of the coverage reward,
+success reward, and overlap penalty. Let 𝑅𝑎𝑡𝑖𝑜𝑡denote the total
+coverage ratio at time 𝑡, 𝐸𝑥𝑝𝑡𝑎be the explored map by agent 𝑎and
+𝐸𝑥𝑝𝑡denote the merged explored map by all agents. Both 𝐸𝑥𝑝𝑡and
+𝐸𝑥𝑝𝑡𝑎are sets of explored areas. The reward terms are defined as
+follows.
+• Coverage Reward: It is proportional to the size of the newly
+discovered region by the team 𝐸𝑥𝑝𝑡\𝐸𝑥𝑝𝑡−1.
+• Success Reward: Agent 𝑎gets a success reward of 𝑅𝑎𝑡𝑖𝑜𝑡
+when 𝐶% coverage ratio is reached, which 𝐶= 98 in the
+grid-like simulator and 𝐶= 90 in Habitat1.
+• Overlap Penalty: The overlap penalty 𝑟𝑜𝑣𝑒𝑟𝑙𝑎𝑝is designed
+to penalize repetitive exploration and encourage cooperation
+with others. It is defined as
+𝑟𝑜𝑣𝑒𝑟𝑙𝑎𝑝=
+
+−𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝× 0.01, 𝑅𝑎𝑡𝑖𝑜𝑡< 0.9
+0, 𝑅𝑎𝑡𝑖𝑜𝑡≥0.9
+,
+where 𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝is the increment of the overlapped explored
+area between agent 𝑎and other agents. The overlapped area
+between agent 𝑎and agent 𝑤is 𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡𝑎,𝑤= 𝐸𝑥𝑝𝑡𝑎∩𝐸𝑥𝑝𝑡𝑤,
+and 𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝= Í
+𝑤∈{1,···,𝑛}\{𝑎} 𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡𝑎,𝑤\𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡−1
+𝑎,𝑤.
+1Maps in Habitat are harder than in the grid-based simulator, leading to differences in
+the success rate threshold.
+6
+EXPERIMENT RESULTS
+6.1
+Training Details
+In the simulation, every RL policy is trained with 50𝑀steps in
+the grid-based simulator and 100𝑀steps in Habitat over 3 random
+seeds. All results are averaged over a total of 300 testing episodes
+(100 episodes per random seed). As for real-world testing, we ran-
+domly generate 10 maps of size 15 × 15 and test 5 times for each
+map. In synchronous action-making cases, agents perform action-
+making at the same time and wait for all other agents to finish. In
+asynchronous action-making cases, agents do not wait for others
+and perform both macro and atomic actions independently.
+6.2
+Evaluation Metrics
+The most important metric in our experiment is Time, which is the
+running time for the agents to reach a 𝐶% coverage ratio. We report
+wall-clock time in the real world, and report an estimated statistical
+running time in simulation: turning left or right takes 0.5𝑠; stepping
+forward takes 1𝑠. Policy inference time is fixed to 0.1𝑠for both RL
+and planning-based methods thus the results can better reflect the
+difference between asynchronous and synchronous settings.
+We also consider 3 additional statistics metrics to capture dif-
+ferent characteristics of a particular exploration strategy. These
+metrics are only for analysis, and we primarily focus on Time as
+our performance criterion.
+• Accumulative Coverage Score (ACS): The overall exploration
+progress throughout an episode computed as𝐴𝑇=
+∫𝑇
+𝑡=0 𝑅𝑎𝑡𝑖𝑜𝑡,
+where 𝑇is the max running time. Higher ACS implies faster
+exploration.
+• Coverage: the final ratio of explored area when an episode
+terminates. Higher implies more exhaustive exploration.
+• Overlap: the ratio of the overlapped region explored by mul-
+tiple agents to the current explored area when C% coverage
+is reached. Lower Overlap implies better credit assignment.
+All metrics are calculated with the running time 𝑡, i.e., the esti-
+mated statistical time in simulation and wall-clock time in the real
+world. Each score is reported as "mean (standard deviation)".
+6.3
+Baselines
+We consider 4 popular planning-based competitors, including a
+utility-maximizing method (Utility) [25], a search-based nearest-
+frontier method (Nearest) [57], a rapid-exploring-random-tree-based
+method (RRT) [45], and an artificial potential field method (APF) [64]
+which applies resistance forces among agents as a cooperation
+
+Map Size
+Methods
+Synchronous Action Making
+Asynchronous Action Making
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+15 × 15
+Utility
+40.81(0.94)
+0.45(0.02)
+1.00(0.00)
+88.80(0.08)
+35.75(0.99)
+0.42(0.01)
+1.00(0.00)
+90.01(0.14)
+Nearest
+25.44(0.53)
+0.17(0.01)
+1.00(0.00)
+91.60(0.17)
+22.59(0.34)
+0.17(0.01)
+1.00(0.00)
+92.47(0.17)
+RRT
+28.86(0.99)
+0.18(0.01)
+1.00(0.00)
+91.46(0.03)
+25.85(0.36)
+0.19(0.01)
+1.00(0.00)
+92.36(0.08)
+APF
+24.95(0.76)
+0.17(0.01)
+1.00(0.00)
+91.57(0.39)
+21.56(0.43)
+0.17(0.01)
+1.00(0.00)
+92.52(0.37)
+Voronoi
+48.57(3.64)
+0.33(0.01)
+1.00(0.00)
+86.43(0.33)
+42.94(4.05)
+0.20(0.01)
+1.00(0.00)
+88.16(0.57)
+MAPPO
+24.75(0.45)
+0.08(0.02)
+1.00(0.00)
+92.39(0.19)
+21.92(0.90)
+0.09(0.01)
+1.00(0.00)
+93.18(0.17)
+ACE
+21.76(0.79)
+0.07(0.00)
+1.00(0.00)
+92.54(0.21)
+18.66(0.79)
+0.07(0.01)
+1.00(0.00)
+93.39(0.14)
+25 × 25
+Utility
+189.38(0.93)
+0.46(0.05)
+0.93(0.01)
+139.31(1.56)
+183.71(1.59)
+0.50(0.04)
+0.95(0.01)
+144.64(1.42)
+Nearest
+113.48(1.73)
+0.24(0.01)
+1.00(0.00)
+161.40(0.63)
+99.52(2.00)
+0.24(0.01)
+1.00(0.00)
+166.53(0.91)
+RRT
+120.15(2.29)
+0.20(0.01)
+1.00(0.00)
+164.35(0.64)
+105.64(1.69)
+0.21(0.01)
+1.00(0.00)
+168.33(0.27)
+APF
+101.41(0.78)
+0.23(0.01)
+1.00(0.00)
+162.46(0.64)
+90.00(1.48)
+0.23(0.01)
+1.00(0.00)
+166.82(0.81)
+Voronoi
+131.65(0.41)
+0.23(0.01)
+1.00(0.00)
+160.92(0.33)
+117.14(0.13)
+0.20(0.01)
+1.00(0.00)
+165.35(0.27)
+MAPPO
+90.15(1.08)
+0.08(0.01)
+1.00(0.00)
+168.54(0.58)
+82.55(2.70)
+0.09(0.01)
+1.00(0.00)
+171.72(0.27)
+ACE
+83.34(0.44)
+0.06(0.00)
+1.00(0.00)
+170.03(0.49)
+74.36(2.93)
+0.06(0.00)
+1.00(0.00)
+173.16(0.72)
+Table 1: Performances of different methods under 2-agent synchronous and asynchronous settings in the grid-based simulator.
+Metrics
+Utility
+Nearest
+RRT
+APF
+ACE
+3 ⇒2
+Time ↓
+139.33(1.79)
+76.53(1.16)
+81.86(1.14)
+74.80(2.11)
+67.50(1.42)
+Overlap ↓
+0.48(0.03)
+0.30(0.01)
+0.27(0.00)
+0.32(0.01)
+0.22(0.00)
+Coverage ↑
+0.94(0.01)
+1.00(0.00)
+1.00(0.00)
+1.00(0.00)
+1.00(0.00)
+ACS ↑
+110.56(1.11)
+126.03(0.39)
+126.75(0.18)
+125.15(0.58)
+128.49(0.37)
+4 ⇒3
+Time ↓
+96.15(0.46)
+53.68(1.01)
+55.33(0.82)
+52.26(0.68)
+48.88(1.82)
+Overlap ↓
+0.40(0.03)
+0.36(0.00)
+0.34(0.01)
+0.38(0.01)
+0.33(0.07)
+Coverage ↑
+0.92(0.01)
+1.00(0.00)
+1.00(0.00)
+1.00(0.00)
+1.00(0.00)
+ACS ↑
+73.28(1.55)
+84.05(0.57)
+84.08(0.41)
+83.60(0.41)
+84.78(0.77)
+Table 2: Performance of different methods with decreased team size on 25 × 25 maps in the grid-based simulator.
+Methods
+Utility
+Nearest
+RRT
+APF
+MAPPO
+ACE
+Time(s)
+60.25(0.16)
+38.72(0.12)
+55.89(0.24)
+52.64(0.23)
+28.48(0.12)
+25.61(0.10)
+Table 3: Running time of different methods when the coverage ratio reaches 100% in the real-world robot system.
+mechanism. Note that APF is a multi-agent baseline while the
+other three are commonly used for single-agent tasks. Moreover, all
+baselines use global information to do planning after every macro
+action. Different from ACE, they are not learning-based and are all
+designed for asynchronous execution.
+6.4
+Grid-Based Scenario
+6.4.1
+Main Results. Experiment results with 2 agents in the grid-
+based simulator under synchronous and asynchronous training are
+provided in Table 1. In both settings, ACE outperforms planning-
+based baselines with ≥10% less Time, full Coverage, and higher ACS.
+Although APF encourages cooperation, its Overlap is still higher
+than ACE, demonstrating ACE’s superiority in discovering efficient
+cooperation strategies. Comparing ACE with MAPPO, which is
+trained in a synchronous manner, ACE demonstrates similar 𝐴𝐶𝑆to
+MAPPO with less Time and Overlap, which indicates the robustness
+of ACE to realistic execution with randomized action delay. Results
+of 3 agents can be found in appendix D.
+6.4.2
+Generalization to Agent Lost. We further consider an-
+other setting where the team size decreases within an episode on
+map size 25 × 25 to emulate the real-world scenarios with hardware
+failure and to examine whether our learned policies can generalize
+to these extreme cases during execution. “𝑁1 ⇒𝑁2” denotes a
+scenario with 𝑁1 agents at the beginning and only 𝑁2 agents alive
+after 50% coverage. As shown in Table 2, ACE demonstrates 10%
+less Time than other baselines and obtains the highest ACS and
+
+lowest Overlap, indicating ACE’s effective zero-shot adaptation to
+extreme situations where some agents go offline.
+6.4.3
+Real-World Robot System. In this part, we present the
+running time of different methods with 2 agents in real-world explo-
+ration tasks on 15×15 maps, which are running in an asynchronous
+manner. The deployment pipeline is described in Sec. 5.1. As shown
+in Table 3, two RL-based methods, MAPPO and ACE, outperform
+the planning-based baselines with a large margin according to the
+total exploration time. In particular, ACE reduces 33.86% real-world
+exploration time than the fastest planning-based method Nearest.
+Besides, ACE reduces 10.07% running time compared with MAPPO,
+proving that combining action-delay randomization with Async-
+MAPPO indeed improves the efficiency of multi-agent exploration.
+6.5
+Habitat Results
+6.5.1
+Main Results. We extend ACE to a vision-based environ-
+ment, Habitat. Table 4 shows the performance of different meth-
+ods under 2-agent asynchronous action-making settings. Despite
+having higher Overlap due to more exhaustive exploration, ACE
+outperforms planning-based baselines with ≥28% less Time, higher
+Coverage and ACS. Compared with synchronous MAPPO, ACE still
+shows higher Coverage and ACS with less Time, demonstrating the
+effectiveness of ACE in more complicated vision-based tasks.
+6.5.2
+Generalization to Agent Lost. We also consider the set-
+ting of decreased team sizes in Habitat, and we follow the same
+experimental setup as for the grid-based simulations. Table 5 shows
+the performance of different methods with decreased team size (2
+⇒1). ACE demonstrates 5.3% less Time than other baselines and
+obtains the highest Coverage and ACS with comparable Overlap,
+which indicates the ACE’s ability to generalize to agent lost.
+Methods
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+Utility
+273.83(37.80)
+0.84(0.03)
+0.83(0.08)
+186.17(17.43)
+Nearest
+220.25(30.23)
+0.59(0.04)
+0.94(0.03)
+180.05(7.37)
+RRT
+177.29(17.16)
+0.63(0.06)
+0.97(0.02)
+187.35(6.86)
+APF
+218.45(24.64)
+0.67(0.04)
+0.94(0.02)
+188.62(7.67)
+MAPPO
+133.23(17.72)
+0.68(0.09)
+0.97(0.01)
+201.33(7.98)
+ACE
+127.62(8.55)
+0.78(0.07)
+0.98(0.01)
+213.81(9.33)
+Table 4: Performance of different methods under 2-agent
+asynchronous action-making settings in Habitat.
+Methods
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+Utility
+281.09(32.25)
+0.48(0.05)
+0.84(0.08)
+153.02(12.38)
+Nearest
+309.76(9.83)
+0.40(0.03)
+0.85(0.05)
+149.43(4.55)
+RRT
+260.31(27.92)
+0.35(0.03)
+0.92(0.02)
+155.23(6.04)
+APF
+309.88(6.63)
+0.42(0.01)
+0.79(0.01)
+143.54(0.83)
+MAPPO
+262.92(19.84)
+0.35(0.04)
+0.90(0.03)
+160.90(6.68)
+ACE
+246.38(19.26)
+0.36(0.03)
+0.92(0.03)
+164.32(8.23)
+Table 5: Performance of different methods with decreased
+team size in Habitat.
+6.6
+Ablation Studies
+In this section, we analyze the sensitivity of communication size
+and action-delay randomization based on the grid-like simulator
+through ablation studies.
+6.6.1
+Sensitivity Analysis of Communication Size. We study
+the exploration performances in different communication traffic
+scenarios, including:
+• No Comm.: The attention-based relation encoder is removed.
+Therefore, agents can only use their own local information to
+perform macro actions. This is the lower bound of different
+communication traffic.
+• Comm. (0.25x): The number of channels output by the CNN
+local feature extractor is set to 1, which is a quarter of the
+original 4 channels.
+• Comm. (0.5x): The number of CNN local feature extractor
+output channels is set to 2.
+• Perf. Comm.: Agents use merged observation from all the
+agents as the input of the CNN local feature extractor.
+Table 6 summarizes the performances on different communica-
+tion traffic with 2 agents on 25 × 25 maps. More communication
+between agents generally leads to better exploration efficiency, as is
+shown by the decreasing Time and increasing ACS from “No Comm.”
+to “Comm. (0.25x)”, “Comm. (0.5x)” and “Perf. Comm.”. Moreover,
+the behavior metric Overlap in these four scenarios shows better
+cooperation efficiency with more communication. Note that ACE
+performs even better than “Perf. Comm.” with strictly less commu-
+nication, demonstrating the effectiveness of the feature embedding
+extracted from our CNN policy for decision-making.
+Methods
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+No Comm.
+159.26(2.18)
+0.37(0.01)
+0.93(0.01)
+151.87(1.82)
+Comm. (0.25x)
+110.92(1.33)
+0.11(0.01)
+0.99(0.00)
+167.60(0.71)
+Comm. (0.5x)
+83.77(1.38)
+0.09(0.00)
+1.00(0.00)
+170.90(0.60)
+Perf. Comm.
+75.62(0.84)
+0.06(0.01)
+1.00(0.00)
+173.15(0.53)
+ACE
+74.36(2.93)
+0.06(0.00)
+1.00(0.00)
+173.16(0.72)
+Table 6: Performance with different communication traffic.
+Intervals
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+Rand (1-10)
+60.24(0.35)
+0.51(0.00)
+1.00(0.00)
+82.44(0.31)
+Rand (5-10)
+56.41(1.51)
+0.47(0.01)
+1.00(0.00)
+83.46(0.35)
+Rand (1-5)
+55.69(1.23)
+0.43(0.01)
+1.00(0.00)
+83.57(0.45)
+ACE (3-5)
+48.88(1.82)
+0.33(0.07)
+1.00(0.00)
+84.78(0.77)
+Table 7: Performance of different action-delay intervals.
+6.6.2
+Sensitivity Analysis of Action-Delay Randomization.
+We further study the impact of the different random action-delay
+intervals. Besides the randomization interval stated in Sec. 4.2, we
+consider 3 different choices of action-delay intervals during train-
+ing, “Rand (1-10)”, “Rand (5-10)”, and “Rand (1-5)”. “Rand (𝑀1 −𝑀2)”
+means each macro action execution is delayed for a random number
+
+of simulation steps uniformly sampled from [𝑀1, 𝑀2]. We empir-
+ically find that these variants have similar performance in most
+simple test settings, while ACE outperforms them in some extreme
+cases. To better illustrate the effect of different action-delay choices,
+we present the results in the “4 ⇒3” setting, an extreme scenario
+with agent loss. As shown in Table 7, ACE consumes the least Time
+and achieves the highest ACS. The results show that action-delay
+randomization works best with a proper randomization interval,
+while a large randomization interval adds high uncertainty during
+training and hurts the final performance.
+7
+CONCLUSION
+To bridge the gap between synchronous simulator and asynchro-
+nous action-making process in real-world multi-agent exploration
+task, we propose a novel real-world multi-robot exploration so-
+lution, Asynchronous Coordination Explorer (ACE) to tackle this
+challenge. In ACE, Multi-agent PPO (MAPPO) is extended to the
+asynchronous action-making setting for effective training, and an
+action-delay-randomization technique is applied for better gener-
+alization to the real world. Besides, each agent equipped with a
+team-size-invariant Multi-tower-CNN-based Policy (MCP), extracts
+and broadcasts the low-dimensional feature embedding to accom-
+plish efficient intra-agent communication. Both simulation and real-
+world results show that ACE improves 10% exploration efficiency
+compared with classical approaches in grid-based environments.
+We also extend ACE to a vision-based testbed Habitat, where ACE
+outperforms planning-based baselines with ≥28% less exploration
+time. Although we aim at the sim-to-real problem caused by mul-
+tiple agents executing tasks asynchronously, there are still many
+issues that have not been fully considered, such as communication
+errors, localization errors, and sensor errors. we leave these issues
+as our future work.
+ACKNOWLEDGMENT
+This research was supported by National Natural Science Foun-
+dation of China (No.U19B2019, 62203257, M-0248), Tsinghua Uni-
+versity Initiative Scientific Research Program, Tsinghua-Meituan
+Joint Institute for Digital Life, Beijing National Research Center for
+Information Science, Technology (BNRist), and Beijing Innovation
+Center for Future Chips and 2030 Innovation Megaprojects of China
+(Programme on New Generation Artificial Intelligence) Grant No.
+2021AAA0150000.
+
+We would suggest to visit https://sites.google.com/view/ace-
+aamas for more information.
+A
+HABITAT DETAILS
+A.1
+Pipeline
+In Habitat experiments, we use Neural SLAM to represent the
+scene with a top-down mapping, and thus the explored regions and
+discovered obstacles are expressed with a top-down 2D mapping.
+Then the planner, MCP, schedules a global goal according to the
+explored information. Finally, the agent uses a local policy that
+guides the agent to the chosen global goal.
+A.2
+MCP Details
+A.2.1
+Input Representation. In MCP, each CNN-based feature ex-
+tractor’s input map, i.e. one feature extractor per agent, is a 240×240
+map with 7 channels, including
+• Obstacle channel: Each pixel value denotes the probability
+of being an obstacle.
+• Explored region channel: A probability map for each pixel
+being explored.
+• One-hot location channel: The only non-zero grid denotes
+the position of the agent.
+• Trajectory channel: This is used to represent the agent’s
+history trace. To reflect time-passing, this channel is updated
+in an exponentially decaying weight manner. More precisely,
+an agent’s trajectory channel 𝑉𝑡at timestep 𝑡is updated as
+following,
+𝑉𝑡𝑥,𝑦=
+
+1
+if agent is near (𝑥,𝑦)
+𝜀𝑉𝑡−1
+𝑥,𝑦
+otherwise
+where the agent is regarded as near (𝑥,𝑦) when the grid-level
+distance between them is less than 3.
+• Three local observations channels: the RGB images of agent-
+view local observations.
+All mapping-related channels are transformed into a world-view
+to save MCP from learning to align all agents’ information, which
+might involve rotation and translation.
+A.2.2
+Action Space. Through MCP, every agent chooses a long-
+term goal (a point) from the whole space. A natural choice is to
+model the agent’s policy as a multi-variable Gaussian distribution
+to select points from a plane. However, in our exploration setting,
+an agent’s policy could be extremely multi-modal especially during
+early stage of exploration since many points could induce similar
+effects on the agent’s path. To fix this issue, we adopt a hierarchical
+design. We first divide the whole map into 8×8 regions, from which
+the agent chooses a desired region. Then, similar to previous choice,
+a point in this region is selected as the long-term goal. Formally,
+the policy of agent 𝑘, could be described as,
+𝑔𝑟,𝑔𝑐∼Cat(𝑟𝜃,𝑟), Car(𝑟𝜃,𝑐)
+𝑥𝑙,𝑦𝑙∼N (𝜇𝜃, Σ𝜃)
+𝑥′
+𝑙= sigmoid(𝑥𝑙), 𝑦′
+𝑙= sigmoid(𝑦𝑙)
+𝑥𝑔= (𝑔𝑟+ 𝑥′
+𝑙)/8, 𝑦𝑔= (𝑔𝑐+ 𝑦′
+𝑙)/8
+where 𝜃is the model parameter, Cat(𝑟𝜃,𝑟), Car(𝑟𝜃,𝑐) represent two
+categorical distributions for choosing the region, 𝑔𝑟,𝑔𝑐are the row
+and column indexes of the sampled region, 𝜇𝜃, Σ𝜃are the mean and
+covariance matrix of the Gaussian distribution to choose the local
+point within the region and (𝑥𝑔,𝑦𝑔) is the final sampled long-term
+goal.
+A.2.3
+Network Architecture. Our models are trained and imple-
+mented using Pytorch [34]. We reuse the neural SLAM module and
+local policy from [38], and we briefly summarize their architectures
+here. Neural SLAM module has two components, a Mapper and a
+Pose Estimator. The Mapper is composed of ResNet18 convolutional
+layers, 2 fully-connected layers, and 3 deconvolutional layers. The
+Pose Estimator consists of 3 convolutional layers and 3 fully con-
+nected layers. Similarly, the local policy has Resnet18 convolutional
+layers, fully-connected layers, and a recurrent GRU layer.
+Table 8: CNN Block Hyperparameter in Habitat.
+Layer
+Out Channels
+Kernel Size
+Stride
+Padding
+1
+32
+3
+1
+1
+2
+64
+3
+1
+1
+3
+128
+3
+1
+1
+4
+64
+3
+1
+1
+5
+32
+3
+2
+1
+The Multi-tower-CNN-based Policy (MCP) has three main com-
+ponents, including CNN-based feature extractors, a transformer-
+based relation encoder, and an action decoder.
+(1) Each CNN-based feature extractor contains 5 consecutive
+CNN blocks. Their corresponding parameters are shown in
+tab. 8. We use ReLU as the activation function. After each
+of the front four CNN blocks, we attach a 2D max pooling
+layer with 2 kernel sizes.
+(2) The transformer-based relation encoder is used to better
+capture spatial information. The attention layer has 4 heads,
+with 32 dimension sizes for each head.
+(3) The action decoder simply uses a CNN projector and lin-
+ear transformations to turn the feature map output from
+the transformer-based relation encoder to corresponding
+logits for Categorical distribution (region head) and means
+and standard deviations of the Gaussian distribution (point
+heads).
+The critic also utilizes a similar architecture as MCP, except for
+replacing the action decoder with fully-connected layers to output
+value predictions.
+B
+TRAINING DETAILS
+B.1
+Reward Function
+We use 3 kinds of team-based rewards, including a coverage reward,
+a success reward, and an overlap penalty. In the following part,
+𝑅𝑎𝑡𝑖𝑜𝑡denotes the total coverage ratio at timestep 𝑡. Let 𝐸𝑥𝑝𝑡be
+the merged explored map at timestep 𝑡and 𝐸𝑥𝑝𝑡
+𝑘be the explored
+map of agent 𝑘. Ideally, both 𝐸𝑥𝑝𝑡and 𝐸𝑥𝑝𝑡
+𝑘can be considered as
+sets of explored points. Then define Δ𝐸𝑥𝑝𝑡= 𝐸𝑥𝑝𝑡\𝐸𝑥𝑝𝑡−1 as the
+newly discovered region at timestep𝑡by the whole team with regard
+of the merged explored area. Specially, we model an individual’s
+effort by Δ𝐸𝑥𝑝𝑡
+𝑘= 𝐸𝑥𝑝𝑡
+𝑘\𝐸𝑥𝑝𝑡−1, that is agent 𝑘’s contribution at
+
+common hyperparameters
+value
+gradient clip norm
+10.0
+GAE lambda
+0.95
+gamma
+0.99
+value loss
+huber loss
+huber delta
+10.0
+mini batch size
+batch size / mini-batch
+optimizer
+Adam
+optimizer epsilon
+1e-5
+weight decay
+0
+network initialization
+Orthogonal
+use reward normalization
+True
+use feature normalization
+True
+learning rate
+2.5e-5
+Table 9: Async-MAPPO hyperparameters
+timestep 𝑘based on the whole team’s previous exploration. Note
+that Δ𝐸𝑥𝑝𝑡
+𝑘is not defined based on the agent’s previous exploration,
+i.e. Δ𝐸𝑥𝑝𝑡
+𝑘≠𝐸𝑥𝑝𝑡
+𝑘\𝐸𝑥𝑝𝑡−1
+𝑘
+.
+• Coverage Reward: The coverage reward consists of two
+parts, a team coverage reward, and an individual coverage
+reward. The team coverage reward is proportional to the
+area of the exploration increment Δ𝐸𝑥𝑝𝑡. The individual
+coverage reward, as the name suggests, is proportional to
+the individual contribution, i.e., the area of Δ𝐸𝑥𝑝𝑡
+𝑘.
+• Success Reward: Agent 𝑎gets a success reward of 𝑅𝑎𝑡𝑖𝑜𝑡
+when 𝐶% coverage rate is reached, which 𝐶= 98 in the
+grid-based simulator and 𝐶= 90 in Habitat2.
+• Overlap Penalty: The overlap penalty 𝑟𝑜𝑣𝑒𝑟𝑙𝑎𝑝is designed
+to encourage agents to reduce repetitive exploration and
+learn to cooperate with others.
+𝑟𝑜𝑣𝑒𝑟𝑙𝑎𝑝=
+
+−𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝× 0.01, 𝑅𝑎𝑡𝑖𝑜𝑡< 0.9
+0, 𝑅𝑎𝑡𝑖𝑜𝑡≥0.9
+,
+where 𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝is the increment of the overlapped explored
+area between agent 𝑎and other agents. The overlapped area
+between agent 𝑎and agent 𝑤is 𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡𝑎,𝑤= 𝐸𝑥𝑝𝑡𝑎∩𝐸𝑥𝑝𝑡𝑤,
+and 𝐴𝑜𝑣𝑒𝑟𝑙𝑎𝑝= Í
+𝑤∈{1,···,𝑛}\{𝑎} 𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡𝑎,𝑤\𝑂𝑣𝑒𝑟𝑙𝑎𝑝𝑡−1
+𝑎,𝑤.
+The final team-based reward is simply the sum of all these terms. In
+Habitat, all the explored and obstacle maps are represented under
+discretization of 5𝑐𝑚, and all the area computations are taken in
+𝑚2.
+B.2
+Hyperparameters
+The hyperparameters for Async-MAPPO are as shown in Table 9.
+C
+PLANNING-BASED BASELINES
+We demonstrate some details about the 5 planning-based baselines
+here.
+Utility: A method that always chooses frontier that maximizes
+information gain [3].
+2Maps in Habitat are harder than in the grid-based simulator, leading to differences in
+the success rate threshold.
+Nearest: A method that always chooses the nearest frontier as
+global goal [58]. The distance to a frontier is computed using the
+breadth-first search on the occupancy map.
+APF: Artificial Potential Field (APF) [64] plans a path for each
+agent based on a computed potential field. The end of the path,
+which is a frontier, is the selected goal. For every agent, an arti-
+ficial potential field 𝐹is computed in the discretized map, with
+consideration of distance to frontiers, presence of obstacles, and
+potential exploration reward. APF also introduces resistance force
+as a simple mechanism. Finally, the path is generated along the
+fastest decreasing direction of 𝐹, starting from the agent’s current
+position.
+RRT: This baseline is adopted from [45]. Rapid-exploring Ran-
+dom Tree (RRT) is originally a path-planning algorithm based on
+random sampling and is used as a frontier detector in [45]. Af-
+ter collecting enough frontiers through random exploration, RRT
+chooses frontier 𝑝with the largest utility 𝑢(𝑝) = 𝐼𝐺(𝑝) −𝑁(𝑝),
+where 𝐼𝐺(𝑝) and 𝑁(𝑝) are respectively the normalized information
+gain and navigation cost of 𝑝.
+Voronoi [20] The voronoi-based method first partitions the map
+via voronoi partition and assigns components to agents so that each
+agent owns parts that are closest to it. Then each agent finds its
+own global goal by finding a frontier point with largest potential
+as in Utility within its own partition.
+In Habitat experiment, to avoid visually blind areas and ensure
+that selected frontiers are far enough, the area within 2.5𝑚from
+each agent is considered explored when making global planning.
+The information gain of a frontier 𝑝is computed as the number
+of unexplored grids within 1.5𝑚to 𝑝. All these baselines do re-
+planning every 15 environment steps.
+Pseudocode of APF is shown in 3. Line 6-12 computes the resis-
+tance force between every pair of agents where 𝐷is the influence
+radius. In lines 13-18, distance maps starting from cluster centers
+are computed, and the corresponding reciprocals are added into the
+potential field so as one agent approaches the frontier, the potential
+drops. Here 𝑤𝑐is the weight of cluster 𝑐, which is the number of
+targets in this cluster. Consequently, an agent would prefer to seek
+frontiers that are closer and with more neighboring frontiers. Lines
+20-25 show the process of finding the fastest potential descend-
+ing path, at each iteration, the agent moves to the cell with the
+smallest potential among all neighboring ones. 𝑇is the maximum
+number of iterations, and 𝐶𝑟𝑒𝑝𝑒𝑎𝑡is the repeat penalty to avoid
+agents wandering around cells with the same potentials.
+Pseudocode of RRT is shown in Algo. 2. In each iteration, a ran-
+dom point 𝑝is drawn and a new node 𝑡is generated by expanding
+from 𝑠to 𝑝with distance 𝐿, where 𝑠is the closest tree node to 𝑝. If
+segment (𝑠,𝑡) has no collision with obstacles in 𝑀, 𝑡is inserted into
+the target list or the tree according to whether 𝑡is in the unexplored
+area or not. Finally, the goal is chosen from the target list with the
+largest utility 𝑢(𝑐) = 𝐼𝐺(𝑐) −𝑁(𝑐) where 𝐼𝐺(𝑐) is the information
+gain and 𝑁(𝑐) is the navigation cost. 𝐼𝐺(𝑐) is computed by the
+number of unexplored grids within 1.5𝑚to 𝑐, as mentioned above.
+𝑁(𝑐) is computed as the Euclidean distance between the agent lo-
+cation and point 𝑐. To keep these two values at the same scale, we
+normalize 𝐼𝐺(·) and 𝑁(·) to [0, 1] w.r.t all cluster centers.
+
+Algorithm 2: Rapid-exploring Random Tree
+Require: Map 𝑀and agent location 𝑙𝑜𝑐.
+Ensure: Selected frontier goal
+1: 𝑁𝑜𝑑𝑒𝐿𝑖𝑠𝑡←{𝑙𝑜𝑐},𝑇𝑎𝑟𝑔𝑒𝑡𝑠←{}
+2: 𝑖←0
+3: while 𝑖< 𝑇and |𝑇𝑎𝑟𝑔𝑒𝑡𝑠| < 𝑁𝑡𝑎𝑟𝑔𝑒𝑡do
+4:
+𝑖←𝑖+ 1
+5:
+𝑝←a random point
+6:
+𝑠←arg min𝑢∈𝑁𝑜𝑑𝑒𝐿𝑖𝑠𝑡||𝑢−𝑝||2
+7:
+𝑡←𝑆𝑡𝑒𝑒𝑟(𝑠, 𝑝, 𝐿)
+8:
+if 𝑁𝑜_𝐶𝑜𝑙𝑙𝑖𝑠𝑖𝑜𝑛(𝑀,𝑠,𝑡) then
+9:
+if 𝑡lies in unexplored area then
+10:
+𝑇𝑎𝑟𝑔𝑒𝑡𝑠←𝑇𝑎𝑟𝑔𝑒𝑡𝑠+ {𝑡}
+11:
+else
+12:
+𝑁𝑜𝑑𝑒𝐿𝑖𝑠𝑡←𝑁𝑜𝑑𝑒𝐿𝑖𝑠𝑡+ {𝑡}
+13:
+end if
+14:
+end if
+15: end while
+16: 𝐶←clusters of points in 𝑇𝑎𝑟𝑔𝑒𝑡𝑠.
+17: 𝑔𝑜𝑎𝑙←arg min𝑐∈𝐶𝐼𝐺(𝑐) −𝑁(𝑐)
+18: return 𝑔𝑜𝑎𝑙
+Algorithm 3: Artificial Potential Field(APF)
+Require: Map 𝑀, number of agents 𝑛and agent locations
+𝑙𝑜𝑐1 . . .𝑙𝑜𝑐𝑛.
+Ensure: Selected goals
+1: 𝑃←frontiers in 𝑀
+2: 𝐶←clusters of frontiers 𝑃
+3: 𝑔𝑜𝑎𝑙𝑠←an empty list
+4: for 𝑖= 1 →𝑛do
+5:
+𝐹←zero potential field, i.e., a 2d array
+6:
+for 𝑗= 1 →𝑛do
+7:
+for empty grid 𝑝∈𝑀do
+8:
+if 𝑗≠𝑖and ||𝑝−𝑙𝑜𝑐𝑗||2 < 𝐷then
+9:
+𝐹𝑝←𝐹𝑝+ 𝑘𝐷· (𝐷−||𝑝−𝑙𝑜𝑐𝑗||2)
+10:
+end if
+11:
+end for
+12:
+end for
+13:
+for 𝑐∈𝐶do
+14:
+Run breadth-first search to compute distance map 𝑑𝑖𝑠
+starting from 𝑐
+15:
+for empty grid 𝑝∈𝑀do
+16:
+𝐹𝑝←𝐹𝑝−𝑑𝑖𝑠−1
+𝑝
+· 𝑤𝑐
+17:
+end for
+18:
+end for
+19:
+𝑢←𝑙𝑜𝑐𝑖,𝑐𝑛𝑡←0
+20:
+while 𝑢∉𝑀and 𝐹𝑢is not a local minima and 𝑐𝑛𝑡< 𝑇do
+21:
+𝑐𝑛𝑡←𝑐𝑛𝑡+ 1
+22:
+𝐹𝑢←𝐹𝑢+ 𝐶𝑟𝑒𝑝𝑒𝑎𝑡
+23:
+𝑢←arg min𝑣∈𝑁𝑒𝑖𝑔ℎ(𝑢) 𝐹𝑣
+24:
+end while
+25:
+append 𝑢to the end of 𝑔𝑜𝑎𝑙𝑠
+26: end for
+27: return 𝑔𝑜𝑎𝑙𝑠
+D
+ADDITIONAL RESULTS
+D.1
+Ablation Studies in Habitat
+We conduct ablation studies on MCP and report the training ACS
+performances on two maps in Habitat.
+D.1.1
+MCP w.o. RE. We consider the MCP without the relation
+encoder. The output feature maps from the CNN-based feature
+extractors are channel-wise concatenated and directly fed into the
+action decoder.
+D.1.2
+MCP w.o. AD. We remove discrete heads from the action de-
+coder so that the global goal is directly generated via two Gaussian
+action distributions.
+Figure 5: Ablation studies on MCP components.
+As shown in Fig. 5, the full MCP module produces both the
+highest ACS while MCP w.o. AD produces the lowest ACS. This
+suggests that a simple Gaussian representation of actions may not
+be able to fully capture the distribution of good global goals, which
+can be highly multi-modal in the early exploration stage. MCP
+w.o. RE performs slightly worse than the full MCP, indicating that
+the relation encoder could encourage cooperation and improve
+exploration efficiency.
+D.2
+3-agent Results
+We additionally report the result of 3 agents in a map with size
+25 × 25 in the grid-based simulator under both synchronous and
+asynchronous settings, shown in Tab. 10. Among all methods, ACE
+achieves the best exploration efficiency, with the lowest time, over-
+lap ratio and the highest ACS.
+
+Map Size
+Methods
+Synchronous Action Making
+Asynchronous Action Making
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+Time ↓
+Overlap ↓
+Coverage ↑
+ACS ↑
+25 × 25
+Utility
+144.13(1.23)
+0.44(0.05)
+0.94(0.01)
+108.0(1.3)
+137.2(3.3)
+0.5(0.0)
+0.95(0.01)
+112.53(0.88)
+Nearest
+79.55(0.94)
+0.33(0.02)
+1.00(0.00)
+125.54(0.39)
+64.65(2.76)
+0.32(0.02)
+1.00(0.00)
+129.6(0.6)
+RRT
+80.42(1.86)
+0.36(0.02)
+1.00(0.00)
+126.89(0.50)
+70.64(2.02)
+0.33(0.05)
+1.00(0.00)
+130.20(0.53)
+APF
+75.67(1.94)
+0.31(0.03)
+1.00(0.00)
+124.98(0.33)
+63.26(2.82)
+0.33(0.06)
+1.00(0.00)
+129.02(0.41)
+Voronoi
+80.63(1.89)
+0.23(0.04)
+1.00(0.00)
+126.23(0.32)
+68.58(1.53)
+0.23(0.01)
+1.00(0.00)
+129.57(0.13)
+MAPPO
+64.8(0.33)
+0.13(0.02)
+1.00(0.00)
+129.7(0.14)
+57.1(0.02)
+0.12(0.01)
+1.00(0.00)
+132.03(0.10)
+ACE
+60.7(0.02)
+0.12(0.01)
+1.00(0.00)
+131.23(0.02)
+55.4(0.03)
+0.10(0.02)
+1.00(0.00)
+134.7(0.02)
+Table 10: Performances of different methods under 3-agent synchronous and asynchronous settings in the grid-based simula-
+tor.

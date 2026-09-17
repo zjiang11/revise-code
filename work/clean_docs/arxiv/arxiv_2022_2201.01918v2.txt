@@ -1,0 +1,800 @@
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED JANUARY, 2022
+1
+SABLAS: Learning Safe Control for Black-box
+Dynamical Systems
+Zengyi Qin1, Dawei Sun2, and Chuchu Fan1
+Abstract—Control certiﬁcates based on barrier functions have
+been a powerful tool to generate probably safe control policies for
+dynamical systems. However, existing methods based on barrier
+certiﬁcates are normally for white-box systems with differentiable
+dynamics, which makes them inapplicable to many practical
+applications where the system is a black-box and cannot be
+accurately modeled. On the other side, model-free reinforcement
+learning (RL) methods for black-box systems suffer from lack
+of safety guarantees and low sampling efﬁciency. In this paper,
+we propose a novel method that can learn safe control policies
+and barrier certiﬁcates for black-box dynamical systems, without
+requiring for an accurate system model. Our method re-designs
+the loss function to back-propagate gradient to the control policy
+even when the black-box dynamical system is non-differentiable,
+and we show that the safety certiﬁcates hold on the black-box
+system. Empirical results in simulation show that our method
+can signiﬁcantly improve the performance of the learned policies
+by achieving nearly 100% safety and goal reaching rates using
+much fewer training samples, compared to state-of-the-art black-
+box safe control methods. Our learned agents can also generalize
+to unseen scenarios while keeping the original performance. The
+source code can be found at https://github.com/Zengyi-Qin/bcbf.
+Index Terms—Robot Safety; Robust/Adaptive Control.
+I. INTRODUCTION
+G
+UARANTEEING safety is an open challenge in de-
+signing control policies for many autonomous robotic
+systems, ranging from consumer electronics to self-driving
+cars and aircrafts. In recent years, the development of machine
+learning (ML) has created unprecedented opportunities to
+control modern autonomous systems with growing complexity.
+However, ML also poses great challenges for developing high-
+assurance autonomous systems that are provably dependable.
+While many learning-based approaches [1], [2], [3], [4] have
+been proposed to train controllers to accomplish complex
+tasks with improved empirical performance, the lack of safety
+certiﬁcates for the learning-enabled components has been a
+fundamental hurdle that blocks the massive deployment of the
+learned solutions.
+For decades, mathematical control certiﬁcates has been used
+as proofs that the desired properties of the system are satisﬁed
+Manuscript received: September 9, 2021; Revised December 11, 2021;
+Accepted January 5, 2022.
+This paper was recommended for publication by Editor Clement Gosselin
+upon evaluation of the Associate Editor and Reviewers’ comments. This work
+was supported by the Defense Science and Technology Agency in Singapore,
+but this article solely reﬂects the opinions and conclusions of its authors and
+not DSTA Singapore or the Singapore Government.
+1Zengyi Qin and Chuchu Fan are with Massachusetts Institute of Technol-
+
+2Dawei Sun is with University of Illinois at Urbana-Champaign, Cham-
+
+Digital Object Identiﬁer (DOI): see top of this page.
+(a) CityEnv
+(b) ValleyEnv
+(c) Comparison with existing methods
+Fig. 1. (a) and (b) are two task environments we consider. In both CityEnv
+and ValleyEnv, the controller should control the ego vehicle to avoid collision
+with NPC vehicles. There are 1024 NPC drones in the city and 32 NPC ships
+in the valley. Each vehicle is assigned a random initial and goal location. (c)
+shows the average result for the two tasks, where the errorbars represent two
+times the standard deviation. SABLAS exhibits signiﬁcant improvement in
+relative safety rate and task completion rate.
+in closed-loop with certain control policies. For example,
+Control Lyapunov Function [5], [6] and Control Contraction
+Metrics [7], [8], [9], [10] ensure the existence of a controller
+under which the system converges to an equilibrium or a
+desired trajectory. Control Barrier Function [11], [12], [13],
+[14], [15], [16], [17] ensures the existence of a controller
+that keeps the system inside a safe invariant set. Classical
+control synthesis methods based on Sum-of-Squares [18],
+[12], [19], [20] and linear programs [21], [22] usually only
+work for systems with low-dimensional state space and simple
+dynamics. This is because they choose polynomials as the
+candidate certiﬁcate functions, where low-order polynomials
+may not be a valid certiﬁcate for complex dynamical systems
+and high-order polynomials will increase the number of de-
+cision variables exponentially in those optimization problems.
+Recent data-driven methods [17], [23], [9], [24] have shown
+signiﬁcant progress in overcoming the limitations of the tra-
+ditional synthesis methods. They can jointly learn the control
+certiﬁcates and policies as neural networks (NN). However,
+arXiv:2201.01918v2  [cs.LG]  9 Jan 2022
+
+2
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED JANUARY, 2022
+data-driven methods that can generate control certiﬁcates still
+require an explicit (or white-box) differentiable model of
+the system dynamics, as the derivatives of the dynamics are
+required in the learning process. Finally, many works study
+the use of control certiﬁcates such as CBF to provide safety
+guarantees during and after training the policies [16], [25],
+but they more or less requires an accurate model of the system
+dynamics or a reasonable modeling of the system uncertainties
+to build the certiﬁcates.
+Many dynamical systems in the real-world are black-box
+and lack accurate models. The most popular model-free ap-
+proach to handle such black-box systems is safe reinforce-
+ment learning (RL). Safe RL methods enforce safety and
+performance by maximizing the expectation of the cumulative
+reward and constraining the expectation of the cost to be less
+or equal to a given threshold. The biggest disadvantage of
+safe RL methods is the lack of systematic or theoretically
+grounded way of designing cost function and reward functions,
+which heavily rely on empirical trials and errors. The lack
+of explainable safety guarantees and low sampling efﬁciency
+also make safe RL methods difﬁcult to exhibit satisfactory
+performance.
+Instead of stressing about the trade-off between the strong
+guarantees from control certiﬁcates and the practicability of
+model-free methods, in this work, we propose SABLAS to
+achieve both. SABLAS is a general-purpose approach to learn-
+ing safe control for black-box dynamical systems. SABLAS
+enjoys the guarantees provided by the safety certiﬁcate from
+CBF theory without requiring for an accurate model for the
+dynamics. Instead, SABLAS only needs a nominal dynamics
+function that can be obtained through regressions over sim-
+ulation data. There is no need to model the error between
+the nominal dynamics and the real dynamics since SABLAS
+essentially re-design the loss function in a novel way to back-
+propagate gradient to the controller even when the black-box
+dynamical system is non-differentiable. The resulting CBF
+(and the corresponding safety certiﬁcate) holds directly on the
+original black-box system if the training process converges.
+The proposed algorithm is easy-to-implement and follows
+almost the same procedure of learning CBF for white-box
+systems with minimal modiﬁcation. SABLAS fundamentally
+solves the problem that control certiﬁcates cannot be learned
+directly on black-box systems, and opens up the next chapter
+use of CBF theory on synthesizing safe controllers for black-
+box dynamical systems.
+Experimental results demonstrates the superior advantages
+of SABLAS over leading learning-based safe control methods
+for black-box systems including CPO [26], PPO-Safe [3]
+and TRPO-Safe [27], [28]. We evaluate SABLAS on two
+challenging tasks in simulation: drone control in a city and
+ship control in a valley (as shown in Fig. 1). The dynamics
+of the drone and ship are assumed unknown. In both tasks,
+the controlled agent should avoid collision with uncontrolled
+agents and other obstacles, and reach its goal before the testing
+episode ends. We also examine the generalization capability
+of SABLAS on testing scenarios that are not seen in training.
+Fig. 1 shows that SABLAS can reach a near 1.0 relative
+safety rate and task completion rate while using only 1/10
+of the training data compared to existing safe RL methods,
+demonstrating a signiﬁcant improvement. We also study the
+effect of model error (between the nominal model and actual
+dynamics) on the performance of the learned policy. It is
+shown that SABLAS is tolerant to large model errors while
+keeping a high safety rate. A detailed description of the results
+is presented in the experiment section. Video results can be
+found at supplementary materials.
+To summarize the strength of SABLAS: 1) SABLAS can
+jointly ﬁnd a safety certiﬁcate (i.e. CBF) and the corresponding
+control policy on black-box dynamics; 2) Unlike RL-based
+methods that need tedious trial-and-error on designing the
+rewards, SABLAS provides a systematic way of learning
+certiﬁed control policy, without parameters (other than the
+standard hyper-parameters in NN training) that need ﬁne-
+tuning. 3) Empirical results that SABLAS can achieve a nearly
+perfect performance in terms of guaranteeing safety and goal-
+reaching, using much less samples than state-of-the-art safe
+RL methods.
+II. RELATED WORK
+There is a rich literature on controlling black-box systems
+and safe RL. Due to the space limit, we only discuss a few
+directly related and commonly used techniques on black-box
+system control. We will also skip the literature review for the
+large body of works on model-based safe control and trajectory
+planning as the research problems we are solving are very
+different.
+A. Controller Synthesis for Black-box Systems
+Proportional–integral–derivative (PID) controller is widely
+used in controlling black-box systems. The advantage of PID
+controller is that it does not rely on a model of the system and
+only requires the measurement of the state. A drawback of
+PID controller is that it does not guarantee safety or stability,
+and the system may overshoot or oscillate about the control
+setpoint. If the underlying black-box system is linear time-
+invariant, existing work [29] has presented a polynomial-time
+control algorithm without relying on any knowledge of the
+environment. For non-linear black-box systems, the dynamics
+model can be approximated using system identiﬁcation and
+controlled using model-based approaches [30], and PID can
+be used to handle the error part. The concept of practical
+relative degree [31] is also proposed to enhance the control
+performance on systems with heavy uncertainties. Recent
+advance in reinforcement learning [4], [3], [27], [32] also gives
+us insight into treating the system as a pure black-box and
+estimating the gradient for the black-box functions in order
+to optimize the control variables. However, in safety-critical
+systems, these black-box control methods still lack formal
+safety guarantee or certiﬁcate.
+Simulation-guided controller synthesis methods can also
+generate control certiﬁcates for black-box systems, and some-
+times those certiﬁcates can indicate how policies should be
+constructed [21], [20], [22]. However, most of these techniques
+use polynomial templates for the certiﬁcates, which limits their
+use on high-dimensional and complex systems. Another line
+
+QIN et al.: SABLAS: LEARNING SAFE CONTROL FOR BLACK-BOX DYNAMICAL SYSTEMS
+3
+of work studies the use of [33], [34] data-driven reachability
+analysis, jointly with receding-horizon control to constructed
+optimal control policies. These methods rely on side informa-
+tion about the black-box systems (e.g. lipschitz constants of
+the dynamics, monotonicity of the states, decoupling in the
+states’ dynamics) to do the reachability, which is not needed
+in our method.
+B. Safe Reinforcement Learning
+Safe RL [26], [28], [2], [35], [36] extends RL by adding
+constraints on the expectation of certain cost functions, which
+encode safety requirements or resource limits. CPO [26]
+derived a policy improvement step that increases the reward
+while satisfying the safety constraint. DCRL [2] imposes con-
+straint on state density functions rather than cost value func-
+tions, and shows that density constraint has better expressive-
+ness over cost value function-based constraints. RCPO [28]
+weights the cost using Lagrangian multipliers and add it to
+the reward. FISAR [36] uses a meta-optimizer to achieve
+forward invariance in the safe set. A disadvantage of safe
+RL is that it does not provide safety guarantee, or their
+safety guarantee cannot be realized in practice. The problem
+of sampling efﬁciency and sparsity of cost also increase the
+difﬁculty to synthesize safe controller through RL.
+C. Safety Certiﬁcate and Control Barrier Functions
+Mathematical certiﬁcates can serve as proofs that the desired
+property of the system is satisﬁed under the corresponding
+planning [37], [38] and control components. Such certiﬁcate
+is able to guide the controller synthesis for dynamical systems
+in order to ensure safety. For example, Control Lyapunov
+Function [5], [6], [24] ensures the existence of a controller
+so that the system converges to desired behavior. Control
+Barrier Function [11], [12], [13], [14], [15], [16], [17], [39]
+ensures the existence of a controller that keep the system
+inside a safe invariant set. However, the existing controller
+synthesis with safety certiﬁcate heavily relies on a white-
+box model of the system dynamics. For black-box systems
+or system with large model uncertainty, these methods are not
+applicable. While recent work [40] proposes to learn the model
+uncertainty effect on the CBF conditions, it still assumes that
+a handcrafted CBF is given, which is not always available for
+complex non-linear dynamical systems. Our approach repre-
+sents a substantial improvement over the existing CBF-based
+safe controller synthesis strategy. The proposed SABLAS
+framework simultaneously enjoys the safety certiﬁcate from
+the CBF theory and the effectiveness on black-box dynamical
+systems.
+III. PRELIMINARIES
+A. Safety of Black-box Dynamical Systems
+Deﬁnition 1 (Black-box Dynamical System). A black-box
+dynamical system is represented by tuple ⟨S, U, f⟩, where
+S ∈Rn is the state space and U ∈Rm is the control input
+space. f : S × U 7→S is the system dynamics ˙s = f(s, u),
+which is unknown due to the black-box assumption.
+Let S0, Sg, Ss and Sd denote the set of initial states,
+goal states, safe states and dangerous states respectively. The
+problem we aim to solve is formalized in Deﬁnition 2.
+Deﬁnition 2 (Safe Control of Black-box Systems). Given a
+black-box dynamical system modeled as in Deﬁnition 1, the
+safe control problem aims to ﬁnd a controller π : S 7→U such
+that under control input u = π(s) and the unknown dynamics
+˙s = f(s, u), the following is satisﬁed:
+∃t > 0, s(t) ∈Sg
+s.t. ∀t > 0, s(t) ̸∈Sd and s(0) ∈S0
+(1)
+The above deﬁnition requires that starting from the initial
+set S0, the system should never enter the dangerous set Sd
+under controller π.
+B. Control Barrier Function as Safety Certiﬁcate
+A common approach for guaranteeing safety of dynamical
+systems is via control barrier functions (CBF) [11], which
+ensures that the state always stay in the safe invariant set.
+A control barrier function h : S 7→R satisﬁes:
+h(s) ≥0,
+∀s ∈S0
+h(s) < 0,
+∀s ∈Sd
+˙h + α(h) = ∂h
+∂s f(s, u) + α(h) ≥0,
+∀s ∈Sp
+(2)
+where Sp = {s | h(s) ≥0}, u = π(s) and α(·) is a class-
+K function that is strictly increasing and α(0) = 0. It is
+proven [11] that if there exists a CBF h for a given controller
+π, the system controlled by π starting from s(0) ∈S0 will
+never enter the dangerous set Sd. Besides the formal safety
+proof in [11], there is an informal but straightforward way to
+understand the safety guarantee. Whenever h(s) decreases to
+0, we have ˙h + α(h) = ˙h ≥0, which means h(s) no longer
+decreases and h(s) < 0 will not occur. Thus s will not enter
+the dangerous set Sd where h(s) < 0.
+C. Co-learning Controller and CBF for White-box Systems
+For white-box dynamical systems where f(s, u) is known,
+we can jointly synthesize the controller π and it safety
+certiﬁcate h that satisfy CBF conditions (2) via a learning-
+based approach. We model π and h as neural networks with
+parameters Θ and Ω. Given a dataset D of the state samples
+in S, the CBF conditions (2) can be translated into empirical
+loss functions:
+L0(Ω) =
+1
+|S0 ∩D|
+X
+s∈S0∩D
+max(0, −h(s; Ω))
+Ld(Ω) =
+1
+|Sd ∩D|
+X
+s∈Sd∩D
+max(0, h(s; Ω))
+Lp(Ω, Θ) =
+1
+|Sp ∩D|
+X
+s∈Sp∩D
+max
+
+0, −∂h
+∂s f(s, π(s; Θ)) −α(h(s, Ω))
+
+.
+(3)
+Each of the loss functions in (3) corresponds to a CBF
+condition in (2). In addition to safety, we also consider goal-
+reaching by penalize the difference between the safe controller
+
+4
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED JANUARY, 2022
+π and the goal-reaching nominal controller πnom in (4). The
+synthesis of πnom is well-studied and is not the contribution
+of our work.
+Lg(Θ) =
+1
+|Sp ∩D|
+X
+s∈Sp∩D
+||π(s; Θ) −πnom(s)||2
+2.
+(4)
+The total loss function is L0(Ω)+Ld(Ω)+Lp(Ω, Θ)+λLg(Θ),
+where λ is a constant that balances the goal-reaching and
+safety objective. The total loss function is minimized via
+stochastic gradient descent to ﬁnd the parameters Ωand
+Θ. The dataset D is not ﬁxed during training and will be
+periodically updated with new samples by running the current
+controller. When the loss L0 + Ld + Lp converges to 0, the
+resulting controller π(s; Θ) and CBF h(s; Ω) will satisfy (2) on
+unseen testing samples with a generalization bound as proven
+in [17]. Therefore, a safe controller and the corresponding CBF
+is found for the white-box system.
+However, for black-box dynamical systems where f(s, u)
+is unknown, the co-learning method for safe controller and
+CBF described above is no longer applicable. In Section IV,
+we propose an important and easy-to-implement modiﬁcation
+to (3) such that we can leverage similar co-learning framework
+to jointly synthesize the safe controller and its corresponding
+CBF as safety certiﬁcate.
+IV. LEARNING CBF ON BLACK-BOX SYSTEMS
+In this section, we ﬁrst elaborate on why it is difﬁcult to
+learn the safe controller and its CBF for black-box dynamical
+systems. Then we will propose an important and easy-to-
+implement re-formulation of the optimization objective, which
+makes learning safe controller in black-box systems as easy
+as in white-box systems.
+A. Challenges in Black-box Dynamical Systems
+Among the three loss functions L0, Ld and Lp in (3), Lp
+is the only one that can propagate gradient to the controller
+parameter Θ. The main challenge of training safe controller
+with its CBF for black-box dynamical systems is that the
+gradient can no longer be back-propagated to Θ when f is
+unknown. Therefore, a safe controller cannot be trained by
+minimizing the loss functions in (3).
+Given state samples s(t) and s(t + ∆t) from the black-box
+system where ∆t is a sufﬁciently small time interval, we can
+approximate ˙h and compute Lp as:
+˙h1(s) = h(s(t + ∆t)) −h(s(t))
+∆t
+Lp1 =
+1
+|Sp ∩D|
+X
+s∈Sp∩D
+max
+
+0, −˙h1(s) −α(h(s))
+
+.
+(5)
+Lp1 does give the value of Lp, but its backward gradient ﬂow
+to the controller is cut off by the black-box system that is non-
+differentiable. (5) can only be used to train CBF h but not the
+safe controller π. Even worse, the h obtained by minimizing
+(5) does not guarantee that a corresponding safe controller π
+exists. If we have an differential expression of dynamics f
+and replace h(s(t + ∆t)) with h(s(t) + f(s(t), π(s(t)))∆t),
+the gradient ﬂow can successfully reach π(s) and update the
+Black-box system
+Nominal model 𝑓𝑛𝑜𝑚
+Controller 𝜋
+Control input 𝑢
+𝑠(𝑡+ ∆𝑡)
+𝑠𝑡+ 𝑓𝑛𝑜𝑚(𝑠, 𝑢)∆𝑡
+ҧ𝑠(𝑡+ ∆𝑡)
+𝑠(𝑡)
+ሶℎ3
+ℒ𝑝3
+Forward pass
+Back-propagation
+Fig. 2. Computational graph of Lp3. The blue lines show how the gradient
+from Lp3 is back-propagated to the controller π despite that the black-box
+system itself is non-differentiable.
+controller parameter. However, this is not immediately possible
+because f is unknown by the black-box assumption.
+A possible way to back-propagate gradient to π is to use a
+differentiable nominal model fnom. There are many methods
+to obtain fnom, such as ﬁtting a neural network using sampled
+data from the real black-box system. We do not require fnom
+to perfectly match the real dynamics f, because there will
+always exist an error between them. With fnom, we can
+approximate Lp as:
+˙h2(s) = h(s + fnom(s, π(s))∆t) −h(s)
+∆t
+Lp2 =
+1
+|Sp ∩D|
+X
+s∈Sp∩D
+max
+
+0, −˙h2(s) −α(h(s))
+
+,
+(6)
+which is differentiable w.r.t. π(s) because both h and fnom
+are differentiable. The gradient of Lp2 can be back-propagated
+to the controller to update its parameters. However, whatever
+way we get fnom, there still exists an error between the
+real dynamics f and fnom, which means ˙h2 is not a good
+approximation of ˙h and Lp2 is not the true value of Lp. Using
+Lp2, it is not guaranteed that the third CBF condition in (2)
+will be satisﬁed.
+B. Learning Safe Control for Black-box Dynamics
+We present a novel re-formulation of Lp that makes learning
+safe controller with CBF for black-box dynamical systems
+as easy as in white-box systems. The proposed formula-
+tion possesses two features: it enables the gradient to back-
+propagate to the controller in training, and offers an error-free
+approximation of ˙h.
+Given state samples s(t) and s(t+∆t) from the trajectories
+of the real black-box dynamical system, where ∆t is a
+sufﬁciently small time interval, we deﬁne snom(t + ∆t) as
+:
+snom(t + ∆t) = s(t) + fnom(s(t), π(s(t)))∆t,
+then construct ¯s(t + ∆t) as:
+¯s(t + ∆t) = snom(t + ∆t) + g(s(t + ∆t) −snom(t + ∆t)),
+where g(s) = s is an identity function but without gra-
+dient. We need to pretend that g(s) is a constant and in
+back-propagation, the gradient on g(s) cannot propagate to
+its argument s. In PyTorch [41], there is an off-the-shelf
+implementation of g(s) as g(s) = s.detach(), which cuts
+
+QIN et al.: SABLAS: LEARNING SAFE CONTROL FOR BLACK-BOX DYNAMICAL SYSTEMS
+5
+off the gradient from g to s in back-propagation. Then we
+approximate Lp using:
+˙h3(s) = h(¯s(t + ∆t)) −h(s(t))
+∆t
+Lp3 =
+1
+|Sp ∩D|
+X
+s∈Sp∩D
+max
+
+0, −˙h3(s) −α(h(s))
+
+.
+(7)
+Theorem 1. ∇ΘLp3 exists and lim∆t→0 Lp3 = Lp. Namely,
+Lp3 is differentiable w.r.t. the controller parameter Θ, and Lp3
+is an error-free approximation of Lp as ∆t →0.
+Proof. Since fnom is differentiable, snom and ¯s(t + ∆t) are
+differentiable w.r.t. π, ˙h3 and Lp3 are also differentiable w.r.t.
+π and its parameter Θ. Thus, ∇ΘLp3 exists. Furthermore,
+since ¯s(t+∆t) = s(t+∆t), ˙h3 is an error-free approximation
+of the real ˙h when ∆t →0. Thus Lp3 is also an error-free
+approximation of Lp when ∆t →0.
+Note that Theorem 1 reveals the reason why the pro-
+posed SABLAS method can jointly learn the CBF and the
+safe controller for black-box dynamical system. First, since
+∇ΘLp3 exists, the gradient from Lp3 can be back-propagated
+to the controller parameters to learn a safe controller. On
+the contrary, ˙h1 is not differentiable w.r.t. π so Lp1 cannot
+be used to train the controller. Second, since Lp3 is a good
+approximation of Lp, minimizing Lp3 contributes to the mini-
+mization of Lp and the satisfaction of the third CBF condition
+in (2). On the contrary, ˙h2 is an inaccurate approximation
+of ˙h as we elaborated in Section IV-A. The construction of
+Lp3 incorporates the advantages of Lp1 and Lp2, and avoids
+the disadvantages of Lp1 and Lp2 at the same time. The
+computational graph of Lp3 is illustrated in Fig. 2, which
+shows the forward pass and the backward gradient propagation
+from Lp3 to controller π.
+Remark 1. One may argue that the gradient received by
+π via minimizing Lp3 is not exactly the gradient it should
+receive if we had a perfect differentiable model of the black-
+box system. Despite this, minimizing Lp3 directly contributes
+to the satisfaction of the third CBF condition in (2). A safe
+controller and its CBF can be found to keep the system within
+safe set.
+Remark 2. Although the current formulation of Lp3 leads
+to promising performance in simulation as we will show in
+experiments, Lp3 requires further consideration in hardware
+experiments. Directly using the future state s(t + ∆t) to
+calculate the time derivative of h or s is not always de-
+sirable because noise will possibly dominate the numerical
+differentiation. When the noise dominates the time derivative
+of s or h, the training will have convergence issues. But a
+moderate noise is actually beneﬁcial to training, because our
+optimization objective makes the CBF conditions hold even
+under noise disturbance, which increases the robustness of the
+trained CBF and controller. On physical robots where noise
+dominates the numerical differentiation, one can incoperate
+ﬁltering techniques to mitigate the noise.
+Combining with the loss functions L0, Ld and Lg in (3) and
+(4), the total loss function can be formulated as:
+L(Ω, Θ) = L0(Ω) + Ld(Ω) + Lp3(Ω, Θ) + λLg(Θ),
+(8)
+Algorithm 1 Learning Safe Controller with CBF for Black-
+box Dynamical Systems
+1: Input: The set of initial condition S0, the set of dan-
+gerous state Sd, controller π and CBF h with randomly
+initialized parameters Θ and Ω, nominal dynamics fnom,
+loss function L(Ω, Θ), the number of episodes K in data
+collection, the number of training iterations N.
+2: for i = 1, 2, · · · , N do
+3:
+Initialize state samples dataset D ←∅
+4:
+for j = 1, 2, · · · , K do
+5:
+s(0) ←SAMPLE(S0)
+6:
+Dj ←RUN(π(·; Θ), s(0)), D ←D ∪Dj
+7:
+end for
+8:
+Ω, Θ ←UPDATE(Ω, Θ, D, L)
+9: end for
+10: return CBF parameter Ωand controller parameter Θ
+where λ is a constant balancing the safety and goal-reaching
+objective. L is minimized via stochastic gradient descent.
+Algorithm 1 summarizes the learning process of the safe
+controller and the corresponding safety certiﬁcate (CBF) for
+black-box dynamical systems. The RUN function runs the
+black-box system using the controller π under initial condition
+s(0), and returns the trajectory data. The UPDATE function
+updates parameters Ω, Θ by minimizing L(Ω, Θ) using the
+state samples in D via gradient descent.
+V. EXPERIMENT
+The primary objective of our experiment is to examine the
+effectiveness of the proposed method in terms of safety and
+goal-reaching when controlling black-box dynamical systems.
+We will conduct comprehensive experiments on two simula-
+tion environments illustrated in Fig.1 (a) and (b), and compare
+with state-of-the-art learning-based control methods for black-
+box systems.
+A. Task Environment Description
+a) Drone control in a city (CityEnv): In our ﬁrst case
+study, we consider the package delivery task in a city using
+drones, as is illustrated in Fig. 1 (a). There is one controlled
+drone and 1024 non-player character (NPC) drones that are not
+controlled by our controller. In each simulation episode, each
+drone is assigned a sequence of randomly selected goals to
+visit. The aim of our controller is to make sure the controlled
+drone reach its goals while avoiding collision with NPC drones
+at any time. A reference trajectory sref(t), t ∈[0, T] will be
+given, which sequentially connects the goals and avoid colli-
+sion with buildings. The reference trajectory can be generated
+by any off-the-shelf single-agent path planning algorithm. We
+use FACTEST [42] in our implementation, and other options
+such as RRT [43] are also suitable. The reference path planner
+does not need to consider the dynamic obstacles, such as the
+moving NPCs in our experiment. A nominal controller πnorm
+will also be given, which outputs control commands that
+drive the drone to follow the reference trajectory. However,
+πnorm is purely for goal-reaching and does not consider safety.
+
+6
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED JANUARY, 2022
+Fig. 3.
+Quantitative results of relative safety rate, task completion rate and tracking error. The center points are mean and error bars represent standard
+deviations. Results are collected over 50 random runs on each method. The ﬁrst row is for drone control in CityEnv and the second row is for ship control
+in ValleyEnv. Our method reaches a high task completion rate and relative rate at the same time, while keeping a low tracking error.
+The CityEnv has two modes: with static NPCs and moving
+NPCs. If the NPCs are static, they will constantly stay at
+their initial locations. If the NPCs are moving, they will
+follow pre-planned trajectories to sequentially visit their goals.
+The drone model is with state space [x, y, z, vx, vy, vz, θx, θy],
+where θx and θy are row and pitch angles. The control inputs
+are the angular acceleration of θx, θy and the vertical thrust.
+The underlying model dynamics is from [17] and assumed
+unknown to the controller and CBF in our experiment.
+b) Ship control in a valley (ValleyEnv): In our second
+case study, we consider task of controlling a ship in valley
+illustrated in Fig. 1 (b). There are one controlled ship and
+32 NPC ships. The number of NPCs in ValleyEnv is less
+than CityEnv because ships are large in size and inertia, and
+hard to maneuver in dense trafﬁc. Also, different from the
+3D CityEnv, ValleyEnv is in 2D, which means the agents
+have fewer degrees of freedom to avoid collision. The initial
+location and goal location of each ship is randomly initialized
+at the beginning of each episode. The aim of our controller is
+to ensure the controlled ship reach its goal and avoid collision
+with NPC ships. Similar to CityEnv, a reference trajectory and
+nominal controller will be provided. There are also two modes
+in ValleyEnv, including the static and moving NPC mode, as is
+in CityEnv. The ship model is with state space [x, y, θ, u, v, ω],
+where θ is the heading angle, u, v are speed in the ship body
+coordinates, and ω is the angular velocity of the heading angle.
+The ship model is from Sec. 4.2 of [44] and is unknown to
+the controller and CBF.
+B. Evaluation Criteria
+Three evaluation criteria are considered. Relative safety
+rate measures the improvement of safety comparing to a nomi-
+nal controller that only targets at goal-reaching but not safety.
+To formally deﬁne the relative safety rate, we ﬁrst consider
+the absolute safety rate α as α =
+1
+T
+R T
+0 I(s(t) ̸∈Sd) dt,
+which measures the proportion of time that the system stays
+outside the dangerous set. Given two control policies π1 and
+π2 with absolute safety rate α1 and α2, the relative safety
+rate of π1 w.r.t. π2 is deﬁned as β12 = α1−α2
+1−α2
+∈(−∞, 1].
+If β12
+= 0, then control policy π1 does not have any
+improvement over π2 in terms of safety. If β12 = 1, then
+π1 completely guarantees safety of the system in t ∈[0, T].
+In our experiment, π1 is the controller to be evaluated, and
+π2 is the nominal controller πnorm that only accounts for
+goal-reaching without considering safety. Task completion
+rate is deﬁned as the success rate of reaching the goal state
+before timeout. Tracking error is the average deviation of the
+system’s state trajectory comparing to a pre-planned reference
+trajectory sref(t), t ∈[0, T] as γ = 1
+T
+R T
+0 ||s(t)−sref(t)||2
+2 dt.
+Note that we do not assume sref always stay outside the
+dangerous set.
+C. Baseline Approaches
+In terms of safe control for black-box systems, the most
+recent state-of-the-art approaches are safe reinforcement learn-
+ing (safe RL) algorithms. We choose three safe RL algorithms
+for comparison: CPO [26] is a general-purpose policy opti-
+mization algorithm for black-box systems that maximizes the
+expected reward while satisfying the safety constraints. PPO-
+Safe is a combination of PPO [3] and RCPO [28]. It uses PPO
+to maximize the expected cumulative reward while leveraging
+the Lagrangian multiplier update rule in RCPO to enforce the
+safety constraint. TRPO-Safe is a combination of TRPO [27]
+and RCPO [28]. The expected reward is maximized via TRPO
+and the safety constraints are imposed using the Lagrangian
+multiplier in RCPO.
+D. Implementation and Training
+Both the controller π and CBF h are multi-layer perceptrons
+(MLP) with architecture adopted from Sec. 4.2 of [17]. π and
+h not only take the state of the controlled agent as input, but
+also the states of 8 nearest NPCs that the controlled agent can
+observe. In Algorithm 1, we choose K = 1, N = 2000. The
+total number of state samples collected during training is 106.
+In UPDATE of the algorithm, we use the Adam [45] optimizer
+with learning rate 10−4 and batch size 1024. The gradient
+
+QIN et al.: SABLAS: LEARNING SAFE CONTROL FOR BLACK-BOX DYNAMICAL SYSTEMS
+7
+(a)
+(b)
+Fig. 4.
+(a) Comparison of sampling efﬁciency. With only 1/10 samples,
+SABLAS achieves a nearly perfect relative safety rate. (b) Inﬂuence of
+model error on safety performance. SABLAS-Lp2 uses Eqn. 6 instead of the
+proposed Eqn. 7 as loss function. SABLAS is tolerant to large error between
+nominal and real models while keeping a high safety rate.
+descent runs for 100 iterations in UPDATE. The nominal model
+dynamics are ﬁtted from trajectory data in simulation. We used
+104 state samples to ﬁt a linear approximation of the drone
+dynamics, and 105 samples to ﬁt a non-linear 3-layer MLP as
+the ship dynamics.
+In training the safe RL methods, the reward in every step is
+the negative distance between the system’s current state and
+the goal state, and the cost is 1 if the system is within the
+dangerous set Sd and 0 otherwise. The threshold for expected
+cost is set to 0, which means we wish the system never enter
+the dangerous set (never reach a state with a positive cost).
+During training, the agent runs the system for 107 timesteps
+in total and performs 2000 policy updates. In each policy
+update, 100 iterations of gradient descent are performed. The
+implementation of the safe RL methods is based on [46].
+All the methods are trained with static NPCs and tested
+on both static and moving NPCs. We believe this can make
+the testing more challenging and examine the generalization
+capability of the tested methods in different scenarios. All the
+agents are assigned random initial and goal locations in every
+simulation episode, which prevents the learned controller from
+overﬁtting a single conﬁguration.
+E. Experimental Results
+a) Safety and goal-reaching performance: Results are
+shown in Fig. 3. Among the compared methods, our method
+is the only one that can reach a high task completion rate
+and relative safety rate at the same time. For other methods
+such as TRPO-Safe, when the controlled drone or ship is
+about to hit the NPCs, the learned controller tend to brake
+and decelerate. Thus, the agent is less likely to reach its goal
+when a simulation episode ends. The task completion rate and
+safety rate are opposite to each other for CPO, PPO-Safe and
+TRPO-Safe. On the contrary, the controller obtained by our
+method can maneuver smoothly among NPCs without severe
+deceleration. This enables the controlled agent to reach the
+goal location on time. Our method can also keep a relatively
+low tracking error, which means the difference between actual
+trajectories and reference trajectories is small.
+b) Generalization capability to unseen scenarios: As is
+stated in Sec. V-D, the NPCs are static in training and can
+be either static or moving in testing. Fig. 3 also demonstrates
+that our method has promising generalization capability across
+different training and testing scenarios.
+c) Sampling efﬁciency: In Fig. 4 (a), we show the safety
+performance under different sizes of the training set. The
+results are averaged over the drone and ship control tasks.
+SABLAS only needs around 1/10 of the samples required
+by the compared methods to achieve a nearly perfect relative
+safety rate. Note that SABLAS requires an extra 104 to 105
+samples to ﬁt the nominal dynamics, but this does not change
+the fact that the total number of samples needed by SABLAS
+is much fewer than the baselines.
+d) Effect of model error: We investigate the inﬂuence of
+the model error || ˙s −˙snom|| between the real dynamics and
+the nominal dynamics on the safety performance. We change
+the modeling error of the drone model and test the learning
+controller on CityEnv with static NPCs. We also perform an
+ablation study where we use Lp2 in Eqn. 6 instead of Lp3 in
+Eqn. 7 as loss function. The red curve in Fig. 4 (b) show that
+SABLAS is tolerant to large model errors while exhibiting a
+promising safety rate. In our previous experiments, the model
+error e = E[|| ˙s −˙snom||]/E[|| ˙s||] is always less than 0.2. We
+did not encounter any difﬁculty ﬁtting a nominal model with
+empirical error e ≤0.2. The orange curve in Fig. 4 (b) shows
+that if we use Lp2 in Eqn. 6, the trained controller will have a
+worse performance in terms of safety rate. This is because Lp2
+only uses the nominal dynamics to calculate the loss, without
+leveraging the real black-box dynamics.
+F. Discussion on Limitation
+The main limitation of the proposed approach is that it
+cannot guarantee the satisfaction of the CBF conditions in
+(2) in the entire state space. Even if we minimize L0, Ld
+and Lp3 to 0 during training, the CBF conditions may still
+be occasionally violated during testing. After all, the training
+samples are ﬁnite and cannot cover the continuous state space.
+If the testing distribution and training distribution are the
+same, one can leverage the Rademacher complexity to give
+an error bound that the CBF conditions are violated, as is in
+Appendix B of [17]. But if the testing distribution is different
+from training, it is still unclear to derive the generalization
+error of the CBF conditions. To train CBF and controller that
+provably satisfy the CBF conditions, one can also use veriﬁ-
+cation tools to ﬁnd the counterexamples in the state space that
+violates the CBF conditions and add those counterexamples
+to the training set [24], [23]. The process is ﬁnished when
+no more counterexample can be found. However, the time
+complexity of the veriﬁcation makes it not applicable for large
+and expressive neural networks. Also, the error between the
+nominal and real dynamics will have a negative impact on the
+safety performance. These limitations are left for future work.
+VI. CONCLUSION AND FUTURE WORKS
+We presented SABLAS, a general-purpose safe controller
+learning approach for black-box systems, which is supported
+by the theoretical guarantees from control barrier function
+theory, and at the same time is strengthened using a novel
+learning structure so it can directly learn the policies and bar-
+rier certiﬁcates for black-box dynamical systems. Simulation
+results show that SABLAS indeed provides a systematic way
+
+8
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED JANUARY, 2022
+of learning safe control policies with a great improvement over
+safe RL methods. For future works, we plan to study SABLAS
+on multi-agent systems, especially with adversarial players.

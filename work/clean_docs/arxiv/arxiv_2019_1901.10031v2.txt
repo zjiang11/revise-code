@@ -1,0 +1,1127 @@
+Lyapunov-based Safe Policy Optimization for Continuous Control
+Yinlam Chow 1 Oﬁr Nachum 2 Aleksandra Faust 2 Edgar Duenez-Guzman 1 Mohammad Ghavamzadeh 3
+Abstract
+We
+study
+continuous
+action
+reinforcement
+learning problems in which it is crucial that
+the agent interacts with the environment only
+through safe policies, i.e., policies that do not
+take the agent to undesirable situations.
+We
+formulate these problems as constrained Markov
+decision processes (CMDPs) and present safe
+policy optimization algorithms that are based
+on a Lyapunov approach to solve them.
+Our
+algorithms can use any standard policy gradient
+(PG) method, such as deep deterministic policy
+gradient (DDPG) or proximal policy optimization
+(PPO), to train a neural network policy, while
+guaranteeing near-constraint satisfaction for
+every policy update by projecting either the
+policy parameter or the action onto the set of
+feasible solutions induced by the state-dependent
+linearized Lyapunov constraints. Compared to
+the existing constrained PG algorithms, ours are
+more data efﬁcient as they are able to utilize
+both on-policy and off-policy data. Moreover,
+our action-projection algorithm often leads to
+less conservative policy updates and allows for
+natural integration into an end-to-end PG training
+pipeline. We evaluate our algorithms and compare
+them with the state-of-the-art baselines on several
+simulated (MuJoCo) tasks, as well as a real-world
+indoor robot navigation problem, demonstrating
+their effectiveness in terms of balancing perfor-
+mance and constraint satisfaction. Videos of the
+experiments can be found in the following link:
+https://drive.google.com/file/d/
+1pzuzFqWIE710bE2U6DmS59AfRzqK2Kek/
+view?usp=sharing
+1. Introduction
+The ﬁeld of reinforcement learning (RL) has witnessed
+tremendous success in many high-dimensional control prob-
+lems, including video games (Mnih et al., 2015), board
+games (Silver et al., 2016), robot locomotion (Lillicrap et al.,
+*Equal contribution
+1DeepMind 2Google Brain 3Facebook
+AI Research.
+Correspondence to:
+Yinlam Chow <yinlam-
+
+Technical Report, Submitted to ICML 2019. Copyright 2019 by
+the author(s).
+2016), manipulation (Levine et al., 2016; Kalashnikov et al.,
+2018), navigation (Faust et al., 2018), and obstacle avoid-
+ance (Chiang et al., 2019). In standard RL, the ultimate goal
+is to optimize the expected sum of rewards/costs, and the
+agent is free to explore any behavior as long as it leads to
+performance improvement. Although this freedom might
+be acceptable in many problems, including those involving
+simulated environments, and could expedite learning a good
+policy, it might be harmful in many other problems and
+could cause damage to the agent (robot) or to the environ-
+ment (plant or the people working nearby). In such domains,
+it is absolutely crucial that while the agent (RL algorithm)
+optimizes its long-term performance, it also maintains safe
+policies both during training and at convergence.
+A natural way to incorporate safety is via constraints. A stan-
+dard model for RL with constraints is constrained Markov
+decision process (CMDP) (Altman, 1999), where in addi-
+tion to its standard objective, the agent must satisfy con-
+straints on expectations of auxiliary costs. Although op-
+timal policies for ﬁnite CMDPs with known models can
+be obtained by linear programming (Altman, 1999), there
+are not many results for solving CMDPs when the model
+is unknown or the state and/or action spaces are large or
+inﬁnite. A common approach to solve CMDPs is to use
+the Lagrangian method (Altman, 1998; Geibel & Wysotzki,
+2005) that augments the original objective function with
+a penalty on constraint violation and computes the saddle-
+point of the constrained policy optimization via primal-dual
+methods (Chow et al., 2017). Although safety is ensured
+when the policy converges asymptotically, a major drawback
+of this approach is that it makes no guarantee with regards
+to the safety of the policies generated during training.
+A few algorithms have been recently proposed to solve
+CMDPs at scale, while remaining safety during training.
+One such algorithm is constrained policy optimization
+(CPO) (Achiam et al., 2017). CPO extends the trust-region
+policy optimization (TRPO) algorithm (Schulman et al.,
+2015a) to handle the constraints in a principled way and
+has shown promising empirical results in terms scalability,
+performance, and constraint satisfaction, both during train-
+ing and after convergence. Another class of algorithms of
+this sort is by Chow et al. (2018). These algorithms use
+the notion of Lyapunov functions that have a long history
+in control theory to analyze the stability of dynamical sys-
+tems (Khalil, 1996). Lyapunov functions have been used in
+RL to guarantee closed-loop stability of the agent (Perkins &
+arXiv:1901.10031v2  [cs.LG]  11 Feb 2019
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+Barto, 2002; Faust et al., 2014). They also have been used to
+guarantee that a model-based RL agent can be brought back
+to a “region of attraction” during exploration (Berkenkamp
+et al., 2017). Chow et al. (2018) use the theoretical proper-
+ties of the Lyapunov functions and propose safe approximate
+policy and value iteration algorithms. They prove theories
+for their algorithms, when the CMDP is ﬁnite and known,
+and empirically evaluate them when it is large and/or un-
+known. However, since their algorithms are value-function-
+based, applying them to continuous action problems is not
+straightforward, and was left as a future work.
+In this paper, we build on the problem formulation and the-
+oretical ﬁndings of the Lyapunov-based approach to solve
+CMDPs, and extend it to tackle continuous action problems
+that play an important role in control theory and robotics.
+We propose Lyapunov-based safe RL algorithms that can
+handle problems with large or inﬁnite action spaces, and
+return safe policies both during training and at convergence.
+To do so, there are two major difﬁculties which we resolve:
+1) the policy update becomes an optimization problem over
+the large or continuous action space (similar to standard
+MDPs with large actions), and 2) the policy update is a
+constrained optimization problem in which the (Lyapunov)
+constraints involve integration over the action space, and
+thus, it is often impossible to have them in closed-form.
+Since the number of Lyapunov constraints is equal to the
+number of states, the situation is even more challenging
+when the problem has a large or an inﬁnite state space. To
+address the ﬁrst difﬁculty, we switch from value-function-
+based to policy gradient (PG) and actor-critic algorithms.
+To address the second difﬁculty, we propose two approaches
+to solve our constrained policy optimization problem (a
+problem with inﬁnite constraints, each involving an inte-
+gral over the continuous action space) that can work with
+any standard on-policy (e.g., proximal policy optimization
+(PPO) Schulman et al. 2017) and off-policy (e.g., deep de-
+terministic policy gradient (DDPG) Lillicrap et al. 2015)
+PG algorithm. Our ﬁrst approach, which we call policy
+parameter projection or θ-projection, is a constrained op-
+timization method that combines PG with a projection of
+the policy parameters onto the set of feasible solutions in-
+duced by the Lyapunov constraints. Our second approach,
+which we call action projection or a-projection, uses the
+concept of a safety layer introduced by Dalal et al. (2018)
+to handle simple single-step constraints, extends this con-
+cept to general trajectory-based constraints, solves the con-
+strained policy optimization problem in closed-form using
+Lyapunov functions, and integrates this closed-form into
+the policy network via safety-layer augmentation. Since
+both approaches guarantee safety at every policy update,
+they manage to maintain safety throughout training (ignor-
+ing errors resulting from function approximation), ensuring
+that all intermediate policies are safe to be deployed. To
+prevent constraint violations due to function approximation
+and modeling errors, similar to CPO, we offer a safeguard
+policy update rule that decreases constraint cost and ensures
+near-constraint satisfaction.
+Our proposed algorithms have two main advantages over
+CPO. First, since CPO is closely connected to TRPO, it
+can only be trivially combined with PG algorithms that
+are regularized with relative entropy, such as PPO. This
+restricts CPO to on-policy PG algorithms. On the contrary,
+our algorithms can work with any on-policy (e.g., PPO) and
+off-policy (e.g., DDPG) PG algorithm. Having an off-policy
+implementation is beneﬁcial, since off-policy algorithms
+are potentially more data-efﬁcient, as they can use the data
+from the replay buffer. Second, while CPO is not a back-
+propagatable algorithm, due to the backtracking line-search
+procedure and the conjugate gradient iterations for comput-
+ing natural gradient in TRPO, our algorithms can be trained
+end-to-end, which is crucial for scalable and efﬁcient im-
+plementation (Hafner et al., 2017). In fact, we show in
+Section 3.1 that CPO (minus the line search) can be viewed
+as a special case of the on-policy version (PPO version)
+of our θ-projection algorithm, corresponding to a speciﬁc
+approximation of the constraints.
+We evaluate our algorithms and compare them with CPO
+and the Lagrangian method on several continuous control
+(MuJoCo) tasks and a real-world robot navigation problem,
+in which the robot must satisfy certain constraints, while
+minimizing its expected cumulative cost. Results show that
+our algorithms outperform the baselines in terms of bal-
+ancing the performance and constraint satisfaction (during
+training), and generalize better to new and more complex
+environments, including transfer to a real Fetch robot.
+2. Preliminaries
+We consider the RL problem in which the agent’s interaction
+with the environment is modeled as a Markov decision pro-
+cess (MDP). A MDP is a tuple (X, A, γ, c, P, x0), where
+X and A are the state and action spaces; γ ∈[0, 1) is a
+discounting factor; c(x, a) ∈[0, Cmax] is the immediate
+cost function; P(·|x, a) is the transition probability distribu-
+tion; and x0 ∈X is the initial state. Although we consider
+deterministic initial state and cost function, our results can
+be easily generalized to random initial states and costs. We
+model the RL problems in which there are constraints on the
+cumulative cost using CMDPs. The CMDP model extends
+MDP by introducing additional costs and the associated con-
+straints, and is deﬁned by (X, A, γ, c, P, x0, d, d0), where
+the ﬁrst six components are the same as in the unconstrained
+MDP; d(x) ∈[0, Dmax] is the (state-dependent) immediate
+constraint cost; and d0 ∈R≥0 is an upper-bound on the
+expected cumulative constraint cost.
+To formalize the optimization problem associated with
+CMDPs, let ∆be the set of Markovian stationary policies,
+i.e., ∆=
+
+π : X × A →[0, 1], P
+a π(a|x) = 1
+	
+. At
+each state x ∈X, we deﬁne the generic Bellman operator
+w.r.t. a policy π ∈∆and a cost function h as Tπ,h[V ](x) =
+P
+a π(a|x)[h(x, a)+γ P
+x′∈X P(x′|x, a)V (x′)]. Given a
+policy π ∈∆, we deﬁne the expected cumulative cost and
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+the safety constraint function (expected cumulative con-
+straint cost) as Cπ(x0) := E
+ P∞
+t=0 γtc(xt, at) | π, x0
+
+and Dπ(x0) := E
+ P∞
+t=0 γtd(xt) | π, x0
+
+. The safety con-
+straint is then deﬁned as Dπ(x0) ≤d0. The goal in CMDPs
+is to solve the constrained optimization problem
+π∗∈min
+π∈∆
+
+Cπ(x0) : Dπ(x0) ≤d0
+	
+.
+(1)
+It has been shown that if the feasibility set is non-empty,
+then there exists an optimal policy in the class of stationary
+Markovian policies ∆(Altman, 1999, Theorem 3.1).
+2.1. Policy Gradient Algorithms
+Policy gradient (PG) algorithms optimize a policy by com-
+puting a sample estimate of the gradient of the expected
+cumulative cost induced by the policy, and then updating
+the policy parameter in the gradient direction. In general,
+stochastic policies that give a probability distribution over
+actions are parameterized by a κ-dimensional vector θ, so
+the space of policies can be written as
+
+πθ, θ ∈Θ ⊂Rκ	
+.
+Since in this setting a policy π is uniquely deﬁned by its
+parameter θ, policy-dependent functions can be written as a
+function of θ or π interchangeably.
+Deep deterministic policy gradient (DDPG) (Lillicrap et al.,
+2015) and proximal policy optimization (PPO) (Schulman
+et al., 2017) are two PG algorithms that have recently gained
+popularity in solving continuous control problems. DDPG
+is an off-policy Q-learning style algorithm that jointly trains
+a deterministic policy πθ(x) and a Q-value approxima-
+tor Q(x, a; φ). The Q-value approximator is trained to
+ﬁt the true Q-value function and the deterministic policy
+is trained to optimize Q(x, πθ(x); φ) via chain-rule. The
+PPO algorithm we use is a penalty form of the trust region
+policy optimization (TRPO) algorithm (Schulman et al.,
+2015a) with an adaptive rule to tune the DKL penalty
+weight βk. PPO trains a policy πθ(x) by optimizing a
+loss function that consists of the standard policy gradi-
+ent objective and a penalty on the KL-divergence between
+the current θ and previous θ′ policies, i.e., DKL(θ, θ′) =
+E[P
+t γtDKL(πθ′(·|xt)||πθ(·|xt))|πθ′, x0].
+2.2. Lagrangian Method
+The Lagrangian method is a straightforward way to
+address the constraint Dπθ(x0)
+≤
+d0 in CMDPs.
+In this approach, we add the constraint costs d(x)
+to
+the
+task
+costs
+c(x, a)
+and
+transform
+the
+con-
+strained
+optimization
+problem
+to
+a
+penalty
+form,
+i.e., minθ∈Θ maxλ≥0 E
+P∞
+t=0 c(xt, at) + λd(xt)|πθ, x0
+
+−
+λd0. We then jointly optimizes θ and λ to ﬁnd a saddle-
+point of the penalized objective. The optimization of θ
+may be performed by any PG algorithm, such as DDPG
+or PPO, on the augmented cost c(x, a) + λd(x), while λ
+is optimized by stochastic gradient descent. As described
+in Section 1, although the Lagrangian approach is easy to
+implement (see Appendix B for the details), in practice, it
+often violates the constraints during training. While at each
+step during training, the objective encourages ﬁnding a safe
+solution, the current value of λ may lead to an unsafe policy.
+This is why the Lagrangian method may not be suitable for
+solving problems in which safety is crucial during training.
+2.3. Lyapunov Functions
+Since in this paper, we extend the Lyapunov-based approach
+to CMDPs to PG algorithms, we end this section by intro-
+ducing some terms and notations from Chow et al. (2018)
+that are important in developing our safe PG algorithms. We
+refer the reader to Appendix A for more details.
+We deﬁne a set of Lyapunov functions w.r.t. initial state
+x0 ∈X and constraint threshold d0 as LπB(x0, d0) =
+{L
+:
+X
+→
+R≥0
+|
+TπB,d[L](x)
+≤
+L(x),
+∀x
+∈
+X, L(x0) ≤d0}, where πB is a feasible policy of (1),
+i.e., DπB(x0) ≤d0. We refer to the constraints in this
+feasibility set as the Lyapunov constraints. For any ar-
+bitrary Lyapunov function L ∈LπB(x0, d0), we denote
+by FL =
+
+π ∈∆: Tπ,d[L](x) ≤L(x), ∀x ∈X
+	
+, the set
+of L-induced Markov stationary policies. The contraction
+property of Tπ,d, together with L(x0) ≤d0, imply that
+any L-induced policy is a feasible policy of (1). However,
+FL(x) does not always contain an optimal solution of (1),
+and thus, it is necessary to design a Lyapunov function that
+provides this guarantee. In other words, the main goal of the
+Lyapunov approach is to construct a Lyapunov function L ∈
+LπB(x0, d0), such that FL contains an optimal policy π∗,
+i.e., L(x) ≥Tπ∗,d[L](x). Chow et al. (2018) show in their
+Theorem 1 that without loss of optimality, the Lyapunov
+function that satisﬁes the above criterion can be expressed
+as LπB,ϵ(x) := E
+ P∞
+t=0 γt d(xt) + ϵ(xt)
+
+| πB, x
+
+, in
+which ϵ(x) ≥0 is a speciﬁc immediate auxiliary constraint
+cost that keeps track of the maximum constraint budget
+available for policy improvement (from πB to π∗). They
+propose ways to construct such ϵ, as well as an auxiliary
+constraint cost surrogate eϵ, which is a tight upper-bound
+on ϵ and can be computed more efﬁciently. They use this
+construction to propose their safe (approximate) policy and
+value iteration algorithms, in which the goal is to solve the
+following LP problem (Chow et al., 2018, Eq. 6) at each
+policy improvement step:
+π+(·|x) = arg min
+π∈∆
+Z
+a∈A
+QVπB (x, a)π(a|x), subject to (2)
+Z
+a∈A
+QLπB (x, a)
+ π(a|x) −πB(a|x)
+
+≤eϵ(x), ∀x ∈X,
+where VπB(x)
+=
+TπB,c[VπB](x) and QVπB (x, a)
+=
+c(x, a) + γ P
+x′ P(x′|x, a)VπB(x′) are the value func-
+tion and state-action value function (w.r.t. the cost
+function
+c),
+and
+QLπB (x, a)
+=
+d(x) + eϵ(x) +
+γ P
+x′ P(x′|x, a)LπB,eϵ(x′) is the Lyapunov function. Note
+that in an iterative policy optimization method, such as those
+we will present in this paper, the feasible policy πB can be
+set to the policy at the previous iteration.
+In (2), there are as many constraints as the number of states
+and each constraint involves an integral over the entire action
+space A. When the state space is large or continuous, even
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+if the integral in the constraint has a closed-form (e.g., when
+the number of actions is ﬁnite), solving LP (2) becomes nu-
+merically intractable. Since Chow et al. (2018) assume that
+the number of actions is ﬁnite, they focus on value-function-
+based RL algorithms and address the large state issue by
+policy distillation. However, in this paper, we are interested
+in problems with large action spaces. In our case, solving (2)
+will be even more challenging. To address this issue, in the
+next section, we ﬁrst switch from value-function-based al-
+gorithms to PG algorithms, then propose an optimization
+problem with Lyapunov constraints, analogous to (2), that is
+suitable for the PG setting, and ﬁnally present two methods
+to solve our proposed optimization problem efﬁciently.
+3. Safe Lyapunov-based Policy Gradient
+We now present our approach to solve CMDPs in a way that
+guarantees safety both at convergence and during training.
+Similar to Chow et al. (2018), our Lyapunov-based safe
+PG algorithms solve a constrained optimization problem
+analogous to (2). In particular, our algorithms consist of
+two components, a baseline PG algorithm, such as DDPG or
+PPO, and an effective method to solve the general Lyapunov-
+based policy optimization problem (the analogous to (2))
+θ+ = arg min
+θ∈Θ
+Cπθ(x0),
+subject to
+(3)
+Z
+a∈A
+ πθ(a|x) −πB(a|x)
+
+QLπB (x, a) da ≤eϵ(x), ∀x ∈X.
+In the next two sections, we present two approaches to
+solve (3) efﬁciently.
+We call these approaches 1) θ-
+projection, a constrained optimization method that combines
+PG with projecting the policy parameter θ onto the set of fea-
+sible solutions induced by the Lyapunov constraints, and 2)
+a-projection, in which we embed the Lyapunov constraints
+into the policy network via a safety layer.
+3.1. The θ-projection Approach
+In this section, we show how a safe Lyapunov-based
+PG algorithm can be derived using the θ-projection ap-
+proach.
+This machinery is based on the minorization-
+maximization technique in conservative PG (Kakade &
+Langford, 2002) and Taylor series expansion, and it
+can be applied to both on-policy and off-policy algo-
+rithms. Following Theorem 4.1 in Kakade & Langford
+(2002), we ﬁrst have the following bound for the cumu-
+lative cost: −βDKL(θ, θB) ≤Cπθ(x0) −CπθB (x0) −
+Ex∼µθB,x0,a∼πθ
+
+QVθB (x, a) −VθB(x)
+
+≤βDKL(θ, θB),
+where µθB,x0 is the γ-visiting distribution of πθB starting at
+the initial state x0, and β is the weight for the entropy-based
+regularization.1 Using the above result, we denote by
+C′
+πθ(x0; πθB) =CπθB (x0) + βDKL(θ, θB)+
+Ex∼µθB,x0,a∼πθ
+
+QVθB (x, a) −VθB(x)
+
+1Theorem 1 in Schulman et al. (2015a) provides a recipe for
+computing β such that the minorization-maximization inequality
+holds. But in practice, β is treated as a tunable hyper-parameter
+for entropy-based regularization.
+the surrogate cumulative cost. It has been shown in Eq. 10
+of Schulman et al. (2015a) that replacing the objective func-
+tion Cπθ(x0) with its surrogate C′
+πθ(x0; πθB) in solving (3)
+will still lead to policy improvement. In order to effec-
+tively compute the improved policy parameter θ+, one fur-
+ther approximates the function C′
+πθ(x0; πθB) with its Tay-
+lor series expansion (around θB). In particular, the term
+Ex∼µθB,x0,a∼πθ
+
+QVθB (x, a)−VθB(x)
+
+is approximated up
+to its ﬁrst order, and the term DKL(θ, θB) is approximated
+up to its second order. Altogether this allows us to replace
+the objective function in (3) with the following surrogate:
+⟨(θ −θB), ∇θEx∼µθB,x0,a∼πθ
+
+QVθB (x, a)
+
+⟩
++ β
+2 ⟨(θ −θB), ∇2
+θDKL(θ, θB) |θ=θB (θ −θB)⟩.
+Similarly, regarding the constraints in (3), we can use the
+Taylor series expansion (around θB) to approximate the
+LHS of the Lyapunov constraints as
+Z
+a∈A
+ πθ(a|x) −πB(a|x)
+
+QL(x, a) da ≈
+
+(θ −θB), ∇θEa∼πθ
+
+QLθB (x, a)
+
+|θ=θB
+
+.
+Using the above approximations, at each iteration, our safe
+PG algorithm updates the policy by solving the following
+constrained optimization problem with semi-inﬁnite dimen-
+sional Lyapunov constraints:
+θ+ ∈arg min
+θ∈Θ
+D
+(θ −θB), ∇θEx∼µθB,x0 ,a∼πθ
+
+QVθB (x, a)
+E
++ β
+2
+D
+(θ −θB), ∇2
+θDKL(θ, θB) |θ=θB (θ −θB)
+E
+,
+(4)
+s.t.
+D
+(θ −θB), ∇θEa∼πθ
+
+QLθB (x, a)
+
+|θ=θB
+E
+≤eϵ(x), ∀x ∈X.
+It can be seen that if the errors resulted from the neural
+network parameterizations of QVθB and QLθB , and the
+Taylor series expansions are small, then an algorithm that
+updates the policy parameter by solving (4) can ensure
+safety during training. However, the presence of inﬁnite-
+dimensional Lyapunov constraints makes solving (4) nu-
+merically intractable. A solution to this is to write the
+Lyapunov constraints in (4) (without loss of optimality) as
+maxx∈X ⟨(θ−θB), ∇θEa∼πθ[QLθB (x, a)] |θ=θB⟩−eϵ(x) ≤
+0. Since the above max-operator is non-differentiable, this
+may still lead to numerical instability in gradient descent al-
+gorithms. Similar to the surrogate constraint used in TRPO
+(to transform the max DKL constraint to an average DKL
+constraint, see Eq. 12 in Schulman et al. 2015a), a more
+numerically stable way is to approximate the Lyapunov
+constraint using the following average constraint surrogate:
+D
+(θ−θB), 1
+M
+M
+X
+i=1
+∇θEa∼πθ
+
+QLθB (xi, a)
+
+|θ=θB
+E
+≤1
+M
+M
+X
+i=1
+eϵ(xi),
+(5)
+where M is the number of on-policy sample trajectories of
+πθB. In practice, when the auxiliary constraint surrogate
+is chosen as eϵ = (1 −γ)
+ d0 −DπθB (x0)
+
+(see Appendix
+A for the justiﬁcation of this choice), the gradient term
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+in (5) can be simpliﬁed as ∇θEa∼πθ
+
+QLθB (xi, a)
+
+=
+∇θ
+R
+a πθ(a|x) ∇θ log πθ(a|x) QWθB (xi, a)da,
+where
+WθB(x)
+=
+TπB,d[WθB](x)
+and
+QWθB (x, a)
+=
+d(x) + γ P
+x′ P(x′|x, a)WθB(x′)
+are
+the
+constraint
+value function and constraint state-action value func-
+tion, respectively.
+Combining with the fact that eϵ is
+state independent, the above arguments further imply
+that the average constraint surrogate in (5) can be ap-
+proximated by the inequality DπθB (x0) +
+1
+1−γ ⟨(θ −
+θB), 1
+M
+PM
+i=1∇θEa∼πθ
+
+QWθB (xi, a)
+
+|θ=θB⟩≤d0, which
+is equivalent to the constraint used in CPO (see Sec. 6.1
+in Achiam et al. 2017). This shows a clear connection
+between CPO (minus the line search) and our Lyapunov-
+based PG with θ-projection. Algorithm 4 in Appendix E
+contains the pseudo-codes of our safe Lyapunov-based PG
+algorithms with θ-projection. We refer to the DDPG and
+PPO versions of this algorithm as SDDPG and SPPO.
+3.2. The a-projection Approach
+Note that the main characteristic of the Lyapunov approach
+is to break down a trajectory-based constraint into a se-
+quence of single-step state dependent constraints. However,
+when the state space X is inﬁnite, the feasibility set is char-
+acterized by inﬁnite dimensional constraints, and thus, it is
+actually counter-intuitive to directly enforce these Lyapunov
+constraints (as opposed to the original trajectory-based con-
+straint) into the policy update optimization. To address this
+issue, we leverage the idea of a safety layer from Dalal
+et al. (2018), that was applied to simple single-step con-
+straints, and propose a novel approach to embed the set of
+Lyapunov constraints into the policy network. This way, we
+reformulate the CMDP problem (1) as an unconstrained op-
+timization problem and optimize its policy parameter θ (of
+the augmented network) using any standard unconstrained
+PG algorithm. At every given state, the unconstrained action
+is ﬁrst computed and then passed through the safety layer,
+where a feasible action mapping is constructed by projecting
+the unconstrained actions onto the feasibility set w.r.t. the
+corresponding Lyapunov constraint. Therefore, safety dur-
+ing training w.r.t. the CMDP problem can be guaranteed by
+this constraint projection approach.
+For simplicity, we only describe how the action mapping
+(to the set of Lyapunov constraints) works for deterministic
+policies. Using identical machinery, this procedure can be
+extended to guarantee safety for stochastic policies. Recall
+from the policy improvement problem in (3) that the Lya-
+punov constraint is imposed at every state x ∈X. Given a
+baseline feasible policy πB = πθB, for any arbitrary policy
+parameter θ ∈Θ, we denote by Ξ(πB, θ) =
+
+θ′ ∈Θ :
+QLπB (x, πθ′(x)) −QLπB (x, πB(x)) ≤eϵ(x), ∀x ∈X
+	
+,
+the projection of θ onto the feasibility set induced by the
+Lyapunov constraints. One way to construct a feasible pol-
+icy πΞ(πB,θ) from a parameter θ is to solve the following
+ℓ2-projection problem at each state x ∈X:
+πΞ(πB,θ)(x) ∈arg min
+a
+1
+2∥a −πθ(x)∥2,
+(6)
+s.t. QLπB (x, a) −QLπB (x, πB(x)) ≤eϵ(x).
+We refer to this operation as the Lyapunov safety layer. In-
+tuitively, this projection perturbs the unconstrained action
+as little as possible in the Euclidean norm in order to satisfy
+the Lyapunov constraints. Since this projection guarantees
+safety (in the Lyapunov sense), if we have access to a closed
+form of the projection, we may insert it into the policy pa-
+rameterization and simply solve an unconstrained policy op-
+timization problem, i.e., θ+ ∈arg minθ∈Θ CπΞ(πB,θ)(x0),
+using any standard PG algorithm.
+To simplify the projection (6), we can approximate the LHS
+of the Lyapunov constraint with its ﬁrst-order Taylor series
+(w.r.t. action a = πB(x)). Thus, at any given state x ∈X,
+the safety layer solves the following projection problem:
+πΞ(πB,θ)(x) ∈arg min
+a
+1
+2∥a −πθ,unc(x)∥2,
+(7)
+s.t.
+ a −πB(x)
+⊤gLπB (x) ≤eϵ(x),
+where gLπB (x) := ∇aQLπB (x, a) |a=πB(x) is the action-
+gradient of the state-action Lyapunov function induced by
+the baseline action a = πB(x).
+Similar to the analysis of Section 3.1, if the auxiliary cost eϵ
+is state independent, one can readily ﬁnd gLπB (x) by com-
+puting the gradient of the constraint action-value function
+∇aQWθB (x, a) |a=πB(x). Note that the objective function
+in (7) is positive-deﬁnite and quadratic, and the constraint
+approximation is linear. Therefore, the solution of this (con-
+vex) projection problem can be effectively computed by
+an in-graph QP-solver, such as OPT-Net (Amos & Kolter,
+2017). Combined with the above projection procedure, this
+further implies that the CMDP problem can be effectively
+solved using an end-to-end PG training pipeline (such as
+DDPG or PPO). Furthermore, when the CMDP has a sin-
+gle constraint (and thus a single Lyapunov constraint), the
+policy πΞ(πB,θ)(x) has the following analytical solution.
+Proposition 1. At any given state x ∈X, the solution to
+the optimization problem (7) has the form πΞ(πB,θ)(x) =
+πθ(x) + λ∗(x) · gLπB (x), where
+λ∗(x) =
+ 
+gLπB (x)⊤ πθ(x) −πB(x)
+
+−eϵ(x)
+gLπB (x)⊤gLπB (x)
+!
++
+.
+The closed-form solution is essentially a linear projection
+of the unconstrained action πθ(x) to the Lyapunov-safe
+hyperplane characterized with slope gLπB (x) and intercept
+eϵ(x) = (1−γ)(d0 −DπB(x0)). Extending this closed-form
+solution to handle multiple constraints is possible, if there
+is at most one constraint active at a time (see Proposition 1
+in Dalal et al. 2018 for a similar extension).
+Without loss of generality, this projection step can also be
+extended to handle actions generated by stochastic policies
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+0
+10
+20
+30
+40
+50
+100
+50
+0
+50
+100
+(a) HalfCheetah-Safe, Return
+(b) HalfCheetah-Safe, Constraint
+0
+10
+20
+30
+40
+50
+0
+2
+4
+6
+8
+10
+12
+14
+(c) Point-Gather, Return
+(d) Point-Gather, Constraint
+0
+5
+10
+15
+20
+25
+30
+6
+4
+2
+0
+2
+4
+6
+8
+10
+12
+(e) Ant-Gather, Return
+(f) Ant-Gather, Constraint
+0
+10
+20
+30
+40
+50
+0
+200
+400
+600
+800
+000
+200
+400
+(g) Point-Circle, Return
+(h) Point-Circle, Constraint
+Figure 1. DDPG (red), DDPG-Lagrangian (cyan), SDDPG (blue),
+DDPG a-projection (green) on HalfCheetah-Safe and Point-Gather.
+Ours (SDDPG, SDDPG a-projection) perform stable and safe
+learning, although the dynamics and cost functions are not known,
+control actions are continuous, and deep function approximations
+are necessary. Unit of x-axis is in thousands of episodes. Shaded
+areas represent the 1-SD conﬁdence intervals (over 10 random
+seeds). The dashed purple line represents the constraint limit.
+with bounded ﬁrst and second order moments (Yu et al.,
+2009). For example when the policy is parameterized with
+a Gaussian distribution, then one needs to project both the
+mean and standard-deviation vector onto the Lyapunov-safe
+hyperplane, in order to obtain a feasible action probability.
+Algorithm 5 in Appendix E contains the pseudo-code of our
+safe Lyapunov-based PG algorithms with a-projection. We
+refer to the DDPG and PPO versions of this algorithm as
+SDDPG-modular and SPPO-modular, respectively.
+4. Experiments on MuJoCo Benchmarks
+We empirically evaluate the Lyapunov-based PG algorithms
+to assess: (i) the performance in terms of cost and safety
+during training, and (ii) robustness with respect to constraint
+violations in the presence of function approximation errors.
+To that end, we design three interpretable experiments in
+simulated robot locomotion continuous control tasks us-
+ing the MuJoCo simulator (Todorov et al., 2012). The
+tasks notions of safety are motivated by physical constraints:
+(i)HalfCheetah-Safe: The HalfCheetah agent is rewarded
+for running, but its speed is limited for stability and safety;
+(ii) Point-Circle: The Point agent is rewarded for running
+in a wide circle, but is constrained to stay within a safe
+region deﬁned by |x| ≤xlim (Achiam et al., 2017); (iii)
+Point-Gather & Ant-Gather: Point or Ant Gatherer agent, is
+rewarded for collecting target objects in a terrain map, while
+being constrained to avoid bombs (Achiam et al., 2017).
+Visualizations of these tasks as well as more details of the
+network architecture used in training the algorithms are
+given in Appendix C.
+We compare the presented methods with two state-of-the-art
+unconstrained reinforcement learning algorithms, DDPG
+(Lillicrap et al., 2015) and PPO (Schulman et al., 2017),
+and two constrained methods, Lagrangian approach with
+optimized hyper-parameters for fairness (Appendix B) and
+on-policy CPO algorithm (Achiam et al., 2017). The orig-
+inal CPO is based on TRPO (?). We use its PPO alterna-
+tive (which coincides with the SPPO algorithm derived in
+Section 4.1) as the safe RL baseline. SPPO preserves the
+essence of CPO by adding the ﬁrst order constraint and the
+relative entropy regularization to the policy optimization
+problem. The main difference between CPO and SPPO is
+that the latter does not perform backtracking line-search
+in learning rate. The decision to compare with SPPO in-
+stead of CPO is 1) to avoid the additional computational
+complexity of line-search in TRPO, while maintaining the
+performance of PG using the popular PPO algorithm, 2) to
+have a back-propagatable version of CPO, and 3) to have
+a fair comparison with other back-propagatable safe RL
+algorithms, such as the DDPG and safety layer counterparts.
+Comparisons with baselines: The Lyapunov-based PG al-
+gorithms are stable in learning and all methods converge
+to feasible policies with reasonable performance (Figures
+1a, 1c, 1e, 1g, 2a, 2c, 2e, 2g). In contrast, when examining
+the constraint violation (Figures 1b, 1d, 1f, 1h, 2b, 2d, 2f,
+2g), the Lyapunov-based PG algorithms quickly stabilize
+the constraint cost to be below the threshold, while the un-
+constrained DDPG and PPO agents violate the constraints in
+these environments, and the the Lagrangian approach tends
+to jiggle around the constrain threshold. Furthermore it is
+worth-noting that the Lagrangian approach can be sensitive
+to the initialization of the Lagrange multiplier λ0. If λ0 is
+too large, it would make policy updates overly conservative,
+while if λ0 is too small then constraint violation will be
+more pronounced. Without further knowledge about the
+environment, here we treat λ0 as a hyper-parameter and
+optimize it via grid-search. See Appendix C for more detail.
+a-projection vs.
+θ-projection:
+In many cases the a-
+projection (DDPG and PPO a-projections) converges faster
+and has lower constraint violation than its θ-projection coun-
+terpart (SDDPG, SPPO). This corroborates with the hypoth-
+esis that the a-projection approach is less conservative dur-
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+0
+20
+40
+60
+80
+100
+100
+50
+0
+50
+100
+(a) HalfCheetah-Safe, Return
+(b) HalfCheetah-Safe, Constraint
+0
+20
+40
+60
+80
+100
+0
+2
+4
+6
+8
+10
+12
+14
+(c) Point-Gather, Return
+(d) Point-Gather, Constraint
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+10
+8
+6
+4
+2
+0
+2
+4
+(e) Ant-Gather, Return
+(f) Ant-Gather, Constraint
+0
+20
+40
+60
+80
+100
+0
+200
+400
+600
+800
+000
+200
+400
+(g) Point-Circle, Return
+(h) Point-Circle, Constraint
+Figure 2. PPO (red), PPO-Lagrangian (cyan), SPPO (blue), SPPO
+a-projection (green) on HalfCheetah-Safe and Point-Gather. Ours
+(PPO, SPPO a-projection) perform stable and safe learning, when
+the dynamics and cost functions are not known, control actions are
+continuous, and deep function approximations are necessary.
+ing policy updates than the θ-projection approach (which is
+what CPO is based on) and generates smoother gradient up-
+dates during end-to-end training, resulting in more effective
+learning than CPO (θ-projection).
+DDPG vs. PPO: Finally, in most experiments (HalfCheetah,
+PointGather, and AntGather) the DDPG algorithms tend to
+have faster learning than the PPO counterpart, while the
+PPO algorithms have better control on constraint violations
+(which are able to satisfy lower constraint thresholds). The
+faster learning behavior is potentially due to the improved
+data-efﬁciency when using off-policy samples in PG up-
+dates, however the covariate-shift in off-policy data makes
+tight constraint control more challenging.
+5. Safe Policy Gradient for Robot Navigation
+We now evaluate the safe policy optimization on a real robot
+task – point to point (P2P) navigation (Chiang et al., 2019) –
+where a noisy differential drive robot with limited sensors
+(Fig. 3a), is required to navigate to a goal outside of its
+(a) Noisy Lidar observation in a corridor
+22x18 m
+Velocity and 
+orientation 
+
+Reward: Distance to reach goal
+Constraint: Total energy on collision
+Robot Agent                Training Environment: 22 x 18m
+Observations: Noisy 1D lidar + Goal + Robot orientation
+ Safe-DDPG
+Parameters, θ
+Policy, 
+𝛑θ(o, a) = P(a|o)
+Action
+Actor
+Critic
+(b) SDDPG for point to point task
+Figure 3. Robot navigation task details.
+visual ﬁeld of view while avoiding collisions with obstacles.
+The agent’s observations consist of the relative goal position,
+the relative goal velocity, and the Lidar measurements (Fig.
+3a). The actions are the linear and angular velocity vector
+at the robot’s center of the mass. The transition probability
+captures the noisy differential drive robot dynamics, whose
+exact formulation is not known to the robot. The robot
+must navigate to arbitrary goal positions collision-free and
+without memory of the workspace topology.
+Here the CMDP is non-discounting and has a ﬁxed horizon.
+We reward the agent for reaching the goal, which translates
+to an immediate cost that measures the relative distance to
+goal. To measure the impact energy of obstacle collisions,
+we impose an immediate constraint cost to account for the
+speed during collision, with a constraint threshold d0 that
+characterizes the agent’s maximum tolerable collision im-
+pact energy to any objects. This type of constraint allows the
+robot to touch the obstacle (such as walls) but prevent it from
+ramming into any objects. Under this CMDP framework
+(Fig. 3b), the main goal is to train a policy π∗that drives
+the robot along the shortest path to the goal and to limit
+the total impact energy of obstacle collisions. Furthermore,
+we note that due to limited data, in practice intermediate
+point-to-point policies are deployed on the real-world robot
+to collect more samples for further training. Therefore, guar-
+anteeing safety during training is critical in this application.
+Descriptions about the robot navigation problem, including
+training and evaluation environments are in Appendix D.
+Experimental Results: We evaluate the learning algorithms
+in terms of average mission success percentage and con-
+straint control. The task is successful if the robot reaches
+the goal before the constraint threshold (total energy of col-
+lision) is exhausted, and the success rate is averaged over
+100 evaluation episodes with random initialization. While
+all methods converge to policies with reasonable perfor-
+mance, Figure 4a and 4b shows that the Lyapunov-based
+PG algorithms have higher success rates, due to their robust
+abilities of controlling the total constraint, as well mini-
+mizing the distance to goal. Although the unconstrained
+method often yields a lower distance to goal, it violates the
+constraint more frequently and thus leads to a lower success
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+(a) Navigation, Mission Success %
+(b) Navigation, Constraint
+Figure 4. DDPG (red), DDPG-Lagrangian (cyan), SDDPG (blue),
+DDPG a-projection (green) on Robot Navigation. Ours (SDDPG,
+SDDPG a-projection) balance between reward and constraint learn-
+ing. Unit of x-axis is in thousands of steps. The shaded areas rep-
+resent the 1-SD conﬁdence intervals (over 50 runs). The dashed
+purple line represents the constraint limit.
+(a) Lagrangian policy
+(b) SDDPG (a-proj.)
+(c) SDDPG (a-proj.)
+on robot
+Figure 5. Navigation routes of two policies on a similar setup (a)
+and (b). Log of on-robot experiments (c). Larger version in Ap-
+pendix D and the video is available in the supplementary materials.
+rate. Furthermore, note that the Lagrangian approach is less
+robust to initialization of parameters, and therefore it gener-
+ally has lower success rate and higher variability than the
+Lyapunov-based methods. Unfortunately due to function
+approximation error and stochasticity of the problem, all the
+algorithms converged pre-maturely with constraints above
+the threshold. One reason is due to the constraint thresh-
+old (d0 = 100) being overly-conservative. In real-world
+problems guaranteeing constraint satisfaction is more chal-
+lenging than maximizing return, and that usually requires
+much more training data. Finally, Figures 5a and 5b illus-
+trate the navigation routes of two policies. On similar goal
+conﬁgurations, the Lagrangian method tends to zigzag and
+has more collisions, while the Lyapunov-based algorithm
+(SDDPG) chooses a safer path to reach the goal.
+Next, we evaluate how well the methods generalize to (i)
+longer trajectories, and (ii) new environments. P2P tasks are
+trained in a 22 by 18 meters environment (Fig. 7) with goals
+placed within 5 to 10 meters from the robot initial state,
+Figure 6 depicts the results evaluations, averaged over 100
+trials, on P2P tasks in a much larger evaluation environment
+(60 by 47 meters) with goals placed up to 15 meters away
+from the goal. The success rate of all methods degrades as
+the goals are further away (Fig. 6a), and the safety methods
+(a-projection – SL-DDPG, and θ-projection – SG-DDPG)
+outperform unconstrained and Lagrangian (DDPG and LA-
+DDPG) as the task becomes more difﬁcult. At the same
+time, our methods retain the lower constraints even when
+the task is difﬁcult (Fig. 6b).
+(a) Navigation, Mission Success %
+(b) Navigation, Constraint
+Figure 6. Robot navigation generalization over success rate (a) and
+constraint satisfaction (b) on a different environment.
+Finally, we deployed the SL-DDPG policy onto the real
+Fetch robot (Melonee Wise & Dymesich, 2016) in an every-
+day ofﬁce environment. Figure 5c shows the top down view
+of the robot log. Robot travelled a total of 500 meters to
+complete ﬁve repetitions of 12 tasks, each averaging about
+10 meters to the goal. The experiments included narrow
+corridors and people walking through the ofﬁce. The robot
+robustly avoids both static and dynamic (humans) obstacles
+coming into its path. We observed additional ”wobbling”
+effects, that was not present in simulation. This is likely
+due to the wheel slippage at the ﬂoor that the policy was
+not trained for. In several occasions when the robot could
+not ﬁnd a clear path, the policy instructed the robot to stay
+put instead of narrowly passing by the obstacle. This is
+precisely the safety behavior we want to achieve with the
+Lyapunov-based algorithms.
+6. Conclusions
+We formulated safe RL as a continuous action CMDP and
+developed two classes, θ-projection and a-projection, of
+policy optimization algorithms based on Lyapunov func-
+tions to learn safe policies with high expected cumulative
+return. We do so by combining both on and off-policy
+optimization (DDPG or PPO) with a critic that evaluates
+the policy and computes its corresponding Lyapunov func-
+tion. We evaluated our algorithms on four high-dimensional
+simulated robot locomotion tasks and compared them with
+several baselines. To demonstrate the effectiveness of the
+Lyapunov-based algorithms in solving real-world problems,
+we also apply these algorithms to indoor robot navigation,
+to ensure that the agent’s path is optimal and collision-free.
+Our results indicate that our Lyapunov-based algorithms 1)
+achieve safe learning, 2) have better data-efﬁciency, 3) can
+be more naturally integrated within the standard end-to-end
+differentiable policy gradient training pipeline, and 4) are
+scalable to tackle real-world problems. Our work is a step
+forward in deploying RL to real-world problems in which
+safety guarantees are of paramount importance. Future work
+includes 1) further exploration of Lyapunov function proper-
+ties to improve training stability and safety, 2) more efﬁcient
+
+Lyapunov-based Safe Policy Optimization for Continuous Control
+use of Lyapunov constraints in constrained policy optimiza-
+tion, and 3) extensions of the Lyapunov-approach to the
+model-based setting to better utilize the agent’s dynamics.

@@ -1,0 +1,1223 @@
+DDG-DA: Data Distribution Generation for Predictable Concept Drift Adaptation
+Wendi Li1,2*, Xiao Yang2*, Weiqing Liu2, Yingce Xia2, Jiang Bian2
+1 University of Wisconsin–Madison
+2 Microsoft Research
+
+Abstract
+In many real-world scenarios, we often deal with streaming
+data that is sequentially collected over time. Due to the non-
+stationary nature of the environment, the streaming data dis-
+tribution may change in unpredictable ways, which is known
+as concept drift. To handle concept drift, previous methods
+ﬁrst detect when/where the concept drift happens and then
+adapt models to ﬁt the distribution of the latest data. How-
+ever, there are still many cases that some underlying factors
+of environment evolution are predictable, making it possible
+to model the future concept drift trend of the streaming data,
+while such cases are not fully explored in previous work. In
+this paper, we propose a novel method DDG-DA, that can
+effectively forecast the evolution of data distribution and im-
+prove the performance of models. Speciﬁcally, we ﬁrst train
+a predictor to estimate the future data distribution, then lever-
+age it to generate training samples, and ﬁnally train models
+on the generated data. We conduct experiments on three real-
+world tasks (forecasting on stock price trend, electricity load
+and solar irradiance) and obtain signiﬁcant improvement on
+multiple widely-used models.
+1
+Introduction
+Machine learning algorithms have been widely applied to
+many real-world applications. One of the foundations of its
+success lies in assuming that the data is independent and
+identically distributed (brieﬂy, the i.i.d. assumption). How-
+ever, such an assumption is not always true for those learn-
+ing tasks under broadly existing scenarios with streaming
+data. In a typical learning task over streaming data, as shown
+in Figure 1, the data comes in a sequential mode, mean-
+ing that, at any timestamp t, the learning task can only
+observe the new coming information, i.e., Data(t), in ad-
+dition to historical ones, i.e., Data(t−1), Data(t−2), · · · ,
+Data(1). The goal of the task is usually to predict a certain
+target related to Data(t+1). Due to the non-stationary nature
+of the real-world environment, the data distribution could
+keep changing with continuous data streaming. Such a phe-
+nomenon/problem is called concept drift (Lu et al. 2018),
+where the basic assumption is that concept drift happens un-
+*These authors contributed equally.
+Copyright © 2022, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+Historical data
+Unseen data
+Figure 1: An example of concept drifts on streaming data.
+Triangle and circle represent two classes of data. Data comes
+like a stream. The data distribution changes over time.
+expectedly and it is unpredictable (Gama et al. 2014) for
+streaming data.
+To handle concept drift, previous studies usually leverage
+a two-step approach. Particularly, the ﬁrst step is detecting
+the occurrence of concept drift in the streaming data, fol-
+lowed by the second step, if concept drift does occur, which
+adapts the model with new coming data by training a new
+model purely with latest data or making an ensemble be-
+tween the new model with the current one, or ﬁne-tuning the
+current model with latest data (Lu et al. 2018). Most of these
+studies share the same assumption that the latest data con-
+tains more useful information w.r.t. the upcoming streaming
+data (Zhao, Cai, and Zhou 2020), and thus the detection of
+concept drift and following model adaptation is mainly ap-
+plied to the latest data.
+Therefore, existing methods for handling concept drift
+will detect concept drift on the latest arrived data Data(t)
+at timestamp t and adapt the forecasting model accord-
+ingly. The concept drift continues, and the adapted model
+on Data(t) will be used on unseen streaming data in the fu-
+ture (e.g., Data(t+1)). The previous model adaptation has
+a one-step delay to the concept drift of upcoming streaming
+data, which means a new concept drift has occurred between
+timestamp t and t + 1.
+Nevertheless, apart from detecting unexpectedly occurred
+concept drift, most of the existing studies paid less atten-
+tion to the scenarios that concept drift evolves in a gradual
+nonrandom way, which are in fact more common in stream-
+ing data. In Figure 2, we visualize the trace of concept drift
+in streaming data on three real-world tasks: forecasting on
+arXiv:2201.04038v2  [cs.LG]  5 Jun 2022
+
+(a) Stock price
+(b) Electricity load
+(c) Solar irradiance
+Figure 2: The visualization of concept drifts over time;
+though the concept drifts unexpectedly at some time, it drifts
+in a gradual nonrandom way most of the time. If the con-
+cept drifts are all sudden and do not follow any pattern, it
+may not be handled. However, in real-world scenarios, as
+we have shown, most concept drifts have a nonrandom trend
+rather than completely random. Even for some quick con-
+cept drifts in the scenarios, the case study in Appendix D
+illustrates that DDG-DA can handle them to some extent.
+stock price trend, electricity load and solar irradiance (de-
+tailed settings can be found in Appendix B). Each point in-
+dicates the data distribution (a.k.a. concept) represented by
+several features in a speciﬁc time period and is plotted on
+the ﬁgure with t-SNE (Van der Maaten and Hinton 2008).
+To better visualize the concept drift, we connect points con-
+tiguous in time to a line. From this ﬁgure, we can ﬁnd that
+unexpected drastic concept drifts only occur occasionally.
+On the other hand, most of the points that are contiguous
+in time are spatially adjacent to each other and form a non-
+random trend, demonstrating a strong indication that a large
+portion of concept drifts do evolve in a gradual nonrandom
+way. More importantly, such gradual nonrandom concept
+drifts are in some sense predictable since patterns exist in
+the concept drift trend.
+In this paper, we focus on predictable concept drift by
+forecasting the future data distribution. We propose a novel
+method DDG-DA1 to predict the data distribution of the
+next time-step sequentially, such that the model of the down-
+stream learning task can be trained on the data sample from
+the predicted distribution instead of catching up with the lat-
+est concept drift only. In practice, DDG-DA is designed as
+a dynamic data generator that can create sample data from
+previously observed data by following predicted future data
+distribution. In other words, DDG-DA generates the resam-
+pling probability of each historical data sample to construct
+the future data distribution in estimation. However, it is quite
+challenging in reality to train this data generator to maxi-
+mize the similarity between the predicted data distribution
+(represented by weighted resampling on historical data) and
+the ground truth future data distribution (represented by data
+in the future). To address this challenge, we propose to ﬁrst
+represent a data distribution by learning a model under this
+data distribution and then create a differentiable distribution
+distance to train the data generator. To verify the effective-
+ness of this approach, we also conduct a thorough theoretical
+1The code is available at https://github.com/Microsoft/qlib/tree/
+main/examples/benchmarks dynamic/DDG-DA
+analysis to prove the equivalence between traditional distri-
+bution distance, e.g. KL-divergence, and the proposed dif-
+ferentiable distribution distance (Appendix E). Furthermore,
+it is worth noting that our proposed new approach is quite
+efﬁcient since the distribution distance is differentiable and
+could be easy for optimization.
+Extensive experiments have been conducted on a va-
+riety of popular streaming data scenarios with multiple
+widely-used learning models to evaluate the effectiveness of
+our proposed method DDG-DA. Experimental results have
+shown that DDG-DA could enhance the performance of
+learning tasks in all these scenarios. Further analysis also
+reveals that DDG-DA can successfully predict the future
+data distribution in the circumstance of predictable concept
+drift. The predicted data distribution could beneﬁt the learn-
+ing task by proactively adapting to drifting concepts. In
+Appendix D.3, more detailed case studies are presented to
+demonstrate that DDG-DA has learned reasonable and ex-
+plainable knowledge. The code of DDG-DA is open-source
+on Github2.
+To sum up, our contributions include
+• To the best of our knowledge, DDG-DA is the ﬁrst
+method to model the evolving of data distribution in pre-
+dictable concept drift scenarios.
+• We create a differentiable distribution distance and pro-
+vide theoretical analysis to prove its equivalence to KL-
+divergence distribution distance.
+• We conduct extensive experiments on different real-
+world concept-drift-predictable scenarios to show that
+DDG-DA
+outperforms
+SOTA
+concept
+drift
+adap-
+tation
+methods
+by
+training
+models
+on
+resampled
+dataset(predicted data distribution).
+2
+Background and Related Work
+2.1
+Streaming Data and Concept Drift
+General Concept Drift
+In a large number of prac-
+tical scenarios, data are collected over time sequen-
+tially. The streaming data could be formalized as X =
+{x(1), x(2), . . . , x(T )}, where each element x(t) ∈Rm per-
+taining to X is an array of m values such that x(t) =
+{x1, x2, . . . , xm}. Each one of the m scalar values corre-
+sponds to the input variable observed at time t. Given a
+target sequence y = {y(1), y(2), . . . , y(T )} corresponding
+to X, algorithms are designed to build the model on his-
+torical data {(x(i), y(i))}t
+i=1 and forecast y on the future
+data D(t)
+test = {(x(i), y(i))}t+τ
+i=t+1 at each timestamp t. Data
+are drawn from a joint distribution (x(t), y(t)) ∼pt(x, y).
+The goal of algorithms is to build a model to make accurate
+predictions on unseen data D(t)
+test in the future. Due to the
+non-stationary nature of the environment, the joint distribu-
+tion pt is not static and changes over time, which is a well-
+known problem named concept drift. Formally, the concept
+drift between two timestamps t and t + 1 can be deﬁned as
+∃x : pt(x, y) ̸= pt+1(x, y).
+2https://github.com/Microsoft/qlib
+
+To improve the forecasting accuracy in the future, adapt-
+ing models to accommodate the evolving data distribution is
+necessary, which is the focused problem in this paper. It can
+be formalized as
+min
+f (t),f (t+1),...,f (t+τ)
+t+τ
+X
+i=t
+l
+
+f (i)(x(i)), y(i)
+where f (t) is learned from the training data in the previous
+stream D(t)
+train = {(x(i), y(i))}t−1
+i=t−k with window size k
+and will be adapted continuously to minimize the target met-
+ric loss in given time period [t, t+τ]. In many practical sce-
+narios, the streaming data come continually over time and
+might never end. Accommodating such an amount of data in
+memory will be infeasible. Therefore only a limited memory
+size k is allowed for an online setting. Data in the memory
+could be used for model adaptation.
+The Categorization of Concept Drifts and Our Scope
+The concept drifts can be categorized into different types
+when based on different criteria (Ren et al. 2018). (Webb
+et al. 2016) provides quantitative measures to categorize
+concept drifts. For instance, a concept drift can be either
+abrupt or gradual according to its changing speed. It can
+also be recurring or non-recurring depending on whether
+similar concepts have appeared in the data stream.
+Our method aims to handle scenarios with predictable
+concept drifts deﬁned in (Minku, White, and Yao 2009),
+which refers to the concept drifts that follow a pattern rather
+than completely random due to the seasonality and reoccur-
+ring contexts. As (Ren et al. 2018; ˇZliobait˙e, Pechenizkiy,
+and Gama 2016) state, the concept drifts in real-world evolv-
+ing data are often caused by changes of the hidden con-
+texts. Taking stock market, electricity load and solar irradi-
+ance as examples, because they are affected by some cyclic
+elements (time of the day, day of the week, month of the
+year, etc.), all of them have periodic, recurrent contexts.
+Abrupt drifts are rare due to nonrandom time-varying con-
+texts, which is shown in Figure 2. Such reasons give these
+concept drifts nonrandom trends rather than completely un-
+predictable ones. (Khamassi et al. 2018; Webb et al. 2016)
+demonstrate that some characteristics of concept drift can be
+measured and predicted.
+2.2
+Related Work
+Concept drift is a well-known topic in recent research works
+(Lu et al. 2018; Gama et al. 2014). The concept drift research
+works usually focus on streaming data, which come in a
+streaming form and are usually collected in non-stationary
+environments as Figure 1 shows. In the setting of most of the
+previous works, concept drift happens unexpectedly and is
+unpredictable. Without proactively predicting concept drift,
+these concept drift adaptation methods usually assume that
+the newer the data, the smaller the distribution gap between
+it and the future coming data. For instance, forgetting-based
+methods (Koychev 2000; Klinkenberg 2004) decay sam-
+ple weights according to their age. When new labelled data
+are available, the model adaptation method detects concept
+drift and optionally updates the current model. However, the
+DDG-DA           creates a new
+dataset from            by resampling
+Learning forecasting models on
+Forecasting on
+Figure 3: Training data (historical data) and test data (recent
+unseen data) change over time; the objective of each task is
+to improve the forecasting performance on test data.
+adapted new model will be used in the future, and the con-
+cept drift continues, which could make the model adaptation
+fail on unseen data in the future.
+Previous Methods to Handle Predictable Concept Drift
+Predictable concept drift is a scenario that the evolving con-
+cept drift is predictable to a certain extent before concept
+drift happens. In this scenario, methods are encouraged to
+predict and adapt to the new concept before drift happens.
+Proactively adapting models to the future joint distribution
+p(x, y) is the key to catching up with the concept evolution.
+Though most previous works assume that concept drift hap-
+pens unexpectedly and is unpredictable. There are still a few
+of them noticing that concept drift is predictable (Minku,
+White, and Yao 2009; Khamassi et al. 2018) under certain
+additional assumptions. Some case studies in real-world sce-
+narios demonstrate that the prediction of concept drift is pos-
+sible (Gama et al. 2014). (Yang, Wu, and Zhu 2005) try to
+deal with recurrent concept drifts. They use a small trig-
+ger window to detect the concept drift. Based on the small
+amount of data in the window, they build a model to predict
+the new concept after concept drift happens. It is designed
+for the traditional concept drift setting instead of predictable
+concept drift. DDG-DA tries to predict and adapt to the new
+concept before it happens. As far as we know, we are the
+ﬁrst method designed for predictable concept drift.
+Types of Methods to Handle Concept Drift
+According
+to the learning mode, methods can be categorized into re-
+training (Bach and Maloof 2008) and incremental adapta-
+tion (Alippi and Roveri 2008). Retraining methods will dis-
+card the current model and learn a new model on a limited
+size of data. Incremental adaptation methods will update the
+current model incrementally.
+From another perspective, most adaptive learning meth-
+ods are designed for speciﬁc models. In lots of practical fore-
+casting tasks, customized models will be designed speciﬁ-
+cally. These model-speciﬁc adaptive learning methods can
+only be carried out on speciﬁc forecasting models and are
+not general solutions, which narrows their practicability in
+real applications. Only a few adaptation methods are model-
+agnostic (Klinkenberg 2004; Koychev 2002, 2000; ˇZliobait˙e
+2009). DDG-DA focuses on predicting future data distribu-
+tion, which is a model-agnostic solution and can beneﬁt dif-
+ferent customized forecasting models on streaming data.
+
+3
+Method Design
+3.1
+Overall Design
+In streaming data, forecasting models are trained and
+adapted on historical data (training data D(t)
+train) and make
+predictions on unseen data (test data D(t)
+test) in the future.
+As shown in Figure 3, training data and test data change
+over time. For each timestamp t, the target of task(t) :=
+(D(t)
+train, D(t)
+test) is to learn a new model or adapt an exist-
+ing model on historical data D(t)
+train and minimize the loss
+on D(t)
+test. The data come continuously and might never end.
+Therefore models can leverage a limited size of D(t)
+train at
+timestamp t due to storage limitation. D(t)
+train is a dataset
+sampled from training data distribution p(t)
+train(x, y) and
+D(t)
+test from test data distribution p(t)
+test(x, y). The two distri-
+butions may be different (a.k.a. non-i.i.d.). This distribution
+gap is harmful to the forecasting accuracy on D(t)
+test when
+learning forecasting models on D(t)
+train with a distribution
+different from D(t)
+test.
+DDG-DA Learning
+To bridge this gap, DDG-DA (anno-
+tated as MΘ) tries to model the concept drift and predict the
+test data distribution p(t)
+test(x, y). The framework of DDG-
+DA is demonstrated in Figure 3. DDG-DA will act like a
+weighted data sampler to resample on D(t)
+train and create a
+new training dataset D(t)
+resam(Θ) whose data distribution is
+p(t)
+resam(x, y; Θ) (the distribution of the resampled dataset
+serves as the prediction of test distribution). DDG-DA tries
+to minimize difference between the p(t)
+resam(x, y; Θ) (the
+predicted data distribution) and the test data distribution
+p(t)
+test(x, y) (the ground truth data distribution).
+During the training process of DDG-DA, MΘ tries to
+learn patterns on task(t)
+∈
+Tasktrain by minimizing
+the data distribution distance between p(t)
+resam(x, y; Θ) and
+p(t)
+test(x, y). The knowledge learned by MΘ from Tasktrain
+is expected to transfer to new tasks from Tasktest.
+DDG-DA Forecast
+For a given task task(t) ∈Tasktest,
+the forecasting model is trained on dataset D(t)
+resam(Θ)
+under distribution p(t)
+resam(x, y; Θ) and forecasts on test
+data D(t)
+test. p(t)
+resam(x, y; Θ) is the distribution of resampled
+dataset D(t)
+resam(Θ) and the decisive factor to the trained
+forecasting model . With the help of DDG-DA, the distri-
+bution of D(t)
+resam(Θ) is more similar to D(t)
+test than D(t)
+train.
+The forecasting model’s performance on D(t)
+test is expected
+to be improved.
+A Practical Example
+To make our method more under-
+standable, we explain it with an example in the stock price
+trending forecasting scenario. To handle the concept drift
+in data, we retrain a new model each month (the rolling
+time interval is 1 month) based on two years of historical
+data (memory size is limited in an online setting). Each
+chance to retrain a new model to handle concept drift is
+called a task. For example, the ﬁrst task(2011/01) contains
+training data D(2011/01)
+train
+from 2009/01 to 2010/12 and a
+month of test data D(2011/01)
+test
+in 2011/01. DDG-DA creates
+D(2011/01)
+resam
+(Θ) based on D(2011/01)
+train
+to train a forecasting
+model to achieve better performance on D(2011/01)
+test
+. A new
+task is created in each month. These tasks are arranged in
+chronological order and separated at the beginning of 2016
+into Tasktrain (all D(t)
+test in Tasktrain range from 2011 to
+2015) and Tasktest (all D(t)
+test in Tasktest range from 2016
+to 2020). DDG-DA is trained on Tasktrain (learning to gen-
+erate D(t)
+resam(Θ) and minimize its distribution distance with
+D(t)
+test). Then DDG-DA is evaluated on Tasktest.
+3.2
+Model Design and Learning Process
+The overall model design and learning process of DDG-DA
+are shown in Figure 4. DDG-DA will build a set of tasks
+Tasktrain = {task(1), . . . , task(τ)} for training DDG-DA.
+The goal of the learned DDG-DA is to improve the perfor-
+mance on test tasks Tasktest := {task(τ+1), . . . , task(T )}.
+Feature Design
+DDG-DA is expected to guide the model
+learning process in each task(t) by forecasting test data dis-
+tribution. Historical data distribution information is useful
+to predict the target distribution of D(t)
+test and is input into
+DDG-DA. DDG-DA will learn concept drift patterns from
+training tasks and help to adapt models in test tasks.
+DDG-DA
+could
+be
+formalized
+as
+q(t)
+train
+=
+MΘ
+
+g(D(t)
+train)
+
+. g is a feature extractor. It takes D(t)
+train
+as input and outputs historical data distribution information.
+MΘ leverages the extracted information and output the
+resampling probabilities for samples in D(t)
+train. More details
+about the feature design are attached in Appendix C.
+Objective Function
+MΘ accepts the extracted feature
+and outputs the resampling probability on D(t)
+train. The re-
+sampled dataset’s joint distribution p(t)
+resam(x, y; Θ) serves
+as the distribution prediction. The learning target of DDG-
+DA is to minimize the difference between p(t)
+resam(x, y; Θ)
+and p(t)
+test(x, y). We focus on the most important concept
+drift subject p(y | x) (Kelly, Hand, and Adams 1999) and
+assume the difference between p(t)
+test(x) and p(t)
+resam(x; Θ)
+are minor. The loss of DDG-DA could be reformulated as
+LΘ(task(t))
+= DKL
+
+p(t)
+test(x, y) ∥p(t)
+resam(x, y; Θ)
+
+= Ex∼p(t)
+test(x)
+h
+DKL
+
+p(t)
+test(y | x) ∥p(t)
+resam(y | x; Θ)
+i (1)
+where DKL represents the Kullback–Leibler divergence.
+Normal distribution assumption is reasonable for un-
+known variables and often used in maximum likelihood es-
+timation (Goodfellow et al. 2016). Under this assumption,
+p(t)
+test(y | x) = N(y(t)
+test(x), σ) and p(t)
+resam(y | x) =
+N(y(t)
+resam(x; Θ), σ) where σ is a constant.
+
+loss
+loss
+Optimization
+Optimization by
+Gradient Descent
+Calculating loss for a single task
+Optimization
+objective
+loss
+Data resampling distribution
+Figure 4: The learning process of DDG-DA; DDG-DA MΘ learns to guide the training process of forecasting model by
+generating dataset D(t)
+resam(Θ) resampled from D(t)
+train with probability q(t)
+train. q(t)
+train is the resampling probability given by
+MΘ at timestamp t.
+The estimated expectation of Equation (1) on empirical
+sampled dataset can be reformulated (Theorem 1 in Ap-
+pendix E) as
+LΘ(task(t)) = 1
+2
+X
+(x,y)∈D(t)
+test
+
+y(t)
+resam(x; Θ) −y
+
+2
+(2)
+Summarizing losses of all the training tasks, the optimiza-
+tion target of DDG-DA could be formalized as
+Θ∗= arg min
+Θ
+X
+task(t)∈T asktrain
+LΘ
+
+task(t)
+(3)
+DDG-DA learns knowledge from Tasktrain and trans-
+fers it to unseen test tasks Tasktest. In each task, DDG-
+DA forecasts the future data distribution and generate
+dataset D(t)
+resam(Θ). Learning the forecasting models on
+D(t)
+resam(Θ), it adapts to upcoming streaming data better.
+Optimization
+In this section, we will introduce the op-
+timization process of (2). y(t)
+test(x) can be get directly
+from dataset D(t)
+test. To approximate y(t)
+resam(x; Θ), DDG-
+DA builds a regression proxy model yproxy(x; φ(t)) on
+D(t)
+resam(Θ). The optimization of the proxy model can be
+formulated as
+φ(t) = arg min
+φ
+X
+(x,y)∈D(t)
+resam(Θ)
+∥yproxy(x; φ) −y∥2
+(4)
+The learning process of DDG-DA becomes a bi-level opti-
+mization problem (Gould et al. 2016). The goal of the upper-
+level is Equation (2) and (3) (y(t)
+resam(x; Θ) is replaced by
+yproxy(x; φ(t))). The goal of the lower-level optimization
+Equation (4) can be regarded as a constraint.
+The overall bi-level optimization formulation of the DDG-DA is
+arg min
+Θ
+X
+task(t)∈T asktrain
+
+
+
+X
+(x,y)∈D(t)
+test
+∥yproxy(x; φ(t)) −y∥2
+
+
+
+s.t.
+φ(t) = arg min
+φ
+X
+(x′,y′)∈D(t)
+resam(Θ)
+∥yproxy(x′; φ) −y′∥2
+(5)
+where Θ is the parameters of DDG-DA.
+Many methods have been proposed to solve such a bi-
+level optimization problem (Gould et al. 2016). Some meth-
+ods based on hyperparameter optimization (Bengio 2000;
+Baydin and Pearlmutter 2014; Maclaurin, Duvenaud, and
+Adams 2015) are proposed. But they have limitations on ei-
+ther the network size or optimization accuracy.
+One of the key barriers that stop researchers from optimiz-
+ing Equation (2) directly is that the lower-level optimization
+Equation (4) usually can not be solved in a closed-form. The
+arg min operator is usually not differentiable, which makes
+some popular and efﬁcient optimization algorithms (such
+as gradient-descend-based methods) impossible in the opti-
+mization of the upper-level (Equation (3)). (Lee et al. 2019;
+Bertinetto et al. 2018) argue that (Bengio 2000; Baydin and
+Pearlmutter 2014) it is too costly and adopt algorithms with
+closed-form solutions in the lower-level optimization.
+DDG-DA adopts a model with a closed-form solution
+as y(t)
+proxy(x; φ(t)). We have many choices, such as logis-
+tic regression (Kleinbaum et al. 2002), kernel-based non-
+linear model (Liu 2003) and differentiable closed-form
+solvers (Bertinetto et al. 2018). We choose a linear model
+h(x; φ(t)) = xφ(t) for yproxy(x; φ(t)) for simplicity. The
+resampling probability q(t)
+train outputted by MΘ could be re-
+garded as sample weights when learning forecasting models.
+The loss function in Equation (4) could be formulated as
+lφ(t)
+
+D(t)
+resam(Θ)
+
+=1
+2
+X
+(x,y)∈D(t)
+train
+q(t)
+train
+
+xφ(t) −y
+2
+=1
+2
+
+X(t)φ(t) −y(t)⊤
+Q(t)(X(t)φ(t) −y(t))
+where X(t), y(t) and Q(t) represent the concatenated fea-
+tures, labels and resampling probability in D(t)
+train.
+It equals to a weighted linear regression problem (Ruppert
+and Wand 1994). φ(t) has a closed-form solution formalized
+
+Method
+Stock Price Trend Forecasting
+Electricity Load
+Solar Irradiance
+IC
+ICIR
+Ann.Ret.
+Sharpe
+MDD
+NMAE
+NRMSE
+Skill (%)
+MAE
+RMSE
+RR
+0.1178
+1.0658
+0.1749
+1.5105
+-0.2907
+0.1877
+0.9265
+7.3047
+21.7704
+48.0117
+GF-Lin
+0.1227
+1.0804
+0.1739
+1.4590
+-0.2690
+0.1843
+0.9109
+9.3503
+21.6878
+46.9522
+GF-Exp
+0.1234
+1.0613
+0.1854
+1.5906
+-0.2984
+0.1839
+0.9084
+9.2652
+21.6841
+46.9963
+ARF
+0.1240
+1.0657
+0.1994
+1.8844
+-0.1176
+0.1733
+0.8901
+8.6267
+21.0962
+47.3270
+Condor
+0.1273
+1.0635
+0.2157
+2.1105
+-0.1624
+———
+———
+———
+———
+———
+DDG-DA
+0.1312
+1.1299
+0.2565
+2.4063
+-0.1381
+0.1622
+0.8498
+12.1327
+18.7997
+45.5110
+Table 1: Performance comparison of the concept drifts adaptation methods.
+as
+φ(t) = arg min
+φ
+lφ(D(t)
+resam(Θ))
+=
+
+X(t)⊤
+Q(t)X(t)
+−1 
+X(t)⊤
+Q(t)y(t)
+(6)
+This closed-form solution to Equation (4) makes the dis-
+tribution distance differentiable. It makes the optimization
+objective of MΘ (Equation (3)) differentiable. Therefore,
+simple and efﬁcient optimization algorithms can be used to
+train DDG-DA (e.g. stochastic gradient descent).
+4
+Experiments
+In this section, we conduct experiments aiming to answer
+the following research questions:
+• Q1: Can DDG-DA outperform SOTA concept drift adap-
+tation methods in predictable concept drift scenarios?
+• Q2: Can DDG-DA generalize to different forecasting
+models in different scenarios?
+Further experiments are conducted in Appendix D. (1)
+Execution time of different methods; (2) Experiments in
+a concept-drift-unpredictable scenario to show our limita-
+tion; (3) Case studies of DDG-DA.
+4.1
+Experiment Setup
+The experiments are conducted on multiple datasets in three
+real-world popular scenarios (forecasting on stock price
+trend, electricity load and solar irradiance (Grinold and
+Kahn 2000; Pedro, Larson, and Coimbra 2019)). The de-
+tailed experiment settings are described in Appendix B.
+4.2
+Experiments Results
+Concept Drift Adaptation Methods Comparison (Q1)
+In this part, we compare DDG-DA with concept drift adapta-
+tion methods in different streaming data scenarios to answer
+Q1 that DDG-DA is the SOTA in concept-drift-predictable
+scenarios. We compared all methods both in classiﬁcation
+tasks (stock price trend forecasting) and regression tasks
+(electricity load forecasting, solar irradiance forecasting).
+The following methods are compared:
+• RR: Periodically Rolling Retrain model on data in mem-
+ory with equal weights. The memory only stores the most
+recent data in a limited window size.
+• GF-Lin (Koychev 2000): Based on RR, Gradual
+Forgetting by weights decaying Linearly by time.
+• GF-Exp (Klinkenberg 2004): Based on RR, Gradual
+Forgetting by weights decaying Exponentially by time.
+• ARF (Gomes et al. 2017, 2018): To deal with concept
+drift in the streaming data, Adaptive Random Forest does
+both internal and external concept drift detecting for each
+newly-created tree. The ﬁnal prediction will be obtained
+by its voting strategy.
+• Condor (Zhao, Cai, and Zhou 2020): Concept Drift via
+model Reuse is an ensemble method that handles non-
+stationary environments by both building new models
+and assigning weights for previous models.
+• DDG-DA: Our proposed method. DDG-DA is based on
+the setting of RR and generates a new dataset by resam-
+pling to retrain forecasting models.
+The compared methods can be categorized into two sets
+based on if they are model-agnostic. A model-agnostic so-
+lution can conduct concept drift adaptation without know-
+ing the details of the forecasting model. Therefore, a model-
+agnostic solution can be applied to any model, which could
+be designed speciﬁcally to target scenarios. RR, GF-Lin,
+GF-Exp, DDG-DA are model-agnostic. They use the same
+forecasting model and historical data memory size. ARF and
+Condor are not model-agnostic. Condor is designed for clas-
+siﬁcation, so it is not evaluated on the regression scenarios.
+We use the open-source models released in Qlib’s model
+zoo as our candidate forecasting model. On the validation
+data, LightGBM (Ke et al. 2017) performs best on aver-
+age. Therefore, we select LightGBM as our ﬁnal forecasting
+model. The same forecasting model is also adopted by RR,
+GF-Lin and GF-Exp. For the training process of DDG-DA,
+we create tasks according to Figure 3. The tasks are created
+in a more coarse-grained frequency to reduce the retrain-
+ing cost. The time interval of two adjacent tasks is 20 trad-
+ing days, 7 days and 7 days in stock price trend forecasting,
+electricity load forecasting and solar irradiance forecasting
+respectively. The test data still arrives in ﬁne granularity.
+The results are shown in Table 1. RR is the most naive
+method and simply periodically retrains models on data in
+memory. It performs worst among the compared methods.
+GF-Lin and GF-Exp assume that the recent data distribu-
+tion is more similar to the upcoming data. The weights of
+the most recent data are the highest and then decay by time.
+Such an assumption is valid in most datasets, and they out-
+
+Model
+Method
+Stock Price Trend Forecasting
+Electricity Load
+Solar Irradiance
+IC
+ICIR
+Ann.Ret.
+Sharpe
+MDD
+NMAE
+NRMSE
+Skill (%)
+MAE
+RMSE
+Linear
+RR
+0.0859
+0.7946
+0.1578
+1.4211
+-0.1721
+0.2080
+1.0207
+1.4133
+24.0910
+51.0632
+GF-Exp
+0.0863
+0.8018
+0.1632
+1.4373
+-0.1462
+0.2009
+0.9787
+1.3660
+24.1391
+51.0877
+DDG-DA
+0.0971
+0.9193
+0.1763
+1.5733
+-0.2130
+0.1973
+0.9702
+3.7378
+23.6901
+49.8592
+MLP
+RR
+0.1092
+0.8647
+0.1803
+1.5200
+-0.1797
+0.1928
+0.9682
+8.2145
+22.1285
+47.5405
+GF-Exp
+0.1091
+0.8654
+0.1889
+1.6121
+-0.1738
+0.1898
+0.9588
+8.4668
+21.6236
+47.4098
+DDG-DA
+0.1211
+0.9921
+0.2181
+1.9409
+-0.1864
+0.1882
+0.9537
+10.0341
+20.3422
+46.5980
+Light-
+GBM
+RR
+0.1178
+1.0658
+0.1749
+1.5105
+-0.2907
+0.1877
+0.9265
+7.3047
+21.7704
+48.0117
+GF-Exp
+0.1234
+1.0613
+0.1854
+1.5906
+-0.2984
+0.1839
+0.9084
+9.2652
+21.6841
+46.9963
+DDG-DA
+0.1312
+1.1299
+0.2565
+2.4063
+-0.1381
+0.1622
+0.8498
+12.1327
+18.7997
+45.5110
+Cat-
+Boost
+RR
+0.1047
+0.7088
+0.1782
+1.3246
+-0.2860
+0.1899
+0.9304
+9.9895
+20.5114
+46.6211
+GF-Exp
+0.1058
+0.7114
+0.1879
+1.3968
+-0.2414
+0.1884
+0.9291
+10.0384
+20.4882
+46.5958
+DDG-DA
+0.1173
+0.8386
+0.1908
+1.5787
+-0.2102
+0.1811
+0.8905
+10.4187
+20.3605
+46.3988
+LSTM
+RR
+0.1003
+0.7066
+0.1899
+1.8919
+-0.1264
+0.1494
+0.8386
+7.5990
+21.7948
+49.8593
+GF-Exp
+0.1008
+0.7110
+0.1928
+1.9238
+-0.1450
+0.1370
+0.7369
+11.4428
+18.5193
+45.8684
+DDG-DA
+0.1049
+0.7456
+0.2122
+2.0334
+-0.1745
+0.1298
+0.7290
+12.4905
+18.3295
+45.3257
+GRU
+RR
+0.1122
+0.9638
+0.1841
+1.6645
+-0.1740
+0.1352
+0.7090
+8.5684
+21.0297
+47.3572
+GF-Exp
+0.1182
+1.0007
+0.1872
+1.7588
+-0.1207
+0.1281
+0.6688
+8.4578
+21.0399
+47.4145
+DDG-DA
+0.1183
+1.0091
+0.1928
+1.7906
+-0.1182
+0.1250
+0.6588
+10.5918
+20.1891
+46.3092
+ALSTM
+RR
+0.1091
+0.8257
+0.1954
+1.6497
+-0.1399
+0.1334
+0.6965
+8.6276
+20.1666
+47.3265
+GF-Exp
+0.1100
+0.8360
+0.1985
+1.6684
+-0.1857
+0.1224
+0.6687
+9.5213
+21.1583
+46.8636
+DDG-DA
+0.1106
+0.8592
+0.2005
+1.7032
+-0.1101
+0.1217
+0.6310
+11.6311
+18.4822
+45.7709
+Table 2: Performance comparison of the model-agnostic solutions on various scenarios and forecasting models.
+perform RR in most scenarios. ARF and Condor are the most
+recent SOTA solutions for concept drift adaptation. They
+adapt models to the most recent data to handle concept drift.
+The forecasting performance is improved further. However,
+the concept drift continues after adapting models to the most
+recent historical data. The adapted model could fail again
+when the concept drifts in the future. DDG-DA solves such
+a problem and performs best. It models the trend of con-
+cept drifts and generates a new dataset whose distribution
+is closer to that in the future. Then the forecasting model is
+trained on the new dataset to handle the future concept drift.
+Generalization to Different Forecasting Models (Q2)
+To answer Q2, we conduct experiments to demonstrate that
+DDG-DA can enhance the performance of different forecast-
+ing models in different streaming data scenarios.
+The experiments involve different forecasting models.
+Therefore, we only compare model-agnostic concept drift
+adaptation solutions. For each forecasting model in each
+scenario, we compare DDG-DA with the RR and GF-Exp
+(GF-Exp is an advanced version of GF-Lin. So GF-Lin is
+not included). We conduct experiments on multiple popular
+forecasting models, including Linear (Graybill 1976), MLP
+(Gardner and Dorling 1998), LightGBM (Ke et al. 2017),
+CatBoost (Dorogush, Ershov, and Gulin 2018), LSTM
+(Hochreiter and Schmidhuber 1997) , GRU (Chung et al.
+2014) and ALSTM (Qin et al. 2017).
+As the results shown in Table 2, DDG-DA outperforms
+others in most cases. The results demonstrate that DDG-DA
+has captured the pattern of concept drift over time, which is
+the inherent nature of data and model-agnostic.
+Comparison of Optimization Methods
+DDG-DA con-
+verts the distribution distance optimization into a bi-level
+optimization by using a proxy model to model data dis-
+tribution p(t)
+resam(x, y; Θ). DDG-DA adapts a proxy model
+with a closed-form solution and convert Equation (4) into
+a differentiable operator. Therefore, the distribution dis-
+tance between D(t)
+resam(Θ) and D(t)
+test becomes differen-
+tiable. Besides this approach, hyperparameter-optimization-
+based methods are eligible for the bi-level optimization.
+Gradient-based Hyperparameter Optimization (GHO) is one
+of them and adopted by a lot of research works (Maclaurin,
+Duvenaud, and Adams 2015; Fan et al. 2020; Baydin et al.
+2017). Instead of requiring a proxy model with a closed-
+form solution, GHO only requires a differentiable proxy
+model. It initializes the proxy model’s parameters with φ(t),0
+and then update it to φ(t),k by k-steps with a gradient-based
+optimization method. At last, the φ(t),k serves as φ(t) in
+Equation (4) and makes Equation (2) differentiable.
+To compare different bi-level optimization algorithms, we
+create a new solution named DDG-DA† based on DDG-DA
+with GHO for optimization and an MLP proxy model. As
+the results show in Table 3, DDG-DA† outperforms RR,
+GF-Lin and GF-Exp. It demonstrates the effectiveness of
+our framework. However, it slightly underperforms DDG-
+DA. DDG-DA† leverages a model with a larger capacity to
+model data distribution. It alleviates the problem of underﬁt-
+ting p(t)
+resam(x, y; Θ). But the gap between the proxy model
+and the ground truth distribution still exists. The hyperpa-
+
+Method
+IC
+ICIR
+Ann.Ret.
+Sharpe
+MDD
+RR
+0.1092
+0.8647
+0.1803
+1.5200
+-0.1797
+GF-Lin
+0.1090
+0.8641
+0.1880
+1.5682
+-0.1656
+GF-Exp
+0.1091
+0.8654
+0.1889
+1.6121
+-0.1738
+DDG-DA†
+0.1204
+0.9732
+0.2065
+1.9243
+-0.1705
+DDG-DA
+0.1211
+0.9921
+0.2181
+1.9409
+-0.1864
+Table 3: Comparison of DDG-DA with different bi-level op-
+timization algorithms and proxy model; DDG-DA† is based
+on GHO and an MLP proxy model.
+rameter k is sensitive. A smaller k may result in underﬁt-
+ting. A greater k may waste computing resources and tend
+to overﬁt.
+5
+Conclusions and Future Works
+In this paper, we propose a novel concept drift adaptation
+method DDG-DA to adapt models to future data distribution
+rather than latest historical data only like previous works.
+DDG-DA models the concept drift and generates a new
+dataset by resampling historical data to guide the training
+process. Experiments on diverse scenarios demonstrate its
+effectiveness in concept-drift-predictable scenarios. More-
+over, we provided a detailed case study in Appendix D to
+show that the patterns learned by DDG-DA are reasonable
+and explainable.DDG-DA is model-agnostic,so it can be
+transferred to any forecasting model used for downstream
+tasks.
+Currently, DDG-DA is a static model that assumes the
+pattern of concept drift is static. This may not be valid in
+some scenarios (e.g. the concept drift frequency of Tasktest
+and Tasktrain may be different). For future work, we will
+improve DDG-DA to a dynamic one to solve this limitation.

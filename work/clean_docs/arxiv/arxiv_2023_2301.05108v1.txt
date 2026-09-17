@@ -1,0 +1,1493 @@
+Serenity: Library Based Python Code Analysis for
+Code Completion and Automated Machine Learning
+Wenting Zhao
+Department of Computer Science
+Cornell University
+
+Ibrahim Abdelaziz
+Thomas J. Watson Research Center
+IBM Research
+
+Julian Dolby
+Thomas J. Watson Research Center
+IBM Research
+
+Kavitha Srinivas
+Thomas J. Watson Research Center
+IBM Research
+
+Mossad Helali
+Department of Computer Science
+Concordia University
+
+Essam Mansour
+Department of Computer Science
+Concordia University
+
+Abstract
+Dynamically typed languages such as Python have become
+very popular1. Among other strengths, Python’s dynamic na-
+ture and its straightforward linking to native code have made
+it the de-facto language for many research areas such as Ar-
+tificial Intelligence. This flexibility, however, makes static
+analysis very hard. While creating a sound, or a soundy,
+analysis for Python remains an open problem, we present in
+this work Serenity, a framework for static analysis of Python
+that turns out to be sufficient for some tasks. The Serenity
+framework exploits two basic mechanisms: (a) reliance on
+dynamic dispatch at the core of language translation, and (b)
+extreme abstraction of libraries, to generate an abstraction
+of the code. We demonstrate the efficiency and usefulness of
+Serenity’s analysis in two applications: code completion and
+automated machine learning. In these two applications, we
+demonstrate that such analysis has a strong signal, and can
+be leveraged to establish state-of-the-art performance, com-
+parable to neural models and dynamic analysis respectively.
+Keywords: Python, Static Analysis, Code completion, Au-
+toML
+1
+Introduction
+Static analysis of Python is hard, due in part to features often
+regarded as strengths: its dynamic nature and its straightfor-
+ward linking to native code. Python is dynamically typed,
+so the aid static types provide to analysis of e.g. Java is not
+available. Python has a dynamic object structure; methods
+can be freely assigned and modified complicating resolving
+calls. Even basic constructs such as method calls and ob-
+ject creations can be ambiguous in the basic syntax. Beyond
+the language itself, many of the rich collection of Python li-
+braries, especially the math-heavy libraries used in machine
+learning, are implemented in native code, which makes analy-
+sis require cross-language support. For these reasons among
+1https://www.techrepublic.com/article/programming-languages-pythons-
+growth-is-absolutely-explosive-says-anaconda-ceo-and-not-slowing-
+down/
+others, to our knowledge, there is a lack of widely-used anal-
+ysis frameworks for Python, despite the value such analysis
+would have, for instance, for tools.
+However, while creating a sound, or a soundy, analysis for
+Python remains an open problem, we demonstrate Serenity2,
+a framework that turns out to be sufficient for some tasks.
+Beyond a relatively direct translation of Python Abstract
+Syntax Tree (AST) into a Control Flow Graph (CFG), Serenity
+exploits two basic mechanisms:
+1. Reliance on dynamic dispatch at the core of language
+translation. It is not possible, always, even to tell whether
+a construct is an object creation or a function call, and
+this is just one example. Our approach to such situ-
+ations is to turn them into dynamic dispatches over
+types representing constituent constructs. We detail
+how many subtleties of Python can be modeled in this
+way.
+2. Extreme abstraction of libraries. User code often makes
+heavy use of APIs to create and operate upon domain
+objects, such as arrays in numpy, but these objects are
+often fairly opaque to the user code. As such, we find
+it often suffices to treat libraries by just tracking the
+objects they create and methods called upon them. This
+is not, nor is it designed to be, soundy, let alone sound.
+We show however that this enables useful modeling
+of user code.
+We first discuss how Python is modeled and how the library
+abstraction still provides a useful analysis of user code. We
+then demonstrate that this analysis is useful where we fo-
+cus on two applications that depend on the outputs of such
+analysis:
+Code Completion is a core functionality expected in
+all IDEs, where the goal is to suggest methods and
+functions to call given prior code. We show how our
+dataflow analysis allows us to focus on relevant code
+at a point of completion, which when combined with
+2With apologies to Reinhold Niebuhr, "give us courage to model what must
+be modeled, serenity to accept what cannot be modeled, and the insight to
+know the one from the other."
+1
+arXiv:2301.05108v1  [cs.PL]  5 Jan 2023
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+local program context prior to the function call pro-
+duces much better code completion performance than
+the context alone.
+Automated Machine Learning which takes a given dataset
+in the form of a structured table, and creates an effec-
+tive machine learning pipeline to learn to predict some
+columns based on other columns. Prior approaches
+have been based on dynamic analysis, and we show
+static analysis does just as well. Static analysis is more
+practical, as actually running these pipelines is an ardu-
+ous and expensive task; and one can mine large open
+repositories to populate such databases using analysis.
+In the rest of the paper, we first describe Serenity’s tech-
+niques for modeling Python based on a running example
+(Sections 2 and 3). We then validate our analysis with two
+applications in code completion (Section 4) and automated
+machine learning (AutoML) (Section 5). We finally survey
+related work in Section 6 and conclude in Section 7.
+2
+A Running Example
+Figure 1 shows the running example for this paper, a snip-
+pet of Python code adapted from the multi_class_svm.py
+script of ETH150K [35] benchmark. Our modification (lines
+1 to 10) is to add some debugging options to illustrate com-
+plexities in Python. The variable fitit is assigned one of
+two functions depending on debug_level: either a closure
+or a function with an added assertion. The code loads a digits
+dataset (line 20), reads specific fields of the dataset (line 21),
+manipulates the dataset (line 22), splits the data into train
+and test splits (line 23), and finally creates X_train_bias
+(line 26. The code then creates machine learning models
+FrankWolfeSSVM (line 42) and LinearSVC (line 72). The code
+then calls them: a fitit call on a LinearSVC (line 74) takes
+the model (line 26), and fitit is called on FrankWolfeSVC
+with X_train_bias (line 79). Note that the call to the con-
+structor FrankWolfeSSVM is on line 42, and the fitit call
+on the object is on line 79, reflecting a property of most code
+- it is non-local.
+3
+Analysis
+3.1
+Background: call graph framework
+Grove et al. [18] provide a framework for expressing call
+graph algorithms for object-oriented languages. It encapsu-
+lates the bulk of the algorithm, parameterizing the algorithms
+with functions that determine how to add context sensitivity.
+The details of the framework are beyond the scope of this
+paper, but we depend on two details:
+• First, we will rely later on something called the Proce-
+dure Key Selection Function (PKS), which is essentially
+a way to specify when called functions should be ana-
+lyzed in a context-sensitive manner.
+• Second, the framework distinguishes between function
+call sites and object creation sites, which, as we shall
+1
+debug_level = 3
+2
+3
+if debug_level > 5:
+4
+def fd(model, test, train):
+5
+assert len(test) < 500
+6
+model.fit(train, test)
+7
+fitit = fd
+8
+9
+else:
+10
+fitit = lambda model, test, train:
+model.fit(train, test)
+↩→
+11
+15
+from sklearn.svm import LinearSVC
+16
+17
+from pystruct.models import MultiClassClf
+18
+from pystruct.learners import (NSlackSSVM,
+OneSlackSSVM, SubgradientSSVM,
+FrankWolfeSSVM)
+↩→
+↩→
+19
+20
+digits = load_digits()
+21
+X, y = digits.data, digits.target
+22
+X = X / 16.
+23
+X_train, X_test, y_train, y_test =
+train_test_split(X, y)
+↩→
+24
+25
+# we add a constant 1 feature for the bias
+26
+X_train_bias = np.hstack([X_train,
+np.ones((X_train.shape[0], 1))])
+↩→
+41
+42
+fw_bc_svm = FrankWolfeSSVM(model, C=.1,
+max_iter=50)
+↩→
+71
+72
+libsvm =
+LinearSVC(multi_class='crammer_singer',
+C=.1)
+↩→
+↩→
+73
+start = time()
+74
+fitit(libsvm, X_train, y_train)
+75
+time_libsvm = time() - start
+76
+print("Score with sklearn and libsvm: %f
+(took %f seconds)" %
+(libsvm.score(X_test, y_test),
+time_libsvm))
+↩→
+↩→
+↩→
+77
+78
+start = time()
+79
+fitit(fw_bc_svm, X_train_bias, y_train)
+Figure 1. A Running example
+see in Figure 3, is not possible in general in Python.
+Hence, we combine the two sets into a single one.
+The framework paper defines relevant program features
+at the top of page 694, which we excerpt here in Figure 2.
+We need two minor changes:
+InstVariables is taken to be the set of strings possibly
+used as field names, rather than a set of declared field
+names, which it is in the original framework. While
+2
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+field names can be defined in Python, this is entirely
+optional so we ignore such definitions.
+NewSites becomes the same as the set CallSites to effect
+the second item above; that is, there is one set that
+combines all possible call sites and creation sites. This
+represents the fact that every site can potentially see
+both classes and functions.
+Class all class declarations in the program
+InstVariable all instance variable declara-
+tions of the program
+Procedure all procedure declarations of the
+program
+Variable all variable names used in the pro-
+gram
+CallSite all call sites in the program
+NewSite all new sites in the program
+LoadSite all loads of instance variables in
+the program
+StoreSite all stores to instance variables in
+the program
+Figure 2. Program features from [18]
+3.2
+Language modeling
+Figure 3 illustrates the kind of dynamism with which anal-
+ysis of Python must contend, in this case 5 different options
+for the meaning of X() on line 45 based on the value supplied
+as sys.argv[1] and sometimes sys.argv[2]:
+class1 class X (line 4) defines an ordinary class named
+X, of which line 45 creates an instance.
+class2 class X (line 11) defines a class named X that
+redefines the new operator, so line 45 just returns 0.
+def1 def X (line 16) defines a function named X, and
+calling it at line 45 returns 1.
+def2 X = lambda. . . (line 20) creates a closure and
+assigns it to X; calling the closure at line 45 returns 2.
+import The module X (line 23) overrides default module
+behavior to become callable and return 3 at line 45.
+method static X (line 32) is assigned the static method
+s of class X (line 28) which returns 5 at line 45.
+method instance X (line 41) gets a bound instance method
+(i.e. a closure over y) i of class X (list 35), returning 4
+at line 45).
+Note that all of these definitions of X can flow to the same call
+at line 45, so there is literally no syntactic distinction between
+different kinds of allocations, calls, and even modules in some
+cases. And class and function names are all first class. Thus
+analysis must handle these basic operations in a dynamic
+manner, unlike e.g. Java, where calls, allocations and imports
+have clear syntactic distinctions. Note further that even basic
+method calls require closures to handle line 41.
+1
+import sys
+2
+3
+if sys.argv[1] == "class1" or sys.argv[1] == "inst":
+4
+class X:
+5
+pass
+6
+7
+if sys.argv[1] == "inst":
+8
+X = X()
+9
+10
+elif sys.argv[1] == "class2":
+11
+class X:
+12
+def __new__(*args):
+13
+return 0
+14
+15
+elif sys.argv[1] == "def1":
+16
+def X():
+17
+return 1
+18
+19
+elif sys.argv[1] == "def2":
+20
+X = lambda: 2
+21
+22
+elif sys.argv[1] == "import":
+23
+import X
+24
+25
+elif sys.argv[1] == "method":
+26
+27
+if sys.argv[2] == "static":
+28
+class X:
+29
+def s():
+30
+return 5
+31
+32
+X = X.s
+33
+34
+elif sys.argv[2] == "instance":
+35
+class X:
+36
+v = 4
+37
+def i(self):
+38
+return self.v
+39
+40
+y = X()
+41
+X = y.i
+42
+43
+44
+print(str(X))
+45
+print(str(X()))
+Figure 3. Dynamic code examples
+The X() at line 45 is a call on X, and this allows us to
+use standard dynamic dispatch to model all of this behavior,
+using synthetic "methods" where needed to handle language
+semantics. We will use a similar "dispatch" at field accesses
+to handle the difference between class and instance fields,
+which again can only be known from the object accessed. We
+shall make use of these indirections to define our framework
+model in Section 3.3.
+3
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+We adopt the terminology of Grove et al. [18] to present
+our work as extensions to standard object-oriented call graph
+construction. To fit our dynamic Python context, we make
+a few changes to the core definitions of that work. These
+changes reflect that Python does not require that fields be
+declared in order to be used, and it makes no syntactic dis-
+tinction between calls and allocations. Furthermore, as is
+standard for representing first-class entities in an object-
+oriented framework, we have one class for each first-class
+entity. As Figure 3 shows, classes, functions, methods and
+modules are all first-class, so our set of classes for analysis
+includes the following:
+𝐶𝑐𝑙𝑎𝑠𝑠a class representing program class C
+𝐶𝑖𝑛𝑠𝑡a class representing instances of class C
+𝑀𝑖𝑛𝑠𝑡a class representing instances of module M
+𝐷𝑖𝑛𝑠𝑡a class representing instances of function D
+𝑆𝑖𝑛𝑠𝑡a class representing the instance of script S
+Now most of the irregularities of Python calls and creations
+are handled by treating every call site as a CallSite for each
+receiver type ∗𝑖𝑛𝑠𝑡and as a NewSite for every receiver type
+∗𝑐𝑙𝑎𝑠𝑠. The site on line 45 in Figure 3 would have some types
+handled by each mechanism. Fields are also handled seam-
+lessly: on line 32, X is a 𝐶𝑐𝑙𝑎𝑠𝑠, and on line 41 X is a 𝐶𝑖𝑛𝑠𝑡, so
+static and instance state are handled by making static fields
+be instance fields of the class object.
+Call graph construction starts with a root stub that creates
+an instance of the main script 𝑆𝑖𝑛𝑠𝑡and calls it.
+3.3
+Framework modeling
+In many situations, it is difficult or impossible to find actual
+code for Python imports: there is no fixed relationship be-
+tween names in import statements and locations of actually
+source code. Even if there were, the structure of Python li-
+braries is such that large amounts of the code is native and
+hence a Python analysis framework is not applicable. Even
+if it were possible to find Python code, many libraries are
+large enough to make precise analysis challenging. In our
+case, we are interested in the behavior of application code
+rather than library internals, so we minimize these issues by
+largely not analyzing framework code.
+Our model, called Turtles3, abstracts Python frameworks
+to capture how the framework interacts with user code and
+to ignore all of its internal details. Specifically, we model
+four aspects, all using the indirections of Section 3.2:
+1. We model import statements as returning a new frame-
+work, denoted by the name of the imported module.
+The framework is an opaque object with no function-
+ality beyond implementing the model.
+2. Calls to framework functions and methods typically
+return something, which is then possibly used by the
+user code. We model every call to the framework as
+3from "turtles all the way down". This phrase is of unknown origin, see
+https://en.wikipedia.org/wiki/Turtles_all_the_way_down
+returning a new object from it; this model is transitive,
+so calls on those objects return further new objects
+from the framework. We label these objects with the
+path by which they are accessed.
+3. Accesses to fields of framework objects have little
+meaning in our model since we do not model the frame-
+work state at all. However, user code typically expects
+that a field access return something, so we model all
+such field accesses as returning the container object.
+4. Arguments to turtle methods are mostly ignored, since
+we do not model what the framework does to them;
+however, sometimes functions are passed as parame-
+ters, and we assume that the framework might call it.
+Since we do not model internal framework state, the
+model invokes callbacks from where they are passed
+as arguments.
+The framework of Grove et al. [18] provides the customiza-
+tion support needed to implement this model. We start by
+introducing a new type of class, 𝑇𝑝𝑎𝑡ℎ, that represents a tur-
+tle, i.e. an opaque model object. Item 1 is implemented by
+modeling import M statements as a call to a synthetic import
+procedure with M as its argument. This call is modeled as
+returning a 𝑇𝑀. Item 2 is implemented as a Procedure Key
+Selection Function (PKS) which takes the receiver of a type
+𝑇𝑝𝑎𝑡ℎand the name 𝑛of the called procedure and returns a
+new turtle of 𝑇𝑝𝑎𝑡ℎ.𝑛. Item 3 is implemented by simply re-
+turning self when reading any field of any 𝑇𝑝𝑎𝑡ℎtype. Item 4
+is implemented as a PKS that generates calls for every argu-
+ment that is of a function type (this is not illustrated in our
+example).
+3.4
+Inheritance from Turtles
+One wrinkle in our data is that application classes often
+inherit from turtle classes, meaning that method calls on
+self should logically be turtle methods when the method
+read is never assigned. That is, if a read of self is to a field
+or method that is never assigned and the class inherits from
+a turtle, the read should return a new turtle object to capture
+unknown superclass behavior. However, this is tricky to do
+because, since methods and fields can be assigned anywhere
+in the code, it is not in general possible to know if one will not
+be assigned until analysis terminates. What we need to do
+is record such reads and, when analysis terminates, process
+them as turtle reads and restart analysis. This restarting itself
+may need to be repeated, since reading one turtle could make
+more code reachable.
+3.5
+Analysis of running example
+When this analysis is applied to the running example (Fig-
+ure 1), the result is the dataflow graph shown in Figure 4. To
+illustrate our framework model, observe the import call of
+LinearSVC on line 15; as an import, this returns an object of
+type 𝐿𝑖𝑛𝑒𝑎𝑟𝑆𝑉𝐶𝑖𝑛𝑠𝑡, that is, an instance of the module. When
+4
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+load_digits
+digits.data
+digits.target
+X
+y
+X/16
+train_test_split
+X_train
+X_test
+y_train
+y_test
+hstack
+fit (fd)
+fit (fd)
+LinearSVC
+FrankWolfeSSVM
+Invocations
+arg 0, flow
+arg > 0
+Reads
+fit (lambda)
+fit (lambda)
+Figure 4. Dataflow graph for the running example
+this is called (line 72), it returns a turtle of type 𝑇𝐿𝑖𝑛𝑒𝑎𝑟𝑆𝑉𝐶,
+illustrated by the green node labeled LinearSVC. When fit
+is called on this object in the fitit functions (line 74),
+item 2 means it returns a derived turtle of type𝑇𝐿𝑖𝑛𝑒𝑎𝑟𝑆𝑉𝐶.𝑓𝑖𝑡,
+shown as a green node labeled fit. Since fit is called on
+LinearSVC, a black data flow edge connects them. On the
+other hand, the other non-self arguments to fit are shown
+with red arrows. Other turtle functions are shown similarly:
+load_digits, train_test_split, hstack, FrankWolfeSSVM.
+Note that analysis has no idea what these functions do, just
+that they pass data. Note that fitit is a variable holding one
+of two first-class functions, and it is called for both of the ML
+models created. To get the precise results shown in Figure 4
+requires analysis infrastructure that handles first-class func-
+tions and also does context-sensitive analysis. In particular,
+the model objects and the data flow to both the normal and
+debugging functions assigned to fit, since both potentially
+flow to fitit. In the figure, the nodes are distinguished with
+labels of the function in which they occur.
+Other nodes in Figure 4 represent local dataflow. The top-
+most two blue nodes represent reads of the data and target
+fields of data, so they have edges from the load_digits call
+and edges to their respective variables X and y. X is scaled
+by 16, shown by the nodes labeled X/16. X/16 and y then
+flow to train_test_split with red edges since they are
+arguments.
+This graph focuses on data flow, which captures patterns
+of how the various turtle APIs are used across programs.
+This allows us to learn patterns that enable our applications.
+3.6
+Implementation
+Our analysis is implemented using WALA and its support
+for both Python 2 and Python 3 using the Jython system.
+WALA is built to be extensible, and we used several features
+to ease our implementation work.
+The main extension is for handling turtles. For item 1, we
+override the model function that handles import to return a
+synthetic object with a turtle type named for the given mod-
+ule. For item 2, we override the selection of called methods
+for turtle classes so that any call goes to a synthetic method
+that creates and returns a turtle with the appropriate ex-
+tended turtle name. For item 2, this synthetic method mostly
+ignores its arguments, except generating a call to each one to
+handle callbacks. For item 3, we override the code handling
+field reads to simply return the container if it is of turtle
+type.
+The other configuration is to add aggressive context sen-
+sitivity for all turtle types. Since the synthetic methods are
+trivial anyway, it is cheap to ensure that every call site is
+analyzed separately.
+4
+Code Completion Application
+The core research question we ask is how useful Serenity’s
+analysis is and whether it can help other applications, de-
+spite the challenges in modeling dynamic languages such as
+Python accurately. As a first application, we examine a code
+completion use case, which we cover below in detail. By code
+completion, we refer to the problem where, when given a
+snippet of a program, the problem is to predict a function
+call, analogous to what an IDE does for method suggestions.
+We do not refer to code generation given natural language
+descriptions of code requirements, as in the Codex model
+that powers GitHub Co-Pilot [8] or even models that gener-
+ate entire functions in a generative style based on function
+signatures or snippets of code, such as CodeT5 [41]. Our
+observation is that for code completion, the analysis require-
+ment is that the methods be callable from a specific type, and
+so analysis for code completion is focused on detecting the
+types of objects. For languages such as Python, type infer-
+ence is hard, but our hypothesis is that code completion can
+benefit significantly from the data flow analysis that Serenity
+produces, simply because data flow can provide a focused
+context for code completion.
+Recently, there have been a plethora of neural models of
+code such as [13], [19], [22], [41] trained with the objective
+of either predicting randomly masked tokens in code, or
+predicting the very next token, which one might assume is
+consistent with the task of code completion. Our research
+question is whether one can leverage the extensive training
+of these models on millions of programs to perform code
+completion. Specifically, we asked whether data flow analy-
+sis provided by Serenity can improve code completion when
+combined with these neural models. If data flow analysis
+does provide any signal from Serenity, it should improve per-
+formance on code completion task even with the extensive
+training these language models already had. We therefore
+5
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+1
+print("Score with pystruct subgradient
+ssvm: %f (took %f seconds)" %
+(np.mean(y_pred == y_test),
+time_subgradient_svm))
+↩→
+↩→
+↩→
+2
+3
+# the standard one-vs-rest multi-class
+4
+# would probably be as good and faster
+5
+# but solving a different model
+6
+libsvm =
+LinearSVC(multi_class='crammer_singer',
+C=.1)
+↩→
+↩→
+7
+start = time()
+8
+libsvm.fit(X_train, y_train)
+9
+time_libsvm = time() - start
+10
+print("Score with sklearn and libsvm: %f
+(took %f seconds)" %
+(libsvm.score(X_test, y_test),
+time_libsvm))
+↩→
+↩→
+↩→
+11
+12
+13
+start = time()
+14
+fw_bc_svm.?
+Figure 5. Code snippet used for prediction
+1
+from sklearn.cross_validation import
+train_test_split
+↩→
+2
+from pystruct.models import MultiClassClf
+3
+from pystruct.learners import (NSlackSSVM,
+OneSlackSSVM,
+↩→
+4
+digits = load_digits()
+5
+digits.data
+6
+digits.target
+7
+X = X / 16.
+8
+train_test_split(X, y)
+9
+X_train_bias = np.hstack([X_train,
+np.ones((X_train.shape[0], 1))])
+↩→
+10
+model =
+MultiClassClf(n_features=X_train_bias.shape[1],
+n_classes=10)
+↩→
+↩→
+11
+fw_bc_svm = FrankWolfeSSVM(model, C=.1,
+max_iter=50)
+↩→
+12
+fw_bc_svm.?
+Figure 6. Code snippet corresponding to a slice from the
+analysis graph
+modeled code completion as a fine tuning task, and varied
+the training inputs of fine tuning to be one of the three
+conditions shown below:
+• All code as text prior to the function call
+• A slice of the code restricted to source expressions that
+are relevant to a function call in data flow
+• Both code as text, as well as the slice, separated by a
+token to distinguish the two inputs.
+For all text code prior to a function call, there are limits on
+how many tokens modern language models can fit. That is,
+when the code goes beyond the limit, truncation is needed
+in order for the models to run. A widely-used truncation
+strategy is to only keep 𝑛tokens prior to the prediction point,
+where 𝑛is the maximum sequence length, which can lead to
+fairly local information, as shown in Figure 5 for our running
+example shown in Figure 1. The key prediction in Figure 5
+is to predict what method will be called on fw_bc_svm, but
+notice that the construction of fw_bc_svm is out of the scope
+of the truncation4.
+For obtaining the slice restricted purely to dataflow, given
+a program and its corresponding dataflow graph, to predict
+the function call, we start at a node that we would like to
+predict, reverse all edges coming into the node, and find
+all reachable nodes. Each node in the reachability set corre-
+sponds to a source expression in the original program, and
+we only include the expressions that are not sub-expressions
+of any other expressions as features. Then, we order these
+expressions according to their positions in the source files,
+and add in variable names from the analysis artifacts so the
+code looks more or less like real code that the language mod-
+els have been trained on. Figure 6 shows an example of such
+a dataflow based slice looks for the code in Figure 1. Here we
+start the fw_bc_svm.fit call in Figure 4, reverse all edges
+coming into the node, and perform a reachability analysis,
+to gather the slice, adding variable names such as digits =
+load_digits(). In this example, dataflow analysis does give
+important information useful for predicting the function call,
+because the slice brings in non-local but relevant code such
+as the definition of fw_bc_svm into the scope of text that
+can be fed to a neural model.
+4.1
+Dataset
+We used the popular benchmark of ETH150K [35], which
+comes with 100K programs used for training, and the re-
+maining 50K used as a testing set. ETH150K was analyzed
+using Serenity, and 147,288 of 150,000 files were successfully
+analyzed. For the analyzed files, we parsed each file with a
+Python AST parser, and gathered all function calls. For each
+function call identified by the AST, we examined whether
+we could find the function in the analysis output, and if it
+was found in the output, we checked if the source location of
+the call matched that in the AST. Our observation has been
+that the Jython source mappings can be wrong sometimes,
+so we used both metrics to measure the completeness of the
+analysis. The analysis found 58.77% of function calls in the
+AST with matching source locations, and 67.36% of function
+calls when the requirements to match source was relaxed.
+Manual inspection on a few cases where source locations did
+not match indicated that the problem was indeed mapping
+4In this example, truncation was set to 1024 tokens, as per the requirements
+of one of the CuBERT models [22]
+6
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+1
+def f_Hp(self, pars, p, inpt, target):
+2
+eps = 1E-6
+3
+deriv = self.fprime(pars, inpt,
+target)
+↩→
+4
+offseted = self.fprime(pars + p *
+eps, inpt, target)
+↩→
+5
+return (offseted - deriv) / eps
+Figure 7. Example of code where a leaf node is an expression
+being incorrect in Jython. Further investigation revealed that
+many of the missing calls are instances of Python primitives
+that Serenity does not model and treats as no-ops, such as
+repr and FutureWarning. A small fraction was found to
+be genuinely dead code, especially when Python files were
+integral parts of a larger application, as they often are in
+ETH150K.
+To generate the slices, we started with leaf nodes, and
+restricted ourselves to cases where the nodes had at least a
+depth of 1 when the edges were reversed. We note that in a
+majority of cases, leaf nodes were actually expressions, as
+shown in the example code in Figure 7. We ignored these
+in creating our dataset because we were focused on a prob-
+lem that cannot be solved by a pure lexical analysis of code.
+When we restricted ourselves to nodes that were potentially
+function calls rather than expressions, we generated slices
+from 65.35% of the programs where there existed at least one
+slice where the leaf node was likely a function call. For the
+train and test sets of programs, we generated 334,415 slices
+and 162,847 slices respectively by iterating over all the leaf
+nodes in dataflow graphs. Once we consider leaf nodes as
+nodes for our prediction, there were a total of over 65K labels
+that were generated across train and test sets for code com-
+pletion. Figure 8 plots the cumulative frequency distribution
+of labels against the number of labels. As shown in the Figure,
+the distribution of labels follows the usual power law, but we
+note that the most popular label appeared across train and
+test only 1.7% of the time, and the top 10 labels cumulatively
+appeared only 11.0% of the time. In other words, this is a
+difficult classification problem5. We note that this method
+of declaring code completion is more realistic compared to
+other means for code completion (such as measuring next
+token prediction), in the sense that this is often the case that
+IDEs focus on.
+4.2
+Language model selection
+To decide on the best neural model to use as a basis for our
+code completion experiments, we tested a number of code
+related language models including CodeBERT [13], Graph-
+CodeBERT [19], CuBERT [22] and CodeT5 [41]. CodeBERT[13]
+5We will make the datasets and code for all the work reported in this section
+available as open source.
+ 0
+ 0.1
+ 0.2
+ 0.3
+ 0.4
+ 0.5
+ 0.6
+ 0.7
+ 0.8
+ 0.9
+ 1
+ 1
+ 4
+ 16
+ 64
+ 256
+ 1024
+ 4096
+ 16384
+Cumulative Frequency
+No. of Labels
+Cumulative frequency of labels
+Figure 8. Distribution of labels for the classification task
+is a bimodal model trained on datasets with natural lan-
+guage (NL) -programming language (PL) pairs (e.g. docu-
+mentation/code pairs) across six programming languages
+(Python, Java, JavaScript, PHP, Ruby, and Go). Similarly,
+GraphCodeBERT uses NL-PL pairs for pretraining a code
+language model, but based on local data flow graphs ex-
+tracted from Abstract Syntax Trees. CuBERT [22] is another
+BERT-based model fine-tuned on multiple classification tasks
+such as checking the presence of certain bugs and predicting
+exception types. CuBERT is trained only on Python code,
+and furthermore uses language level tokens as inputs to the
+model. CodeT5 [41] is an encoder-decoder model based on
+T5 architecture [33] with code-specific knowledge trained
+to distinguish which tokens are identifiers and recover them
+when they are masked out. CodeT5 is fine-tuned using multi-
+ple CodeXGLUE benchmarks including understanding tasks
+such as code defect detection and clone detection, and gen-
+eration tasks like code summarization and translation.
+Figure 9 shows the performance of these different models
+on the code completion task with no fine tuning for the top-1
+and top-5 cases. We modeled code completion as a mask pre-
+diction task, with the function call to be predicted being the
+masked token. As shown in the Figure 9, the best performing
+model was CuBERT on this task, which is not surprising
+because it was the only model trained exclusively on Python
+and used language level tokens unlike the other models. We
+note that the performance of CodeT5 was surprisingly poor,
+but we think this may in part be due to the fact that it is
+trained on NL-PL pairs and it is strictly a generative model,
+7
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+21
+19
+13
+2.7
+33
+27
+23
+3.1
+0
+5
+10
+15
+20
+25
+30
+35
+40
+CuBERT
+CodeBERT
+GraphCodeBert
+CodeT5
+Accuracy
+Complete (Top1)
+Complete (Top5)
+Figure 9. Accuracy on top-5 and top-1 test data for base lan-
+guage models. Performance on CuBERT for slices is based on
+150,739 and 137,987 examples for complete and slice, respec-
+tively because of tokenization issues. For all other systems
+the number of testing examples was 167,816.
+for which we needed to specify a length of generation. It
+also needed the most tuning in terms of specifying different
+search strategies for final token prediction, so it is possible
+that we did not choose the optimal search strategy for it. For
+our purposes though, we chose CuBERT as a base, primarily
+because we expected to benefit most from fine tuning. We
+point out that given our label distribution, for the language
+model to provide even 21% performance on complete for
+top-1 and 33% for top-5 is quite good.
+We turn now to the problem of fine tuning CuBERT with
+training inputs to see if analysis does in fact improve code
+completion as we defined it. Note that CuBERT’s pretraining
+was performed by feeding the model the logical lines of 5
+million programs - so at the minimal, some fine tuning for
+the code context where the function call is to be predicted
+is needed. As stated earlier, we contrasted three different
+training conditions:
+• complete: where we gave the model text starting from
+the call, backwards, as shown in Figure 5
+• slice: where we used a backwards slice as shown in
+Figure 6
+• combined where the text from complete and slice
+were concatenated as input to the model using a sepa-
+rator token.
+The test was on complete text, or combined. We chose
+these conditions because we observed from examples that
+for the problem of code generation, data flow is not sufficient
+by itself. Figure 10 shows such an example. In this code, lines
+5 and 15 contain the clue needed to make the prediction
+of id, but they are unrelated to the receiver for which the
+call is being made on line 22. Yet, the local pattern of code
+has the same variable names, and the same set of calls are
+repeated across functions, suggesting that id may be a good
+candidate label. By contrast, the corresponding slice con-
+tains minimal information as shown in Figure 11, since the
+1
+response.json.return_value = dict(response,
+total_count=3, limit=0, offset=0)
+↩→
+2
+projects =
+self.redmine.project.all()
+↩→
+3
+self.assertEqual(projects.limit, 0)
+4
+self.assertEqual(projects.offset,
+0)
+↩→
+5
+self.assertEqual(projects[0].id, 1)
+6
+self.assertEqual(projects[1].id, 2)
+7
+self.assertEqual(projects[2].id, 3)
+8
+9
+def test_offset_limit(self):
+10
+response_with_limit_offset =
+{'total_count': 2, 'limit': 3,
+'offset': 1, 'projects':
+response['projects'][1:3]}
+↩→
+↩→
+↩→
+11
+self.response.json.return_value =
+response_with_limit_offset
+↩→
+12
+projects =
+self.redmine.project.all()[1:3]
+↩→
+13
+self.assertEqual(projects.limit, 3)
+14
+self.assertEqual(projects.offset,
+1)
+↩→
+15
+self.assertEqual(projects[0].id, 2)
+16
+self.assertEqual(projects[1].id, 3)
+17
+18
+def test_offset_limit_mimic(self):
+19
+projects =
+self.redmine.project.all()[1:3]
+↩→
+20
+self.assertEqual(projects.limit, 3)
+21
+self.assertEqual(projects.offset,
+1)
+↩→
+22
+self.assertEqual(projects[0].?
+Figure 10. Code snippet where local text can help prediction
+1
+from tests import unittest, mock, Redmine,
+URL
+↩→
+2
+Redmine(self.url)
+3
+projects = self.redmine.project.all()[1:3]
+4
+self.assertEqual(projects[0].?
+Figure 11. Code where data flow lacks sufficient context
+receiver projects[0] was defined just within the function
+test_offset_limit_mimic.
+We note however that sometimes the slice can help even
+when the truncation does not cut off key information for
+prediction. Figure 12 shows one such example. The predicted
+function is partial is imported in line 3, but the actual call
+is on line 28. On the other hand, in Figure 13, the import is
+the only call prior to the line, so the slice can make relevant
+information proximal, such that the neural model can pay
+greater attention to proximal elements of the code.
+8
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+1
+import sys
+2
+import logging
+3
+from functools import partial
+4
+from datetime import datetime
+5
+from abc import ABCMeta, abstractmethod
+6
+import json
+7
+from _config import AttrDict
+8
+9
+__all__ = ['multikey_getter_gen',
+'unescape_json', 'LogParser',
+'JSONParser', 'LogLine',
+↩→
+↩→
+10
+'AccessLog', 'CommonLogFormat',
+'uWSGIParser']
+↩→
+11
+12
+def multikey_getter_gen(parser, keys,
+is_indices=False, delimiter="\t"):
+↩→
+13
+"""Generator meta-function to return a
+function
+↩→
+14
+parsing a logline and returning
+multiple keys (tab-delimited)"""
+↩→
+15
+if is_indices:
+16
+keys = map(int, keys)
+17
+18
+def multikey_getter(line, parser,
+keyset):
+↩→
+19
+data = parser(line.strip())
+20
+return
+delimiter.join((unicode(data[k])
+for k in keyset))
+↩→
+↩→
+21
+22
+def multiindex_getter(line, parser,
+keyset):
+↩→
+23
+data = parser(line.strip())
+24
+return delimiter.join((unicode(
+data.by_index( idx-1,
+raw=True)) for idx in keys))
+↩→
+↩→
+25
+26
+if is_indices is True:
+27
+# Field indices
+28
+return ?
+Figure 12. Example of where complete text may have text
+relevant to the prediction, but distant from call site
+1
+partial = #!/usr/bin/env python #
+2
+from functools import partial
+3
+keys = map(int, keys)
+4
+return ?
+Figure 13. Example of where dataflow is very focused
+4.3
+Model details
+We use the CuBERT model released by [22]6, which has 24
+layers with 16 attention heads and 1024 hidden units and
+6The CuBERT model can be accessed at github.com/google-research/google-
+research/tree/master/cubert
+was pretrained on 4M unique Python files on Github. At
+fine-tuning, we set the batch size to 10 and trained the model
+using 8 Tesla V100 with 32GB memory. The learning rate
+is 5e-5, and we gradually warmed up the learning rate for
+the first 300 gradient updates, which are the default val-
+ues provided by the HuggingFace library [43]. The training
+stops after 20 epochs, or ends after the evaluation accuracy
+hasn’t improved for three epochs. For the complete and
+slice models we used the 512 tokens model, and when we
+used combined, we used the 1024 tokens model such that
+the exact same tokens present in complete and slice could
+be used together along with the separator.
+We apply CuBERT’s tokenization to Python programs in
+ETH150K where the Python programs are first tokenized us-
+ing the standard Python tokenizer (the tokenize module)7,8.
+Then we further break down the program tokens into 49,558
+subwords using subword tokenization [39], as performed by
+the cuBERT tokenizer.
+4.4
+Results of fine tuning
+Figure 14 shows the accuracy in predicting the function call
+exactly across the different training and test conditions. As
+shown in the Figure 14, training on slice was at 47% ac-
+curacy when tested on the complete text (slice-complete),
+which is significantly above the 21% of top-1 baseline from
+cuBERT. Training on complete however was much better
+at 62% on the same text (complete-complete), which is
+not surprising given that inspection of examples (e.g., Fig-
+ure 10) show that complete often contains the expressions
+in slice when the dataflow is local, and furthermore, ben-
+efits from repetition in coding patterns that might hint at
+labels in the absence of any real connection. The key ques-
+tion is whether slices provide any benefit over and above
+what benefit is gained from complete. Training on combined
+suggests that slices do provide a strong signal, with a 65%
+accuracy on complete text (combined-complete), and 69%
+accuracy on the combined text (combined-combined). We
+also compared top-5 performance across conditions to allow
+comparison to the baseline language models - not surpris-
+ingly this result improved accuracy across all conditions,
+with the combined-combined condition showing the best
+performance at 78%. The results show that data flow analysis
+can significantly augment code completion performance.
+4.5
+How do slices help code completion?
+We conducted an analysis of how slices might help code
+completion performance; i.e., to understand if slices help
+the model complete code better for rare labels compared
+7github.com/python/cpython/blob/main/Lib/tokenize.py
+8We note that tokenize only outputs tokens for the code snippet that is
+free of any syntax errors; otherwise, it returns either IndentationError or
+TokenError. To predict function calls we often feed code that is incomplete,
+thus syntactically incorrect; therefore, we had to modify the original module
+so that it always returns what has been already tokenized thus far.
+9
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+21
+47
+62
+65
+69
+33
+66
+74
+75
+78
+0
+10
+20
+30
+40
+50
+60
+70
+80
+CuBERT baseline
+slice-complete
+complete-complete combined-complete combined-combined
+Accuracy
+Top-1
+Top-5
+Figure 14. Results of fine tuning on the different "training -
+testing" conditions; i.e., training on {slice, complete or com-
+bined} and tested on {complete or combined}
+ 0
+ 0.1
+ 0.2
+ 0.3
+ 0.4
+ 0.5
+ 0.6
+ 0.7
+ 0.8
+ 0.9
+ 1
+ 1
+ 4
+ 16
+ 64
+ 256
+ 1024
+Proportion of labels output correctly
+Label Counts
+Combined-Complete
+Complete-Complete
+Combined-Combined
+Figure 15. Accuracy on labels with different counts
+to more common ones, since statistical approaches likely
+work better for common labels, but less well for rare ones.
+Figure 15 shows the performance of the different models; the
+presence of slices at training and test enhance code comple-
+tion performance for rare labels more than common labels,
+although the advantage does seem to be present for common
+ones as well. The combined-combined model was 15% ac-
+curate on labels with count 1, of about 18,000 labels, and that
+number rapidly approaches 40% for labels with count 3. As
+labels become more frequent, the differences between the
+sklearn.datasets
+sklearn.load_digits
+sklearn.load_digits.data
+sklearn.load_digits.target
+sklearn.train_test_split
+sklearn.LinearSVC
+sklearn.svm
+sklearn.cross_validation
+Figure 16. KGpip’s training graph for our running example
+after filtering out as input to the AutoML system.
+models gets more noisy but the combined-combined case
+still holds an advantage.
+4.6
+Comparison to existing work
+In this space, comparisons are tricky because there is no com-
+mon or standard benchmark and because the exact problem
+varies. We chose ETH150K, which is at least a well-known
+code repository, but work that e.g. relies on its own sample
+of GitHub makes results incomparable. The exact problem
+varies too, with some tools, like us, predicting function calls,
+others predicting only method calls and still others predict
+the next token for all tokens. There is a real need for a bench-
+mark in this space; as part of helping build such a benchmark,
+we will release our own slice and complete dataset to the
+community. [25] reports overall accuracy numbers around
+0.7, which is almost the same as ours, but that paper is pre-
+dicting the next token across all token types, so could benefit
+from the fact that some predictions (e.g. ’)’ followed by ’:’ in
+def) follow from the grammar. Pythia [37] uses a neural net-
+work rather than a language model, but reports comparable
+accuracy numbers for top-1. Their top-5 number is higher,
+but their predictions seem to be for method calls, rather than
+all functions as we do, for which the receiver may provide
+context to aid prediction.
+These approaches may be complementary, too. Our work
+showed that adding slice data to local context greatly aided
+the accuracy of our models. Other approaches also rely on
+mostly local information, and could potentially benefit from
+slices as well. We plan to investigate this further in our future
+work.
+5
+Automated ML Pipelines Application
+The problem of automated machine learning pipelines (Au-
+toML) focuses on automatically building pipelines by per-
+forming a search over valid data transformations and learn-
+ers, along with hyper-parameter optimization for each learner.
+Our research question is whether we can perform learner and
+transformation selection based on mining large repositories
+10
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+of abstracted ML python scripts obtained statically by Seren-
+ity. Unlike dynamic analysis, Serenity’s static analysis of ML
+pipelines has the advantage of scaling to millions of scripts
+due to its low cost. Specifically, our question is whether the
+extracted semantics of a set of pipelines by Serenity can help
+in predicting a new pipeline when combined with neural
+graph models.
+We developed an AutoML system, called KGpip, described
+in detail in a separate work [20], which builds a database
+of datasets and their corresponding historically used ML
+pipelines using Serenity analysis. KGpip formulates the au-
+tomation of a ML pipeline as a graph generation problem. It
+is based on two hypotheses that a neural graph generator
+will: i) capture more succinctly multiple pipelines seen in
+practice for a given dataset, and ii) capture statistical similar-
+ities between different pipelines more effectively. In KGpip,
+we filter out Serenity’s analysis to remove non-ML related
+components such as calls to libraries other than target ML
+libraries (Sklearn, XGBoost, and LGBM), and nodes indicat-
+ing location of calls within a pipeline script, among others.
+Figure 16 shows the filtered version of the graph for our
+running example. We also show in Figure 17 an overview of
+how KGpip works at training and inference phases. Using
+code analysis graphs obtained from Serenity and dataset em-
+beddings, KGpip trains a graph generation model optimized
+to output a ML pipeline as close as possible to the target
+pipelines of the training data. At inference time, KGpip iden-
+tifies the closest dataset to the input dataset and uses its
+embedding as input to the graph generation model which in
+turn outputs a set of possible ML pipelines. These pipelines
+are then validated and fed to a hyper-parameter optimizer to
+get the best pipeline that results in the highest performance
+on the input dataset.
+KGpip is designed to work with AutoML systems, such
+as AutoSklearn [15] and FLAML [40], to utilize their hyper-
+parameter optimizers. With a collection of 2000 ML python
+scripts, we trained a graph generation neural network that
+learns to generate a ML pipeline graph for a given dataset.
+We conducted a comprehensive evaluation using 77 datasets
+from different benchmarks, such as AutoML and Penn Ma-
+chine Learning Benchmark (PMLB), and different ML portals,
+such as Kaggle and OpenML. Table 1 shows the overall KG-
+pip performance which significantly improves the selection
+of data transformation and learning algorithms of state-of-
+the-art AutoML systems, namely, Auto-Sklearn and FLAML.
+We note that AutoSklearn consults a database of pipelines
+and datasets, and picks pipelines to start the search based
+on a nearest neighbors to an unseen dataset, except that Au-
+toSklearn’s dataset consists of effective pipelines based on
+actual execution. We also compared KGpip to AL [6], which
+uses dynamic code analysis on existing machine learning
+pipelines to select optimized pipelines. AL was unable to
+process 60 datasets because it ran out of time in searching
+for pipelines. On a smaller set of 17/77 datasets on which
+Average Performance
+T-Test
+AutoSklearn
+0.71 (0.24)
+-
+KGpip + AutoSklearn
+0.77 (0.22)
+0.0002
+FLAML
+0.71 (0.27)
+-
+KGpip + FLAML
+0.77 (0.20)
+0.0132
+Table 1. Performance (average and stdev) of KGpip com-
+pared to FLAML and AutoSklearn. Both variations of KGpip
+show significant improvements compared to existing sys-
+tems, both with 2-tailed T-test 𝑝< 0.05
+AL was able to work, AL achieved an average performance
+of 0.36 compared to 0.745, 0.705, 0.79 and 0.765 by FLAML,
+Auto-Sklearn, KGpip + FLAML, and KGpip + AutoSklearn,
+respectively. This comparison with both AL and AutoSklearn
+clearly illustrates the value provided by Serenity, compared
+even to approaches that rely on dynamic runtime analysis.
+6
+Related Work
+Static Analysis for Python: Static analysis of Python has
+attracted considerable interest lately, and there have been
+a range of approaches. Type inference has been a focus of
+much work, some using techniques such as abstract inter-
+pretation and, more recently, there has been work using
+machine learning. Likely the best-known work is MyPy [1]
+and Pytype [2]. MyPy focuses on checking and inferring
+types that conform to PEP 484 [38], which defines a syntax
+for Python types. MyPy focuses on inference within a single
+function, since types are expressed at function boundaries
+in PEP 484. Pytype does type inference, and it can handle
+cases where a variable has different types at different points.
+It also does relatively little interprocedural analysis.
+Moat et al. [28] present an abstract interpretation for type
+inference of Python that models a variety of domains to
+compute more accurate information, and it makes use of
+the recency abstraction for aliasing. However, it is currently
+limited in its support for interprocedural analysis, which is
+enabled by inlining. Fritz and Hage [16] present a dataflow
+analysis for type inference that provides a range of tradeoffs
+for cost and precision. It does handle features like first-class
+functions.
+Machine learning is also used for type inference of Python.
+TypeWriter [31] trained a neural model using a corpus of
+code, with labeled data derived from user annotations. Type-
+Writer considers comments in code as inputs to the neural
+model, unlike program analysis based type inference. While
+such systems are certainly performing analysis, their ap-
+proach and mechanism are quite different from ours.
+There have been other analyses of Python, often for spe-
+cial purposes. Ariadne [11] makes use of WALA, as we do,
+but focuses on inferring the shapes of tensors in machine
+11
+
+, ,
+Wenting Zhao, Ibrahim Abdelaziz, Julian Dolby, Kavitha Srinivas, Mossad Helali, and Essam Mansour
+Figure 17. An overview of KGpip training and inference workflows
+learning programs. Unlike our approach to libraries, Ariadne
+models ML libraries as needed for tensor-related operations.
+Code completion: Code completion has been a prominent
+area of research towards achieving better productivity when
+working within an IDE. One of the main challenges in this
+domain is about code representation where the vast majority
+of work has used either tokens or abstract syntax trees to
+represent code (we refer the reader to [3] for a detailed survey
+of this area). [25] represents Python and JavaScript codes
+as ASTs and use a pointer network for better predicting
+Out of Vocabulary words in code completion. Pythia [37] is
+another approach that uses ASTs with an LSTM model for
+code completion.
+A number of approaches also tried to leverage representa-
+tions based on data and control flow [4, 7, 14]. On JavaScript,
+[21] utilized a program dependence graph to detect code du-
+plication. [4] use AST based representation augmented with
+local data and control flows for predicting variable names
+and variables misuse. [14] combines token based represen-
+tations of code with edges based on object uses, and AST
+nodes to predict the documentation of a method. To perform
+code completion over Java API calls, [29, 30] used a mostly
+intraprocedural analysis for mining graphs augmented with
+control and data flow.
+With the rise of pre-trained language models such as BERT
+[10] and GPT [5, 32], many recent approaches [13, 19, 22,
+26, 41] started to leverage the already existing rich language
+understanding in these models and fine tune it for various
+code understanding tasks such as code summarization, trans-
+lation, completion, bug detection, etc. CodeBERT[13] is a
+BERT based model trained on pairs of natural language and
+programming language samples across six programming
+languages. GraphCodeBERT [19] uses BERT as well, but
+represents the code using data flow graphs based on ASTs.
+The dataflow in GraphCodeBERT is completely local and
+not interprocedural, as in Serenity. For instance as an exam-
+ple, it adds edges from all variables used in an expression
+to their definitions. CuBERT [22] and CodeT5 [41] are an-
+other two models based on BERT and T5 [33] architectures,
+respectively.
+Unlike our approach, all these methods represented code
+either as a sequence of tokens [13, 22], ASTs [25, 27, 37, 41],
+or data flows derived from ASTs [19].
+AutoML approaches: Several AutoML frameworks have
+been proposed recently [6, 12, 15, 40]. In most AutoML sys-
+tems, learner and pre-processing selection is driven by a
+database of actual executions of pipelines and data. For in-
+stance, [15, 36] compute a database of dataset meta-features
+such as number of rows and columns, while [6] mines a
+repository of run-time information of inputs to the learners
+and preprocessors via dynamic code analysis of public ML
+pipelines available e.g. on Kaggle. The predicted learners and
+preprocessors are based on a similarity measure between the
+target dataset and stored features. In KGpip we utilized dense
+vector embeddings derived from raw contents of datasets to
+measure this similarity and graph neural networks to select
+the learners/preprocessors and generate the pipeline.
+Some existing systems such as TPOT [24] or Recipe [9]
+use evolutionary algorithms for pipeline generation. Others
+approach it as a probabilistic matrix factorization [17], an
+AI planning problem when combined with a user specified
+grammar [23, 42], or a bayesian optimization problem com-
+bined with Monte Carlo Tree Search [34]. None of these
+approaches however use analysis to build up their database.
+7
+Conclusion
+In this paper, we introduced Serenity; a framework for Python
+code static analysis. Serenity relies on two mechanisms (a)
+dynamic dispatching at the core of language translation,
+and (b) extreme abstraction of libraries. To demonstrate the
+12
+
+Serenity: Library Based Python Code Analysis for Code Completion and Automated Machine Learning
+, ,
+utility of Serenity’s analysis, we used it in two important
+code-related applications: code generation and automated
+machine learning. Serenity’s analysis showed very promis-
+ing performance in both applications, allowing us in some
+cases to outperform approaches based on dynamic analysis,
+and perform competitively for code completion. We also im-
+plemented Serenity as an open-source implementation based
+on WALA, a popular framework for program analysis.

@@ -1,0 +1,531 @@
+ON-POLICY TRUST REGION POLICY OPTIMISATION
+WITH REPLAY BUFFERS
+Dmitry Kangin & Nicolas Pugeault
+Department of Computer Science, University of Exeter, UK
+
+ABSTRACT
+Building upon the recent success of deep reinforcement learning methods, we
+investigate the possibility of on-policy reinforcement learning improvement by
+reusing the data from several consecutive policies. On-policy methods bring many
+beneﬁts, such as ability to evaluate each resulting policy. However, they usually
+discard all the information about the policies which existed before. In this work,
+we propose adaptation of the replay buffer concept, borrowed from the off-policy
+learning setting, to create the method, combining advantages of on- and off-policy
+learning. To achieve this, the proposed algorithm generalises the Q-, value and
+advantage functions for data from multiple policies. The method uses trust region
+optimisation, while avoiding some of the common problems of the algorithms
+such as TRPO or ACKTR: it uses hyperparameters to replace the trust region
+selection heuristics, as well as the trainable covariance matrix instead of the ﬁxed
+one. In many cases, the method not only improves the results comparing to the
+state-of-the-art trust region on-policy learning algorithms such as PPO, ACKTR
+and TRPO, but also with respect to their off-policy counterpart DDPG.
+1
+INTRODUCTION
+The past few years have been marked by active development of reinforcement learning methods.
+Although the mathematical foundations of reinforcement learning have been known long before
+(Sutton & Barto, 1998), starting from 2013, the novel deep learning techniques allowed to solve
+vision based discrete control tasks such as Atari 2600 games (Mnih et al., 2013) as well as continu-
+ous control problems (Lillicrap et al., 2015; Mnih et al., 2016). Many of the leading state-of-the-art
+reinforcement learning methods share the actor-critic architecture (Crites & Barto, 1995). Actor-
+critic methods separate the actor, providing a policy, and the critic, providing an approximation for
+the expected discounted cumulative reward or some derived quantities such as advantage functions
+(Baird III, 1993). However, despite improvements, state-of-the-art reinforcement learning still suf-
+fers from poor sample efﬁciency and extensive parameterisation. For most real-world applications,
+in contrast to simulations, there is a need to learn in real time and over a limited training period,
+while minimising any risk that would cause damage to the actor or the environment.
+Reinforcement learning algorithms can be divided into two groups: on-policy and off-policy learn-
+ing. On-policy approaches (e. g., SARSA (Rummery & Niranjan, 1994), ACKTR (Wu et al., 2017))
+evaluate the target policy by assuming that future actions will be chosen according to it, hence the
+exploration strategy must be incorporated as a part of the policy. Off-policy methods (e. g., Q-
+learning (Watkins, 1989), DDPG (Lillicrap et al., 2015)) separate the exploration strategy, which
+modiﬁes the policy to explore different states, from the target policy.
+The off-policy methods commonly use the concept of replay buffers to memorise the outcomes of the
+previous policies and therefore exploit the information accumulated through the previous iterations
+(Lin, 1993). Mnih et al. (2013) combined this experience replay mechanism with Deep Q-Networks
+(DQN), demonstrating end-to-end learning on Atari 2600 games. One limitation of DQN is that it
+can only operate on discrete action spaces. Lillicrap et al. (2015) proposed an extension of DQN to
+handle continuous action spaces based on the Deep Deterministic Policy Gradient (DDPG). There,
+exponential smoothing of the target actor and critic weights has been introduced to ensure stability
+of the rewards and critic predictions over the subsequent iterations. In order to improve the variance
+1
+arXiv:1901.06212v1  [cs.LG]  18 Jan 2019
+
+of policy gradients, Schulman et al. (2015b) proposed a Generalised Advantage Function. Mnih
+et al. (2016) combined this advantage function learning with a parallelisation of exploration using
+differently trained actors in their Asynchronous Advantage Actor Critic model (A3C); however,
+Wang et al. (2016) demonstrated that such parallelisation may also have negative impact on sam-
+ple efﬁciency. Although some work has been performed on improvement of exploratory strategies
+for reinforcement learning (Hester et al., 2013), but it still does not solve the fundamental restric-
+tion of inability to evaluate the actual policy, neither it removes the necessity to provide a separate
+exploratory strategy as a separate part of the method.
+In contrast to those, state-of-the-art on-policy methods have many attractive properties: they are
+able to evaluate exactly the resulting policy with no need to provide a separate exploration strategy.
+However, they suffer from poor sample efﬁciency, to a larger extent than off-policy reinforcement
+learning. TRPO method (Schulman et al., 2015a) has introduced trust region policy optimisation to
+explicitly control the speed of policy evolution of Gaussian policies over time, expressed in a form of
+Kullback-Leibler divergence, during the training process. Nevertheless, the original TRPO method
+suffered from poor sample efﬁciency in comparison to off-policy methods such as DDPG. One
+way to solve this issue is by replacing the ﬁrst order gradient descent methods, standard for deep
+learning, with second order natural gradient (Amari, 1998). Wu et al. (2017) used a Kronecker-
+factored Approximate Curvature (K-FAC) optimiser (Martens & Grosse, 2015) in their ACKTR
+method. PPO method (Schulman et al., 2017) proposes a number of modiﬁcations to the TRPO
+scheme, including changing the objective function formulation and clipping the gradients. Wang
+et al. (2016) proposed another approach in their ACER algorithm: in this method, the target network
+is still maintained in the off-policy way, similar to DDPG (Lillicrap et al., 2015), while the trust
+region constraint is built upon the difference between the current and the target network.
+Related to our approach, recently a group of methods has appeared in an attempt to get the bene-
+ﬁts of both groups of methods. Gu et al. (2017) propose interpolated policy gradient, which uses
+the weighted sum of both stochastic (Sutton et al., 2000) and deterministic policy gradient (Silver
+et al., 2014). Nachum et al. (2018) propose an off-policy trust region method, Trust-PCL, which
+exploits off-policy data within the trust regions optimisation framework, while maintaining stability
+of optimisation by using relative entropy regularisation.
+While it is a common practice to use replay buffers for the off-policy reinforcement learning, their
+existing concept is not used in combination with the existing on-policy scenarios, which results in
+discarding all policies but the last. Furthermore, many on-policy methods, such as TRPO (Schulman
+et al., 2015a), rely on stochastic policy gradient (Sutton et al., 2000), which is restricted by station-
+arity assumptions, in a contrast to those based on deterministic policy gradient (Silver et al., 2014),
+like DDPG (Lillicrap et al., 2015). In this article, we describe a novel reinforcement learning algo-
+rithm, allowing the joint use of replay buffers with trust region optimisation and leading to sample
+efﬁciency improvement. The contributions of the paper are given as follows:
+1. a reinforcement learning method, enabling replay buffer concept along with on-policy data;
+2. theoretical insights into the replay buffer usage within the on-policy setting are discussed;
+3. we show that, unlike the state-of-the-art methods as ACKTR (Wu et al., 2017), PPO (Schul-
+man et al., 2017) and TRPO (Schulman et al., 2015a), a single non-adaptive set of hyper-
+parameters such as the trust region radius is sufﬁcient for achieving better performance on
+a number of reinforcement learning tasks.
+The code for this paper is available at https://github.com/dkangin/baselines/
+tree/master/baselines/trpo_replay.
+2
+BACKGROUND
+2.1
+ACTOR-CRITIC REINFORCEMENT LEARNING
+Consider an agent, interacting with the environment by responding to the states st, t ≥0, from the
+state space S, which are assumed to be also the observations, with actions at from the action space
+A chosen by the policy distribution πθ(·|st), where θ are the parameters of the policy. The initial
+state distribution is ρ0 : S →R. Every time the agent produces an action, the environment gives
+2
+
+back a reward r(st, at) ∈R, which serves as a feedback on how good the action choice was and
+switches to the next state st+1 according to the transitional probability P(st+1|st, at). Altogether, it
+can be formalised as an inﬁnite horizon γ-discounted Markov Decision Process (S, A, P, r, ρ0, γ),
+γ ∈[0, 1) (Wu et al., 2017; Schulman et al., 2015a). The expected discounted return (Bellman,
+1957) is deﬁned as per Schulman et al. (2015a):
+ρ(π) = Es0,a0,···
+" ∞
+X
+t=0
+γtr(st, at)
+#
+(1)
+The advantage function Aπ (Baird III, 1993), the value function V π and the Q-function Qπ are
+deﬁned as per Mnih et al. (2016); Schulman et al. (2015a):
+Aπ(s, a) = Qπ(s, a) −V π(s),
+(2)
+Qπ(st, at) = Est+1,at+1,...
+" ∞
+X
+l=0
+γlr(st+l, at+l)
+#
+, t ≥0,
+(3)
+V π(st) = Eat,st+1,...
+" ∞
+X
+l=0
+γlr(st+l, at+l)
+#
+, t ≥0
+(4)
+In all above deﬁnitions s0 ∼ρ0(s0), at ∼π(at|st), st+1 ∼P(st+1|st, at), and the policy π = πθ
+is deﬁned by its parameters θ.
+2.2
+TRUST REGION POLICY OPTIMISATION (TRPO)
+A straightforward approach for learning a policy is to perform unconstrained maximisation ρ(πθ)
+with respect to the policy parameters θ. However, for the state-of-the-art iterative gradient-based
+optimisation methods, this approach would lead to unpredictable and uncontrolled changes in the
+policy, which would impede efﬁcient exploration. Furthermore, in practice the exact values of ρ(πθ)
+are unknown, and the quality of its estimates depends on approximators which tend to be correct
+only in the vicinity of parameters of observed policies.
+Schulman et al. (2015a), based on theorems by Kakade (2002), prove the minorisation-maximisation
+(MM) algorithm (Hunter & Lange, 2004) for policy parameters optimisation.
+Schulman et al.
+(2015a) mention that in practice the algorithm’s convergence rate and the complexity of maximum
+KL divergence computations makes it impractical to apply this method directly. Therefore, they
+proposed to replace the unconstrained optimisation with a similar constrained optimisation problem,
+the Trust Region Policy Optimisation (TRPO) problem:
+arg max
+θ
+ρ(πθ)
+(5)
+DKL(πθold, πθ) ≤δ,
+(6)
+where DKL is the KL divergence between the old and the new policy πθold and πθ respectively, and
+δ is the trust region radius. Despite this improvement, it needs some further enhancements to solve
+this problem efﬁciently, as we will elaborate in the next section.
+2.3
+SECOND ORDER ACTOR-CRITIC NATURAL GRADIENT OPTIMISATION
+Many of the state-of-the-art trust region based methods, including TRPO (Schulman et al., 2015a)
+and ACKTR (Wu et al., 2017), use second order natural gradient based actor-critic optimisation
+(Amari, 1998; Kakade, 2002). The motivation behind it is to eliminate the issue that gradient de-
+scent loss, calculated as the Euclidean norm, is dependent on parametrisation. For this purpose, the
+Fisher information matrix is used, which is, as it follows from Amari (1998) and Kakade (2002),
+normalises per-parameter changes in the objective function. In the context of actor-critic optimisa-
+tion it can be written as (Wu et al., 2017; Kakade, 2002), where p(τ) is the trajectory distribution
+p(s0) QT
+t=0 π(at|st)p(st+1|st, at):
+F = Ep(τ)
+h
+∇θ log π(at|st) (∇θ log π(at|st))T i
+.
+(7)
+3
+
+However, the computation of the Fisher matrix is intractable in practice due to the large number of
+parameters involved; therefore, there is a need to resort to approximations, such as the Kronecker-
+factored approximate curvature (K-FAC) method (Martens & Grosse, 2015), which has been ﬁrst
+proposed for ACKTR in (Wu et al., 2017). In the proposed method, as it is detailed in Algorithm 1,
+this optimisation method is used for optimising the policy.
+3
+METHOD DESCRIPTION
+While the original trust regions optimisation method can only use the samples from the very last
+policy, discarding the potentially useful information from the previous ones, we make use of samples
+over several consecutive policies. The rest of the section contains deﬁnition of the proposed replay
+buffer concept adaptation, and then formulation and discussion of the proposed algorithm.
+3.1
+USAGE OF REPLAY BUFFERS
+Mnih et al. (2013) suggested to use replay buffers for DQN to improve stability of learning, which
+then has been extended to other off-policy methods such as DDPG (Lillicrap et al., 2015). The
+concept has not been applied to on-policy methods like TRPO (Schulman et al., 2015a) or ACKTR
+(Wu et al., 2017), which do not use of previous data generated by other policies. Although based on
+trust regions optimisation, ACER (Wang et al., 2016) uses replay buffers for its off-policy part.
+In this paper, we propose a different concept of the replay buffers, which combines the on-policy
+data with data from several previous policies, to avoid the restrictions of policy distribution station-
+arity for stochastic policy gradient (Sutton et al., 2000). Such replay buffers are used for storing
+simulations from several policies at the same time, which are then utilised in the method, built upon
+generalised value and advantage functions, accommodating data from these policies. The following
+deﬁnitions are necessary for the formalisation of the proposed algorithm and theorems.
+We deﬁne a generalised Q-function for multiple policies {π1, . . . , πn, . . . , πN} as
+Qπ(st, at) = EnEsn
+t+1,an
+t+1,...
+" ∞
+X
+l=0
+γlr(sn
+t+l, an
+t+l)
+#
+, t ≥0,
+(8)
+sn
+0 ∼ρ0(sn
+0), sn
+t+1 ∼P(sn
+t+1|sn
+t , an
+t ), an
+t ∼πn(an
+t |sn
+t ).
+(9)
+We also deﬁne the generalised value function and the generalised advantage function as
+V π(st) = EnEat,st+1,at+1
+" ∞
+X
+l=0
+γlr(sn
+t+l, an
+t+l)
+#
+, t ≥0,
+(10)
+Aπn(st) = Qπn(st, at) −V π(st), t ≥0,
+(11)
+To conform with the notation from Sutton et al. (2000), we deﬁne
+ρ(π) = V π(s0), Dπn(s) =
+∞
+X
+k=0
+γkP(s0 →s, k, πn),
+(12)
+P(s →x, k, π), as in Sutton et al. (2000), is the probability of transition from the state s to the state
+x in k steps using policy π.
+Theorem 1. For the set of policies {π1, . . . , πN} the following equality will be true for the gradient:
+∂ρπ
+∂θ =
+N
+X
+n=1
+p(πn)
+Z
+s
+dsDπn(s)
+Z
+a
+da∂πn(s, a)
+∂θ
+[Qπn(s, a) + bπn(s)],
+(13)
+where θ are the joint parameters of all policies {πn} and bπn(s) is a bias function for the policy.
+The proof of Theorem 1 is given in Appendix B. Applying a particular case of the bias function
+bπn(s) = −V π(s) and using the likelihood ratio transformation, one can get
+∂ρπ
+∂θ =
+N
+X
+n=1
+p(πn)
+Z
+s
+dsDπn(s)
+Z
+a
+daπn(s, a)∂log πn(s, a)
+∂θ
+Aπn(s, a)
+(14)
+4
+
+Algorithm 1 Trust Regions Algorithm with a Replay Buffer
+{Initialisation} Randomly initialise the weights θ of the policy estimator π(·) and Ψ of the value
+function estimator ˜V (·). Initialise the policy replay buffer Rp = {}, set i = 0, δ = DELTA
+while i < MAX TIMESTEPS do
+{Stage
+1}
+Collect
+ni
+data
+paths
+using
+the
+current
+policy
+π(·):
+P
+=
+nD
+(sj
+0, aj
+0, rj
+0), . . . , (sj
+kj, aj
+kj, rj
+kj)
+Eoni
+j=0, increase i by the total number of timesteps in
+all new paths.
+{Stage 2} Put recorded paths into the policy paths replay buffer Rp ←P.
+{Stage 3} For every path in Rp compute the targets for the value function regression using
+equation (15). Ψ = Update the value function estimator parameters
+{Stage 4} For every path in Rp, estimate the advantage function using Equation (23).
+{Stage 5} Update parameters of the policy θ for N ITER PL UPDATE iterations using the
+gradient from Equation (25) and a barrier function deﬁned in Equation (26).
+end while
+3.2
+ALGORITHM DESCRIPTION
+The proposed approach is summarised in Algorithm 1. The replay buffer Rp contains data col-
+lected from several subsequent policies. The size of this buffer is RBP CAPACITY. During
+Stage 1, the data are collected for every path until the termination state is received, but at least
+TIMESTEPS PER BATCH steps in total for all paths. The policy actions are assumed to be sam-
+pled from the Gaussian distribution, with the mean values predicted by the policy estimator along
+with the covariance matrix diagonal. The covariance matrix output was inspired, although the idea
+is different, by the EPG paper (Ciosek & Whiteson, 2017).
+At Stage 2, the obtained data for every policy are saved in the policy replay buffer Rp.
+At Stage 3, the regression of the value function is trained using Adam optimiser (Kingma & Ba,
+2015) with step size VF STEP SIZE for N ITER VF UPDATE iterations. For this regression,
+the sum-of-squares loss function is used. The value function target values are computed for every
+state st for every policy in the replay buffer using the actual sampled policy values, where tmax is
+the maximum policy step index:
+ˆV (st) =
+tmax−t
+X
+l=0
+γlr(st+l, at+l),
+(15)
+During Stage 4, we perform the advantage function estimation. Schulman et al. (2015b) proposed
+the Generalised Advantage Estimator for the advantage function Aπ(st, at) as follows:
+˜Aπ(st, at) = (1 −λ)( ˆAπ,(1)
+t
++ λ ˆAπ,(2)
+t
++ λ2 ˆAπ,(3)
+t
++ . . .),
+(16)
+where
+ˆAπ,(1)
+t
+= −˜V π(st) + rt + γ ˜V π(st+1), . . .
+(17)
+ˆAπ,(k)
+t
+= −˜V π(st) + rt + . . . + γk−1rt+k−1 + γk ˜V π(st+k), . . .
+(18)
+Here k > 0 is a cut-off value, deﬁned by the length of the sequence of occured states and actions
+within the MDP, λ ∈[0, 1] is an estimator parameter, and ˜V π(st) is the approximation for the value
+function Vπ(st), with the approximation targets deﬁned in Equation (15). As proved in Schulman
+et al. (2015b), after rearrangement this would result in the generalised advantage function estimator
+˜Aπ(st, at) =
+k−1
+X
+l=0
+(γλ)l(rt+l + γ ˜V π(st+l+1) −˜V π(st+l)),
+(19)
+For the proposed advantage function (see Equation 11), the estimator could be deﬁned similarly to
+Schulman et al. (2015b) as
+˜Aπn(st, at) = (1 −λ)( ˆAπn,(1)
+t
++ λ ˆAπn,(2)
+t
++ λ2 ˆAπn,(3)
+t
++ . . .),
+(20)
+5
+
+ˆAπn,(1)
+t
+= −˜V π(st) + rt + γ ˜V πn(st+1), . . .
+(21)
+ˆAπn,(k)
+t
+= −˜V π(st) + rt + γrt+1 + . . . + γk−1rt+k−1 + γk ˜V πn(st+k).
+(22)
+However, it would mean the estimation of multiple value functions, which diminishes the replay
+buffer idea. To avoid it, we modify this estimator for the proposed advantage function as
+˜Aπn(st, at) =
+k−1
+X
+l=0
+(γλ)l(rt+l + γ ˜V π(st+l+1) −˜V π(st+l)),
+(23)
+Theorem 2. The difference between the estimators (20) and (23) is
+∆˜Aπn(st, at) = γ(1 −λ)
+k
+X
+l=1
+λl−1γl−1( ˜V πn(st+l) −˜V π(st+l)).
+(24)
+The proof of Theorem 2 is given in Appendix C. It shows that the difference between two estimators
+is dependent of the difference in the conventional and the generalised value functions; given the
+continuous value function approximator it reveals that the closer are the policies, within a few trust
+regions radii, the smaller will be the bias.
+During Stage 5, the policy function is approximated, using the K-FAC optimiser (Martens & Grosse,
+2015) with the constant step size PL STEP SIZE. As one can see from the description, and dif-
+ferently from ACKTR, we do not use any adaptation of the trust region radius and/or optimisation
+algorithm parameters. Also, the output parameters include the diagonal of the (diagonal) policy co-
+variance matrix. The elements of the covariance matrix, for the purpose of efﬁcient optimisation, are
+restricted to universal minimum and maximum values MIN COV EL and MAX COV EL. As an
+extention from Schulman et al. (2015b) and following Theorem 1 with the substitution of likelihood
+ratio, the policy gradient estimation is deﬁned as
+∇ρ(θ) ≈EnEπn
+" ∞
+X
+t=0
+˜Aπn(sn
+t , an
+t )∇θ log πn(an
+t |sn
+t )
+#
+.
+(25)
+To practically implement this gradient, we substitute the parameters θπ, derived from the latest
+policy for the replay buffer, instead of joint θ parameters assuming that the parameters would not
+deviate far from each other due to the trust region restrictions; it is still possible to calculate the
+estimation of ˜Aπn(sn
+t , an
+t ) for each policy using Equation (23) as these policies are observed. For
+the constrained optimisation we add the linear barrier function to the function ρ(θ):
+ρb(θ) = ρ(θ) −α · max(0, DKL(πθold, πθ) −δ),
+(26)
+where α > 0 is a barrier function parameter and θold are the parameters of the policy on the previous
+iteration. Besides of removing the necessity of heuristical estimation of the optimisation parameters,
+it also conforms with the theoretical prepositions shown in Schulman et al. (2017) and, while our ap-
+proach is proposed independently, pursues the similar ideas of using actual constrained optimisation
+method instead of changing the gradient step size parameters as per Schulman et al. (2015a).
+The networks’ architectures correspond to OpenAI Baselines ACKTR implementation (Dhariwal
+et al., 2017) ,which has been implemented by the ACKTR authors (Wu et al., 2017). The only de-
+parture from the proposed architecture is the diagonal covariance matrix outputs, which are present,
+in addition to the mean output, in the policy network.
+4
+EXPERIMENTS
+4.1
+EXPERIMENTAL RESULTS
+In order to provide the experimental evidence for the method, we have compared it with the on-policy
+ACKTR (Wu et al., 2017), PPO (Schulman et al., 2017) and TRPO (Schulman et al., 2015a) meth-
+ods, as well as with the off-policy DDPG (Lillicrap et al., 2015) method on the MuJoCo (Todorov
+et al., 2012) robotic simulations. The technical implementation is described in Appendix A, and
+additional ablation studies are given in Appendix D.
+6
+
+(a) HumanoidStandup v2
+(b) Half Cheetah v2
+(c) Humanoid v2
+(d) Walker2d v2
+(e) Striker v2
+(f) Hopper v2
+(g) Pusher v2
+(h) Reacher v2
+(i) Ant v2
+(j) Thrower v2
+Figure 1: Experiments in MuJoCo environment (Todorov et al., 2012): comparison with TRPO
+(Schulman et al., 2015a), ACKTR (Wu et al., 2017) and PPO (Schulman et al., 2017)
+(a) HumanoidStandup v2
+(b) Half Cheetah v2
+(c) Humanoid v2
+(d) Walker2d v2
+(e) Striker v2
+(f) Hopper v2
+(g) Pusher v2
+(h) Reacher v2
+(i) Ant v2
+(j) Thrower v2
+Figure 2: Experiments in MuJoCo environment (Todorov et al., 2012): comparison between differ-
+ent replay buffer depth values
+7
+
+(a) HumanoidStandup v2
+(b) Half Cheetah v2
+(c) Humanoid v2
+(d) Walker2d v2
+(e) Striker v2
+(f) Hopper v2
+(g) Pusher v2
+(h) Reacher v2
+(i) Ant v2
+(j) Thrower v2
+Figure 3: Experiments in MuJoCo environment (Todorov et al., 2012): comparison between the
+proposed algorithm and DDPG (Lillicrap et al., 2015)
+Figure 1 shows the total reward values and their standard deviations, averaged over every one hun-
+dred simulation steps over three randomised runs. The results show drastic improvements over the
+state-of-the-art methods, including the on-policy ones (ACKTR, TRPO, PPO), on most problems.
+In contrast to those methods, the method shows that the adaptive values for trust region radius can
+be advantageously replaced by a ﬁxed value in a combination with the trainable policy distribution
+covariance matrix, thus reducing the number of necessary hyperparameters. The results for ACKTR
+for the tasks HumanoidStandup, Striker and Thrower are not included as the baseline ACKTR imple-
+mentation (Dhariwal et al., 2017) diverged at the ﬁrst iterations with the predeﬁned parameterisation.
+PPO results are obtained from baselines implementation PPO1 (Dhariwal et al., 2017).
+Figure 2 compares results for different replay buffer sizes; the size of the replay buffers reﬂects the
+number of policies in it and not actions (i.e. buffer size 3 means data from three successive policies
+in the replay buffer). We see that in most of the cases, the use of replay buffers show performance
+improvement against those with replay buffer size 1 (i.e., no replay buffer with only the current
+policy used for policy gradient); substantial improvements can be seen for HumanoidStandup task.
+Figure 3 shows the performance comparison with the DDPG method (Lillicrap et al., 2015). In all the
+tasks except HalfCheetah and Humanoid, the proposed method outperforms DDPG. For HalfChee-
+tah, the versions with a replay buffer marginally overcomes the one without. It is also remarkable
+that the method demonstrates stable performance on the tasks HumanoidStandup, Pusher, Striker
+and Thrower, on which DDPG failed (and these tasks were not included into the DDPG article).
+5
+CONCLUSION
+The paper combines replay buffers and on-policy data for reinforcement learning. Experimental
+results on various tasks from the MuJoCo suite (Todorov et al., 2012) show signiﬁcant improvements
+compared to the state of the art. Moreover, we proposed a replacement of the heuristically calculated
+trust region parameters, to a single ﬁxed hyperparameter, which also reduces the computational
+expences, and a trainable diagonal covariance matrix.
+8
+
+The proposed approach opens the door to using a combination of replay buffers and trust regions for
+reinforcement learning problems. While it is formulated for continuous tasks, it is possible to reuse
+the same ideas for discrete reinforcement learning tasks, such as ATARI games.

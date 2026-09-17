@@ -1,0 +1,728 @@
+On the Challenges of using Reinforcement Learning in Precision Drug Dosing:
+Delay and Prolongedness of Action Effects
+Sumana Basu1,2, Marc-Andr´e Legault1,2, Adriana Romero-Soriano1,2,3, Doina Precup1,2
+1 McGill University, 2 Mila, 3 Meta AI
+
+Abstract
+Drug dosing is an important application of AI, which can
+be formulated as a Reinforcement Learning (RL) problem.
+In this paper, we identify two major challenges of using RL
+for drug dosing: delayed and prolonged effects of adminis-
+tering medications, which break the Markov assumption of
+the RL framework. We focus on prolongedness and deﬁne
+PAE-POMDP (Prolonged Action Effect-Partially Observable
+Markov Decision Process), a subclass of POMDPs in which
+the Markov assumption does not hold speciﬁcally due to pro-
+longed effects of actions. Motivated by the pharmacology lit-
+erature, we propose a simple and effective approach to con-
+verting drug dosing PAE-POMDPs into MDPs, enabling the
+use of the existing RL algorithms to solve such problems.
+We validate the proposed approach on a toy task, and a
+challenging glucose control task, for which we devise a
+clinically-inspired reward function. Our results demonstrate
+that: (1) the proposed method to restore the Markov as-
+sumption leads to signiﬁcant improvements over a vanilla
+baseline; (2) the approach is competitive with recurrent
+policies which may inherently capture the prolonged effect
+of actions; (3) it is remarkably more time and memory
+efﬁcient than the recurrent baseline and hence more suitable
+for real-time dosing control systems; and (4) it exhibits
+favourable qualitative behavior in our policy analysis.
+1
+Introduction
+Drug dosing plays an important role in human health–
+e.g. individuals with type 1 diabetes require regular insulin
+injections to manage their blood glucose levels, intensive
+care patients require continuous monitoring and adminis-
+tration of drugs, optimal doses of anaesthesia are required
+during operative procedures, etc. Optimal drug dosing is
+most important in cases where the therapeutic window is
+narrow, meaning that small deviations from the therapeutic
+range of drug concentration may lead to serious clinical
+complications (FDA 2015; Maxﬁeld and Zineh 2021). These
+problems are compounded by idiosyncratic differences in
+the dynamics of drug absorption, distribution, metabolism or
+excretion (collectively referred to as pharmacokinetics) and
+drug sensitivity. Therefore, one important goal of precision
+medicine is to tailor patient care while accounting for indi-
+vidual characteristics, and developing algorithmic solutions
+for drug dosing is a contribution towards that broader goal.
+Figure 1: Delayed and prolonged effects of drugs. Drug is
+only administered at the ﬁrst step, but no immediate effect
+is observed. After the initial delay, the initial dose keeps
+altering the patient status for a while, even in the absence of
+additional dosage. The duration of delay and prolongedness
+is individual speciﬁc.
+Reinforcement learning (RL) offers a framework to ac-
+count for individual characteristics and automatically derive
+personalized treatment policies in line with the objective of
+precision medicine (Ribba et al. 2020). However, RL-based
+algorithms cannot be applied off-the-shelf to tackle preci-
+sion dosing since all drugs are known to have a delayed
+and prolonged effect from the point of medication (Holford
+2018) (see Figure 1). The delay is attributed to the time it
+takes for the drug to distribute to the target site, bind to the
+receptor and ﬁnally to change physiological substances be-
+fore its response can be observed. This can vary between
+minutes to hours or even longer (Holford 2018). The pro-
+longedness is due to individual variation in pharmacokinet-
+ics (Vogenberg, Barash, and Pursel 2010). In this delayed
+and prolonged action effects scenario, the future depends
+on the previous drug dosages and their effect, and there-
+fore the Markov assumption usually made by RL algorithms
+no longer holds. Although RL has been applied to address
+drug dosing problems such as controlling glucose levels for
+closed loop artiﬁcial pancreas (Tejedor, Woldaregay, and
+Godtliebsen 2020), the violation of the Markov assumption
+is in this case not only problematic from an RL research per-
+spective, but also from a safety perspective, as ignoring the
+delayed and prolonged effects of a drug can lead to drug
+overdosing related toxicity (Guengerich 2011).
+Contributions.
+In this paper, we identify prolongedness
+and delay as fundamental roadblocks to using RL in pre-
+cision drug dosing, and focus on addressing the former. To
+that end, we introduce the prolonged action effect partially
+observable Markov decision process (PAE-POMDP), a
+arXiv:2301.00512v1  [cs.LG]  2 Jan 2023
+
+framework for modeling delayed action effects in decision
+making. We then present assumptions inspired by the
+pharmacology literature to convert the non-Markovian
+prolonged action effect problem into a Markov decision
+process (MDP), therefore enabling the use of recent ad-
+vances in model-free RL. To the best of our knowledge, our
+work is the ﬁrst to explore the prolonged effect of actions.
+We validate the proposed approach on a toy task, where
+the only violation of the Markov property comes from
+the prolonged effect of actions, and show that restoring
+the Markov assumption allows the RL agent we develop
+to signiﬁcantly outperform previous baselines. We also
+address the challenging task of glucose control by optimal
+insulin dosing for type 1 diabetes patients by leveraging the
+open-sourced version of the FDA-approved UDA/Padova
+simulator (Dalla, MD, and C. 2009; Xie 2018). Although
+the glucose control task has garnered interest in the RL
+literature in the past (Tejedor, Woldaregay, and Godtliebsen
+2020), there does not appear to be a widely adopted reward
+function. Therefore, we design a clinically motivated
+reward function that explicitly avoids overdosing while
+effectively controlling glucose levels. Our results show that
+our approach of converting the PAE-POMDP into a MDP
+is not only competitive in terms of performance, but is also
+remarkably more time and memory efﬁcient than the base-
+lines, making it more suitable for real-time dosing control
+systems. With these contributions, we aim to raise aware-
+ness of both the delayed and prolonged effects of drugs
+while tackling personalized drug dosing with RL, and hope
+that the proposed reward function will help break the entry
+barrier to control glucose levels for a closed-loop artiﬁcial
+pancreas, while fostering future research in this direction.
+What this paper does not do.
+This paper does not aim
+to provide a general solution to tackle the prolonged effect
+of actions, but one crafted speciﬁcally for precision drug
+dosing that allows to quickly bring the problem back to the
+MDP framework in a compute- and memory-efﬁcient way.
+We do not provide a new algorithm to tackle prolongedness,
+but instead propose a pharmacologically motivated effective
+way to enable the use of already existing RL algorithms
+for precision drug dosing. We are assuming drug action
+in isolation, instead of in combination with other drugs.
+Learning and predicting drug synergies is a growing body
+of research that can provide interesting future work.
+2
+Related Work
+Blood glucose control in individuals with Type 1 diabetes is
+a longstanding problem in medicine that has stimulated the
+interest of RL researchers for a long time. In a systematic
+review of reinforcement learning approaches for blood
+glucose management, Tejedor, Woldaregay, and Godtlieb-
+sen (2020) reported 347 papers between 1990 and 2019
+on the topic, of which 11 used the UVA/Padova simulator
+(Dalla, MD, and C. 2009; Dalla et al. 2014; Xie 2018).
+While most of these work explore RL algorithms – e.g. Ac-
+tor Critic, Q-learning, SARSA, and DQN among others
+– to address the glucose control problem, none of them
+acknowledges the fundamental challenge of prolongedness
+and most consider the current blood glucose level as a
+sufﬁcient statistic for state information. Even in the cases
+where actions are considered as part of the state information,
+only the most recent action is taken into account, which
+is not enough to restore the Markov assumption violated
+due to prolongedness (see appendix). Fox et al. (2020)
+formalized the problem as a POMDP by augmenting 4
+hours of blood glucose and insulin information, but they did
+not recognize prolongeness of drug effects as the reason for
+partial observability. In fact, to handle prolongedness, the
+most recent blood glucose measurement and residual active
+insulin are sufﬁcient, as we show in the experiments section.
+There is a similar theme of exploring various state of
+the art deep RL algorithms for other drug dosing problems.
+However, these works also miss the crucial point of recog-
+nizing and handling the prolonged effect of drugs. In a non-
+exhaustive list, Nemati, Ghassemi, and Clifford (2016) use
+a Q-Network to learn a personalized heparin dosing policy,
+Weng et al. (2017) use policy iteration to manage glycemia
+for septic patients in critical care, Lin et al. (2018) propose
+the use of Deep Deterministic Policy Gradient (DDPG, (Lil-
+licrap et al. 2016)) for heparin dosing in critical care pa-
+tients, and Lopez-Martinez et al. (2019) use Double Deep Q-
+Networks (DDQN) to administer opioids for pain manage-
+ment in critical care patients. But none of these papers dis-
+cusses the prolonged effect of drug doses. Zadeh, Street, and
+Thomas (2022) use Deep Q-Networks (DQN) to administer
+the anticoagulant warfarin, and they consider a pre-deﬁned
+duration along with a dose. They use a Pharmacokinet-
+ic/Pharmacodynamic (PK/PD) model to determine the dura-
+tion and add it to the state information, along with the patient
+information, blood coagulability measure and dosing his-
+tory. However, the authors do not explicitly recognize pro-
+longed drug effect as one of the reasons for adding the dura-
+tion information. In addition, since dose response is individ-
+ual speciﬁc, ﬁnding the right duration is a challenge in itself.
+3
+Background
+Markov
+Decision
+Process
+(MDP).
+Reinforcement
+Learning (RL) is a framework for solving sequential
+decision making problems where an agent interacts with
+the environment and receives feedback in the form of
+reward. The typical formal framework for RL is the
+Markov Decision Process (MDP). A MDP M is a 5-tuple
+(S, A, r, P, γ), where S is a (ﬁnite) set of states, A is a
+(ﬁnite) set of actions, P is the state transition probability
+P(st+1 = s′|st = s, at = a), r : S × A × S →R is the
+reward function and γ ∈[0, 1) is the discount factor. As the
+name suggests, a MDP obeys the Markov assumption that
+the future is in independent of the past given the present,
+which means that transitions and rewards depend only on
+the current state and action and not on the past history. The
+goal of an RL agent is to ﬁnd a policy π : S×A →[0, 1] that
+maximizes the cumulative discounted return P∞
+t=0 γtrt.
+POMDP and Recurrent Policy.
+A Partially Observable
+MDP (POMDP) is a 7-tuple (S, A, r, P, Ω, O, γ), where
+Ωis the set of observations, O is the set of conditional
+observation probabilities, O(ω|s), also known as the emis-
+
+sion function, and the rest of the elements are the same as
+in an MDP. In a POMDP, the agent does not have direct
+access to the identity of the states, instead needing to infer
+them through the observations. Note that while in a MDP,
+an agent which aims to act optimally with respect to the
+expected long-term return only needs to consider Markovian
+policies, π : S × A →[0, 1], in a POMDP, policies need to
+either rely on the entire history of action and observations,
+or to infer the distribution of hidden states from this history
+(as in belief-based POMDP dolution methods). In recent
+work, recurrent networks have become the standard for
+implementing POMDP policies. We call recurrent policy
+a mapping π : T × A →[0, 1] where T is the space of
+trajectories τ = {(ot, at, rt)}T
+t=0 of up to T time steps.
+Q-Learning and Deep Q-Networks (DQN).
+Q-Learning
+(Watkins and Dayan 1989) is a model-free RL algorithm
+that estimates Q : S × A →R, a value function as-
+sessing the quality of action at ∈A at state st ∈S.
+The value function can be estimated as: Q(st, at)
+=
+Q(st, at) + α
+ rt + γ maxa Q(st+1, a) −Q(st, at)
+
+,
+where α ∈(0, 1) is the learning rate. In DQN (Mnih,
+Kavukcuoglu, and et al. 2015), the Q-values are estimated
+by a neural network minimizing the Mean Square Bellman
+Error: Li(θi) = Est,at∼πb
+
+(yi −Q(st, at; θi))2
+yi = (rt + γ maxat+1 Q(st+1, at+1; θi−1), where πb is the
+behavior policy, yi is the target and θi are the parameters of
+the Q-network at iteration i.
+4
+Method
+4.1
+Problem Formulation
+Drug dosing can be formalized as a POMDP, because the
+effect of a medication is felt over a period of time after
+its administration. In this section, we introduce prolonged
+action effect POMDPs, referred to as PAE-POMDPs, a sub-
+class of POMDPs in which an action’s effect lasts more than
+one time step. More precisely, the action at taken at time
+step t continues to affect the future states of the environment
+for κ ∈Z+ time steps, where κ is the time interval necessary
+for at’s effect to fall below a given threshold. The value of
+κ is environment speciﬁc and also depends on the amplitude
+of the action at. The above-deﬁned prolongedness offers a
+forward view in time. From a backward view perspective,
+the state at a time step t is the result of super-imposing the
+effects of the actions from several preceding time steps,
+which are still felt at time t i.e. st+1 = st + Pκ
+k=0 ∆at−k,
+where ∆at is the effect of action at on the state. In other
+words, the Markov transition function P(st+1|st, at) is no
+longer valid, and instead the transition function becomes
+P(st+1|st, (at−k)κ
+k=0). In this case, the reward function
+can still be assumed to be Markov R(st, at, st+1) (see
+Equation 2). From the perspective of the agent, this means
+that it needs to keep track of the history of actions over
+a preceding period of time. In general, this problem is
+no simpler than a regular POMDP, as an agent that keeps
+track of its history may need to remember all the actions
+taken since the beginning of time. However, in this work,
+we consider a more circumscribed problem formulation
+which is relevant for therapeutic dosing. Speciﬁcally, we
+use knowledge from pharmacology to enable us to restore
+the Markov assumptions for drug-dosing PAE-POMDP.
+4.2
+Converting PAE-POMDP into MDP
+In this section, we present the speciﬁc knowledge used to
+restore the Markov assumptions in drug dosing problems
+and show how by leveraging them we can effectively
+convert a PAE-POMDP into an MDP.
+Action and effect equivalence.
+We start by noting that as
+per the pharmacodynamics axioms, drug effects are deter-
+mined by drug concentration at the site of action (Holford
+1984, 2018). Therefore, action and effect are considered to
+be equivalent and used interchangeably hereinafter.
+Exponential rate of decay.
+Motivated by the pharmacol-
+ogy (Benet and Zia-Amirhosseini 1995; Dasgupta and Kra-
+sowski 2020), biotechnology (Hobbie and Roth 2007), as
+well as chemical- kinetics (Peter and de Paula Julio 2006)
+literature, we adopt an exponential decay model of drug con-
+centration over time (Annamalai 2010). In particular, we as-
+sume that the initial action effect will decay at a constant rate
+λ, which is speciﬁc to the environment (drug as well as indi-
+vidual). Formally, we assume that a>t≤κ = λat. Note that
+here we implicitly assume that the action’s effects can safely
+be ignored after κ time-steps. This assumption is valid in the
+context of drug dosing, since drugs are ineffective below a
+certain concentration. The observation of the agent at a par-
+ticular time step can therefore be deﬁned conditional on the
+current state and on all the past actions: ot+1 ∼O(.|st, a<t).
+Note that although this is a generalized notation, not all the
+actions a<t that occur before t have an effect on ot+1 (only
+those within a κ window). If the amplitude of an action de-
+cays by a factor of λ for each of the κ time steps during
+which the action’s effect is felt, then at any time-step t, the
+environment state is a function of a sub-sequence of the pre-
+vious actions {a≤t}, which we call effective action, atE, and
+deﬁne as:
+atE =
+0,
+if t = 0
+λa(t−1)E + at−1,
+otherwise
+(1)
+where λ ∈(0, 1) enforces the exponential decay assumption
+on the actions. Note that setting λ = 0 falls back to the
+classical RL scenario, whereas setting λ = 1 entails a
+inﬁnitely long action effects.
+Additive composition of action effects.
+We note that
+Equation 1 leverages the additive property of drug concen-
+tration, and therefore assumes that action effects are additive
+and independent of each other. With the additive action
+effects assumption, the conditional distribution O(.|st, a<t)
+could be modelled as a sum of effects due to the actions.
+From PAE-POMDP to MDP.
+Finally, we convert the
+PAE-POMDP into a MDP, by augmenting the states with
+effective actions. Formally, we deﬁne a revised MDP,
+ME = (SE, A, r, P, γ), where the states in SE are deﬁned
+as stE = (st, atE). The updated state deﬁnition restores the
+Markov assumption, and therefore ME can be solved as a
+
+Figure 2: Performance on MoveBlock. Cumulative dis-
+counted return of tabular Q-learning and Effective Q-
+learning. Mean and std of performance over 10 seeds. Per-
+formance is smoothed with a window of size 1000.
+proxy of the original MDP M. Note that ME and M only
+differ in their state space. Since we have access to ME, we
+can use traditional RL algorithms to solve it.
+5
+Experiments
+We validate the proposed approach on a toy environment, as
+a sanity check to prototype our method, and on a challeng-
+ing glucose control environment. This section describes both
+environments and presents the obtained results.
+5.1
+Toy Environment: MoveBlock
+Environment.
+We created the MoveBlock environment to
+assess our proposed approach in a controlled manner. In par-
+ticular, we built the environment in such a way that the only
+violation of the Markov property comes from the prolonged
+effect of actions. In MoveBlock, the task is to move a block
+from its random initial position to a ﬁxed ﬁnal position on a
+slippery surface with minimum possible force applied along
+the horizontal axis in the direction of the goal. Due to the
+slippery nature of the ﬂoor, an exerted force will cause the
+object to move until it is stopped by friction, prolonging the
+effect of actions over multiple time-steps. The reward sys-
+tem is the same as the one in the Mountain Car environ-
+ment (Brockman et al. 2016) – i.e. there is a high reward
+for reaching the goal position, but action magnitude propor-
+tional penalties to encourage policies where minimum effort
+is used. The observation is the position (continuous) while
+the velocity remains unobserved to the agent.
+Experimental setup and results.
+To keep the states
+tractable, we discretized the continuous position values into
+10k states. The action space is discrete, but to keep the effec-
+tive actions tractable, we clipped the effective action value
+to the maximum action value. We then trained a tabular Q-
+learning agent, which serves as baseline, with ϵ-greedy ex-
+ploration. Next, we modiﬁed this tabular Q-learning agent
+with the method proposed in Section 4.2, and trained an Ef-
+fective Q-learning agent. The results are shown in Figure 2.
+We observe that the Effective Q-learning agent, which re-
+stores the Markov assumptions broken by the prolonged ac-
+tion effects, consistently outperforms the Q-learning agent
+despite using the same Q-learning algorithm, which high-
+lights the importance of considering the prolongedness of
+actions when solving PAE-POMDPs.
+5.2
+Glucose Control Environment
+Environment.
+We chose blood glucose control as a real-
+world example of PAE-POMDP given the low therapeutic
+index of insulin, which makes it a good candidate for pre-
+cision dosing. We used Simglucose (Xie 2018), the OpenAI
+Gym (Brockman et al. 2016) implementation of the FDA
+approved UVA/Padova Type1 Diabetes Mellitus Simulator
+(T1DMS) (Dalla, MD, and C. 2009; Dalla et al. 2014) built
+on an in-silico population of 30 patients. In this case, the task
+is to manage blood glucose by administering insulin to type
+1 diabetes patients, who lose their ability to produce insulin
+for the rest of their lives. In particular, the goal is to maintain
+blood glucose as close as possible to the non-diabetic range
+for a given patient. However, the environment does not come
+with a recognized pre-deﬁned reward function.
+Experimental setup.
+We are interested in training a per-
+sonalized glucose control policy instead of a population-
+level policy. To this end, we randomly selected a virtual pa-
+tient from the simulator and modiﬁed the simulator for the
+experiments presented in this paper (See Appendix for more
+details). In this PAE-POMDP setting, the states are hidden
+patient parameters (Kovatchev et al. 2009), observations are
+continuous blood glucose readings, actions are discrete in-
+sulin doses in the range of [0, 5], transition dynamics are
+speciﬁc to the chosen patient but unknown to the agent, and
+the reward function is described in the next paragraph. We
+appended the current observations with the effective actions
+as described in section 4.2.
+Reward.
+Reward design in RL is a challenging task in it-
+self. The task of maintaining blood glucose as close as pos-
+sible to the non-diabetic range, can be addressed by maxi-
+mizing the time spent in the target zone with as little insulin
+as possible. The minimal insulin dose requirement is due
+to the need to avoid building insulin resistance, a condition
+where a person no longer responds to small doses of insulin.
+Note that the tendency to develop resistance is applicable to
+any drug. Unfortunately, recently introduced reward func-
+tions do not fulﬁll the above-discussed criteria. Therefore,
+we designed a biologically inspired custom zone reward that
+incentivizes the time spent in the target zone and penalizes
+hyperglycemia, hypoglycemia and high insulin doses. For-
+mally, the reward is deﬁned as:
+rt(st−1, at, st) = rt,state(st−1, st) −rt,action(at)
+(2)
+where rt,state is a state reward which encourages the agent
+to maintain the target vital statistics within a healthy range
+as follows:
+rt,state(st−1, st) =
+
+
+
+
+
+
+
+
+
+−100
+st < 70 or st > 200 (episode termination)
+−1
+st < 100 and st −st−1 < 0.5 (hypoglycemia)
+−1
+st > 150 and st −st−1 > 0.5 (hyperglycemia)
+10
+100 <= st <= 150 (target blood glucose)
+(3)
+and rt,action is a penalty term which encourages the agent to
+avoid overdosing:
+rt,action(at) = 0.1 ∗a2
+t
+(penalize overdosing)
+(4)
+Note that this kind of reward function is well-suited for any
+homeostatic control problem in drug dosing.
+
+Model
+Runtime
+Max
+memory
+ADRQN
+359.64 ± 19.25
+1623
+Effective-DQN
+129.04 ± 42.73
+1513
+Table 1: Runtime and memory require-
+ments. 5 agents trained on a Nvidia RTX
+8000 GPU with the same 5 seeds (mean ±
+std). Runtime is in mins/10K episode and
+memory in MiB.
+Figure 5: Effect of history length on compute (left) and memory requirement
+(right). Compute time increases exponentially and memory requirement linearly
+with the history length for ADRQN agents, but Effective-DQN compute and
+memory are independent of the history length and hence remain constant.
+Figure 3: Performance (Cumulative discounted sum of
+rewards) on the glucose control task. Since DQN assumes
+the environment to be Markov, its performance is almost as
+poor as the ﬁxed policy. The performance of Effective-DQN
+is at par with ADRQN (history length 15); both consider
+prolonged effects of actions.
+Figure 4: Glucose control performance breakdown.
+Average number of steps in each blood glucose zone over
+training episodes (std over 5 seeds). Due to the prolonged
+action effect, Effective-DQN spends more time in the hyper-
+glycemic zone as well as in the target zone than ADRQN.
+DQN learns a sub-optimal policy that tends to overdose in
+order to to quickly get out of hyperglycemia and eventually
+leads to episode termination due to hypoglycemia.
+Policies under comparison.
+All agents are trained using
+the zone reward function introduced in the previous section.
+1. Fixed Dose. This is a handcrafted step-wise policy with
+the underlying assumption that higher blood glucose lev-
+els call for higher doses. Speciﬁcally, we inject the max-
+imum insulin (5 units) for blood glucose in the range of
+190 to 200. For every 10 units drop in blood glucose level
+from 190, we reduce the insulin dose by 1 unit until it is
+cut off at blood glucose 150.
+2. DQN. The DQN agent assumes the environment to be
+Markov, and hence is a good baseline to capture the effect
+of ignoring the inherent prolongedness of the actions.
+3. Action-speciﬁc
+Deep
+Recurrent
+Q-Network
+(ADRQN) (Zhu, Li, and Poupart 2017). This baseline
+leverages a recurrent neural network that encodes the ac-
+tion history and appends it with the current observation to
+form a state. The action history length is set to 15, as per
+hyper-parameter tuning. Note that since we are the ﬁrst to
+acknowledge the prolonged effect of drug dosing, we are
+also the ﬁrst to propose an action history based baseline
+in this context. In a scenario where compute and memory
+is not a limiting factor, ADRQN (or any other action
+history based policy) can serve as the state of the art.
+4. Effective-DQN. This approach enhances the DQN base-
+line, but with the decay assumption introduced in the pre-
+vious section i.e. the blood glucose values are augmented
+with the effective insulin dose to represent the state.
+Quantitative Results.
+We compare the cumulative dis-
+counted sum of rewards for all the agents under consid-
+eration in Figure 3. The ﬁxed dose policy, which under-
+goes no learning, achieves the lowest performance. Unsur-
+prisingly, the DQN agent only slightly improves upon this
+naive hand-crafted policy, since it assumes the environment
+is Markov and thus ignores the prolonged effect of ac-
+tions. The ADRQN agent exhibits a signiﬁcant performance
+boost as compared to the DQN agent, since the learned pol-
+icy depends not only on the current observation, but also
+on the action history responsible for the prolonged effect.
+The Effective-DQN agent’s performance is on par with the
+ADRQN agent, suggesting that our decay assumption is
+a good approximation for the prolonged action effect ob-
+served in the diabetes simulator (see Appendix for details).
+
+To gain further insights, we stratify the performance of each
+RL agent into the hyperglycemic, hypoglycemic, and tar-
+get zones, and assess the number of steps each agent spends
+in each blood glucose zone over training episodes (see Fig-
+ure 4). We observe that the DQN agent minimizes the neg-
+ative reward for hyperglycemia and spends minimum time
+in the hyperglycemic zone. However, due to the prolonged
+effect of the actions taken in hyperglycemia, the agent
+spends very little time in the target zone as well as hypo-
+glycemic zone, suggesting that the agent learns to overdose
+to quickly get out of hyperglycemia, and eventually leading
+to episode termination due to hypoglycemia. Both ADRQN
+and Effective-DQN spend a similar amount of time in the
+hypoglycemic zone, whereas Effective-DQN spends slightly
+more time in hyperglycemia than ADRQN, increasing the
+time it spends in the target zone. This explains the perfor-
+mance gain of the Effective-DQN agent over ADRQN.
+Efﬁciency analysis.
+Since time sensitivity and limited
+memory are crucial aspects of real-time control sys-
+tems, we compare the best performing agents (ADRQN and
+Effective-DQN) in terms of compute and memory efﬁciency.
+In Table 1, we present the compute and maximum memory
+requirement to train the models on the glucose control task.
+The Runtime column presents the time required to train the
+models for 10K episodes on a single Nvidia RTX 8000 GPU.
+We used the readily available ADRQN PyTorch implemen-
+tation1, and ensured both ADRQN and Effective-DQN are
+comparable in terms of capacity. Although some of the
+differences might still be attributed to the implementation,
+many are due to the individual properties of each model. In
+particular, ADRQN has the longest runtime as it needs to
+learn the action history through the LSTM (Hochreiter and
+Schmidhuber 1997) unit, and as shown in Figure 5 (left), the
+compute time grows exponentially with the history length.
+History length depends on how prolonged the action effects
+are, which in turn are individual and drug speciﬁc factors.
+However, the compute time for Effective-DQN remains
+constant no matter the history length, making the compute
+efﬁciency gap between ADRQN and Effective-DQN in-
+crease for longer history lengths. In the max memory column
+of Table 1, we present the maximum memory required by
+the models during training. We keep a replay buffer of the
+same size to train all the models. As shown in the table,
+ADRQN requires slightly more memory than Effective-
+DQN. While this difference does not appear signiﬁcant, it is
+worth noting that ADRQN requires memory proportional to
+the history length (see Figure 5 (right)). Moreover, in order
+to beneﬁt from longer histories, ADRQN might also require
+larger models, further increasing its memory requirement.
+In contrast, the Effective-DQN’s memory requirement
+remains constant as we increase the history length.
+Qualitative results.
+We present a qualitative assessment
+of the policies under comparison to better understand their
+behavior. Figure 6 displays the effect of insulin intake dic-
+tated by each policy, and food intake, on the blood glucose
+level over 10 evaluation episodes. Note that the food intake
+1https://mlpeschl.com/post/tiny adrqn/
+schedule is ﬁxed across all agents and episodes, and that
+food occurrence might look different across different plots
+due to episodes terminating, in some cases, before mealtime.
+The starting blood glucose level is also the same in all cases,
+but from then on, the trajectories are generated based on
+each policy. The ﬁxed policy (Figure 6(a)) administers the
+same dose given the same blood glucose level, and hence it
+is not surprising to see all the episodes terminate in hypo-
+glycemia due to the prolonged effect of the doses injected at
+higher blood glucose levels. The DQN agent (Figure 6(b))
+learns to administer a constant low dose of insulin due to
+the various penalties in the reward function. A probable in-
+terpretation is that: (1) The agent learns that not doing any-
+thing – i.e. setting the dose to 0 – makes the agent spend
+more time in hyperglycemia, and incurs penalties (2) Due to
+the inherent prolongedness of actions, higher doses quickly
+drive the agent into hypoglycemia, which also leads to
+penalties. Since the agent has no prior information about the
+prolonged action effects, it may interpret this penalty as indi-
+cating that choosing high doses is harmful. (3) There is also
+an additional penalty that comes from overdosing. Hence,
+the DQN agent chooses a middle ground of constantly ad-
+ministering the minimum non-zero dose available (dose = 1)
+to maximize its duration into the target zone. The ADRQN
+agent (Figure 6(c)) is able to leverage insulin history through
+its state description and hence mostly administers new doses
+sparingly. As shown in the ﬁgure, it chooses all possible
+doses between 0 and 5. We observe frequent doses when
+blood glucose spikes around food intake, but in an attempt
+to quickly regulate the spike in blood glucose, the agent of-
+ten ends up over-dosing. This leads to quick episode termi-
+nation due to hypoglycemia right after food consumption.
+This is an undesirable behavior, evoking safety concerns, as
+in the clinical context, hypoglycemia is more fatal than hy-
+perglycemia (McCrimmon and Sherwin 2010), and requires
+immediate medical attention. Finally, the Effective-DQN
+agent (Figure 6(d)) appears to be conservative; like the DQN
+agent, it only injects the smallest possible dose when it de-
+cides to administer insulin. However, unlike the DQN agent,
+the Effective-DQN agent has information about the residual
+insulin in the blood from previous doses and hence learns
+when not to administer further doses. This is an important
+improvement over DQN, which closes the performance gap
+with ADRQN. It is interesting to note that the Effective-
+DQN agent also chooses to administer insulin around food
+intake when blood glucose spikes, but the dose magnitude
+remains small. A noteworthy behavior is that the Effective-
+DQN agent never ended an episode due to hypoglycemia. A
+potential explanation is that either administering a slightly
+higher does of 2 units or more frequently administering
+1-unit doses might push the agent into hypoglycemia and
+eventually death. This hypothesis could be veriﬁed in the fu-
+ture by training an agent with access to smaller insulin doses.
+Note however that this behavior is an observation, not a con-
+straint, and hence not a guarantee on the policy. To have such
+guarantees one must add desired conservative properties as
+constraints, which we leave for future work.
+
+(a) Fixed Dose
+(b) DQN
+(c) ADRQN
+(d) Effective-DQN
+Figure 6: Policy visualization. Trained greedy agents evaluated on 10 episodes with the same starting blood glucose. Red
+crosses mark the end of episodes. The insulin administered is as prescribed by the respective policy. In the blood glucose plot,
+the space between the two red dotted lines is the target zone. Effective-DQN appears to be conservative and thus does not allow
+the patient to get into hypoglycemia. The ADRQN agent gets into both hypo- and hyperglycemia.
+6
+Discussion
+Conclusion.
+In this paper, we identiﬁed delay and pro-
+longedness as a common roadblock for using RL in drug
+dosing. We deﬁned PAE-POMDP, a sub-class of POMDPs
+in which action effects persist for multiple time steps, and in-
+troduced a simple and effective framework to convert PAE-
+POMDPs into MDPs which can be subsequently solved with
+traditional RL algorithms. We evaluated our proposed ap-
+proach on a toy task and on a glucose control task, for which
+we proposed a clinically-inspired reward function for the
+glucose control simulator, which we hope will facilitate fur-
+ther research. Our quantitative results have shown that our
+proposed approach to convert PAE-POMDPs into MDPs is
+competitive and offers important advantages over the base-
+lines. In particular, we have shown that by introducing do-
+main knowledge on the prolongedness of action effects, we
+could build a solution capable of matching state-of-the-art
+recurrent policies such as ADRQN while being remarkably
+more time and memory efﬁcient. Our qualitative results have
+further emphasized the beneﬁts of the introduced Effective-
+DQN policy, which appeared to be more conservative than
+the recurrent policy, despite using the same reward function.
+Limitations.
+Our glucose control experiments are limited
+to a single virtual patient environment. Since humans exhibit
+similar proﬁles for prolonged action effects, similar perfor-
+mance on patients from other demographics is expected but
+should be evaluated. Although based on pharmacological
+literature we acknowledge that delay and prolongedness
+are present in any drug dosing scenario, we did not ﬁnd
+other simulated environments to test our hypothesis. Hence,
+our experiments at the moment are limited to a single drug
+effect simulation. Although this work is only in the context
+of drug dosing, prolonged action effects seem to be present
+in other application areas such as robotics, where the decay
+assumption may not be justiﬁed. The recurrent solution is
+still the most general solution in such cases. This work does
+not explore those applications.
+Future work.
+In this work, we have only considered dis-
+crete action spaces. Exploring continuous actions might lead
+to more interesting insights in the future. Delay and pro-
+longedness appear across all drug dosing scenarios, so we
+hope future RL applications of autonomous drug dosing will
+consciously account for them. More broadly, future work
+includes coming up with more generalized solutions for
+action superposition that accommodate qualitative actions
+and are suitable for application areas beyond drug dosing.

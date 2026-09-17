@@ -1,0 +1,1126 @@
+Learning to Communicate to Solve Riddles
+with Deep Distributed Recurrent Q-Networks
+Jakob N. Foerster1,†
+
+Yannis M. Assael1,†
+
+Nando de Freitas1,2,3
+
+Shimon Whiteson1
+
+1University of Oxford, United Kingdom
+2Canadian Institute for Advanced Research, CIFAR NCAP Program
+3Google DeepMind
+Abstract
+We
+propose
+deep
+distributed
+recurrent
+Q-
+networks (DDRQN), which enable teams of
+agents to learn to solve communication-based co-
+ordination tasks. In these tasks, the agents are
+not given any pre-designed communication pro-
+tocol. Therefore, in order to successfully com-
+municate, they must ﬁrst automatically develop
+and agree upon their own communication proto-
+col. We present empirical results on two multi-
+agent learning problems based on well-known
+riddles, demonstrating that DDRQN can success-
+fully solve such tasks and discover elegant com-
+munication protocols to do so. To our knowl-
+edge, this is the ﬁrst time deep reinforcement
+learning has succeeded in learning communica-
+tion protocols. In addition, we present ablation
+experiments that conﬁrm that each of the main
+components of the DDRQN architecture are crit-
+ical to its success.
+1. Introduction
+In recent years, advances in deep learning have been in-
+strumental in solving a number of challenging reinforce-
+ment learning (RL) problems, including high-dimensional
+robot control (Levine et al., 2015; Assael et al., 2015; Wat-
+ter et al., 2015), visual attention (Ba et al., 2015), and the
+Atari learning environment (ALE) (Guo et al., 2014; Mnih
+et al., 2015; Stadie et al., 2015; Wang et al., 2015; Schaul
+et al., 2016; van Hasselt et al., 2016; Oh et al., 2015; Belle-
+mare et al., 2016; Nair et al., 2015).
+The above-mentioned problems all involve only a single
+learning agent. However, recent work has begun to address
+multi-agent deep RL. In competitive settings, deep learn-
+†These authors contributed equally to this work.
+ing for Go (Maddison et al., 2015; Silver et al., 2016) has
+recently shown success. In cooperative settings, Tampuu
+et al. (2015) have adapted deep Q-networks (Mnih et al.,
+2015) to allow two agents to tackle a multi-agent exten-
+sion to ALE. Their approach is based on independent Q-
+learning (Shoham et al., 2007; Shoham & Leyton-Brown,
+2009; Zawadzki et al., 2014), in which all agents learn their
+own Q-functions independently in parallel.
+However, these approaches all assume that each agent can
+fully observe the state of the environment. While DQN
+has also been extended to address partial observability
+(Hausknecht & Stone, 2015), only single-agent settings
+have been considered. To our knowledge, no work on deep
+reinforcement learning has yet considered settings that are
+both partially observable and multi-agent.
+Such problems are both challenging and important. In the
+cooperative case, multiple agents must coordinate their be-
+haviour so as to maximise their common payoff while fac-
+ing uncertainty, not only about the hidden state of the envi-
+ronment but about what their teammates have observed and
+thus how they will act. Such problems arise naturally in a
+variety of settings, such as multi-robot systems and sensor
+networks (Matari, 1997; Fox et al., 2000; Gerkey & Matari,
+2004; Olfati-Saber et al., 2007; Cao et al., 2013).
+In this paper, we propose deep distributed recurrent Q-
+networks (DDRQN) to enable teams of agents to learn ef-
+fectively coordinated policies on such challenging prob-
+lems.
+We show that a naive approach to simply train-
+ing independent DQN agents with long short-term memory
+(LSTM) networks (Hochreiter & Schmidhuber, 1997) is in-
+adequate for multi-agent partially observable problems.
+Therefore, we introduce three modiﬁcations that are key to
+DDRQN’s success: a) last-action inputs: supplying each
+agent with its previous action as input on the next time step
+so that agents can approximate their action-observation his-
+tories; b) inter-agent weight sharing: a single network’s
+arXiv:1602.02672v1  [cs.AI]  8 Feb 2016
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+weights are used by all agents but that network conditions
+on the agent’s unique ID, to enable fast learning while also
+allowing for diverse behaviour; and c) disabling experience
+replay, which is poorly suited to the non-stationarity aris-
+ing from multiple agents learning simultaneously.
+To evaluate DDRQN, we propose two multi-agent rein-
+forcement learning problems that are based on well-known
+riddles: the hats riddle, where n prisoners in a line must
+determine their own hat colours; and the switch riddle, in
+which n prisoners must determine when they have all vis-
+ited a room containing a single switch. Both riddles have
+been used as interview questions at companies like Google
+and Goldman Sachs.
+While these environments do not require convolutional net-
+works for perception, the presence of partial observabil-
+ity means that they do require recurrent networks to deal
+with complex sequences, as in some single-agent works
+(Hausknecht & Stone, 2015; Ba et al., 2015) and language-
+based (Narasimhan et al., 2015) tasks. In addition, because
+partial observability is coupled with multiple agents, op-
+timal policies critically rely on communication between
+agents. Since no communication protocol is given a pri-
+ori, reinforcement learning must automatically develop a
+coordinated communication protocol.
+Our results demonstrate that DDRQN can successfully
+solve these tasks, outperforming baseline methods, and dis-
+covering elegant communication protocols along the way.
+To our knowledge, this is the ﬁrst time deep reinforcement
+learning has succeeded in learning communication proto-
+cols. In addition, we present ablation experiments that con-
+ﬁrm that each of the main components of the DDRQN ar-
+chitecture are critical to its success.
+2. Background
+In this section, we brieﬂy introduce DQN and its multi-
+agent and recurrent extensions.
+2.1. Deep Q-Networks
+In a single-agent, fully-observable, reinforcement learning
+setting (Sutton & Barto, 1998), an agent observes its cur-
+rent state st ∈S at each discrete time step t, chooses an
+action at ∈A according to a potentially stochastic policy
+π, observes a reward signal rt, and transitions to a new state
+st+1. Its objective is to maximize an expectation over the
+discounted return, Rt
+Rt = rt + γrt+1 + γ2rt+2 + · · · ,
+(1)
+where γ ∈[0, 1) is a discount factor. The Q-function of a
+policy π is:
+Qπ(s, a) = E [Rt|st = s, at = a] .
+(2)
+The
+optimal
+action-value
+function
+Q∗(s, a)
+=
+maxπ Qπ(s, a) obeys the Bellman optimality equation:
+Q∗(s, a) = Es′
+h
+r + γ max
+a′ Q∗(s′, a′) | s, a
+i
+.
+(3)
+Deep Q-networks (Mnih et al., 2015) (DQNs) use neural
+networks parameterised by θ to represent Q(s, a; θ). DQNs
+are optimised by minimising the following loss function at
+each iteration i:
+Li(θi) = Es,a,r,s′
+
+yDQN
+i
+−Q(s, a; θi)
+2
+,
+(4)
+with target
+yDQN
+i
+= r + γ max
+a′ Q(s′, a′; θ−
+i ).
+(5)
+Here, θ−
+i are the weights of a target network that is frozen
+for a number of iterations while updating the online net-
+work Q(s, a; θi) by gradient descent. DQN uses experience
+replay (Lin, 1993; Mnih et al., 2015): during learning, the
+agent builds a dataset Dt = {e1, e2, . . . , et} of experiences
+et = (st, at, rt, st+1) across episodes. The Q-network is
+then trained by sampling mini-batches of experiences from
+D uniformly at random. Experience replay helps prevent
+divergence by breaking correlations among the samples. It
+also enables reuse of past experiences for learning, thereby
+reducing sample costs.
+2.2. Independent DQN
+DQN has been extended to cooperative multi-agent set-
+tings, in which each agent m observes the global st, se-
+lects an individual action am
+t , and receives a team reward,
+rt, shared among all agents.
+Tampuu et al. (2015) ad-
+dress this setting with a framework that combines DQN
+with independent Q-learning, applied to two-player pong,
+in which all agents independently and simultaneously learn
+their own Q-functions Qm(s, am; θm
+i ).
+While indepen-
+dent Q-learning can in principle lead to convergence prob-
+lems (since one agent’s learning makes the environment ap-
+pear non-stationary to other agents), it has a strong empir-
+ical track record (Shoham et al., 2007; Shoham & Leyton-
+Brown, 2009; Zawadzki et al., 2014).
+2.3. Deep Recurrent Q-Networks
+Both DQN and independent DQN assume full observabil-
+ity, i.e., the agent receives st as input. By contrast, in par-
+tially observable environments, st is hidden and instead the
+agent receives only an observation ot that is correlated with
+st but in general does not disambiguate it.
+Hausknecht & Stone (2015) propose the deep recurrent Q-
+network (DRQN) architecture to address single-agent, par-
+tially observable settings. Instead of approximating Q(s, a)
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+with a feed-forward network, they approximate Q(o, a)
+with a recurrent neural network that can maintain an in-
+ternal state and aggregate observations over time. This can
+be modelled by adding an extra input ht−1 that represents
+the hidden state of the network, yielding Q(ot, ht−1, a; θi).
+Thus, DRQN outputs both Qt, and ht, at each time step.
+DRQN was tested on a partially observable version of ALE
+in which a portion of the input screens were blanked out.
+2.4. Partially Observable Multi-Agent RL
+In this work, we consider settings where there are both mul-
+tiple agents and partial observability: each agent receives
+its own private om
+t at each time step and maintains an inter-
+nal state hm
+t . However, we assume that learning can occur
+in a centralised fashion, i.e., agents can share parameters,
+etc., during learning so long as the policies they learn con-
+dition only on their private histories. In other words, we
+consider centralised learning of decentralised policies.
+We are interested in such settings because it is only when
+multiple agents and partial observability coexist that agents
+have the incentive to communicate. Because no communi-
+cation protocol is given a priori, the agents must ﬁrst au-
+tomatically develop and agree upon such a protocol. To
+our knowledge, no work on deep RL has considered such
+settings and no work has demonstrated that deep RL can
+successfully learn communication protocols.
+3. DDRQN
+The most straightforward approach to deep RL in par-
+tially observable multi-agent settings is to simply combine
+DRQN with independent Q-learning, in which case each
+agent’s
+Q-network
+represents
+Qm(om
+t , hm
+t−1, am; θm
+i ),
+which conditions on that agent’s individual hidden state as
+well as observation. This approach, which we call the naive
+method, performs poorly, as we show in Section 5.
+Instead, we propose deep distributed recurrent Q-networks
+(DDRQN), which makes three key modiﬁcations to the
+naive method. The ﬁrst, last-action input, involves pro-
+viding each agent with its previous action as input to the
+next time step. Since the agents employ stochastic policies
+for the sake of exploration, they should in general condi-
+tion their actions on their action-observation histories, not
+just their observation histories. Feeding the last action as
+input allows the RNN to approximate action-observation
+histories.
+The second, inter-agent weight sharing, involves tying the
+weights of all agents networks. In effect, only one network
+is learned and used by all agents. However, the agents can
+still behave differently because they receive different ob-
+servations and thus evolve different hidden states. In ad-
+dition, each agent receives its own index m as input, mak-
+Algorithm 1 DDRQN
+Initialise θ1 and θ−
+1
+for each episode e do
+hm
+1 = 0 for each agent m
+s1 = initial state, t = 1
+while st ̸= terminal and t < T do
+for each agent m do
+With probability ϵ pick random am
+t
+else am
+t = arg maxa Q(om
+t , hm
+t−1, m, am
+t−1, a; θi)
+Get reward rt and next state st+1, t = t + 1
+∇θ = 0
+▷reset gradient
+for j = t −1 to 1, −1 do
+for each agent m do
+ym
+j =
+n rj, if sj terminal, else
+rj + γ maxa Q(om
+j+1, hm
+j , m, am
+j , a; θ−
+i )
+Accumulate gradients for:
+(ym
+j −Q(om
+j , hm
+j−1, m, am
+j−1, am
+j ; θi))2
+θi+1 = θi + α∇θ
+▷update parameters
+θ−
+i+1 = θ−
+i + α−(θi+1 −θ−
+i ) ▷update target network
+ing it easier for agents to specialise. Weight sharing dra-
+matically reduces the number of parameters that must be
+learned, greatly speeding learning.
+The third, disabling experience replay, simply involves
+turning off this feature of DQN. Although experience re-
+play is helpful in single-agent settings, when multiple
+agents learn independently the environment appears non-
+stationary to each agent, rendering its own experience ob-
+solete and possibly misleading.
+Given these modiﬁcations, DDRQN learns a Q-function of
+the form Q(om
+t , hm
+t−1, m, am
+t−1, am
+t ; θi). Note that θi does
+not condition on m, due to weight sharing, and that am
+t−1 is
+a portion of the history while am
+t is the action whose value
+the Q-network estimates.
+Algorithm 1 describes DDRQN. First, we initialise the tar-
+get and Q-networks. For each episode, we also initialise
+the state, s1, the internal state of the agents, hm
+1 , and am
+0 .
+Next, for each time step we pick an action for each agent
+ϵ-greedily w.r.t. the Q-function. We feed in the previous
+action, am
+t−1, the agent index, m, along with the observa-
+tion om
+t
+and the previous internal state, hm
+t−1.
+After all
+agents have taken their action, we query the environment
+for a state update and reward information.
+When we reach the ﬁnal time step or a terminal state, we
+proceed to the Bellman updates. Here, for each agent, m,
+and time step, j, we calculate a target Q-value, ym
+j , using
+the observed reward, rj, and the discounted target network.
+We also accumulate the gradients, ∇θ, by regressing the
+Q-value estimate, Q(om
+j , hm
+j−1, m, am
+j−1, a; θi), against the
+target Q-value, ym
+j , for the action chosen, am
+j .
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+Lastly, we conduct two weight updates, ﬁrst θi in the direc-
+tion of the accumulated gradients, ∇θ, and then the target
+network, θ−
+i , in the direction of θi.
+4. Multi-Agent Riddles
+In this section, we describe the riddles on which we evalu-
+ate DDRQN.
+4.1. Hats Riddle
+The hats riddle can be described as follows: “An execu-
+tioner lines up 100 prisoners single ﬁle and puts a red or a
+blue hat on each prisoner’s head. Every prisoner can see
+the hats of the people in front of him in the line - but not
+his own hat, nor those of anyone behind him. The execu-
+tioner starts at the end (back) and asks the last prisoner
+the colour of his hat. He must answer “red” or “blue.” If
+he answers correctly, he is allowed to live. If he gives the
+wrong answer, he is killed instantly and silently. (While ev-
+eryone hears the answer, no one knows whether an answer
+was right.) On the night before the line-up, the prisoners
+confer on a strategy to help them. What should they do?”
+(Poundstone, 2012). Figure 1 illustrates this setup.
+2
+1
+3
+4
+5
+6
+“Red”
+Answers:
+Prisoners:
+Hats:
+“Red”
+Observed hats
+?
+Figure 1. Hats: Each prisoner can hear the answers from all pre-
+ceding prisoners (to the left) and see the colour of the hats in front
+of him (to the right) but must guess his own hat colour.
+An optimal strategy is for all prisoners to agree on a com-
+munication protocol in which the ﬁrst prisoner says “blue”
+if the number of blue hats is even and “red” otherwise (or
+vice-versa). All remaining prisoners can then deduce their
+hat colour given the hats they see in front of them and the
+responses they have heard behind them. Thus, everyone
+except the ﬁrst prisoner will deﬁnitely answer correctly.
+To formalise the hats riddle as a multi-agent RL task, we
+deﬁne a state space s = (s1, . . . , sn, a1, . . . , an), where n
+is the total number of agents, sm ∈{blue, red} is the m-
+th agent’s hat colour and am ∈{blue, red} is the action it
+took on the m-th step. At all other time steps, agent m can
+only take a null action. On the m-th time step, agent m’s
+observation is om = (a1, . . . , am−1, sm+1, . . . , sn).
+Re-
+ward is zero except at the end of the episode, when it is
+the total number of agents with the correct action: rn =
+P
+m I(am = sm). We label only the relevant observation
+om and action am of agent m, omitting the time index.
+Although this riddle is a single action and observation prob-
+lem it is still partially observable, given that none of the
+agents can observe the colour of their own hat.
+4.2. Switch Riddle
+The switch riddle can be described as follows: “One hun-
+dred prisoners have been newly ushered into prison. The
+warden tells them that starting tomorrow, each of them
+will be placed in an isolated cell, unable to communicate
+amongst each other. Each day, the warden will choose one
+of the prisoners uniformly at random with replacement, and
+place him in a central interrogation room containing only
+a light bulb with a toggle switch. The prisoner will be able
+to observe the current state of the light bulb. If he wishes,
+he can toggle the light bulb. He also has the option of an-
+nouncing that he believes all prisoners have visited the in-
+terrogation room at some point in time. If this announce-
+ment is true, then all prisoners are set free, but if it is false,
+all prisoners are executed. The warden leaves and the pris-
+oners huddle together to discuss their fate. Can they agree
+on a protocol that will guarantee their freedom?” (Wu,
+2002).
+Day 1
+3
+2
+3
+1
+Off
+On
+Off
+On
+Off
+On
+Day 2
+Day 3
+Day 4
+Switch:
+Action:
+On
+None
+None
+Tell
+Off
+On
+Prisoner 
+in IR:
+Figure 2. Switch: Every day one prisoner gets sent to the inter-
+rogation room where he can see the switch and choose between
+actions “On”, “Off”, “Tell” and “None”.
+A number of strategies (Song, 2012; Wu, 2002) have been
+analysed for the inﬁnite time-horizon version of this prob-
+lem in which the goal is to guarantee survival. One well-
+known strategy is for one prisoner to be designated the
+counter. Only he is allowed to turn the switch off while
+each other prisoner turns it on only once. Thus, when the
+counter has turned the switch off n−1 times, he can “Tell”.
+To formalise the switch riddle, we deﬁne a state space
+s = (SWt, IRt, s1, . . . , sn), where SWt ∈{on, off} is
+the position of the switch, IR ∈{1 . . . n} is the current
+visitor in the interrogation room and s1, . . . , sn ∈{0, 1}
+tracks which agents have already been to the interrogation
+room. At time step t, agent m observes om
+t = (irt, swt),
+where irt = I(IRt = m), and swt = SWt if the agent
+is in the interrogation room and null otherwise. If agent
+m is in the interrogation room then its actions are am
+t
+∈
+{“On”, “Off”, “Tell”, “None”}; otherwise the only action
+is ”None”. The episode ends when an agent chooses “Tell”
+or when the maximum time step is reached. The reward rt
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+Q m
+m, n
+a 1
++
++
++
+m, n
+a m-1
+m, n
++
++
++
+m, n
+s m+1
+s n
+m, n
+s k
+m, n
+a k
+LSTM unrolled for m-1 steps
+LSTM unrolled for n-m steps
+…
+…
+…
+…
+z a
+1
+z s
+m+1
+z a
+k
+z s
+k
+z a
+m-1
+z s
+n
+h a
+1
+h s
+m+1
+h a
+k
+h s
+k
+y a
+m-1
+y s
+n
+Figure 3. Hats: Each agent m observes the answers, ak, k < m,
+from all preceding agents and hat colour, sk in front of him,
+k > m. Both variable length sequences are processed through
+RNNs. First, the answers heard are passed through two single-
+layer MLPs, zk
+a = MLP(ak) ⊕MLP(m, n), and their outputs
+are added element-wise.
+zk
+a is passed through an LSTM net-
+work yk
+a, hk
+a = LSTMa(zk
+a, hk−1
+a
+). Similarly for the observed
+hats we deﬁne yk−1
+s
+, hk−1
+s
+= LSTMs(zk
+s , hk−1
+s
+). The last val-
+ues of the two LSTMs ym−1
+a
+and yn
+s are used to approximate
+Qm = MLP(ym−1
+a
+||yn
+s ) from which the action am is chosen.
+is 0 except unless an agent chooses “Tell”, in which case
+it is 1 if all agents have been to the interrogation room and
+−1 otherwise.
+5. Experiments
+In this section, we evaluate DDRQN on both multi-agent
+riddles. In our experiments, prisoners select actions using
+an ϵ-greedy policy with ϵ = 1−0.5
+1
+n for the hats riddle and
+ϵ = 0.05 for the switch riddle. For the latter, the discount
+factor was set to γ = 0.95, and the target networks, as
+described in Section 3, update with α−= 0.01, while in
+both cases weights were optimised using Adam (Kingma &
+Ba, 2014) with a learning rate of 1 × 10−3. The proposed
+architectures make use of rectiﬁed linear units, and LSTM
+cells. Further details of the network implementations are
+described in the Supplementary Material and source code
+will be published online.
+5.1. Hats Riddle
+Figure 3 shows the architecture we use to apply DDRQN
+to the hats riddle.
+To select am, the network is fed as
+input om = (a1, . . . , am−1, sm+1, . . . , sn), as well as
+m and n.
+The answers heard are passed through two
+single-layer MLPs, zk
+a = MLP[1 × 64](ak) ⊕MLP[2 ×
+64](m, n), and their outputs are added element-wise.
+Subsequently, zk
+a is passed through an LSTM network
+yk
+a, hk
+a = LSTMa[64](zk
+a, hk−1
+a
+). We follow a similar pro-
+cedure for the n −m hats observed deﬁning yk
+s , hk
+s =
+LSTMs[64](zk
+s , hk−1
+s
+). Finally, the last values of the two
+LSTM networks ym−1
+a
+and yn
+s are used to approximate
+the Q-Values for each action Qm = MLP[128 × 64, 64 ×
+64, 64 × 1](ym−1
+a
+||yn
+s ). The network is trained with mini-
+batches of 20 episodes.
+Furthermore, we use an adaptive variant of curriculum
+learning (Bengio et al., 2009) to pave the way for scalable
+strategies and better training performance. We sample ex-
+amples from a multinomial distribution of curricula, each
+corresponding to a different n, where the current bound is
+raised every time performance becomes near optimal. The
+probability of sampling a given n is inversely proportional
+to the performance gap compared to the normalised maxi-
+mum reward. The performance is depicted in Figure 5.
+We ﬁrst evaluate DDRQN for n = 10 and compare it with
+tabular Q-learning. Tabular Q-learning is feasible only with
+few agents, since the state space grows exponentially with
+n. In addition, separate tables for each agent precludes gen-
+eralising across agents.
+Figure 4 shows the results, in which DDRQN substan-
+tially outperforms tabular Q-learning. In addition, DDRQN
+also comes near in performance to the optimal strategy de-
+scribed in Section 4.1. This ﬁgure also shows the results of
+an ablation experiment in which inter-agent weight sharing
+has been removed from DDRQN. The results conﬁrm that
+inter-agent weight sharing is key to performance.
+Since each agent takes only one action in the hats riddle, it
+is essentially a single step problem. Therefore, last-action
+20k
+40k
+60k
+80k
+100k
+# Epochs
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Norm. R (Optimal)
+DDRQN w Tied Weights
+DDRQN w/o Tied Weights
+Q-Table
+Optimal
+Figure 4. Results on the hats riddle with n = 10 agents, com-
+paring DDRQN with and without inter-agent weight sharing to
+a tabular Q-table and a hand-coded optimal strategy. The lines
+depict the average of 10 runs and 95% conﬁdence intervals.
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+Table 1. Percent agreement on the hats riddle between DDRQN
+and the optimal parity-encoding strategy.
+N
+% AGREEMENT
+3
+100.0%
+5
+100.0%
+8
+79.6%
+12
+52.6%
+16
+50.8%
+20
+52.5%
+inputs and disabling experience replay do not play a role
+and do not need to be ablated. We consider these compo-
+nents in the switch riddle in Section 5.2.
+We compare the strategies DDRQN learns to the optimal
+strategy by computing the percentage of trials in which the
+ﬁrst agent correctly encodes the parity of the observed hats
+in its answer. Table 1 shows that the encoding is almost
+perfect for n ∈{3, 5, 8}. For n ∈{12, 16, 20}, the agents
+do not encode parity but learn a different distributed solu-
+tion that is nonetheless close to optimal. We believe that
+qualitatively this solution corresponds to more the agents
+communicating information about other hats through their
+answers, instead of only the ﬁrst agent.
+5.2. Switch Riddle
+Figure 6 illustrates the model architecture used in the
+switch riddle. Each agent m is modelled as a recurrent
+neural network with LSTM cells that is unrolled for Dmax
+time-steps, where d denotes the number of days of the
+episode. In our experiments, we limit d to Dmax = 4n −6
+in order to keep the experiments computationally tractable.
+The inputs, om
+t , am
+t−1, m and n, are processed through
+a 2-layer MLP zm
+t
+=
+MLP[(7 + n) × 128, 128 ×
+20k
+40k
+60k
+80k
+100k
+120k
+140k
+160k
+# Epochs
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Norm. R (Optimal)
+n=3 C.L.
+n=5 C.L.
+n=8 C.L.
+n=12 C.L.
+n=16 C.L.
+n=20 C.L.
+n=20
+Optimal
+Figure 5. Hats: Using Curriculum Learning DDRQN achieves
+good performance for n = 3...20 agents, compared to the op-
+timal strategy.
+Q 2
+m
+,
+sw1
+m, n)
+ir 1
+m, a 0
+m,
+(
+,
+sw3
+m, n)
+ir 3
+m, a 2
+m ,
+(
+,
+swDmax
+m, n)
+ir Dmax
+m , a Dmax -1
+m
+,
+(
+…
+…
+…
+…
+Q 1
+m
+Q t
+m
+Q Dmax
+m
+Q 3
+m
+…
+…
+h 1
+m
+h 2
+m
+h t
+m
+h Dmax -1
+m
+y 1
+m
+y 2
+m
+y 3
+m
+y t
+m
+y Dmax
+m
+z 1
+m
+z 2
+m
+z 3
+m
+z t
+m
+z Dmax
+m
+Figure 6. Switch:
+Agent m receives as input:
+the switch
+state swt, the room he is in, irm
+t , his last action, am
+t−1,
+his ID, m,
+and the # of agents,
+n.
+At each step,
+the inputs are processed through a 2-layer MLP zm
+t
+=
+MLP(swt, irm
+t , OneHot(am
+t−1), OneHot(m), n).
+Their embed-
+ding zm
+t
+is then passed to an LSTM network, ym
+t , hm
+t
+=
+LSTM(zm
+t , hm
+t−1), which is used to approximate the agent’s
+action-observation history. Finally, the output ym
+t
+of the LSTM
+is used at each step to compute Qm
+t = MLP(ym
+t ).
+128](om
+t , OneHot(am
+t−1), OneHot(m), n).
+Their embed-
+ding zm
+t
+is then passed an LSTM network, ym
+t , hm
+t
+=
+LSTM[128](zm
+t , hm
+t−1), which is used to approximate the
+agent’s action-observation history. Finally, the output ym
+t
+of the LSTM is used at each step to approximate the
+Q-values of each action using a 2-layer MLP Qm
+t
+=
+MLP[128 × 128, 128 × 128, 128 × 4](ym
+t ). As in the hats
+riddle, curriculum learning was used for training.
+Figure 7, which shows results for n = 3, shows that
+DDRQN learns an optimal policy, beating the naive method
+and the hand coded strategy, “tell on last day”. This veri-
+ﬁes that the three modiﬁcations of DDRQN substantially
+improve performance on this task. In following paragraphs
+we analyse the importance of the individual modiﬁcations.
+We analysed the strategy that DDRQN discovered for n =
+3 by looking at 1000 sampled episodes. Figure 8 shows a
+decision tree, constructed from those samples, that corre-
+sponds to an optimal strategy allowing the agents to col-
+lectively track the number of visitors to the interrogation
+room. When a prisoner visits the interrogation room after
+day two, there are only two options: either one or two pris-
+oners may have visited the room before. If three prisoners
+had been, the third prisoner would have already ﬁnished
+the game. The two remaining options can be encoded via
+the “on” and “off” position respectively. In order to carry
+out this strategy each prisoner has to learn to keep track
+of whether he has visited the cell before and what day it
+currently is.
+Figure 9 compares the performance of DDRQN to a variant
+in which the switch has been disabled. After around 3,500
+episodes, the two diverge in performance. Hence, there is a
+clearly identiﬁable point during learning when the prison-
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+10k
+20k
+30k
+40k
+50k
+# Epochs
+1.0
+0.5
+0.0
+0.5
+1.0
+Norm. R (Oracle)
+DDRQN
+Naive Method
+Hand-coded
+Oracle
+Figure 7. Switch: For n = 3 DDRQN outperforms the “Naive
+Method” and a simple hand coded strategy, “tell on last day”,
+achieving “Oracle” level performance. The lines depict the av-
+erage of 10 runs and the 95% conﬁdence interval.
+ers start learning to communicate via the switch. Note that
+only when the switch is enabled can DDRQN outperform
+the hand-coded “tell on last day” strategy. Thus, communi-
+cation via the switch is required for good performance.
+Figure 10 shows performance for n = 4. On most runs,
+DDRQN clearly beats the hand-coded “tell on last day”
+strategy and ﬁnal performance approaches 90% of the or-
+acle. However, on some of the remaining runs DDRQN
+fails to signiﬁcantly outperform the hand-coded strategy.
+Analysing the learned strategies suggests that prisoners
+typically encode whether 2 or 3 prisoners have been to the
+room via the “on” and “off” positions of the switch, respec-
+tively. This strategy generates no false negatives, i.e., when
+the 4th prisoner enters the room, he always “Tells”, but
+generates false positives around 5% of the time. Example
+strategies are included in the Supplementary Material.
+Furthermore, Figure 11 shows the results of ablation ex-
+periments in which each of the modiﬁcations in DDRQN
+is removed one by one. The results show that all three
+Off
+Has Been?
+On
+Yes
+No
+None
+Has Been?
+Yes
+No
+Switch?
+On
+On
+Off
+Tell
+On
+Day
+1
+2
+3+
+Figure 8. Switch: For n = 3, DDRQN manages to discover a per-
+fect strategy, which we visualise as a decision tree in this Figure.
+After day 2, the “on” position of the switch encodes that 2 prison-
+ers have visited the interrogation room, while “off” encodes that
+one prisoner has.
+10k
+20k
+30k
+40k
+50k
+# Epochs
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Norm. R (Oracle)
+DDRQN
+w Disabled Switch
+Hand-coded
+Oracle
+Split
+Figure 9. Switch: At 3.5k episodes the DDRQN line clearly sep-
+arates from the performance line for the “no switch” test and start
+exceeding “tell on last day”. At this point the agents start to dis-
+cover strategies that evolve communication using the switch. The
+lines depict the mean of 10 runs and the 95% conﬁdence interval.
+modiﬁcations contribute substantially to DDRQN’s perfor-
+mance. Inter-agent weight sharing is by far the most im-
+portant, without which the agents are essentially unable to
+learn the task, even for n = 3. Last-action inputs also
+play a signiﬁcant role, without which performance does
+not substantially exceed that of the “tell on last day” strat-
+egy. Disabling experience replay also makes a difference,
+as performance with replay never reaches optimal, even af-
+ter 50,000 episodes. This result is not surprising given the
+non-stationarity induced by multiple agents learning in par-
+allel. Such non-stationarity arises even though agents can
+track their action-observation histories via RNNs within
+a given episode. Since their memories are reset between
+episodes, learning performed by other agents appears as
+non-stationary from their perspective.
+100k
+200k
+300k
+400k
+500k
+# Epochs
+0.6
+0.7
+0.8
+0.9
+1.0
+Norm. R (Oracle)
+n=4 C.L
+Hand-coded
+Oracle
+Figure 10. Switch: 10 runs using curriculum learning for n =
+3, 4. In most cases was able DDRQN to ﬁnd strategies that out-
+perform “tell on last day” for n = 4.
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+10k
+20k
+30k
+40k
+50k
+# Epochs
+0.4
+0.2
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Norm. R (Oracle)
+DDRQN
+w/o Last Action
+w/o Tied Weights
+w Experience Replay
+Hand-coded
+Oracle
+Figure 11. Switch: Tied weights and last action input are key for
+the performance of DDRQN. Experience replay prevents agents
+from reaching Oracle level. The experiment was executed for
+n = 3 and the lines depict the average of 10 runs and the 95%
+conﬁdence interval.
+However, it is particularly important in communication-
+based tasks like these riddles, since the value function for
+communication actions depends heavily on the interpreta-
+tion of these messages by the other agents, which is in turn
+set by their Q-functions.
+6. Related Work
+There has been a plethora of work on multi-agent rein-
+forcement learning with communication, e.g., (Tan, 1993;
+Melo et al., 2011; Panait & Luke, 2005; Zhang & Lesser,
+2013; Maravall et al., 2013). However, most of this work
+assumes a pre-deﬁned communication protocol. One ex-
+ception is the work of Kasai et al. (2008), in which the
+tabular Q-learning agents have to learn the content of a
+message to solve a predator-prey task. Their approach is
+similar to the Q-table benchmark used in Section 5.1. By
+contrast, DDRQN uses recurrent neural networks that al-
+low for memory-based communication and generalisation
+across agents.
+Another example of open-ended communication learning
+in a multi-agent task is given in (Giles & Jim, 2002). How-
+ever, here evolutionary methods are used for learning com-
+munication protocols, rather than RL. By using deep RL
+with shared weights we enable our agents to develop dis-
+tributed communication strategies and to allow for faster
+learning via gradient based optimisation.
+Furthermore, planning-based RL methods have been em-
+ployed to include messages as an integral part of the
+multi-agent reinforcement learning challenge (Spaan et al.,
+2006). However, so far this work has not been extended to
+deal with high dimensional complex problems.
+In ALE, partial observability has been artiﬁcially in-
+troduced
+by
+blanking
+out
+a
+fraction
+of
+the
+input
+screen (Hausknecht & Stone, 2015).
+Deep recurrent
+reinforcement learning has also been applied to text-
+based games, which are naturally partially observable
+(Narasimhan et al., 2015). Recurrent DQN was also suc-
+
+However, all these examples apply recurrent DQN in
+single-agent domains. Without the combination of multiple
+agents and partial observability, there is no need to learn a
+communication protocol, an essential feature of our work.
+7. Conclusions & Future Work
+This paper proposed deep distributed recurrent Q-networks
+(DDRQN), which enable teams of agents to learn to solve
+communication-based coordination tasks. In order to suc-
+cessfully communicate, agents in these tasks must ﬁrst au-
+tomatically develop and agree upon their own communi-
+cation protocol.
+We presented empirical results on two
+multi-agent learning problems based on well-known rid-
+dles, demonstrating that DDRQN can successfully solve
+such tasks and discover elegant communication protocols
+to do so. In addition, we presented ablation experiments
+that conﬁrm that each of the main components of the
+DDRQN architecture are critical to its success.
+Future work is needed to fully understand and improve
+the scalability of the DDRQN architecture for large num-
+bers of agents, e.g., for n > 4 in the switch riddle. We
+also hope to further explore the “local minima” structure
+of the coordination and strategy space that underlies these
+riddles.
+Another avenue for improvement is to extend
+DDRQN to make use of various multi-agent adaptations of
+Q-learning (Tan, 1993; Littman, 1994; Lauer & Riedmiller,
+2000; Panait & Luke, 2005).
+A beneﬁt of using deep models is that they can efﬁciently
+cope with high dimensional perceptual signals as inputs. In
+the future this can be tested by replacing the binary repre-
+sentation of the colour with real images of hats or applying
+DDRQN to other scenarios that involve real world data as
+input.
+While we have advanced a new proposal for using riddles
+as a test ﬁeld for multi-agent partially observable reinforce-
+ment learning with communication, we also hope that this
+research will spur the development of further interesting
+and challenging domains in the area.
+
+Learning to Communicate to Solve Riddles with Deep Distributed Recurrent Q-Networks
+8. Acknowledgements
+This work was supported by the Oxford-Google DeepMind
+Graduate Scholarship and the EPSRC.

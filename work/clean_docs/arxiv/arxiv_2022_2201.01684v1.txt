@@ -1,0 +1,2016 @@
+1
+Dynamic GPU Energy Optimization for Machine Learning Training
+Workloads
+Farui Wang, Weizhe Zhang, Shichao Lai, Meng Hao, and Zheng Wang
+Abstract—GPUs are widely used to accelerate the training of machine learning workloads. As modern machine learning models
+become increasingly larger, they require a longer time to train, leading to higher GPU energy consumption. This paper presents
+GPOEO, an online GPU energy optimization framework for machine learning training workloads. GPOEO dynamically determines the
+optimal energy conﬁguration by employing novel techniques for online measurement, multi-objective prediction modeling, and search
+optimization. To characterize the target workload behavior, GPOEO utilizes GPU performance counters. To reduce the performance
+counter proﬁling overhead, it uses an analytical model to detect the training iteration change and only collects performance counter
+data when an iteration shift is detected. GPOEO employs multi-objective models based on gradient boosting and a local search
+algorithm to ﬁnd a trade-off between execution time and energy consumption. We evaluate the GPOEO by applying it to 71 machine
+learning workloads from two AI benchmark suites running on an NVIDIA RTX3080Ti GPU. Compared with the NVIDIA default
+scheduling strategy, GPOEO delivers a mean energy saving of 16.2% with a modest average execution time increase of 5.1%.
+Index Terms—Dynamic energy optimization, online application iteration detection, multi-objective machine learning, GPU
+!
+1
+INTRODUCTION
+In recent years, deep neural networks (DNNs) have
+demonstrated breakthrough effectiveness in various tasks
+that were once deemed impossible [1], [2]. Training an
+effective DNN requires performing expensive training on
+a large number of samples. As the model training time
+increases, the energy consumption of machine learning
+training workloads also grows. This is a particular concern
+for high-performance GPUs because they are widely used
+to train DNN workloads but are less energy-efﬁcient than
+their CPU counterparts. As a result, there is a critical need
+to reduce the energy consumption for GPUs when training
+machine learning workloads. Achieving this goal can reduce
+the maintenance cost and allow users to train larger models
+within the same budget.
+Most of the existing studies in general GPU energy
+optimization are ofﬂine techniques [3]–[7]. These techniques
+require proﬁling applications ahead of time [3]–[5], [7] or
+analyzing their source code [6] in advance to collect ap-
+plication features. These approaches cannot adapt to the
+change of the program behavior and can incur expensive
+proﬁling overhead. Other approaches change the internal
+working mechanisms of machine learning (ML) models [8],
+[9], but they are speciﬁc to the ML algorithms used and do
+not generalize to other ML methods.
+Recently, efforts have been made to target online GPU
+power optimization. The work presented in [10] proposes a
+dynamic power management method for integrated APUs.
+ODPP [11] is another online dynamic power-performance
+management framework. ODPP detects the periods of appli-
+cations to build prediction models. However, their models
+•
+F. Wang, W. Zhang, S. Lai, and M. Hao are with the School of Cyberspace
+Science at Harbin Institute of Technology, Harbin 150000, China.
+
+•
+Z. Wang is with the School of Computing at University of Leeds, United
+Kingdom.
+
+can only detect coarse-grained phase change patterns.
+This work aims to provide a better dynamic GPU energy
+optimization method for iterative ML training workloads.
+We present GPOEO, a micro-intrusive 1 GPU online energy
+optimization framework. GPOEO only requires the user to
+mark the beginning and the end of the target code region.
+GPOEO can then automatically collect the relevant infor-
+mation to monitor the program behavior to identify the re-
+peat workload patterns and adjust the energy optimization
+scheme accordingly.
+GPOEO trades execution time for energy efﬁciency. To
+this end, we employ multi-objective optimization models
+built on the XGBoost Classiﬁer [12]. As a departure from
+existing online GPU power optimization schemes, GPOEO
+leverages the ﬁne-grained runtime information provided by
+the hardware performance counters to model the system
+and program behavior to build more accurate decision
+models. We use the predictive model as a cost function to
+search for the optimal energy conﬁguration for the current
+workload pattern. These supporting methods enable us to
+develop a period detection algorithm based on the fast
+Fourier transform (FFT) and feature sequence similarity
+evaluation to identify if a changed training iteration takes
+place and adjust our optimization accordingly.
+We evaluate GPOEO by applying it to 71 machine learn-
+ing workloads from three AI benchmark suites [13]. We
+test our approach on an NVIDIA RTX3080Ti GPU. Exper-
+imental results show that GPOEO can reduce GPU energy
+consumption by over 20% (16.2% on average), with most
+execution time increments less than 7% (5.1% on average)
+when compared to the NVIDIA default GPU scheduling
+strategy.
+This paper makes the following contributions:
+1. Micro-intrusive means we require minor changes to the program
+source code.
+arXiv:2201.01684v1  [cs.DC]  5 Jan 2022
+
+2
+• It is the ﬁrst work to exploit performance counter met-
+rics to perform online energy prediction and optimiza-
+tion for discrete GPUs. By minimizing the instrument
+and measurement overhead, our approach improves
+the practicability of online GPU proﬁling.
+• It presents a robust detection algorithm to automati-
+cally detect the iterative period of ML applications from
+the GPU resource traces (Section 4.1).
+• It showcases how an effective GPU online energy opti-
+mization framework can be constructed as a cost model
+to quickly identify a good energy conﬁguration.
+Online material: The GPOEO framework is publicly avail-
+able at https://github.com/ruixueqingyang/GPOEO.
+2
+BACKGROUND AND MOTIVATION
+2.1
+GPU conﬁguration and proﬁling tools
+NVIDIA provides the NVML [14] and CUPTI [15] library
+for reconﬁguring, measuring, and proﬁling its GPUs. The
+NVML [14] can set Streaming Multiprocessor (SM) clock
+frequency, global memory clock frequency (only certain
+types of NVIDIA GPUs), and powercap online. It also sup-
+ports measuring power, SM utilization, and global memory
+utilization. The CUPTI [15] can proﬁle performance counter.
+These tools make GPU online energy optimization possible.
+In this work, we adjust the clock frequency of the GPU SM
+and global memory to achieve energy saving.
+2.2
+Motivation
+2.2.1
+Energy Optimization Potential
+The training phase of machine learning usually uses high-
+performance GPUs as accelerators. GPUs consume a lot
+of energy and time. To explore the energy-saving poten-
+tial on GPUs, we run ﬁve applications in AIBench [13]
+and benchmarking-gnns [16] on all combinations of SM
+and memory clock frequencies and select the best con-
+ﬁgurations for minimal energy consumption within the
+slowdown constraint of 5%. Figure 1 shows the oracle
+results of energy saving, slowdown, and ED2P (Energy ×
+Dealy2) saving. The AI FE, AI S2T, and SBM GIN are
+relatively compute-intensive and save signiﬁcant energy
+(14.9%-22.4%). The CLB MLP and TSP GatedGCN are rel-
+atively memory-intensive and save considerable energy
+(18.0%-26.4%). These results highlight that both compute-
+intensive and memory-intensive ML training workloads
+have the chance to save energy with acceptable slowdown.
+2.2.2
+Make Energy Optimization Practical
+Most existing studies on GPU energy optimization are
+ofﬂine and need domain knowledge and complex ofﬂine
+proﬁling. Thus, users or researchers can hardly apply these
+studies in practice. An ideal online GPU energy optimiza-
+tion system should be non-intrusive to applications and
+transparent to users. Majumdar’s work [10] only applies to
+AMD APUs. Motivated by drawbacks, we propose an online
+energy optimization framework called GPOEO. Users only
+need to insert the Begin and End APIs, and the GPOEO
+automatically optimizes energy online.
+AI_FE
+AI_S2T
+CLB_MLP
+SBM_GIN TSP_GatedGCN
+0%
+10%
+20%
+30%
+40%
+50%
+22.4
+14.9
+26.4
+16.8
+18.0
+4.8
+4.7
+5.0
+4.8
+4.9
+Energy Saving
+Slowdown
+-10%
+0%
+10%
+20%
+30%
+14.7
+6.8
+18.9
+8.5
+9.8
+ED2P Saving
+Fig. 1. Oracle ED2P saving of ML applications
+1020
+1080
+1140
+1200
+1260
+1320
+1380
+1440
+1500
+1560
+1620
+1680
+1740
+1800
+1860
+1920
+Default
+SM Clock Frequencies (MHz)
+0%
+20%
+40%
+60%
+80%
+100%
+ODPP Period Detection Errors
+GPOEO Period Detection Errors
+(a) MLC 3WLGNN application
+1020
+1080
+1140
+1200
+1260
+1320
+1380
+1440
+1500
+1560
+1620
+1680
+1740
+1800
+1860
+1920
+Default
+SM Clock Frequencies (MHz)
+0%
+20%
+40%
+60%
+80%
+ODPP Period Detection Errors
+GPOEO Period Detection Errors
+(b) SP GCN application
+Fig. 2. Period detection errors of ODPP and GPOEO under different SM
+clock frequencies
+2.2.3
+Reduce Period Detection Error
+Online sampling time series of power and utilization can
+reﬂect the periodic pattern. ODPP [11] uses the Fourier
+transform algorithm to detect periods, namely the execu-
+tion time of one major iteration. However, according to
+our experimental results, the period error of ODPP [11] is
+quite large when the periodicity is not apparent. To solve
+this shortcoming, we propose a robust period detection
+algorithm. Figure 2 shows the absolute percentage errors
+of period detection with ODPP and our algorithm GPOEO
+under different SM clock frequencies on two ML applica-
+tions. The “Default” means the NVIDIA default scheduling
+strategy. The period detection errors of ODPP are pretty
+signiﬁcant and unstable, while the period detection errors of
+our GPOEO are less than 5% under all SM clock frequencies.
+2.2.4
+Using GPU Performance Counters
+ODPP [11] uses power, SM utilization, and memory uti-
+lization as features to predict energy and execution time.
+However, these coarse-grained features are inadequate to
+give accurate predictions for some machine learning ap-
+plications. We give an example in Figure 3. Applications
+in each pair have similar average power and utilization
+under the same reference clock frequency conﬁguration, but
+their optimal SM clocks for ED2P are different (memory
+frequency ﬁxed at 9251MHz). In light of this observation, we
+wish to use more ﬁne-grained metrics to capture the subtle
+interactions between the application and the hardware. To
+this end, we use hardware performance counter metrics
+as features to build predictive models to estimate energy
+
+3
+CSL_MLP
+CSL_GatedGCN
+TU_GCN
+TU_GraphSage
+TSP_MoNet
+TSP_GCN
+AI_I2T
+AI_TS
+0
+50
+100
+150
+200
+250
+300
+350
+92.1
+93.8
+95.4
+94.9
+103.1
+102.6
+168.0
+159.1
+31.5
+32.3
+36.6
+36.0
+32.5
+30.1
+67.6
+66.2
+0.0
+0.0
+0.9
+0.9
+6.8
+7.6
+37.7
+41.7
+avgPower: W
+avgGPUUtil: (%)
+avgMemUtil: (%)
+0
+500
+1000
+1500
+2000
+750
+930
+1365
+990
+1515
+1650
+1125
+1740
+Best Clock: MHz
+Fig. 3. ML applications with similar coarse-grained features and different
+optimal SM clocks for ED2P
+and execution time. Later in the paper, we show that this
+strategy allows us to build more accurate prediction models,
+which in turn lead to better optimization decisions. The key
+challenges here are reducing the overhead of performance
+counter proﬁling and minimizing code modiﬁcations.
+3
+OVERVIEW OF OUR APPROACH
+This section deﬁnes the scope of the work and gives an
+overview of our approach.
+3.1
+Problem Formulation
+This work aims to ﬁnd an optimal SM and memory clock
+frequency conﬁguration to balance the GPU energy con-
+sumption and execution time for ML training workloads.
+Our goal can be formulated as follows:
+min
+FSM = fobj
+
+d
+engSM,
+d
+timeSM
+
+s.t.
+d
+engSM = EngMdlSM (wSM) ,
+d
+timeSM = TimeMdlSM (wSM) ,
+wSM = {SMgeari, Feature} ,
+SMgeari ∈{SMgear1, . . . , SMgearm} ,
+Feature = {feature1, . . . , featureq} .
+(1)
+min
+FMem = fobj
+
+d
+engMem,
+d
+timeMem
+
+s.t.
+d
+engMem = EngMdlMem (wMem) ,
+d
+timeMem = TimeMdlMem (wMem) ,
+wMem = {Memgeari, Feature} ,
+Memgeari ∈{Memgear1, . . . , Memgearp} .
+(2)
+Table 1 lists the variables used in our problem formula-
+tion. We note that our approach can be applied to an arbi-
+trary objective function. We select the energy consumption
+with an execution time increase constraint as our objective
+function to explicitly control the performance loss. Like
+[17], we assume that the search space of SM and memory
+clocks is convex and optimize the SM frequency and mem-
+ory frequency in order. We use four prediction models to
+estimate energy and time with different SM and memory
+clock frequencies. Then we select the SM and memory clock
+conﬁguration that can best satisfy the optimization goal.
+TABLE 1
+Description of Parameters
+Notation
+Description
+fobj
+objective function
+d
+engSM
+energy consumption predicted with the SM clock
+d
+timeSM
+execution time predicted with the SM clock
+EngMdlSM
+energy prediction model with the SM clock
+TimeMdlSM
+time prediction model with the SM clock
+SMgeari
+one SM gear represents an SM clock frequency
+wSM
+the input vector containing SM clock
+d
+engMem
+energy consumption predicted with the memory
+clock
+d
+timeMem
+execution time predicted with the memory clock
+EngMdlMem
+energy prediction model with the memory clock
+TimeMdlMem
+time prediction model with the memory clock
+Memgeari
+one memory gear represents a memory clock fre-
+quency
+wMem
+the input vector containing memory clock
+Feature
+feature vector measured under the reference clock
+conﬁguration from the ML applications
+reference energy
+configuration
+other energy
+configurations
+performance
+counter metrics 
+(reference energy
+ configuration)
+① run benchmarks
+measure metrics
+energy and time metrics
+(all energy
+configurations)
+② train energy model
+and time model
+energy model
+time model
+offline
+online
+③ period
+detection
+④ measure energy and
+performance counter
+metrics in one period
+(reference energy configuration)
+⑤ predict
+energy and time
+with ML model
+⑥ predicted optimal
+configuration
+according to
+user requirements
+⑦ actual optimal
+configuration through
+local search
+training data
+⑧
+monitor energy
+features
+no change
+change
+Fig. 4. Overview of the GPOEO workﬂow.
+3.2
+Framework Overview
+GPOEO includes two stages, shown in Figure 4. In the
+ofﬂine training stage, we run representative benchmarks
+on each SM and memory clock frequencies ( 1 ) to collect
+performance counter metrics on the reference SM and mem-
+ory frequencies and energy-time data on all frequencies.
+Then we train multi-objective models ( 2 ). In the online
+optimization stage, we measure energy and performance
+counter metrics in one detected period ( 3 ,
+4 ), then
+predict the optimal SM and memory frequencies ( 5 ,
+6 ).
+After that, we try frequencies around the predicted optimal
+conﬁguration and compare the measured energy-time data
+to search for the actual optimal conﬁguration ( 7 ). Finally,
+we set the actual optimal conﬁguration and monitor energy
+characteristics ( 8 ). If the ﬂuctuation of energy characteris-
+tics exceeds the threshold, another optimization process will
+start.
+
+4
+4
+DESIGN AND IMPLEMENT
+4.1
+Robust Period Detection
+Iterative ML workloads exhibit periodic behavior across
+iterations. We treat one period, namely one iteration, as
+basic unit for online metric measurement and evaluation.
+Our approach does not rely on ofﬂine code instrumentation
+to reduce developer involvement.
+4.1.1
+Fourier Transform: Get Candidate Periods
+To detect the period change, we leverage the Fourier trans-
+form. This established methodology is widely used in signal
+processing to detect the dominant frequency and period. In
+our scenario, we assume the periodic feature of ML applica-
+tions, such as GPU power and utilization, can be expressed
+as a time-domain function F(t). Generally speaking, F(t)
+is periodic and can be expressed as a linear combination of
+trigonometric series (know as Fourier Series) in exponential
+form as:
+F (t) =
+∞
+X
+n=−∞
+Cne2πjnt/Titer
+where Cn are Fourier coefﬁcients.
+We can get a series of frequency components via Fourier
+transform:
+F(ω) = 2π
+∞
+X
+n=−∞
+Cnδ (ω −2πn/Titer)
+the frequency F(ω) is a series of impulse functions (i.e., δ)
+located at 2πn/Titer, with amplitude proportional to Cn.
+These impulses represent different frequency components
+in F(t). The one with the largest amplitude is the major
+frequency component. The iterative period Titer of the ML
+application can be calculated as Titer = 1/fmajor, where
+fmajor is the frequency of the major frequency component.
+4.1.2
+Feature Sequence Similarity: Find Accurate Periods
+As mentioned in Section 2.2.3, the period detection results of
+the Fourier transform may have vast errors. Our period cal-
+culation algorithm (Algorithm 1) combines the fast Fourier
+transform (FFT) and feature sequence similarity (Algorithm
+2) to reduce these errors. We ﬁnd amplitude peaks and
+corresponding periods TPeak in the result of FFT (line
+1-3). Then we select periods Tpeakm with relatively high
+peaks as candidate periods Tcand (line 4-5). We set the
+peak coefﬁcient cpeak to 0.6-0.7 empirically. Then we use
+feature sequence similarity (Algorithm 2) to evaluate and
+select the best candidate period with minimal error. Finally,
+we perform a local search around the best candidate period
+to further improve accuracy.
+We propose the feature sequence similarity algorithm
+(Algorithm 2) to evaluate candidate periods. We divide the
+feature sampling curve into several sub-curves, and the time
+duration of each sub-curve is equal to the candidate period
+(line 1-4). The more similar the curves are, the closer the
+candidate period is to the actual period. So we evaluate the
+similarity of each pair of adjacent sub-curves (line 5-18).
+Each sub-curve is a time series, and calculating the Eu-
+clidean distance between corresponding points is a common
+method to measure the similarity of time series. However, in
+Algorithm 1 Period calculation algorithm based on FFT and
+feature sequence similarity
+Input: feature sampling sequence Smp = {s1, . . . , sN},
+sampling interval Ts
+Output: iterative period Titer, error of period err
+1: Freq, Ampl = {freqi}, {ampli} =FFT(Smp, Ts)
+2: T = {Ti} = {1/freqi}
+3: Find peaks in Ampl, get the set of peaks AmplPeak =
+{amplpeakm} and the set of corresponding periods
+TPeak = {Tpeakm}
+4: IndexCand = {idxcandk}
+=
+{m|amplpeakm
+>
+cpeak
+×
+max(AmplPeak)}
+5: TCand = {Tcandp} = {Tpeakidxcandk}
+6: for Tcandp ∈TCand do
+7:
+errp = Algorithm2(Tcandp, Smp, Ts)
+8: end for
+9: Find erridxmin = min({errp})
+10: Tcandopt = Tcandidxmin
+11: NT = Ts × (N −1)/Tcandopt,
+Tlow = Tcandopt × (1 −1/(NT + 1))
+12: Tup = Tcandopt × (1 + 1/(NT −1))
+13: Construct an arithmetic sequence TLocal = {Tlocalq},
+where Tlocalq = Tlow + (q −1) × Taccu,
+q = 1, . . . , (Tup −Tup)/Taccu
+14: for Tlocalq ∈TLocal do
+15:
+errlocalq =Algorithm2(Tlocalp, Smp, Ts)
+16: end for
+17: Find err = erridxmin = min({errlocalq})
+18: Titer = Tlocalidxmin
+19: return Titer, err
+our scenario, the Euclidean distance is susceptible to high-
+frequency interference and reports the wrong similarity.
+Inspired by this, instead of calculating the distance of each
+pair of corresponding points, we group the sampling data
+within a series and evaluate the distance between the corre-
+sponding groups. Speciﬁcally, we use the Gaussian mixture
+model algorithm to cluster each sub-curves into N groups
+(line 8-11). Then, for each group, we calculate the relative
+average amplitudes (line 12-13). The average operation can
+eliminate the inﬂuence of high-frequency interference. Later,
+we calculate the symmetric mean absolute percentage error
+(SMAPE) of the current group pair (line 14). Finally, we
+calculate the weighted average of all SMAPEs as similarity
+error (line 16-17). The weights are the numbers of sampling
+points in groups. When all adjacent sub-curves are evalu-
+ated, we treat the mean similarity error as the error of Titer
+(line 19).
+4.1.3
+Online Robust Period Detection Algorithm Frame-
+work
+To get accurate Titer dynamically, we design an online
+robust period detection algorithm framework (Algorithm
+3). The framework calculates Titer in a rolling form while
+sampling the power and utilization of the GPU until the
+Titer is stable. First, we get the initial period Tinit, using
+Algorithm 2. If sampling duration is short than cmeasure
+
+5
+Algorithm 2 Feature sequence similarity algorithm
+Input: Period to be evaluated Titer, feature sampling se-
+quence Smp = {s1, . . . , sN}, sampling interval Ts
+Output: error of period ErrT
+1: NumT = ⌊sN/Titer⌋; Nums = ⌊T/Ts⌋
+2: for i ∈{1, . . . NumT } do
+3:
+Smpi = {s(i−1)×Nums+1, . . . , si×Nums} = {ssi,j}
+(j = 1, . . . , Nums)
+4: end for
+5: for i ∈{1, . . . , NumT −1} do
+6:
+Meanprev = mean(Smpi)
+7:
+Meanback = mean(Smpi+1)
+8:
+{GaGrp1, . . . , GaGrpNumG} =Gauss(Smpi, NumG)
+where GaGrpj = {idxj,1, . . . , idxj,Numj}
+9:
+for j ∈{1, . . . , NumG} do
+10:
+Grpprev = {ssi,idxj,1, . . . , ssi,idxj,Numj}
+11:
+Grpback = {ssi+1,idxj,1, . . . , ssi+1,idxj,Numj}
+12:
+RelV alPrevj = mean(Grpprev) −Meanprev
+13:
+RelV alBackj = mean(Grpback) −Meanback
+14:
+grperrj =SMAPE(RelV alPrevj, RelV alBackj)
+15:
+end for
+16:
+Weight = {|GaGrp1|, . . . , |GaGrpNumG|}
+17:
+erri = avg({grperr1, . . . , grperrNumG}, Weight)
+18: end for
+19: return ErrT = mean({err1, . . . , errNumT −1})
+Note: Gauss = the Gaussian mixture model clustering algorithm
+times Tinit (cmeasure is set to 2 empirically), it is too short
+to do a rolling calculation, so we calculate the required sam-
+pling duration, skip rolling calculation, and return (line2-
+6). If the sampling duration is long enough, we get some
+updated samples by setting tstart (line 7). Samples before
+tstart are ignored because they may be outdated. We set
+step = 0.5 and ceval = 6.5 according to our experiments.
+Then, the rolling period calculation begins. In each iteration,
+we calculate the period (line 9-11) and increase tstart to
+exclude more outdated samples for the next iteration (line
+12). With the rolling period calculation, we get a sequence of
+periods with errors (line 14). If an ML application runs in the
+regular iteration phase, these periods should be similar. If
+the difference of these periods is less than the threshold, set
+SmpDurnext = −1 to indicate stop sampling. Otherwise,
+calculate SmpDurnext (line 16-21). The best period, namely
+Titer, is the period with the minimal error (line 15). If
+SmpDurnext > 0, we ignore Titer, keep sampling, and call
+Algorithm 3 again after SmpDurnext. Otherwise, we use
+Titer for feature measurement (Section 4.2).
+4.2
+Micro-intrusive Online Feature Measurement
+Based on the robust period detection, we propose the
+adaptive feature measurement algorithm (Algorithm 4). The
+feature measurement causes overhead and extends Titer
+compared with the normal run of the application. So, we
+adaptively detect Titer of applications while the measure-
+ment is running (line 1-7). In line 5, we collect Featuredect
+after a delay of SmpDurNext. We use the sampling se-
+quence of Featuredect to form the curve for the period
+detection, so we must sample Featuredect continuously and
+uniformly. On the NVIDIA GPU platform, the instantaneous
+Algorithm 3 Online robust period detection algorithm
+framework
+Input:feature sampling sequence Smp = {s1, . . . , sN}, sam-
+pling interval Ts
+Output:iterative
+period Titer,
+next
+sampling
+duration
+SmpDurnext
+1: Tinit, errinit =Algorithm1(Smp, Ts)
+2: SmpDur = (N −1) × Ts
+3: if SmpDur < cmeasure × Tinit then
+4:
+Titer = Tinit
+5:
+SmpDurnext = cmeasure × Tinit −SmpDur
+6: end if
+7: tstart = max(0, (SmpDur −(2 + ceval × step) × Tinit))
+8: while (SmpDur −tstart)/Tinit ≥cmeasure do
+9:
+istart = 1 + ⌊tstart/Ts⌋
+10:
+SubSmp = {sistart, . . . , sN}
+11:
+Tj, errj =Algorithm1(SubSmp, Ts)
+12:
+tstart = tstart + step × Tinit
+13: end while
+14: T = {Tj}, Err = {errj}
+15: Find min(Err) = errk then Titer = Tk
+16: Diff = abs((max(T) −min(T))/mean(T))
+17: if Diff < Diffthreshold then
+18:
+SmpDurnext = −1
+19: else
+20:
+SmpDurnext =
+⌈SmpDur/max(T)⌉× max(T) −SmpDur
+21: end if
+22: return Titer, SmpDurnext
+Algorithm 4 Adaptive feature measurement
+Input:
+features
+to
+be
+measured
+FeatureName
+=
+{name1, . . . , namen}, the feature for iterative period detec-
+tion Featuredect
+Output: feature data Feature = {feature1, . . . , featuren}
+1: Start measurement for FeatureName and Featuredect
+2: SmpDurnext = SmpDurinit
+3: while SmpDurnext > 0 do
+4:
+Delay SmpDurnext
+5:
+Collect sampling sequence of Featuredect
+6:
+Titer, SmpDurnext =Algorithm3(Featuredect, Ts)
+7: end while
+8: Restart measurement for FeatureName
+9: Delay Titer then stop measurement
+10: Collect feature data Feature
+11: return Feature
+power, SM utilization, and memory utilization can meet
+this requirement. However, the performance counters can-
+not meet this requirement because its minimum sampling
+granularity is a CUDA kernel. According to our experi-
+mental results, we use the composite feature of power, SM
+utilization, and memory utilization as Featuredect, whose
+traces show more obvious periodicity. In line 6, we call
+Algorithm 3 to detect Titer and determine whether Titer is
+stable. If SmpDurNext > 0, we redo line 4-6 with the new
+SmpDurNext. Otherwise, we think Titer is stable and restart
+the feature measurement (line 8). After a delay of Titer, we
+stop measurement and collect the feature data (line 8-10).
+
+6
+We implement micro-intrusive online feature measure-
+ment based on Algorithm 4. Users only need to insert the
+Begin and End APIs of GPOEO at the beginning and end of
+their source code, rather than instrument loops.
+4.3
+Training Data Collection and Model Generation
+We establish energy consumption and execution time pre-
+diction models with the boosting machine learning method.
+Our work aims to ﬁnd the optimal SM and memory clock
+gears that optimize the objective function. Therefore, these
+four models only need to predict the relative energy con-
+sumption and execution time relative to the NVIDIA default
+scheduling strategy rather than the absolute energy and
+time [4].
+To train the models deﬁned in Equation 1 and 2, we
+deﬁne and collect four training data sets:
+EngTrSM = {EngSM i
+j}, TimeTrSM = {TimeSM i
+j}
+EngTrMem = {EngMemi
+j}, TimeTrMem = {TimeMemi
+j}
+where EngSM i
+j or TimeSM i
+j represents a piece of training
+data collected from application i under the SM clock gear
+SMgearj and the memory clock controlled by the NVIDIA
+default scheduling strategy. EngMemi
+j or TimeMemi
+j is
+collected under the memory clock gear Memgearj and
+the optimal SM clock gear. engi
+default and timei
+default are
+the default energy consumption and execution time under
+the NVIDIA default scheduling strategy. Each input vector
+wSM i
+j or wMemi
+j contains SMgearj or Memgearj and the
+feature vector Featurei. For each application, the feature
+vector Featurei is measured under the reference clock con-
+ﬁguration.
+EngSM i
+j = {wSM
+i
+j, engSM
+i
+j/engi
+default}
+TimeSM i
+j = {wSM
+i
+j, timeSM
+i
+j/timei
+default}
+wSM
+i
+j = {SMgearj, Featurei}
+EngMemi
+j = {wMem
+i
+j, engMem
+i
+j/engi
+default}
+TimeMemi
+j = {wMem
+i
+j, timeMem
+i
+j/timei
+default}
+wMem
+i
+j = {Memgearj, Featurei}
+4.3.1
+Feature Selection
+As mentioned in Section 2.2.4, the high-level features, such
+as power, SM utilization, and memory utilization, cannot
+provide enough information for modeling. So we introduce
+performance counter metrics as input features.
+The CUPTI [15] supports proﬁling over 1100 per-
+formance counters on NVIDIA high-end GPUs, such as
+RTX2080Ti and RTX3080Ti. Inspired by Arafa’s work
+[7], we treat each Parallel Thread Execution (PTX) in-
+struction as a basic unit of energy consumption and
+focus on performance counter metrics that reﬂect the
+density of different types of PTX instructions. We list
+the selected metrics in Table 2. A metric with preﬁx
+sm__inst_executed_pipe_ represents a type of PTX in-
+struction. The sufﬁx pct_of_peak_sustained_active
+means the percentage of actual mean instruction throughput
+to the theoretical maximum sustained instruction through-
+put in an activity clock cycle [15].
+TABLE 2
+Selected Features
+Notation
+Full name or expression
+IPCPct
+sm
+inst executed.PctSus
+L1MissPerInst
+l1tex
+t sectors lookup miss.sum /
+sm
+inst executed.sum
+L1MissPct
+l1tex
+t sectors lookup miss.sum /
+(l1tex
+t sectors lookup miss.sum +
+l1tex
+t sectors lookup hit.sum)
+L2MissPerInst
+lts
+t sectors lookup miss.sum /
+sm
+inst executed.sum
+L2MissPct
+lts
+t sectors lookup miss.sum /
+(lts
+t sectors lookup miss.sum +
+lts
+t sectors lookup hit.sum)
+ALUPct
+sm
+inst executed pipe alu.PctSus
+ADUPct
+sm
+inst executed pipe adu.PctSus
+FP16Pct
+sm
+inst executed pipe fp16.PctSus
+FMAPct
+sm
+inst executed pipe fma.PctSus
+FP64Pct
+sm
+inst executed pipe fp64.PctSus
+XUPct
+sm
+inst executed pipe xu.PctSus
+TNSPct
+sm
+inst executed pipe tensor.PctSus
+CBUPct
+sm
+inst executed pipe cbu.PctSus
+LSUPct
+sm
+inst executed pipe lsu.PctSus
+TEXPct
+sm
+inst executed pipe tex.PctSus
+UNIPct
+sm
+inst executed pipe uniform.PctSus
+Note: PctSus = sum.pct of peak sustained active
+According to related work [4], DRAM and L2 cache
+miss information may help predict energy and time. How-
+ever, proﬁling performance counters of DRAM and FBPA
+need several kernel replays which cannot be implemented
+online. We design several composite metrics as alterna-
+tives, also shown in Table 2. The L1MissPerInst or
+L2MissPerInst means the number of L1 or L2 cache miss
+per instruction. The L1MissPct or L2MissPct means the
+percentage of L1 or L2 cache miss. In conclusion, we use
+metrics listed in Table 2 as features.
+4.3.2
+Benchmark Selection and Training Data Collection
+We use the PyTorch Benchmarks [18], which contain
+over 40 mini ML applications, for training. We select
+the AIBench Training Component Benchmark [13], the
+benchmarking-gnns [16], a ThunderSVM [19] workload,
+and a ThunderGBM [20]–[22] workload as the testing set.
+The benchmarking-gnns is a graph neural networks (GNN)
+benchmarking framework including seven datasets (CLB,
+CSL, SBM, TSP, TU, MLC, and SP) and nine models.
+For each application in the training set, we proﬁle fea-
+tures under the reference clock conﬁguration. We measure
+the actual energy (engSM i
+j) and time (timeSM
+i
+j) under all
+available SM clock gears and the memory clock controlled
+by the NVIDIA default scheduling strategy. We also mea-
+sure the actual energy (engMemi
+j) and time (timeMem
+i
+j)
+under all available memory clock gears and the optimal
+SM clock gear. Feature, energy, and time data construct four
+training data sets (EngTrSM, TimeTrSM, EngTrMem, and
+TimeTrMem). We conduct each measurement ten times and
+take the average to reduce the training data noise.
+4.3.3
+Prediction model
+We construct energy and time prediction models with the
+XGBoost [12], a widely used supervised machine learning
+
+7
+CLB_GAT
+CLB_GatedGCN
+CLB_GCN
+CLB_GIN
+CLB_GraphSage
+CLB_MLP
+MLC_3WLGNN
+MLC_GAT
+MLC_GatedGCN
+MLC_GIN
+MLC_MoNet
+SBM_3WLGNN
+SBM_GAT
+SBM_GatedGCN
+SBM_GCN
+SBM_GIN
+SBM_GraphSage
+SBM_MLP
+SBM_MoNet
+SBM_RingGNN
+SP_3WLGNN
+SP_GAT
+SP_GatedGCN
+SP_GCN
+SP_GraphSage
+SP_MLP
+SP_MoNet
+SP_RingGNN
+TSP_GAT
+TSP_GatedGCN
+TSP_GCN
+TSP_GIN
+TSP_GraphSage
+TSP_MLP
+TSP_MoNet
+0%
+20%
+40%
+60%
+80%
+100%
+120%
+2.4
+1.5
+1.3
+0.8
+1.5
+1.0
+3.1
+1.2
+1.2
+1.9
+0.0
+1.5
+7.2
+0.0
+0.7
+2.6
+2.7
+1.8
+0.7
+2.3
+0.1
+0.8
+6.7
+4.6
+1.4
+1.5
+0.1
+1.4
+2.1
+1.0
+0.2
+1.8
+0.2
+1.2
+0.0
+2.4
+51.0
+2.0
+1.8
+3.0
+0.3
+67.2
+68.3
+12.7
+83.5
+0.8
+4.3
+66.9
+95.5
+2.3
+3.6
+11.7
+0.8
+0.4
+2.5
+68.5
+73.5
+6.1
+10.5
+12.7
+10.9
+2.6
+4.9
+2.6
+96.4
+5.0
+5.4
+2.7
+0.8
+6.5
+GPOEO Period Detection Errors
+ODPP Period Detection Errors
+Fig. 5. The period detection errors of GPOEO and ODPP. GPOEO gives lower errors compared to ODPP.
+model improved from the gradient tree boosting algorithm.
+Combined with our scenario, we apply the XGBoost to build
+four prediction models shown in Equation 1 and 2. The
+model construction processes are similar, so we take the
+energy consumption model EngMdlSM as an example to
+introduce these processes. For EngMdlSM, the XGBoost
+weights and sums several regression trees and can be de-
+ﬁned as follows:
+d
+engSM i
+j =
+K
+X
+k=1
+fk(wSM
+i
+j), fk ∈F
+where
+d
+engSM i
+j is the predicted energy consumption of the
+input vector wSM i
+j, which contains the features of applica-
+tion i and the SM gear j. fk represents the kth regression
+tree, and K is the number of regression trees. We use the
+training datasets EngTrSM to train the model EngMdlSM.
+During training, we use the grid search method to tune the
+hyper-parameters such as the minimum loss reduction, the
+maximum depth of a tree, the minimum sum of instance
+weight, and the maximum number of nodes to be added.
+4.3.4
+Online Local Search
+To ﬁx minor errors caused by multi-objective predicted
+models, we perform a local search around the predicted
+optimal clock conﬁguration. We use online detected period
+and energy data measured during one period to evaluate
+different clock frequencies and ﬁnd the actual optimal clock
+conﬁguration. We ﬁrst conduct a local search for the mem-
+ory clock because wrong memory clock frequencies (too
+low) can lead to severe slowdowns. Based on the optimal
+memory clock frequency, we conduct another local search
+for the SM clock. According to our experimental results and
+Schwarzrock’s work [17], the relationship between energy
+optimization objectives and clock gears is generally a convex
+function. Based on this observation, we use the golden-
+section search method [23] to accelerate our local search.
+We ﬁrst ﬁnd a gear with a worse objective value on each
+side of the predicted optimal gear to determine the search
+interval. Then we follow the classic golden section-search
+process [23] to attempt different clock gears. Due to possible
+errors of measured energy and periods, we ﬁt the attempted
+points to obtain a convex function. Then we use the convex
+function to determine the optimal clock gear.
+4.3.5
+Optimize aperiodic applications
+‘ The power and utilization traces of some applications are
+aperiodic, such as applications in CSL and TUs datasets, the
+ThunderSVM [19] workload, and the ThunderGBM [20]–
+[22] workload. We can not evaluate their execution time
+or energy consumption with data measured in one period.
+In this case, we ﬁx the measurement time interval and the
+use measured mean number of instructions executed per
+second (IPS) and power to evaluate the execution time and
+energy consumption. If the number of instructions in the
+program is Instsum, the execution time can be calculated
+as time = Instsum/IPS, and the energy consumption can
+be calculated as energy = power ∗time = Instsum ∗
+power/IPS. Then we can evaluate different clock frequency
+conﬁgurations.
+Based on these analyses, we apply GPOEO to aperi-
+odic applications. We ﬁrst measure performance counter
+metrics in the ﬁxed time interval and predict the optimal
+clock frequency conﬁguration. In the online local search, we
+measure and calculate timedefault and energydefault under
+the NVIDIA default scheduling strategy as the baseline.
+Then, we follow the golden-section search strategy and
+collect timei and energyi under different clock frequency
+conﬁgurations near the predicted optimal clock frequency
+conﬁguration. Finally, we compare these timei and energyi
+with the baseline to ﬁnd the optimal clock frequency conﬁg-
+uration.
+5
+EVALUATION
+We evaluate our GPOEO system in this section. We ﬁrst
+introduce the experimental step. Then, we evaluate the
+accuracy of the period detection algorithm and energy-
+performance prediction models. Finally, we analyze the
+online energy-saving results on various ML benchmarks.
+5.1
+Experimental Setup
+5.1.1
+Hardware and Software Platforms
+Our experimental platform is a GPU server equipped with
+one NVIDIA RTX3080Ti GPU, one AMD 5950X CPU, and 64
+GB memory. The software environment is NVIDIA Driver
+470.57 and CUDA 11.3. RTX3080Ti supports continuously
+adjustable SM clock frequency, from 210 MHz to 2,025
+MHz, and the step is 15 MHz. We ﬁnd that some higher
+frequencies are not practical or stable. Under lower frequen-
+cies, applications cannot save energy while suffering severe
+slowdowns. Therefore, we only consider the frequencies in
+the middle part, which can run stably and may improve
+energy efﬁciency. We treat each SM clock frequency as an
+SM clock gear, from SMgear16 = 450 MHz to SMgear114
+
+8
+1020
+1080
+1140
+1200
+1260
+1320
+1380
+1440
+1500
+1560
+1620
+1680
+1740
+1800
+1860
+1920
+Default
+SM Clock Frequencies (MHz)
+0%
+10%
+20%
+30%
+40%
+50%
+60%
+70%
+ODPP Period Detection Errors
+GPOEO Period Detection Errors
+Fig. 6. Period detection errors of ODPP and GPOEO on the CLB GAT
+application under different SM clock frequencies
+1020
+1080
+1140
+1200
+1260
+1320
+1380
+1440
+1500
+1560
+1620
+1680
+1740
+1800
+1860
+1920
+Default
+SM Clock Frequencies (MHz)
+0%
+20%
+40%
+60%
+80%
+100%
+ODPP Period Detection Errors
+GPOEO Period Detection Errors
+Fig. 7. Period detection errors of ODPP and GPOEO on the
+SBM 3WLGNN application under different SM clock frequencies
+= 1,920 MHz. RTX3080Ti supports 5 global memory clock
+frequencies: Memgear0 = 450 MHz, Memgear1 = 810 MHz,
+Memgear2 = 5,001 MHz, Memgear3 = 9,251 MHz, and
+Memgear4 = 9,501 MHz. We select SMgear106 = 1,800
+MHz and Memgear3 = 9,251 MHz as reference frequencies,
+which are used in performance counter proﬁling.
+5.1.2
+Benchmarks
+We train our machine learning models using data collected
+from PyTorch Benchmarks [18]. We then test the trained
+models on AIBench [13] and benchmarking-gnns [16]. In
+addition to deep neural networks, we also use two classical
+ML workloads, the ThunderSVM [19] and ThunderGBM
+[20]–[22], in our evaluation.
+5.2
+Accuracy and Sensitivity of Period Detection
+We analyze our period detection algorithm on 34 differ-
+ent ML applications. Figure 5 shows the period detection
+errors of GPOEO and ODPP [11] using the NVIDIA de-
+fault scheduling strategy. GPOEO is far more accurate than
+ODPP. The mean period error of GPOEO is 1.72%, while
+the mean error of ODPP is 23.16%. The maximum error of
+GPOEO is 7.2%, and 32 errors are within 5%. For ODPP,
+nine errors are above 50%, nine errors are among 5-13%, and
+sixteen errors are within 5%. GPOEO is more accurate than
+ODPP on 29 applications. For the other three applications,
+the accuracy differences are within 1%.
+Figure 6, 7, and 8 show the periods detection errors
+of GPOEO and ODPP under varying SM clock frequen-
+cies and ﬁxed memory clock frequency. GPOEO exhibits
+stable low errors (within 5% for most cases). This phe-
+nomenon indicates that GPOEO is sensitive to clock fre-
+quency changes. However, ODPP shows poor stability. On
+CLB GAT and SBM 3WLGNN, ODPP gains huge errors
+under three and ten SM clock frequencies, respectively.
+This instability causes inaccurate prediction models, which
+ODPP builds online. For TSP GatedGCN, ODPP gains huge
+errors (nearly 100%) under all frequencies because it is
+1020
+1080
+1140
+1200
+1260
+1320
+1380
+1440
+1500
+1560
+1620
+1680
+1740
+1800
+1860
+1920
+Default
+SM Clock Frequencies (MHz)
+0%
+20%
+40%
+60%
+80%
+100%
+120%
+140%
+ODPP Period Detection Errors
+GPOEO Period Detection Errors
+Fig. 8. Period detection errors of ODPP and GPOEO on the
+TSP GatedGCN application under different SM clock frequencies
+450-607
+607-765
+765-922
+922-1080
+1080-1237
+1237-1395
+1395-1552
+1552-1710
+1710-1867
+1867-2025
+SM Clock Frequency Ranges (MHz)
+-20%
+-15%
+-10%
+-5%
+0%
+5%
+10%
+15%
+20%
+(a) Energy consumption prediction errors
+450-607
+607-765
+765-922
+922-1080
+1080-1237
+1237-1395
+1395-1552
+1552-1710
+1710-1867
+1867-2025
+SM Clock Frequency Ranges (MHz)
+-20%
+-10%
+0%
+10%
+20%
+30%
+40%
+(b) Execution time prediction errors
+Fig. 9. Prediction errors by varying the SM clock (grouped by different
+SM clock ranges)
+COLLAB
+CSL
+molecules
+SBMs
+superpixels
+TSP
+TUs
+Applications & Data Sets
+-20%
+-15%
+-10%
+-5%
+0%
+5%
+10%
+15%
+(a) Energy consumption prediction errors
+COLLAB
+CSL
+molecules
+SBMs
+superpixels
+TSP
+TUs
+Applications & Data Sets
+-15%
+-10%
+-5%
+0%
+5%
+10%
+15%
+20%
+(b) Execution time prediction errors
+Fig. 10. Prediction errors by varying the SM clock (grouped by different
+datasets)
+disturbed by high-frequency noise, only detects the local
+short period, and ignores the real global period.
+5.3
+Accuracy of Energy and Execution Time Prediction
+In this section, we evaluate four prediction models. We
+measure selected features (Table 2) during one iteration of
+each ML application under the reference SM and memory
+clock frequency (1800 MHz and 9251MHz). Then we use
+these features and different SM and memory clock frequen-
+cies as input of our multi-objective models to predict the
+relative energy consumption and execution time relative
+
+9
+405 MHz
+810 MHz
+5001 MHz
+9251 MHz
+9501 MHz
+Memory Clock Frequency Ranges (MHz)
+-10%
+-5%
+0%
+5%
+10%
+(a) Energy consumption prediction errors
+405 MHz
+810 MHz
+5001 MHz
+9251 MHz
+9501 MHz
+Memory Clock Frequency Ranges (MHz)
+-20%
+-10%
+0%
+10%
+20%
+(b) Execution time prediction errors
+Fig. 11. Prediction errors by varying the memory clock (grouped by
+different memory clock frequencies)
+COLLAB
+CSL
+molecules
+SBMs
+superpixels
+TSP
+TUs
+Applications & Data Sets
+-10%
+-5%
+0%
+5%
+10%
+(a) Energy consumption prediction errors
+COLLAB
+CSL
+molecules
+SBMs
+superpixels
+TSP
+TUs
+Applications & Data Sets
+-20%
+-10%
+0%
+10%
+20%
+(b) Execution time prediction errors
+Fig. 12. Prediction errors by varying the memory clock (grouped by
+different datasets)
+to the NVIDIA default scheduling strategy. Note that for
+the SM clock models EngMdlSM and TimeMdlSM, we
+let the NVIDIA default scheduling strategy control the
+memory clock and then predict and select the optimal SM
+clock frequency. For the memory models EngMdlMem and
+TimeMdlMem, we assume that the SM clock is already set
+to the optimal frequency and then predict and select the
+optimal memory clock frequency.
+For the SM clock models, we collect 11,660 predic-
+tion values in total (2 objectives, 55 applications, and
+106 SM clock frequencies). The mean prediction errors of
+energy consumption and execution time are 3.05% and
+2.09%, respectively. Next, we analyze the distributions of
+errors sorted by SM clock frequency ranges and application
+datasets. Figure 9 shows the prediction errors of energy
+consumption and execution time separately grouped by
+different SM clock frequency ranges. Each clock frequency
+range contains 550 or 605 prediction values depending on
+the number of energy gears included in the clock range
+(ten or eleven gears). For all clock ranges, most energy
+and time prediction errors are less than 5%. Most scattered
+errors are within 20%. This phenomenon proves that our
+energy prediction model and execution time prediction
+model are accurate for different SM clock frequencies. Figure
+10 shows the prediction errors grouped by different appli-
+cation datasets. Each group contains 636 to 954 predicted
+values depending on the number of applications included
+in the datasets (six to nine applications). For all application
+datasets, most energy and execution time prediction errors
+are less than 5%. This phenomenon demonstrates that our
+SM clock models are applicable to all these applications.
+For the memory clock models, we collect 550 predic-
+tion values in total (2 objectives, 55 applications, and 5
+memory clock frequencies). The mean prediction errors of
+energy consumption and execution time are 2.72% and
+2.31%, respectively. Figure 11 shows the prediction errors of
+energy consumption and execution time separately grouped
+by different memory clock frequencies. For all clock fre-
+quencies, most energy and time prediction errors are less
+than 5%. Figure 12 shows the prediction errors grouped by
+different application datasets. For all application datasets,
+most prediction errors are also within 5%. These phenomena
+demonstrate that our memory clock models are applicable
+to all memory frequencies and all these applications.
+5.4
+Results of Online Optimization
+Our multi-objective models predict the energy consumption
+and execution time of one iteration under different SM and
+memory clock gears. Users can use diverse energy efﬁciency
+objectives to select the predicted optimal energy gears and
+guide local search to ﬁnd the actual optimal energy gears. In
+this experiment, we set the objective function to minimize
+the energy consumption within the slowdown constraint of
+5%. For each ML training application, we use the energy
+consumption and execution time under the NVIDIA default
+scheduling strategy as the baseline. Then we run these
+applications with our GPOEO system to optimize the energy
+consumption online. We also implement the ODPP [11] as a
+comparison.
+5.4.1
+Medium benchmark suite
+Figure 13 shows the online optimization results of the
+AIBench, the ThunderSVM workload, and the Thun-
+derGBM workload. We use energy saving, slowdown (ex-
+ecution time increase), and ED2P (ED2P = Energy ×
+Time2) saving to evaluate GPOEO and ODPP [11]. GPOEO
+achieves an average energy saving of 14.7% and an average
+ED2P saving of 6.8%, with an average execution time
+increase of 4.6%. Especially, GPOEO achieves signiﬁcant
+energy saving (≥20%) on four out of sixteen applications.
+On AI I2T, GPOEO achieves 29.5% energy saving and 0.1%
+slowdown. Table 3 shows the online optimization process
+for SM and memory clocks. On AI I2T, the error of our
+multi-objective prediction models is only -2 SM gears. This
+error is eliminated by the online local search within ﬁve
+steps so that the vast energy saving can be achieved. For
+AI 3DFR, AI 3DOR, AI I2IP, and AI TS, GPOEO obtains
+considerable energy savings (18-24%) with reasonable slow-
+downs (less than 8%). The online optimization processes
+of these applications are similar to AI I2T. The prediction
+errors of SM gear are relatively small (within 11 SM gears),
+and the online local search reduces these errors in three to
+ﬁve steps.
+AI FE, AI ICMP, AI IGEN, AI LRK, AI OBJ, AI S2T,
+and AI ST have medium energy-saving opportunities (10-
+21%) with the slowdown constraint of 5%. GPOEO gains
+
+10
+-20
+-10
+0
+10
+20
+30
+Energy Saving (%)
+ODPP
+GPOEO
+0
+10
+20
+Slowdown (%)
+ODPP
+GPOEO
+AI_3DFR
+AI_3DOR
+AI_FE
+AI_I2IC
+AI_I2IP
+AI_I2T
+AI_ICMP
+AI_IGEN
+AI_LRK
+AI_OBJ
+AI_S2T
+AI_ST
+AI_T2T
+AI_TS
+TGBM
+TSVM
+-30
+-20
+-10
+0
+10
+20
+30
+ED2P Saving (%)
+ODPP
+GPOEO
+Fig. 13. Energy savings, slowdown, and ED2P saving compared to the NVIDIA default scheduling strategy on AIBench and traditional ML
+applications
+TABLE 3
+Online optimization process for SM and memory clock on AIBench
+3DFR
+3DOR
+FE
+I2IC
+I2IP
+I2T
+ICMP
+IGEN
+LRK
+OBJ
+S2T
+ST
+T2T
+TS
+Oracle SM Gear
+104
+102
+109
+104
+91
+94
+107
+71
+88
+100
+108
+39
+100
+107
+Prediction Error (SM gear)
+-11
+5
+-13
+2
+3
+-2
+-13
+22
+24
+-4
+-15
+11
+5
+-5
+Search Error (SM gear)
+-2
+-3
+-8
+1
+-2
+0
+-2
+-3
+-2
+0
+-7
+4
+-2
+-1
+# of Search Steps (SM)
+5
+4
+4
+3
+4
+3
+6
+8
+9
+4
+5
+5
+4
+4
+Oracle Mem clock (MHz)
+9501
+9251
+9501
+9501
+9251
+9251
+9251
+405
+5001
+9251
+9251
+810
+9251
+9501
+Predicted Mem clock
+9501
+9501
+9251
+9501
+9501
+9501
+9501
+405
+5001
+9251
+9501
+405
+9251
+9501
+Searched Mem clock
+9501
+9501
+9501
+9501
+9501
+9251
+9251
+405
+5001
+9251
+9251
+810
+9251
+9501
+# of Search Steps (Mem)
+2
+2
+3
+2
+2
+2
+2
+3
+3
+3
+2
+3
+3
+2
+medium energy savings (8-14%) with reasonable slow-
+downs (2-7%) on these seven applications. Two reasons
+cause GPOEO does not make full use of energy-saving po-
+tentials. For AI FE and AI S2T, the period detection and fea-
+ture measurement get inaccurate data due to some abnormal
+iterations. Therefore prediction errors are signiﬁcant and
+local search can not eliminate these errors. For the conve-
+nience of experiments, we just train each machine learning
+model for a few iterations, and only iterations after opti-
+mization processes can enjoy the optimal SM gear. However,
+in real-life scenarios, the model will be trained on many
+more iterations, for which our approach can give higher en-
+ergy saving. GPOEO does not perform well on AI I2IC and
+AI T2T. These two applications are computation-intensive
+with little energy-saving opportunities (1% and 4%). For
+non-periodical applications TGBM and TSVM, GPOEO also
+achieves good results, saving 17.9% and 12.0% energy with
+slowdowns of 3.5% and 4.7%, respectively. As for the mem-
+ory clock, the oracle frequencies of thirteen applications
+are 9,251 MHz or 9,501 MHz. Our method ﬁnds oracle
+frequencies on eleven applications and ﬁnds nearby 9,501
+MHz on the other two applications within two or three
+search steps. In fact, the energy consumption and execution
+time are similar under these two memory clock frequen-
+cies. GPOEO also ﬁnds low oracle memory frequencies
+on AI IGEN, AI LRK, and AI ST within three steps. Our
+method meets the performance loss constraint of 5% on
+nine applications, while ODPP only achieves the same goal
+on four applications. For GPOEO, only iterations after opti-
+mization processes are guaranteed to meet the performance
+loss constraint, and the previous iterations may result in a
+violation of the performance loss constraint.
+Compared to ODPP, our approach can improve the
+energy saving by 9.2%, improve the ED2P saving by
+20.4%, and reduce the slowdown by 5.0% on average.
+GPOEO performs better than ODPP on all sixteen appli-
+cations. Especially, our approach gains both larger energy
+savings and lighter slowdowns on eight applications. For
+AI 3DFR, AI GEN, AI LRK, and AI S2T, GPOEO achieves
+more considerable energy savings with similar slowdowns.
+Our method gains similar energy savings with lighter slow-
+downs on AI I2IC and TSVM. ODPP builds two piecewise
+linear models online to predict energy and time. The accu-
+racy of these two models is highly dependent on the period
+detection accuracy. Poor period detection accuracy of ODPP
+causes signiﬁcant prediction errors, so ODPP shows heav-
+ier slowdowns and less energy saving. On non-periodical
+applications TGBM and TSVM, ODPP shows much worse
+results than GPOEO. This phenomenon demonstrates that
+ODPP cannot handle non-periodical applications, while
+GPOEO can.
+
+11
+-10
+0
+10
+20
+30
+Energy Saving (%)
+ODPP
+GPOEO
+0
+10
+20
+30
+Slowdown (%)
+ODPP
+GPOEO
+CLB_GAT
+CLB_GCN
+CLB_GIN
+CLB_GatedGCN
+CLB_GraphSage
+CLB_MLP
+CSL_3WLGNN
+CSL_GAT
+CSL_GCN
+CSL_GIN
+CSL_GatedGCN
+CSL_GraphSage
+CSL_MLP
+CSL_MoNet
+CSL_RingGNN
+SBM_3WLGNN
+SBM_GAT
+SBM_GCN
+SBM_GIN
+SBM_GatedGCN
+SBM_GraphSage
+SBM_MLP
+SBM_MoNet
+SBM_RingGNN
+TSP_GAT
+TSP_GCN
+TSP_GIN
+TSP_GatedGCN
+TSP_GraphSage
+TSP_MLP
+TSP_MoNet
+TU_3WLGNN
+TU_GAT
+TU_GCN
+TU_GIN
+TU_GatedGCN
+TU_GraphSage
+TU_MLP
+TU_MoNet
+TU_RingGNN
+MLC_3WLGNN
+MLC_GAT
+MLC_GCN
+MLC_GIN
+MLC_GatedGCN
+MLC_GraphSage
+MLC_MoNet
+MLC_RingGNN
+SP_3WLGNN
+SP_GAT
+SP_GCN
+SP_GatedGCN
+SP_GraphSage
+SP_MoNet
+SP_RingGNN
+-20
+-10
+0
+10
+20
+30
+ED2P Saving (%)
+ODPP
+GPOEO
+Fig. 14. Energy saving, slowdown, and ED2P saving compared to the NVIDIA default scheduling strategy on benchmarking-gnns applications
+AI_3DFR
+AI_3DOR
+AI_FE
+AI_I2IC
+AI_I2IP
+AI_I2T
+AI_ICMP
+AI_IGEN
+AI_LRK
+AI_OBJ
+AI_S2T
+AI_ST
+AI_T2T
+AI_TS
+0%
+1%
+2%
+3%
+4%
+5%
+6%
+7%
+Energy Overhead
+Performance Overhead
+Fig. 15. Energy and time overhead of GPOEO on AIBench
+5.4.2
+Large benchmark suite
+We also use the benchmarking-gnns suite to evaluate
+our method and ODPP [11] extensively. Figure 14 shows
+the online optimization results of 55 applications in the
+benchmark-gnns. GPOEO achieves an energy saving of
+16.6% and an ED2P saving of 7.8%, with an execution
+time increase of 5.2% on average. In comparison, ODPP
+gains an energy saving of 6.1% and an ED2P saving of -
+4.5%, with an execution time increase of 5.6% on average.
+GPOEO saves ED2P on 50 applications, while ODPP only
+gains ED2P saving on 19 applications. Our method meets
+the performance loss constraint of 5% on 22 applications.
+ODPP achieves the same goal on 27 applications because it
+does not proﬁle performance counters and has a lower mea-
+surement overhead. With the help of performance counter
+features, GPOEO saves more energy than ODPP on 48
+applications. Applications in CSL and TU datasets are non-
+periodical. ODPP can not handle these applications and
+only saves 0.73% of energy with a slowdown of 1.32% on
+average. On the contrary, GPOEO gains an energy saving of
+20.0% with a slowdown of 5.2% on average. These phenom-
+ena show that GPOEO has better performance and broader
+applicability than ODPP.
+5.5
+Overhead Evaluation
+To evaluate the overhead of the GPOEO system, we run
+AIBench applications with the entire GPOEO system except
+adjusting SM and memory clocks. We also manually set the
+number of local search steps shown in Table 3. As shown in
+Figure 15, all energy and time overheads are within 4%.
+6
+RELATED WORK
+There is a growing interest in optimizing machine learning
+workloads for performance and energy efﬁciency. Many
+works concentrate on CPU energy optimization [17], [24]–
+[29]. Some of these prior works [24]–[26] use ofﬂine methods
+to model energy and performance, while others [17], [27],
+[28] design runtime to adjust the CPU clock or enforce
+power capping [29]. These methods rely heavily on run-
+time CPU-speciﬁc performance counter proﬁling and are
+not transferable to GPUs, but the prediction models [26],
+[28], [30] they have used may also apply to GPUs.
+Proﬁling workloads using GPU performance counter
+during program execution time can be expensive. For this
+reason, most GPU energy optimization works have to rely
+on ofﬂine proﬁling information [4], [6], [7], [31]. Most ofﬂine
+works [4], [6], [31] focus on modeling and predicting energy
+and performance under different hardware conﬁgurations.
+Other works study GPU energy and performance from
+the view of assembly instructions [6], [7]. These works
+require tedious ofﬂine proﬁling and analysis for each new
+application or even different inputs. In contrast, our work
+can automatically optimize new applications online once
+the prediction models are established and well trained.
+Although these ofﬂine jobs are inconvenient to use, the
+energy features [4], [31] they have used are instructive for
+GPU online energy consumption optimization.
+A few studies [10], [11] realize GPU online energy con-
+sumption optimization. Majumdar et al. [10] exploit low-
+overhead ﬁne-grained proﬁling functions supported by the
+
+12
+APU platform. It obtains the stream of energy, execution
+time, throughput, and performance counter metrics at ker-
+nel granularity without worrying about time and energy
+overhead. Therefore, it can catch energy-saving chances at
+kernel granularity and save considerable energy with low
+overhead. Majumdar’s work cannot be transplanted to the
+NVIDIA GPU platform, considering the signiﬁcant amount
+of code instrumentation (around each kernel) and the high
+overhead of continuously proﬁling. Our approach targets
+the NVIDIA GPU platform with high runtime proﬁling
+overhead (with a slowdown of > 8% and energy overhead
+of > 10%). We proﬁle performance counter metrics in only
+one iteration period to minimize overhead. ODPP [11] pro-
+poses an online dynamic power-performance management
+framework for GPUs using coarse-grained features which
+cannot provide enough information to model energy con-
+sumption and performance accurately, as mentioned in Sec-
+tion 2.2.4. Besides, the period detection algorithm of ODPP
+is unstable and error-prone. Due to the two weaknesses,
+ODPP exhibits poor energy-saving results and can give
+severe slowdown in our evaluation. Our approach exploits
+hardware performance counter metrics and utilizes a robust
+period detection algorithm to tackle these two weaknesses,
+leading to better performance.
+Energy and performance optimization built upon ma-
+chine learning techniques have been demonstrated to be
+promising in various application domains [8], [9], [32]–[47].
+Some works [8], [9], [41], [42], [44], [46] tune hyperparam-
+eters, model structure conﬁgurations, or data structures to
+speed up ML applications or save energy consumption. Our
+method can be used together with these application-level
+techniques to reduce energy consumption further. CAMEL
+[43] optimizes the energy of web applications on mobile
+platforms. It uses the frame rate as the performance index,
+which is only suitable for web applications. Many studies
+[32], [33], [35]–[40], [45] concentrate on accelerating applica-
+tions on heterogeneous platforms. Combining these studies
+with our method may enable acceleration while saving
+energy. Based on the graph neural network, Ye et al. [47]
+propose a novel program analysis and modeling method
+to provide comprehensive insight into the program. This
+method may be helpful to build more accurate energy and
+performance prediction models.
+7
+CONCLUSION
+We have presented GPOEO, a new online GPU energy
+optimization framework for iterative machine learning (ML)
+workloads. GPOEO detects iterative periods, measures per-
+formance counter features, and predicts the optimal energy
+conﬁgurations automatically. We evaluate GPOEO on 71
+ML applications running on an NVIDIA RTX3080Ti GPU.
+GPOEO achieves a mean energy saving of 16.2% at a modest
+cost of 5.1% performance loss compared to the NVIDIA
+default scheduling strategy.

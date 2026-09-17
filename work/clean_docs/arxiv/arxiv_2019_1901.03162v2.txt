@@ -1,0 +1,626 @@
+Motion Perception in
+Reinforcement Learning with Dynamic Objects
+Artemij Amiranashvili
+University of Freiburg
+Alexey Dosovitskiy
+Intel Labs
+Vladlen Koltun
+Intel Labs
+Thomas Brox
+University of Freiburg
+Abstract: In dynamic environments, learned controllers are supposed to take mo-
+tion into account when selecting the action to be taken. However, in existing rein-
+forcement learning works motion is rarely treated explicitly; it is rather assumed
+that the controller learns the necessary motion representation from temporal stacks
+of frames implicitly. In this paper, we show that for continuous control tasks learn-
+ing an explicit representation of motion improves the quality of the learned con-
+troller in dynamic scenarios. We demonstrate this on common benchmark tasks
+(Walker, Swimmer, Hopper), on target reaching and ball catching tasks with simu-
+lated robotic arms, and on a dynamic single ball juggling task. Moreover, we ﬁnd
+that when equipped with an appropriate network architecture, the agent can, on
+some tasks, learn motion features also with pure reinforcement learning, without
+additional supervision. Further we ﬁnd that using an image difference between the
+current and the previous frame as an additional input leads to better results than a
+temporal stack of frames.1
+Keywords: Reinforcement learning, Motion perception, Optical ﬂow
+1
+Introduction
+In many robotic tasks, the robot must interact with a dynamic environment, where not only the dy-
+namics of the robot itself but also the unknown dynamics of the environment must be taken into
+account. Examples of such tasks include autonomous driving, indoor navigation among other mo-
+bile agents, and manipulation of moving objects such as grasping and catching. The presence of
+moving elements in the environment typically increases the difﬁculty of a control task substantially,
+necessitating fast reaction time and prediction of the future trajectories of the moving objects.
+In deep reinforcement learning (DRL), using a neural network as function approximator, a model of
+the environment’s dynamics can, in principle, be learned implicitly. In simple cases, such as in some
+Atari games, corresponding motion features seem to be picked up automatically [21]. However, it
+can be observed that a model operating on just a single frame often has the same performance as
+a model that takes a stack of successive images as input [6]. Is motion uninformative or is it just
+harder to learn than static features for an end-to-end trained system? Intuitively, we expect the latter,
+but then: how can we best enable the use of motion when training controllers?
+In this paper, we conﬁrm the importance of motion in learning tasks that involve dynamic objects,
+and we investigate the use of optical ﬂow to help the controller learn the use of motion features. In
+a straightforward manner, optical ﬂow can be just provided as an additional input to an RL agent.
+A complication with this approach is that accurate optical ﬂow computation is typically too slow
+for training of RL models, which requires frame rates of at least hundreds of frames per second to
+run efﬁciently. To address this issue, we design a small specialized optical ﬂow network derived
+from FlowNet [7]. The network is small enough to be run jointly with reinforcement learning while
+keeping computational requirements practical. We consider two training modes: one where the
+1This is an extended version of the CoRL paper (2nd Conference on Robot Learning (CoRL 2018), Z¨urich,
+Switzerland) with the additional image difference baseline [33].
+arXiv:1901.03162v2  [cs.LG]  1 Feb 2019
+
+optical ﬂow network is trained in a supervised manner beforehand, and one where the same network
+is trained online via RL based just on the rewards, i.e., without explicit supervision on the optical
+ﬂow.
+We perform extensive experiments on multiple diverse continuous control tasks. We observe that
+the use of optical ﬂow consistently improves the quality of the learned policy. The improvement is
+higher the more relevance the dynamics have for the completion of the task. Some tasks involving
+dynamic objects cannot be learned at all without the explicit use of motion. In some tasks unsuper-
+vised learning of the optical ﬂow based on the rewards is possible, whereas on harder tasks, direct
+supervision is still required to kickstart the motion representation learning.
+We also ﬁnd that a network provided with the current frame concatenated with the difference be-
+tween the current and the previous frame outperforms or matches the image stack baseline across
+all tasks with dynamic objects. This suggests that the image difference could be a more useful input
+for pixel control reinforcement learning than the usually used stack of frames [21].
+2
+Related Work
+Deep reinforcement learning aims to learn sensorimotor control directly from raw high-level sensory
+input via direct maximization of the task performance, by using deep networks as function approxi-
+mators. This approach has allowed learning complex behaviors based on raw sensory data in various
+domains: arcade game playing [21], navigation in simulated indoor environments [22, 20, 6, 17],
+simulated racing [22], simulated robotic locomotion [18] and manipulation [2, 30], as well as ma-
+nipulation on physical systems [13]. Despite these notable successes, there is little understanding of
+how and what exactly do the DRL agents learn. In this work, we focus on studying how DRL makes
+use of motion information in dynamic environments.
+Previous works in DRL vary in how they provide motion information to the network. The most
+standard approach is to feed a stack of several recent frames to the agent, assuming that the deep
+network will extract the motion information from these if needed [21, 22, 6]. On the architecture
+side, agents are commonly equipped with a long short-term memory (LSTM) that can, in principle,
+pick up the motion information [22, 20, 17]. An alternative approach to using motion information
+is based on future frame prediction, which can be used to learn a useful feature representation [11]
+or to plan future actions explicitly [10, 9]. A representation of motion and static properties can
+also be learned through a self-supervised multi-frame TNC embedding [8]. In contrast to all these
+works, we aim to understand what representation of motion is the most useful for an RL agent and
+in particular experiment with explicitly computed optical ﬂow.
+The use of optical ﬂow relates our work to the line of research on using explicit perception systems
+to improve the performance of learned sensorimotor control policies. Providing ground truth depth
+maps to the agent has been shown to lead to improved navigation performance compared to a system
+making use of only color images [20, 25]. In the domain of autonomous driving, semantic segmen-
+tation can help improve the driving command prediction [34] or allows the transfer from simulation
+to the real world [23]. Goel et al. [12] show that object segmentation learned in an unsupervised
+fashion leads to improved performance in some Atari games. Clavera et al. [5] use object detection
+to improve transfer of learned object manipulation policies. Our work is similar in spirit to these,
+but we focus on analyzing the use of motion and optical ﬂow in deep reinforcement learning, which,
+to our knowledge, has not been previously addressed.
+While optical ﬂow is not commonly used in DRL, it has a long history in robotics. Vision-based
+robotic systems have employed optical ﬂow a range of diverse applications: tracking [19], navi-
+gation [24, 32, 4], obstacle avoidance [27], visual servoing [1], object catching [28]. Applications
+of optical ﬂow have been complicated by the trade-off between computational efﬁciency and the
+accuracy. Only recently, deep-learning-based methods have allowed for fast and accurate estima-
+tion of optical ﬂow [7]. In this paper, we build on this progress and use a miniaturized variant of
+FlowNet [7, 16] to estimate optical ﬂow. Our optimized small FlowNet is extremely efﬁcient, which
+allows its use for training reinforcement learning agents.
+2
+
+Figure 1: Illustration of the approach. The RL agent uses an explicit motion representation provided
+in the form of optical ﬂow.
+3
+Method
+We study an agent operating in an environment in discrete time. At each time step t the agent gets an
+observation ot from the environment and generates an action at in response. In this work we focus
+on environments where observation is a high-dimensional sensory input, such as an image, and the
+action is a relatively low-dimensional vector of continuous values. In addition to the observation, at
+each step the agent gets a scalar reward rt. In this work the reward is often the sum of two terms
+rt = rsc
+t + rsh
+t : the typically sparse scoring reward rsc
+t (we often refer to it as score) and a denser
+shaping reward rsh
+t . We are interested in achieving high scoring reward, but add a shaping reward
+to simplify training.
+Since we deal with continuous control tasks, we use Proximal Policy Optimization (PPO) [26] as
+our base RL algorithm. To enable processing of high-dimensional inputs, we use a convolutional
+network (CNN) as a function approximator. We use an architecture similar to Mnih et al. [21]. In
+tasks involving manipulation of moving objects we provide the vector of robot state variables to the
+network in addition to the high-dimensional sensory observation. We process this vectorial input by
+a separate fully connected network and concatenate the output with the output of the perception part
+of the CNN (full architecture is shown in Table S1).
+To understand the role of motion perception in training of an RL agent, we vary the input provided to
+the agent. The straightforward options are to provide the network with just the current observation
+or several recent observations stacked together. A more interesting scenario is to provide optical
+ﬂow explicitly to the RL network. In this case, we use a separate convolutional network to estimate
+the optical ﬂow. This setup is illustrated in Figure 1.
+For optical ﬂow estimation we use a miniaturized version of the FlowNetS network [7], which
+we refer to as TinyFlowNet. This is necessitated by two considerations: ﬁrst, we need the ﬂow
+computation to be sufﬁciently fast to support RL training and, second, the input resolution used
+for RL is much smaller than that assumed by the full FlowNet. TinyFlowNet consists of a 5-layer
+encoder and a 2-layer decoder, compared to a 9-layer encoder and a 4-layer decoder in the original
+FlowNet. Moreover, there are only two strided layers, the maximum number of channels is 128, and
+all convolutional kernels are 3 × 3. We ﬁnd that this smaller network is sufﬁciently expressive to
+accurately estimate optical ﬂow in environments we consider in this work, while processing 1800
+image pairs per second on a Geforce 1080 Ti GPU. The full TinyFlowNet architecture is shown in
+Table S3.
+We investigate two approaches to training the two-network system: pre-training the ﬂow net-
+work separately or training both networks from scratch with RL. In the ﬁrst case, we pre-train
+TinyFlowNet in a supervised fashion on data extracted automatically from the RL environments
+using FlowNet 2.0 [16] to provide targets for training; see Figure 2. This student-teacher setup
+allows training without ground truth optical ﬂow, making the approach applicable to arbitrary envi-
+ronments. In the second case, we initialize both networks with random weights and train the whole
+system from scratch with RL.
+3.1
+Training details
+We use images of resolution 84 × 84 pixels as sensory observations in all environments. The action
+space varies depending on the environment. We train all agents for 20 million time steps. This
+is longer than what is typically used for PPO [26], since training from raw sensory observations
+is more difﬁcult than from low-dimensional state vectors. We use the same hyperparameters as
+3
+
+Figure 2: Training of TinyFlowNet using FlowNet 2.0 [16] as a teacher.
+used by Schulman et al. [26] for Atari environments. However, we adjust the learning rate to 1 ×
+10−4 and the number of epochs to 2, which resulted in better and more stable performance in our
+environments.
+The pre-training of TinyFlowNet is illustrated in Figure 2. We compute optical ﬂow in high reso-
+lution (512 × 512 pixels) using FlowNet 2.0. This optical ﬂow is downsampled to 84 × 84 pixels
+and used as target for training TinyFlowNet. To ensure accurate optical ﬂow prediction, we trained
+a separate ﬂow network for each of the environments, by extracting a dataset of 20,000 image pairs.
+For the standard control tasks (Walker, Swimmer, Hopper) we execute random actions to generate
+training data. In our new tasks with moving objects, we keep the robot arm static while creating the
+dataset. This makes the optical ﬂow estimation focus on the moving objects.
+4
+Experiments
+We compare the ﬂow-based approach against several baselines on standard control tasks and on
+a series of new tasks that require interaction with dynamic objects. We evaluated the following
+models:
+• Image: processes the current image by a feedforward CNN
+• Image stack: processes a stack of the 2 most recent images by a feedforward CNN
+• Image difference: processes the current image stacked with the image difference between
+the previous image and the current image
+• LSTM: processes the current image by a CNN with an LSTM layer
+• Segmentation: processes the current image and a segmentation mask of the moving object
+by a feedforward CNN. The mask is a motion segmentation taken from the predicted optical
+ﬂow
+• Flow: processes the current image and the optical ﬂow between the current frame and the
+previous one by a feedforward CNN. Flow is computed in the backward direction to ensure
+that the object in the ﬂow image is co-located with the object in the color image
+4.1
+Standard control tasks
+We started by experimenting with three standard control tasks from the OpenAI Gym framework [3]:
+Walker, Swimmer, and Hopper. We additionally adjusted these environments with visual modiﬁca-
+tions from the DeepMind Control Suite [29]. Typically, these tasks are trained with the robot’s
+state vector provided as input to the network. We rather focused on learning solely from raw im-
+ages and investigated whether information about motion, represented by optical ﬂow, helps learning
+better policies. Because of the high variance of the performance on these tasks [15], we trained
+each model 8 times with different random seeds and show the average performance and the standard
+deviation in Figure 3.
+Although there are no moving objects in these tasks apart from the agent itself, providing optical ﬂow
+as input clearly improves results compared to providing just the stack of images. This supports our
+initial hypotheses that motion information is very useful in dynamic environments and that the agent
+has problems deriving good motion features from the plain image stack using a standard network
+architecture.
+4
+
+0
+5
+10
+15
+20
+Timesteps (1e6)
+500
+1000
+1500
+2000
+2500
+3000
+3500
+Score
+Walker2D
+Image stack
+Flow
+0
+5
+10
+15
+20
+Timesteps (1e6)
+30
+40
+50
+60
+70
+80
+90
+100
+Score
+Swimmer
+Image stack
+Flow
+0
+2
+4
+6
+8
+10
+Timesteps (1e6)
+200
+400
+600
+800
+1000
+Score
+Hopper
+Image stack
+Flow
+Figure 3: Training curves on standard control tasks with pixel control. We trained 8 models in each
+condition. Lines show the mean reward; shaded areas show the standard deviation.
+4.2
+Tasks with dynamic objects
+We analyze the effect of motion perception in more detail on a speciﬁcally designed set of tasks,
+where the environment surrounding the robot contains moving objects. In such environments, the
+use of motion information is expected to be even more crucial than on the control tasks above.
+In these experiments we complement the high-dimensional sensory observations with the vector
+containing the current state of the robot.
+We implemented four such environments in the MuJoCo simulator [31] by modifying OpenAI Gym
+tasks [3]. Two of these are set up in a two-dimensional space and two in a three-dimensional space.
+The environments are illustrated in Figure 4. All tasks terminate after 250 time steps.
+• 2D Catcher. A 2-link 2D robotic arm is ﬁxed in the center of the ﬁeld as in the standard
+reacher environment. The target is a ball moving from the top of the screen towards the
+bottom, reﬂecting from two walls like in billiard. The aim is to “catch” the target by
+making the end effector of the arm overlap with the target. After the ball is caught a new
+target appears from the top.
+• 2D Chaser. A 2-link 2D robotic arm is ﬁxed in the center of the ﬁeld as in the previous
+task, but the target now reﬂects from the four borders. The aim is to keep the end effector
+of the robotic arm as close to the target as possible while the target keeps moving.
+• 3D Catcher. A 3-link 3D robotic arm is ﬁxed on a base. Moving targets follow randomized
+parabolic trajectories in the vicinity of the arm. The aim is to “catch” the target with the
+end effector of the arm.
+• 3D KeepUp. A 3-link 3D robotic arm is ﬁxed on a base and has a square pad ﬁxed on
+its end effector. A ball falls down from the top under the effect of gravity. The aim is to
+reﬂect the ball with the pad and keep reﬂecting it every time it falls, by moving the arm and
+rotating the pad.
+Like in the standard MuJoCo control tasks, each reward function also contains a motion penalty term
+to reduce unnecessary movement of the robot arm. Further details are provided in the sections below.
+Environment conﬁguration ﬁles, reward parameters, implementations, and a video showing the tasks
+(a) 2D Catcher
+(b) 2D Chaser
+(c) 3D Catcher
+(d) 3D KeepUp
+Figure 4: The tested environments with moving objects.
+5
+
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Timesteps (1e6)
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+Score
+2D Catcher
+Image
+Image stack
+Image diff
+LSTM
+Segmentation
+Flow
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Timesteps (1e6)
+0
+20
+40
+60
+80
+Score
+2D Chaser
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Timesteps (1e6)
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+Score
+3D Catcher
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Timesteps (1e6)
+0
+2
+4
+6
+8
+Score
+3D KeepUp
+Figure 5: Performance on the four tasks that involve moving objects. Overall the agent that uses
+optical ﬂow outperforms other baselines, including LSTM and an agent provided with a stack of two
+recent frames.
+and qualitative results will be made available on the project page: https://lmb.informatik.
+uni-freiburg.de/projects/flowrl/.
+2D environments.
+In 2D environments the robots are controlled by applying torque at the joints.
+In both tasks the agent receives a dense shaping reward depending on the distance to the target. In
+addition, it receives a sparse scoring reward when the distance between the end effector and the
+target falls below a ﬁxed threshold (corresponding to overlap of the end effector with the target). In
+case of the 2D Catcher, this counts as a catch and a new ball is spawn, while in case of 2D Chaser
+the ball keeps moving.
+The achieved scores are shown in Figure 5 (top). On both tasks, the use of optical ﬂow improved
+the performance of the agent. Most alternative strategies that would allow the agent to use motion
+information, such as LSTM units or the image stack, hardly improved over the use of a single
+image. However, the image difference baseline clearly outperformed other baselines and nearly
+matched the performance of the ﬂow-based agent on the 2D Chaser task. It is interesting that a
+minor change in the input representation from image stack to the image difference leads to such a
+dramatic performance improvement, despite the fact that a network with image stack as input could
+easily learn to compute the image difference. We believe this inability to learn the simple difference
+operation is due to the complexity and unstability of the network optimization.
+Providing the segmentation mask of the moving ball did not reach the same performance as pro-
+viding the optical ﬂow. This shows that the optical ﬂow is not just used for localizing the moving
+object, but also for predicting its future position. This is particularly important for the 2D Catcher
+task, where the agent easily misses the ball without a good prediction of the future ball position. The
+arm is not fast enough to catch up with the falling ball when it was missed.
+6
+
+1.00
+0.75
+0.50
+0.25
+Relative target speed
+20
+40
+60
+80
+100
+Relative score (%)
+2D Catcher with varying target speed
+Image
+Image stack
+LSTM
+Segmentation
+Flow
+Figure 6:
+Results on the 2D Catcher
+task when varying the speed of the tar-
+get. We plot the score relative to an agent
+equipped with optical ﬂow.
+Varying the target speed.
+The faster the motion in
+the environment relative to the robot’s speed, the more
+important is the ability to plan ahead and, in order to do
+so, to estimate the motion of the objects. We performed
+an experiment to verify this hypothesis empirically. We
+varied the speed of the target in the 2D Catcher task and
+measured the scores.
+Figure 6 shows the relative performance of the baselines
+to the ﬂow-based agent as a function of the speed of the
+target. As expected, the slower the target, the closer the
+performance of all methods. However, even for slow
+targets the ﬂow-based agent has a small advantage.
+This might be because even for slow targets motion in-
+formation helps catching them slightly faster, or, alter-
+natively, because optical ﬂow is not only useful for pre-
+dicting the future trajectory of objects, but also for de-
+tecting moving objects which is useful even if the ob-
+jects are slow.
+3D environments.
+In the 3D environments we provide two perpendicular camera views to the
+agent for it to have sufﬁcient perceptual information to act in 3D space (shown in Figure S1). The
+agent must combine the information from both views to control the end effector relative to the target
+in 3D space. The robots in these environments are position controlled. In the case of the 3D Catcher
+the action space is 3-dimensional and includes the movement along the x, y, and z axis. The shaping
+reward is the distance to the target future location in the plane of the end effector. The agent scores
+for each catch. In the 3D KeepUp task the shaping reward is the distance along the x-y plane between
+the target and the middle of the square pad. The agent scores each time it successfully reﬂects the
+target.
+The results are shown in Figure 5 (bottom). In both cases, the ﬂow-based agent learned effective
+policies, while the agent provided with an image, an image stack, or a LSTM layer could not solve
+the task. The agent with a motion segmentation mask outperformed other baselines on the 3D
+Catcher task, but could not reach the score of the ﬂow-based agent. The image difference baseline
+matched the performance of the ﬂow-based agent on the 3D KeepUp task.
+Analysis of motion representations.
+In order to better understand the effect of motion represen-
+tations on learning, we experiment with providing the agent with a low-dimensional velocity vector
+of the target instead of per-pixel optical ﬂow. We compute the velocity vector from the optical ﬂow
+prediction and feed it to the RL agent as an additional vector input. We also measure the perfor-
+mance of the RL agent with ground truth optical ﬂow or velocity vector. The results are shown in
+Figure S4. Overall, the agent with access to per-pixel optical ﬂow outperforms the velocity vector
+input. The agent with optical ﬂow ground truth performs better in the 2D environments, indicating
+that the TinyFlowNet results could potentially be improved by using a larger network with better
+optical ﬂow prediction.
+4.3
+Learning motion features with deep RL
+The previous experiments show that availability of a pre-trained explicit optical ﬂow estimator im-
+proves the agent’s performance on dynamic tasks. The typical network architecture used in most RL
+works, even when equipped with LSTM units, is not able to learn a good motion representation just
+from the reward signals. Is this still true if we train RL from scratch with a more powerful network?
+We experiment with two larger network architectures. The ﬁrst one is the one used in experiments
+with pre-trained optical ﬂow: a TinyFlowNet with a normal RL network on top, but trained end-
+to-end from scratch. The second one is a residual network [14] with 8 convolutional layers and
+approximately the same number of parameters as the combination of the TinyFlowNet with the
+normal RL network (the exact architecture is shown in Table S2).
+7
+
+0
+5
+10
+15
+20
+Timesteps (1e6)
+0
+5
+10
+15
+20
+25
+Score
+2D Catcher
+0
+5
+10
+15
+20
+Timesteps (1e6)
+0
+20
+40
+60
+80
+100
+Score
+2D Chaser
+Pre-trained TinyFlowNet
+TinyFlowNet from scratch
+Residual Net from scratch
+Residual Net from scr. with image diff.
+0
+5
+10
+15
+20
+Timesteps (1e6)
+0
+5
+10
+15
+20
+25
+30
+35
+Score
+2D Chaser with Multi-Texture
+0
+5
+10
+15
+20
+Timesteps (1e6)
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+Score
+3D Catcher
+0
+5
+10
+15
+20
+Timesteps (1e6)
+2
+4
+6
+8
+10
+Score
+3D KeepUp
+0
+5
+10
+15
+20
+Timesteps (1e6)
+0
+2
+4
+6
+8
+Score
+3D KeepUp with High Motion Penalty
+Figure 7: Comparison of a ﬁxed pre-trained TinyFlowNet, a TinyFlowNet trained from scratch
+within the RL framework, and a deep residual RL network without the TinyFlowNet architecture.
+In addition to the four environments introduced above, here we experiment with more difﬁcult ver-
+sions of the 2D Chaser and 3D KeepUp tasks. In 2D Chaser with Multi-Texture, in each episode
+the background of the environment is randomly selected out of four different backgrounds (shown
+in Figure S2). This increases the perceptual complexity of the task. In 3D KeepUp with High Mo-
+tion Penalty the motion penalty in the reward is increased, to further reduce the overall speed and
+unnecessary movement of the robot.
+The results on all six environments are shown in Figure 7. Surprisingly, and in contrast to the
+architectures evaluated in the previous section, for both advanced architectures training from scratch
+works very well in some of the environments. However, in the more complex tasks – 3D Catcher,
+2D Chaser with Multi-Texture, and 3D KeepUp with High Motion Penalty – training from scratch
+with an image stack input does not yield a successful policy. In particular, in 3D KeepUp with High
+Motion Penalty training from scratch gets stuck in a local optimum of not moving the robot arm,
+while the agent with pre-trained TinyFlowNet is still able to solve the task. Providing the residual
+network with the image difference improves its performance on the 2D Chaser tasks and results in a
+successful policy on the 3D KeepUp with High Motion Penalty. This indicates that using the image
+difference as an additional input also improves the performance of larger architectures.
+Overall, although in several cases a larger architecture can learn the necessary motion features based
+only on the reward signal, the use of a pre-trained optical ﬂow estimator is still beneﬁcial and allows
+for robust training on a wider range of environments.
+The two advanced architectures trained from scratch reach similar scores in all environments; how-
+ever, the architecture including TinyFlowNet has the advantage of being more interpretable, since
+it predicts an intermediate optical-ﬂow-like two-channel representation. We show example outputs
+of an automatically learned TinyFlowNet in Figure S3. To visualize the two-channel outputs of the
+network, we assign them to two color channels of an RGB image: red and blue. Interestingly, the
+network learned to represent the motion of the ball and largely ignore the motion of the robotic arm.
+The representation of the motion generated by the network is different from the standard optical
+ﬂow representation: instead of encoding the (x,y) displacements in the two channels of the result,
+the network displaces the content of the two channels spatially in the direction of the motion.
+5
+Conclusion
+In this work we showcased the importance of an explicit motion representation for control tasks that
+involve dynamic objects. We presented the integration of an optical ﬂow network into a reinforce-
+ment learning setup and showed that the use of optical ﬂow helped on tasks that involve dynamics.
+Interestingly, on several tasks, motion features were learned in an unsupervised manner just from
+8
+
+task-speciﬁc rewards and achieved the same and sometime higher performance than the network
+that was trained to predict optical ﬂow in a supervised manner. On two tasks, unsupervised learning
+was not successful and kickstarting the use of motion by supervised learning of optical ﬂow was
+necessary.
+Further, we found that in all experiments providing image difference as input to the network matched
+or outperformed the image stack input. RL with image difference input was not able to solve all of
+the tasks with dynamic objects, however, the faster computation time compared to optical ﬂow es-
+timation makes it a viable alternative for tasks with simple motion components. We still expect
+that the image difference will not outperform the image stack in environments with more complex
+motion, including large displacements or egomotion. Overall our results suggest using image differ-
+ence as the default input representation instead of an image stack when performing RL in dynamic
+environments.
+Our work opens up several opportunities for future research. First, it would be interesting to apply
+similar methods to more complex environments and eventually to physical robotic systems. We
+expect that pre-trained perception systems would be even more beneﬁcial in these more complex
+conditions, and, moreover, the use of the abstract optical ﬂow representation may simplify the trans-
+fer from simulation to the real world [5, 23]. Second, rather than pre-training optical ﬂow using
+supervised learning, one could use unsupervised methods based on frame prediction [11, 35]. Third,
+learning of motion features just from rewards in several tasks is interesting by itself and only suc-
+ceeded due to the deeper network architectures. How the use of suitable network architectures may
+generally help improve representation learning in control setups is worth further investigation.

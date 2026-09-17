@@ -1,0 +1,1194 @@
+Belief Propagation by Message Passing in Junction Trees:
+Computing Each Message Faster Using GPU Parallelization
+Lu Zheng and Ole Mengshoel∗
+Electrical and Computer Engineering Department,
+Carnegie Mellon University.
+Jike Chong†
+Electrical Engineering and Computer
+Science Department,
+University of California, Berkeley.
+Abstract
+Compiling Bayesian networks (BNs) to junc-
+tion trees and performing belief propaga-
+tion over them is among the most promi-
+nent approaches to computing posteriors in
+BNs. However, belief propagation over junc-
+tion tree is known to be computationally in-
+tensive in the general case.
+Its complexity
+may increase dramatically with the connec-
+tivity and state space cardinality of Bayesian
+network nodes.
+In this paper, we address
+this computational challenge using GPU par-
+allelization. We develop data structures and
+algorithms that extend existing junction tree
+techniques, and speciﬁcally develop a novel
+approach to computing each belief propaga-
+tion message in parallel. We implement our
+approach on an NVIDIA GPU and test it us-
+ing BNs from several applications. Experi-
+mentally, we study how junction tree param-
+eters aﬀect parallelization opportunities and
+hence the performance of our algorithm. We
+achieve speedups ranging from 0.68 to 9.18
+for the BNs studied.
+1
+Introduction
+Bayesian networks (BNs) are an eﬀective tool in a di-
+verse range of applications that require representation
+and reasoning with uncertain knowledge and data. In-
+ference over BNs can be either exact or approximate.
+Perhaps the most popular exact inference algorithm,
+belief propagation in junction trees, relies on the com-
+pilation of a BN into a junction tree. Exact belief up-
+dating (or marginalization) is then performed by mes-
+sage passing over the junction tree [6]. Each node of a
+
+junction tree is a clique computed from the moralized
+graph based on the original BN.
+However, belief propagation over junction trees is
+known to be computationally hard.
+Computational
+diﬃculty increases dramatically with the density of
+the BN, the treewidth of the network, and the num-
+ber of states of each network node [9]. In addition,
+some practical issues associated with the speciﬁc im-
+plementation platform also aﬀect the computation per-
+formance [1]. In our work, we address the computa-
+tional problem of belief propagation on both the ana-
+lytical and implementation levels.
+Two fundamental issues, which may cause large cliques
+in junction trees, are: (i) the topology and connect-
+edness of a BN [9] and (ii) the high cardinality of a
+signiﬁcant set of discrete BN nodes [13]. Discrete BN
+nodes can have high cardinalities for several reasons:
+First, they may represent discrete parameters, for ex-
+ample categorical parameters, that inherently take a
+large number of values [13]. A second reason for high-
+cardinality, discrete BN nodes is that they are used
+to represent continuous parameters. The number of
+states grows exponentially with the number of bits
+used when representing a quantized continuous param-
+eter. Consequently, if a ﬁne-grained discretization is
+used in BN nodes, the diﬃculty of computation may
+become a major challenge.
+The above issues may cause very large cliques to be
+formed in junction trees, and thus hinder the appli-
+cation of BNs in cases where real-time inference is re-
+quired. In addition, there can be major computational
+challenges when BN inference is in the inner loop of
+iterative algorithms like the EM algorithm [5]. There-
+fore, it is of great interest to develop parallel comput-
+ing techniques to speed up junction tree inference. Re-
+cently, graphic processing units (GPUs) have become
+increasingly programmable and their parallel process-
+ing power can now be used for general purpose com-
+putation with Compute Uniﬁed Device Architecture
+(CUDA). However, due to the intricate nature of join
+
+tree computation and the distinctive GPU program-
+ming architecture, it is still a major challenge to adapt
+junction tree algorithms to the GPU. In this paper,
+we discuss data structures and algorithms that extend
+existing junction tree techniques [1,6], and speciﬁcally
+develop a novel approach to parallel message compu-
+tation using belief propagation in junction trees.
+Parallelization of Bayesian network computation has
+been investigated in previous research [2–4, 7, 8, 10,
+14, 15].
+A data parallel implementation for junc-
+tion tree inference has been developed for a cache-
+coherent shared-address-space machine with physi-
+cally distributed main memory [4]. Parallelism in the
+basic sum-product computation has been investigated
+for GPUs [14]. The eﬃciency in using disk memory
+for exact inference, using parallelism and other tech-
+niques, has been improved [3]; parallel techniques for
+BN structure learning have also been developed [7].
+An algorithm for parallel BN inference using pointer
+jumping has been introduced [10]. Both parallelization
+based on graph structure [8] as well as node level prim-
+itives for parallel computing based on a table extension
+idea have been developed [15]; a GPU implementation
+based on this idea was later developed [2].
+In this paper, we also focus on node level parallelism,
+motivated by the existence of very large cliques in junc-
+tion trees from applications. In such settings, node-
+level operations are often the dominating part of the
+problem [15]. However, we take a diﬀerent approach
+from previous research [2, 15], and in particular our
+approach is motivated by the cluster-sepset mapping
+method of Huang and Darwiche [1].
+We develop a
+parallel message computation algorithm for junction
+tree belief propagation.
+The speedup of this par-
+allel algorithm, relative to the sequential algorithm,
+is analyzed theoretically. Experimental results, with
+speedups ranging from 0.68 to 9.18, show our GPU
+implementation’s performance as it varies according
+to the junction tree topology.
+Our paper is organized as follows: In Section 2, we re-
+view BNs, junction trees, and parallel computing using
+GPUs. In Section 3, we describe our parallel approach
+to message computation for belief propagation in junc-
+tion trees. Experimental results are discussed in Sec-
+tion 4. In Section 5 we conclude and outline future
+research.
+2
+Background
+2.1
+Belief Propagation in Junction Trees
+A BN is a compact representation of a joint distribu-
+tion over a set of random variables X. A BN is struc-
+tured as a directed acyclic graph (DAG) whose ver-
+tices are the random variables and the directed edges
+represent dependency relationship among the random
+variables. The evidence in a Bayesian network consists
+of variables that have been instantiated.
+The junction tree algorithm propagates beliefs (or pos-
+teriors) over a derived graph called a junction tree. A
+junction tree is generated from a BN by means of mor-
+alization and triangulation [6]. Each vertex Ci of the
+junction tree contains a subset of the random variables
+that forms a clique in the moralized and triangulated
+BN, denoted by Xi ⊆X. Associated with each ver-
+tex of the junction tree there is a potential table φXi.
+With the above notations, a junction tree can be de-
+ﬁned as J = (T, Φ), where T represents a tree and Φ
+represents all the potential tables associated with this
+tree. Assuming Ci and Cj are adjacent, a separator
+Sij is induced on a connecting edge.
+The variables
+contained in Sij are deﬁned to be Xi ∩Xj.
+Belief propagation is invoked when we get new evi-
+dence e for a set of variables E ⊆X.
+We need to
+update the potential tables Φ to reﬂect this new in-
+formation.
+To do this, belief propagation over the
+junction tree is used, this is a two-phase procedure:
+evidence collection and evidence distribution. For the
+evidence collection phase, messages are collected from
+the leaf vertices all the way up to a designated root
+vertex. For the evidence distribution phase, messages
+are distributed from the root vertex to the leaf vertices.
+Figure 1 shows a toy BN and the corresponding junc-
+tion tree. As shown in the ﬁgure, during the evidence
+collection phase, the two leaf nodes pass messages to
+the root node {A, B, D}, updating its potential table.
+During the evidence distribution phase, the root node
+passes messages back to the two leaf nodes.
+Message passing can be viewed as the atomic operation
+for belief propagation, both for evidence collection and
+distribution. Mathematically, a message passed from
+vertex i to vertex j can be written as:
+φ∗
+Sij =
+X
+Xi/Sij
+φXi,
+φ∗
+Xj = φXj
+φ∗
+Sij
+φSij
+,
+(1)
+where φ∗
+X
+represents the updated potential table
+of vertex X.
+From these potential tables we can
+marginalize and compute P(X|e) where X ∈X and e
+is the evidence.
+2.2
+CPU/GPU Platform
+GPUs are designed for compute-intensive, highly par-
+allel computations. Compared to CPUs, more transis-
+tors are in GPUs devoted to data processing rather
+than data caching and ﬂow control.
+GPUs are
+well-suited to problems that can be expressed as
+
+B
+D
+C
+A
+B
+C
+E
+A,B,D
+B,C
+D,E
+B
+D
+Thread 1
+Thread 2
+Thread N
+Parallel Message Passing
+Figure 1: An example Bayesian network with ﬁve ran-
+dom variables (left) along with the derivative junction
+tree (right). Message passing is done between adja-
+cent junction tree vertices, and we parallelize it using
+N threads as indicated.
+data-parallel computations where data elements are
+mapped to parallel processing threads. GPUs are typ-
+ically used to accelerate compute-intensive parts of an
+application, and thus attached to a host CPU perform-
+ing control-dominant computations.
+Today, a CPU
+and its GPU communicate via a PCI-Express bus.
+CUDA is a general-purpose parallel computing ar-
+chitecture developed by NVIDIA. CUDA consists of
+three key parallel computing abstractions: a hierar-
+chy of thread groups, shared memories, and barrier
+synchronization.
+These abstractions are exposed to
+the programmer as a programming language, making
+CUDA a model that scales to an increasing number
+of processor cores [11]. Speciﬁcally, CUDA provides a
+ﬁne-grained data and thread parallelism nested within
+coarse-grained data and task parallelism. A kernel is
+organized as a set of thread blocks when executed.
+A thread block is a batch of threads that all execute
+on one of the multiprocessors. As a result, they can
+cooperate by eﬃciently sharing data through shared
+memory, and can synchronize their execution to co-
+ordinate memory access. Blocks of the same size can
+execute the same kernel batched together as a grid of
+blocks.
+However, threads in diﬀerent blocks cannot
+communicate and synchronize with each other.
+3
+Computing Each Message Faster
+We
+parallelize
+the
+atomic
+operation
+of
+belief
+propagation–message passing, as shown in Figure 1.
+The advantage of doing so is that atomic level paral-
+lelism can be embedded in diﬀerent belief propagation
+algorithms unobtrusively, without any change of those
+algorithms.
+Associated with each junction tree vertex Ci and the
+contained set of variables Xi, there is a potential ta-
+ble φXi containing non-negative real numbers that are
+proportional to the joint distribution of Xi. If each
+variable can take sj states, the size of the potential
+table is |φXi| = Q|Xi|
+j=1 sj, where |Xi| is the cardinality
+of Xi.
+Message passing from Ci to an adjacent vertex Ck, with
+separator Sik, involves two steps:
+1. Marginalization.
+The potential table φSik of
+the separator is updated to φ∗
+Sik by marginalizing
+the potential table φXi:
+φ∗
+Sik =
+X
+Xi/Sik
+φXi.
+(2)
+2. Scattering. The potential table of Ck is updated
+using both the old and new table of Sik:
+φ∗
+Xk = φXk
+φ∗
+Sik
+φSik
+.
+(3)
+We deﬁne 0
+0 = 0 in this case, that is, if the de-
+nominator in (3) is zero, then we simply set the
+corresponding φ∗
+Xk to zeros.
+3.1
+Index Mapping for Parallelism
+Although written in a compact form, each of equation
+(2) and (3) is actually a set of many equations updat-
+ing all the cells in the potential tables φSik and φXk.
+Our key contribution is to eﬃciently parallelize the
+computations in (2) and (3) by partitioning these sets
+of equations into independent subsets of equations.
+This can be done by taking a closer look at the data
+ﬂow in the message passing procedure. We concentrate
+on the j-th element of the separator’s potential table,
+i.e., φSik(j). Here, φSik(j) is the potential value asso-
+ciated with a speciﬁc instantiation of the variables in
+Sik. In the marginalization step, to update the value of
+φSik(j), we need to retrieve values from the elements in
+φXi which have the same instantiation for those vari-
+ables. Note, the values of those elements in φXi are
+only required for the computation related to φSik(j).
+Similarly, in the scattering step, for all the elements in
+φXk that have the same instantiation for the variables
+in Sik as φSik(j), we need to multiply their value by
+φ∗
+Sik(j)/φSik(j). This suggests a natural way to com-
+pute (2) and (3) using data parallelism. To handle the
+computation related to each speciﬁc element in φSik,
+we can assign a separate thread, as long as the GPU
+has threads available.
+Figure 2 illustrates the data ﬂow in a message passing
+from the left child to the root node in Figure 1. In this
+
+BC
+00
+01
+10
+11
+B
+B
+0
+1
+0
+1
+ABD
+000
+001
+010
+011
+100
+101
+110
+111
+Index mapping from left clique to separator
+Index mapping from right clique to separator
+Clique
+Clique
+Separator
+Figure 2: We introduce multiple index mapping ta-
+bles between a clique and a separator.
+The map-
+ping tables from the left clique to the separator:
+µXi,φSik (0) = {0, 1, 4, 5}, µXi,φSik (1) = {2, 3, 6, 7}. The
+mapping tables from the right clique to the separator:
+µXk,φSik (0) = {0, 1}, µXk,φSik (1) = {2, 3}.
+case, Xi = {A, B, D}, Xk = {B, C} and Sik = {B}.
+Let us assume that all random variables in {A, B, C}
+are binary with states {0, 1}. The light gray boxes in
+Figure 2 are the values used in computations related to
+the ﬁrst element of φSik, B = 0. The dark gray boxes
+are for computations related to the second element of
+φSik, B = 1.
+The computation related to diﬀerent
+elements in φSik are independent, providing a natural
+opportunity for parallelism.
+The only problem left is that we need to ﬁgure out
+the “mapping relationship” from the elements of φXi
+and φXk to the elements of φSik. The mapping rule
+is that the corresponding elements in φXi and φSik
+should have the same instantiation for the variables in
+Sik. To this end, for a certain element in φSik, say,
+φSik(r), we ﬁrst convert the index r into a state string
+Y r = (xr
+1, . . . , xr
+|Sik|) and then scan through all the
+elements of φXi or φXk. For the j-th element in φXi
+(j = 1, . . . , |φXi|), we convert the index j into a state
+string as Xj
+i = (xj
+1, . . . , xj
+|Xi|) and check whether the
+variables that also appear in Sik take the same states
+as in Y r.
+If yes, φXi(j) should be among the data
+to load in when we perform the marginalization for
+φSik(r). Similarly, we can determine which elements
+should be updated in φXk during the scattering phase.
+3.2
+Index Mapping Table
+Suppose the j-th random variable in Xi can take sj
+states.
+To convert the index j into the sequence of
+variable states takes O(|Xi| P
+j sj). Then the whole
+Figure 3: Data structure used to parallelize message
+passing from clique m to clique n in the junction tree.
+1
+2
+3
+Look Up Table
+Separator: CPT
+Look Up Table
+1
+2
+3
+Separator
+Clique i
+Clique k
+Clique i: CPT
+Clique k: CPT
+scanning process to match the elements of Xi and S
+will take O(|φXi||Xi| P
+j sj) time. This could be a con-
+siderable amount of computation time when the po-
+tential table size is large.
+It is extremely ineﬃcient
+for every thread to scan through the whole potential
+table φXi and φXk, since only a small fraction of them
+will be used by each thread. To tackle this potential
+ineﬃciency, we introduce an index mapping table tech-
+nique inspired by the cluster-sepset mapping (CSM)
+technique [1], where a mapping table µX,S is created
+to store the index mappings from φX to φS. To adapt
+CSM to parallel computing, instead of creating one
+mapping table [1], we create |φSik| mapping tables.
+In each mapping table µXi,φSik (j) we store the indices
+of the elements of φXi mapping to the j-th separa-
+tor table element. Mathematically, µXi,φSik (j) = {r ∈
+[0, |φXi| −1] : φXi(r) is mapped to φSik(j)}.
+Algorithm 1 Message Passing(φXi, φXk, φSik)
+Input: φXi, φXk, φSik.
+for j = 1 to |φSik| in parallel do
+sep star=0;
+for n = 1 to |µXi,sj| do
+sep star[j] = sep star[j]+φXi(µXi,sj[n])
+end for
+for n = 1 to |µXk,sj| do
+φXk(µXk,sj[n]) = sep star[j]
+φSik [j] φXk(µXk,sj[n])
+end for
+end for
+The thread that handles the j-th element of the sepa-
+rator potential table just needs to look up µXi, φSik(j)
+and retrieve the corresponding data from φXi, as
+shown in Figure 3. Further, we avoid unnecessary re-
+computation of the mappings by precomputing them
+
+when the junction tree is established. Despite the re-
+quirement for memory (increased by the size of the
+clique potential table), our index mapping table often
+provides a large speedup.
+Our novel algorithm for one message passing is shown
+in Algorithm 1.
+A function that runs on the GPU
+as diﬀerent threads is called a kernel.
+Algorithm 1
+is wrapped into a kernel function, thus enabling paral-
+lelism. While beneﬁcial from a parallelism perspective,
+there are kernel invocation overhead and memory la-
+tency issues associated with this use of a GPU, as we
+will further discuss below.
+3.3
+Belief Propagation Algorithm
+Algorithm 2 Collect Evidence(J, Ci)
+for each child of Ci do
+Message Passing(Ci, Collect Evidence(J,child))
+end for
+return(Ci)
+Algorithm 3 Distribute Evidence(J, Ci)
+for each child of Ci do
+Message Passing(Ci, child)
+Distribute Evidence(J, child)
+end for
+Algorithm 4 Belief Propagation(J, Croot)
+Input: J, Croot
+Initialization (J)
+Collect Evidence(J, Croot)
+Distribute Evidence(J, Croot)
+Belief propagation can be done using both breadth-
+ﬁrst and depth-ﬁrst traversal over a junction tree. In
+our work, we consider the Hugin algorithm, which
+adopts depth-ﬁrst belief propagation.
+Given an es-
+tablished junction tree J with root vertex Croot, the
+pseudo code is shown in Algorithm 4.
+We ﬁrst ini-
+tialize the junction tree by multiplying together the
+Bayesian network potential tables (CPTs). Then, a
+two phase belief propagation is adopted [6]: collect
+evidence and then distribute evidence.
+3.4
+Analysis of Speedup
+From the description above, one can see that the
+amount of parallelism is determined by the number of
+elements in the separators’ potential table |φS|. Sup-
+pose the junction tree has n vertices; then the total
+number of message passings for full belief propagation
+is 2(n −1). Considering a message passed from Ci to
+Ck, the total number of additions is (|φXi|−|φSik|) and
+the total number of multiplications is (|φXk| + |φSik|).
+Therefore the theoretical time complexity of one mes-
+sage passing between vertex i and k is
+(|φXi| −|φSik|) + (|φXk| + |φSik|)
+|φSik|
+= |φXi| + |φXk|
+|φSik|
+,
+which gives |φSik| times speedup over sequential code.
+Belief propagation is just a sequence of messages
+passed in a certain order [6].
+Let Ne(C) denote the neighbors of C in the join tree.
+The time complexity for belief propagation is
+X
+i
+X
+k∈Ne(Ci)
+|φXi| + |φXk|
+|φSik|
+.
+(4)
+Kernel invocation overhead, incurred each time Algo-
+rithm 1 is invoked, turns out to be an important per-
+formance factor. If we model the invocation overhead
+for each kernel call to be a constant τ, then the time
+complexity becomes
+X
+i
+diτ +
+X
+i
+X
+k∈Ne(Ci)
+|φXi| + |φXk|
+|φSik|
+,
+(5)
+where di is the degree of a node Ci. In a tree structure,
+P di = 2(n −1). Thus the GPU time complexity is
+2(n −1)τ +
+X
+i
+X
+k∈Ne(Ci)
+|φXi| + |φXk|
+|φSik|
+.
+(6)
+From this equation, we can see that junction tree
+topology impacts GPU performance in at least two
+ways: the total invocation overhead is proportional to
+the number of nodes in the junction tree, while the sep-
+arator table sizes determine the degree of parallelism.
+The overall speedup of our novel parallel belief propa-
+gation approach is determined by the equation
+Speedup =
+P
+i
+P
+k∈Ne(Ci)(|φXi| + |φXk|)
+2(n −1)τ + P
+i
+P
+k∈Ne(Ci)
+(|φXi|+|φXk |)
+|φSik |
+.
+Clearly, performance is closely related to the distri-
+bution of the size of the separators’ and cliques’ po-
+tential tables.
+A simple bound for the speedup is
+mini,k |φSik| ≤Speedup ≤maxi,k |φSik|. For the kind
+of junction tree that has mostly large separators, our
+parallel algorithm is expected to perform very well.
+The worst case is that all the separators of the junc-
+tion tree are small. However, even in this case, since
+|φS| ≥2, we are in theory guaranteed to have at
+least two times speedup over sequential code. How-
+ever, taking into account that the CPU/GPU plat-
+form incurs invocation overhead and the long memory
+
+Figure 4: Histograms of separator potential table sizes for eight Bayesian networks.
+<16
+16~48
+48~96
+96~182 182~364
+>364
+0
+5
+10
+15
+20
+25
+30
+Separator Table Size
+Occurence Frequency
+Barley
+<16
+16~48
+48~96
+96~182 182~364
+>364
+0
+200
+400
+600
+800
+1000
+1200
+1400
+1600
+Separator Table Size
+Munin3
+<16
+16~48
+48~96
+96~182 182~364
+>364
+0
+50
+100
+150
+200
+250
+300
+Separator Table Size
+Occurence Frequency
+Pigs
+<16
+16~48
+48~96
+96~182 182~364
+>364
+0
+50
+100
+150
+200
+250
+Separator Table Size
+Diabetes
+<16
+16~32
+32~96
+96~192 192~384
+>384
+0
+2
+4
+6
+8
+10
+12
+14
+16
+Separator Table Size
+Occurence Frequency
+Mildew
+<16
+16~32
+32~96
+96~192 192~384
+>384
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+Separator Table Size
+Water
+<16
+16~48
+48~96
+96~192 192~384
+>384
+0
+50
+100
+150
+200
+250
+300
+350
+Separator Table Size
+Occurence Frequency
+Munin2
+<16
+16~48
+48~96
+96~192 192~384
+>384
+0
+50
+100
+150
+200
+250
+300
+350
+Separator Table Size
+Munin4
+latency when loading data from slow device memory
+to fast shared memory, the theoretical speedup is hard
+to achieve in practice.
+From the equations above, we can estimate the overall
+belief propagation speedup to be around the average
+potential table size
+¯
+|φSik|. We take an experimental
+approach to study how the structure of the junction
+trees aﬀects the performance of our parallel technique
+on the CPU/GPU setting in Section 4.
+4
+Experimental Results
+In our work, we use the NVIDIA GeForce GTX460 as
+the platform for our implementation. This device con-
+sists of seven multiprocessors, and each multiprocessor
+consists of 48 cores and 48K on-chip shared memory
+per thread block. The peak thread level parallelism
+achieves 907GFlop/s. In addition to the fast shared
+memory, a much larger but slower oﬀ-chip global mem-
+ory (785 MB) that is shared by all multiprocessors
+is provided. The bandwidth between the global and
+shared memories is about 90 Gbps. In the computa-
+tion, we are using single precision.
+4.1
+Methods and Data
+Our
+implementation
+is
+tested
+on
+a
+number
+of
+Bayesian
+networks
+(see
+http://bndg.cs.aau.dk/
+html/bayesian_networks.html). They are from dif-
+ferent problem domains, with varying structures and
+state spaces. These diﬀerences lead to very diﬀerent
+junction trees, as reﬂected in Table 1. In our work,
+we would like to not only to compare the performance
+of our parallel code to the sequential code, but also
+study how the structure of junction tree—for exam-
+ple the size of the separators’ potential table—aﬀects
+performance in the parallel case versus the sequential
+case. We compile the Bayesian networks into the junc-
+tion trees oﬄine and then run belief propagation over
+the junction trees, see Algorithm 4.
+As mentioned in Section 3, the performance is related
+to the distribution of the size of the separators’ poten-
+tial table, i.e., |φS|. Hence we also present histograms
+of the potential table sizes for all the junction trees in
+Figure 4.
+4.2
+Optimization on GPU
+Our novel message computation algorithm (Algorithm
+1) is wrapped into a kernel to enable GPU parallelism,
+and a kernel is organized as a set of thread blocks
+when executed.
+Varying the thread block size may
+impact performance, and we would like to optimize
+thread block and grid size for each of the experimental
+junction trees. We experimented with varying block
+sizes and picked the best one for a given BN.
+
+Dataset
+Mildew
+Diabetes
+Barley
+Pigs
+Munin2
+Munin3
+Munin4
+Water
+# of JT nodes
+28
+337
+36
+368
+860
+904
+872
+20
+Max. CPT size
+4,372,480
+190,080
+7,257,600
+177,147
+504,000
+156,800
+784,000
+995,328
+Min. CPT size
+336
+495
+216
+27
+4
+4
+4
+9
+Ave. CPT size
+341,651
+32,443
+512,044
+1,927
+5,653
+3,443
+16,444
+173,297
+Max. SPT size
+71,680
+11,880
+907,200
+59,049
+72,000
+22,400
+112,000
+147,456
+Min. SPT size
+72
+16
+7
+3
+2
+2
+2
+3
+Ave. SPT size
+9,273
+1,845
+39,318
+339
+713
+553
+2,099
+26,065
+BP on GPU [ms]
+53
+94
+106
+75
+125
+104
+342
+52
+BP on CPU [ms]
+355
+397
+974
+51
+210
+137
+473
+120
+Speedup
+6.70
+4.22
+9.19
+0.68
+1.68
+1.32
+1.38
+2.31
+Table 1: Junction tree (JT) statistics and belief propagation (BP) performance for eight Bayesian networks. For
+each junction tree, clique potential table (CPT) and separator potential table (SPT) are shown.
+Figure 5: GPU execution time as a function of thread
+block size.
+16
+32
+48
+64
+80
+96
+112
+128
+100
+105
+110
+115
+120
+125
+130
+block size
+execution time
+Barley
+16
+32
+48
+64
+80
+96
+112
+128
+100
+105
+110
+115
+120
+block size
+Munin3
+Figure 5 shows how execution time changes with block
+size for Bayesian networks Barley and Munin3. For
+Barley, GTX460 achieves the optimal performance
+when each block contains 48 threads.
+While for
+Munin3, optimal performance is found with 16 threads
+per block.
+The performance diﬀerences can be ex-
+plained by the degree of match between the conﬁg-
+uration of the GPU architecture and the junction tree
+structure.
+On the GPU, each thread block is exe-
+cuted on one multiprocessor. To fully make use of the
+GPU’s computing resource, at least 7 thread blocks are
+needed, each assigned to one multiprocessor. However,
+for Munin3, the separator potential tables are very
+small. Less than 7 blocks are created for the message
+passing, leaving some multiprocessor unused. The size
+of Barley’s separator potential tables are mostly large
+enough to fully use the computing resource. In Figure
+4, we present the histogram counts of the potential
+table sizes of Barley and Munin3.
+Figure 6 illustrates the scalability of the speedup. We
+order the junction trees according to the average size
+of the separator potential tables, and plot the speedup
+relative to the average separator potential table. In
+general, the junction tree with larger average separa-
+tor potential table has better speedup. This coincides
+with our analysis (see Section 3.4) that larger separa-
+tor potential tables provide more opportunity for par-
+allelization and hence better performance.
+Figure 6: Speedup as a function of average separator
+potential table size.
+0
+0.5
+1
+1.5
+2
+2.5
+3
+3.5
+4
+x 10
+4
+0
+2
+4
+6
+8
+10
+average separator size
+Speedup
+0
+0.5
+1
+1.5
+2
+2.5
+3
+3.5
+4
+x 10
+4
+0
+0.5
+1
+1.5
+2
+2.5
+x 10
+9
+Flops
+ 
+ 
+Flops
+Speedup
+Pigs
+Munin2
+Diabetes
+Munin3
+Munin4
+Barley
+Water
+Mildew
+4.3
+Performance Comparison with
+Sequential Code
+As a baseline, we implemented a sequential program
+on an Intel CPU. The execution time of the program
+is comparable to that of GeNie/SMILE [12], a widely
+used C++ software package for Bayesian network in-
+ference. We do not directly use GeNie/SMILE as the
+baseline here, because we do not know the implemen-
+tation details of GeNie/SMILE. Detailed information
+for the CPU and GPU platforms is in Table 2.
+Table 1 gives the execution time comparison for the
+GTX460 and the Intel CPU. The obtained speedup
+ranges from 0.68 to 9.18. The performance is an over-
+all eﬀect of many factors such as parallelism, mem-
+ory latency, kernel invocation overhead, etc.
+Those
+factors, in turn, are closely correlated with the un-
+derlying structures of the junction trees.
+Networks
+Pigs, Munin2, Munin3 and Munin4 mostly consist of
+small vertices and separators (see Figure 4).
+There
+are only limited opportunities for message computa-
+tion parallelism, resulting in limited speedup. On the
+
+Table 2: Experimental platforms.
+NVIDIA Geforce GTX 460
+# of Processing Cores
+336
+Shared Memory
+48K per block
+Global Memory
+785MB
+Memory Bandwidth
+90 GB/sec peak
+Intel Core2 Quad CPU
+# of Cores
+4
+Processor Clock
+2.5GHz
+Cache
+8MB
+Memory
+9 GB
+Figure 7: Comparison of kernel overhead (in yellow)
+and execution time (in green) for the datasets.
+0
+50
+100
+150
+200
+250
+300
+350
+Munin2
+Munin3
+Munin4
+Pigs
+Mildew
+Diabetes
+Barley
+Water
+ 
+ 
+execution time
+overhead
+other hand, for Mildew, Diabetes, Barley and Water,
+the potential histograms in Figure 4 skew to the right.
+This explains why they have very good speedup. Two
+extreme examples are Barley and Pigs. The best per-
+former, Barley, has a total of 36 cliques, and an aver-
+age separator table size of 39,318. This topology pro-
+vides abundant opportunity for parallelism and conse-
+quently a good speedup over the sequential code. Pigs,
+on the other hand, has 368 cliques, and furthermore
+the average separator size is as small as 339. This is
+a junction tree with a large number of small cliques
+and separators, with very restricted opportunity for
+parallelism in message computation.
+4.4
+Kernel Overhead
+For our parallel inference algorithm implementation
+on the GPU, we should also consider the overhead
+incurred when launching a kernel (kernel overhead).
+Figure 7 shows kernel overhead as a fraction of total
+execution time. Kernel overhead percentage is deter-
+mined by the number of kernel invocations and the
+amount of computation per kernel invocation, which
+in turn is determined by the structure of the junction
+trees.
+Kernel overhead may greatly aﬀect the performance.
+For Munin3, for example, the overhead counts for as
+Figure 8: Memory layout for the mapping tables.
+Mapping table 1
+Mapping table 2
+Mapping table 3
+Advanced Mem Layout
+Naive Mem Layout
+Thread 1
+Thread 2
+Thread 3
+Thread 1
+Thread 2
+Thread 3
+Thread 1
+Thread 2
+Thread 3
+Time 1
+Time 2
+Time 3
+Thread 1
+Thread 2
+Thread 3
+Thread 1
+Thread 2
+Thread 3
+Thread 1
+Thread 2
+Thread 3
+Time 1
+Time 2
+Time 3
+Bank Conflict
+No Bank Conflict
+much as 36% in the overall execution time. This gives
+an upper bound of 2.71 on the speedup over sequential
+code. However, for Barley, the overhead is only 1.7%
+of the overall execution time. The variation in over-
+head percentages is caused by the diﬀerences in the
+structures of the Munin3 and Barley junction trees,
+see Table 1 and Figure 4.
+4.5
+Memory Layout
+Appropriate data layout in the global GPU memory
+makes a big diﬀerence in the memory latency asso-
+ciated with bringing data into shared GPU memory.
+In our algorithm, the mapping table method is essen-
+tially an indirect addressing for the data. In Figure
+8, we compare two memory layouts for the mapping
+tables. On the left hand side of Figure 8 is a naive
+approach; mapping tables are just placed sequentially
+in global memory. This may cause bank conﬂicts when
+loading the data into the shared memory. Therefore,
+we introduce an advanced approach: for the mapping
+tables from a separator to a clique potential table, we
+put the elements with the same index in mapping ta-
+bles in adjacent memory cells, as shown on the right
+hand side of Figure 8. In our experience, this advanced
+memory layout gave a 20% - 30 % improvement in the
+overall speedup compared to the naive layout.
+5
+Conclusion and Future Work
+In this paper, we have developed a novel approach to
+parallel belief propagation over junction trees, based
+on the cluster-sepset mapping method. Our approach
+focuses on the parallelization of message computation
+for message passing in junction trees. In our approach,
+the parallel opportunity is in theory equal to the size
+of the separator potential table. Although practical
+issues such as kernel overhead and memory latency
+make it hard to achieve this theoretic performance, our
+experimental results still indicate that performance
+
+scales well with the separator potential table sizes.
+In experiments with a CUDA implementation of our
+parallel message computation algorithm executing on
+an NVIDIA GeForce GTX460 GPU, we explored how
+performance varies with diﬀerent junction tree struc-
+tures. As expected from our analysis, we found that
+our approach performs well for junction trees with
+large separator potential tables.
+However, perfor-
+mance is compromised if the junction tree consists of
+many small nodes with corresponding small separator
+potential tables. Speedup ranged from 0.68 to 9.18.
+Our future work will be focused on improving the
+parallel computing performance for junction tree mes-
+sage passing over small separators. A possible solution
+is merging small separators into large ones, and per-
+forming belief propagation over such modiﬁed junction
+trees.

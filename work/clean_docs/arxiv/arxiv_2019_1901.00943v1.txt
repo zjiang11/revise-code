@@ -1,0 +1,382 @@
+Self-supervised Learning of Image Embedding for
+Continuous Control
+Carlos Florensa∗
+University of California, Berkeley,
+
+Jonas Degrave
+DeepMind
+London, N1C FCQ, UK
+
+Nicolas Heess
+DeepMind
+London, N1C FCQ, UK
+
+Jost Tobias Springenberg
+DeepMind
+London, N1C FCQ, UK
+
+Martin Riedmiller
+DeepMind
+London, N1C FCQ, UK
+
+Abstract
+Operating directly from raw high dimensional sensory inputs like images is still
+a challenge for robotic control. Recently, Reinforcement Learning methods have
+been proposed to solve speciﬁc tasks end-to-end, from pixels to torques. However,
+these approaches assume the access to a speciﬁed reward which may require
+specialized instrumentation of the environment. Furthermore, the obtained policy
+and representations tend to be task speciﬁc and may not transfer well. In this work
+we investigate completely self-supervised learning of a general image embedding
+and control primitives, based on ﬁnding the shortest time to reach any state. We also
+introduce a new structure for the state-action value function that builds a connection
+between model-free and model-based methods, and improves the performance of
+the learning algorithm. We experimentally demonstrate these ﬁndings in three
+simulated robotic tasks.
+1
+Introduction
+Reinforcement Learning methods have shown great success in learning complex behaviors, like
+robotic locomotion [Heess et al., 2017, Florensa et al., 2017a], manipulation of objects [Florensa
+et al., 2017b, Rajeswaran et al., 2018], or super-human game strategies [Mnih et al., 2015, Silver
+et al., 2016]. These approaches hold the promise of end-to-end learning of policies that select the
+optimal action to apply at every state, only leveraging direct interaction with the environment, and
+a reward signal indicating the desired behavior. Nevertheless, in continuous control many of these
+approaches still avoid learning from raw sensory input like camera images, or have a separately
+engineered vision module trained to provide some state information that is known to be relevant for
+the task [Andrychowicz et al., 2018]. This is a considerable drawback to scale up robotic learning
+and bring them out of instrumented lab environments.
+In this work we ask ourselves what a robot could learn solely through self-supervised interaction
+with the environment, and its high-dimensional sensory input, without any further instrumentation or
+reward. We show that we can learn a goal-reaching value function [Schaul et al., 2015] as well as a
+corresponding policy that is conditioned on a previously collected observation, and is able to bring
+the system to a state where the observation closely matches the desired one. This policy is able to
+connect states even if it has never attempted to reach one from the other. It could later be used in a
+∗Work done during a summer internship at DeepMind
+Infer to Control: NIPS 2018 Workshop on Probabilistic Reinforcement Learning and Structured Control.
+arXiv:1901.00943v1  [cs.LG]  3 Jan 2019
+
+hierarchical fashion to perform sequence of operations (like following a desired path, or an assembly
+instruction manual), or for more meaningful exploration in other downstream tasks [Hausman et al.,
+2018].
+The underlying idea of our algorithm is to learn a state representation where the Euclidean distance
+between two embedded states corresponds to the minimum number of actions or time-steps needed to
+connect them. Such an embedding must satisfy a recursive formula that corresponds to the Bellman
+equation when the reward is the indicator function signaling a perfect match of the observation
+and the goal. This reward requires no additional instrumentation, but unfortunately the probability
+of observing it is negligible for any high-dimensional sensory input. To sidestep this issue we
+can re-label the trajectories as trying to recreate an observation that happened along the trajectory
+[Andrychowicz et al., 2017], therefore observing this reward as often as needed. This idea was
+originally studied with low-dimensional state representations, and required a suitably deﬁned distance
+function to give rewards based on ϵ-Balls around the goals. Here, we show that both limitations can
+be lifted. Furthermore, we introduce a novel architecture for the state-action value function that ties
+this model-free Reinforcement Learning technique to model-based counterparts.
+2
+Background
+In this section we formally introduce the Reinforcement Learning framework, its extension for
+goal-oriented tasks, and efﬁcient model-free learning algorithms that leverage goal relabeling. We
+also review the basics of model-based learning as we will draw a connection between the two later
+on.
+2.1
+Reinforcement Learning framework
+We deﬁne a discrete-time ﬁnite-horizon Markov decision process (MDP) by a tuple M
+=
+(S, A, P, r, ρ0, T), in which S is a state set, A an action set, P : S × A × S →R+ is a tran-
+sition probability distribution, r : S × A →R is a bounded reward function, ρ0 : S →R+ is a start
+state distribution, and T is the horizon. Our aim is to learn a stochastic policy πθ : S × A →R+
+parametrized by θ that maximizes the expected return, ηρ0(πθ) = Es0∼ρ0R(π, s0). We denote by
+R(π, s0) := Eτ|s0[PT
+t=0 r(st, at)] the expected cumulative reward starting when starting from a
+s0 ∼ρ0, where τ = (s0, a0, , . . . , aT −1, sT ) denotes a whole trajectory, with at ∼πθ(at|st), and
+st+1 ∼P(st+1|st, at).
+2.2
+Visual goal tasks
+In this work we assume that we have access to the state only through camera readings, or observations
+ot. Observations are a function of the current state of the world st, usually higher dimensional, noisy,
+and prone to aliasing, like robotic sensory inputs. Technically observations might not be Markovian,
+but if this is anyhow critical for the task we can always set as state the collection of all previous
+observations (see Section 6 for further discussion). Our objective is to train a policy π(at|ot, og) that
+is conditioned on the current observation and a goal observation og, such that its sampled actions
+modify the world to obtain an observation that matches og. We employ ideas from Universal Value
+Function Approximators [Schaul et al., 2015] but for tasks in continuous action spaces and where the
+goals are in the same space as the observations.
+2.3
+Off-policy training with goal re-labeling
+When we execute a policy conditioned on a certain goal, it might be that the policy fails to reach that
+goal, hence does not receive any reward. And if no reward is ever observed, no learning can take place.
+Fortunately, the goal only affects the reward, but not the dynamics of the environment. Therefore,
+if the training is done with an off-policy RL algorithm like DDPG [Lillicrap et al., 2016], we can
+re-label in hindsight the trajectories to learn about other goals than the one we were originally trying
+to achieve [Andrychowicz et al., 2017]. In particular, if using as goal a point along the trajectory, we
+are sure to observe a reward.
+2
+
+2.4
+Model-Based Learning
+A forward model is a function f : O × A →O that predicts the next observation from the current
+observation and action. A standard way to learn such a model is to ﬁt a parameterized function fθ by
+solving
+min
+θ
+X
+i,t
+∥fθ(oi
+t, ai
+t) −oi
+t+1∥,
+(1)
+where
+
+(oi
+t, ai
+t, oi
+t+1)
+	
+i,t are observed transitions of different trajectories τ i. Once such a model has
+been learned, it could be used by search and planning algorithms to select actions that reach a given
+goal observation og. One approach would be Model Predictive Control (MPC) methods [Rao, 2009,
+Nagabandi et al., 2017], where a full sequence of T actions is selected based on the solution to
+min
+a0,...,aT ∥f(f(f(o0, a0), a1) . . . ), aT ) −og∥,
+(2)
+Despite considerable progress in the area [Finn et al., 2016, Lee et al., 2018], it is still challenging to
+learn a visual model useful for long-horizon planning, specially due to the intractability of solving
+equation 2 exactly, the model-bias and compounding errors in higher dimensions.
+3
+Related work
+One of the closes recent work is Temporal Difference Models [Pong et al., 2018], where the authors
+also try to link model-based and model-free RL through the state-action value function of trying to
+reach all states. Nevertheless, instead of using directly the minimum number of time-steps to reach a
+state as we do, they ﬁt the distance at which they will be from the intended goal after h time-steps
+(with h also given as input to the Q function). Therefore they need to deﬁne a distance metric, which
+is exactly what we try to avoid in our work. Furthermore, this limitation makes them work only from
+state-space (i.e. positions), where the Euclidean distance is more informative than in image space.
+Finally, although they sketch a similar connection between MB and MF, theirs only holds for γ = 0,
+which is not the discount used in practice.
+Several work learn a representations of the image observations with some auto-encoding technique
+[Lange and Riedmiller, 2010]. For example, in [Finn et al., 2015] an auto-encoder with spatial
+soft-max is learned on data from trajectories that already succeed at a task 10% of the time, and then
+its features are used as the state in a GPS algorithm [Levine and Abbeel, 2014] to solve that speciﬁc
+task. On the other hand, Visual RL from Imagined Goals [Nair et al., 2018] has the same objective of
+trying to reach any reachable observation. They do so training a β-VAE [Higgins et al., 2016] and
+directly using a distance in that learned space. They obtain interesting results, despite their encoding
+not reﬂecting anyhow the dynamics of the environment not what states are actually close to each
+other in terms of minimum number of actions needed to join them.
+Other recent methods have proposed to learn an image embedding spaces where the planning problem
+could be easier [Kurutach et al., 2018, Zhang et al., 2018]. All these methods require more complex
+methods to learn the embedding than just replacing ot by φ(ot) in equation 1. Only performing this
+change would just lead to collapse of the embedding space (φ(·) = 0, f(·, ·) = 0 trivially satisﬁes
+the equation).
+Successor features [Dayan, 1993] or representations [Barreto et al., 2018, 2016] constitute another
+related body of work. They also tackle the problem of using the collected transitions for learning
+policies that can perform well under many rewards. Unfortunately such rewards need to be expressed
+as a linear combination of some features, and the collection of all indicator rewards cannot be
+expressed with a ﬁnite number of such features. See Appendix C for more details.
+4
+Method
+In an MDP setting, two states are considered “nearby” if a small number of actions are required
+to reach one from the other. Unfortunately, a simple distance between states, like the Euclidean,
+might be uninformative about how nearby two states are. Most prior work in Reinforcement Learning
+assumes access to a carefully deﬁned state representation such that a reward based on a distance in
+3
+
+that space provides enough shaping to learn the desired policy. The problem is considerably harder
+when we only have access to high dimensional observations, like images.
+Our aim is to learn an embedding space where the distance between embedded observations is
+representative of (e.g. proportional to) the minimum number of time-steps needed to reach one
+observation from any other. The main idea is to leverage all collected trajectories to learn such
+embedding, and, as a by-product, obtain a policy able to reach any past observation upon request. In
+this section we ﬁrst recast this as an RL problem, and explain a goal relabeling strategy to solve it.
+Then we introduce a novel structure for the Q function, that can be seen as bridging the gap between
+model-based and model-free RL.
+4.1
+Minimum time to observation as RL
+Knowing the minimum number of time-steps needed to reach a desired observation as a function of
+the current state and action is arguably sufﬁcient to perform goal reaching tasks. A discount-based
+equivalent of this function can be deﬁned by the recursive equation
+Q(ot, at, og) = Eot+1∼p(·|ot,at)
+h
+1{ot+1 == og} + 1{ot ̸= og}γ max
+a
+Q(ot+1, a, og)
+i
+.
+(3)
+If the environment is deterministic and the transition (ot, at, ot+1) exists, then Q(ot, at, og = ot+1) =
+1. Equivalently, if at least h steps are needed to reach a certain state ot+h from ot, then we have
+Q(ot, at, ot+h) = γh. Note that the equation above is exactly the Bellman equation deﬁning the
+optimal Q-function [Sutton and Barto, 1998] for the reward r(ot, at, ot+1, og) = 1{ot+1 == og}.
+In continuous observation spaces (or discrete but high-dimensional) this reward is not practical since
+even a near-optimal policy might never reach exactly the observation that it is trying to achieve.
+Therefore to train this value function we use the relabeling strategy outlined in section 2.3. In the
+next section we describe the speciﬁc algorithm we use.
+4.2
+Goal relabeling and Q ﬁtting
+The ideas outlined in the previous section are not tied to any particular algorithm choice for learning
+Q. For our experiments we use a goal-conditioned variant of MPO [Abdolmaleki et al., 2018]. This
+algorithm combines a Q ﬁtting done with Retrace [Munos et al., 2016] to propagate the discounted
+returns faster, and a policy improvement step. See details in the Appendix A.
+Algorithm 1: Learning Loop
+Input
+:Discount γ, parameterized policy πθ, action-value function Qη, Sequence size h,
+replay buffer R, hindsight pg, Batch Size B
+while True do
+Sample (ot, at, rt, . . . , ot+h, rt+h|og) ∼R ;
+// og was the goal observation
+Sample p ∼Unif([0, 1]) ;
+// Use achieved observations as goals
+if p < pg then
+Sample k ∼Unif({1, 2, . . . , h});
+Set og = ot+k and rt+k+1 = 1 ;
+// All other rs = 0 already
+end
+Minimize the loss in equation 6;
+Improve policy by solving equation 7;
+end
+The learning loop of our full algorithm is described in Algorithm 1. Note that there are three sample
+procedures involved: ﬁrst obtain a trajectory from the replay buffer, then decide to relabel the
+trajectory with probability pg (we use 0.5, but we have seen that, surprisingly, any value between 0.2
+and 0.8 yields similar results!). Finally, if we are relabeling the trajectory, we pick a time-step within
+h = 32 in the future and use the observation at that time as the goal (also replacing the reward at that
+time).
+The data collection loop executes the most recent policy πθ by conditioning it on any previously
+observed state as goal. In the next subsection we motivate a new architecture for the Q function, and
+outline a connection with model learning.
+4
+
+4.3
+Q structure and model-learning
+A general architecture for the Q would be to have two independent feature extractors, one for the
+current observation and another for the goal observation, followed by a Multi-Layer Perceptron
+(MLP) acting on the concatenated representations. Such an architecture is depicted in Fig. 1a. Is
+there a more sensible choice of structure for Q? First of all, see that this is an universal value function
+[Schaul et al., 2015] that depends on a goal, and in this case the goal also belongs to the observation
+space. Therefore it is reasonable to apply the same processing to both inputs. Furthermore, the action
+has no effect on the goal, it only affect the current state. Finally, the Q function should be positive
+everywhere and evolve exponentially in the minimum number of time-steps needed to reach a state.
+This suggest the following architecture:
+Q(ot, at, og) = γ∥f(φ(ot),at)−φ(og)∥
+(4)
+where f and φ are parameterized functions. A scheme of our proposed architecture can be found in
+Fig. 1b.
+(a) Q unstructured
+(b) Q structured
+Figure 1: Two Q-function architectures we compare to learn a visual goal-reaching policy.
+Given the observations from the previous subsections, we realize that using this architecture to
+optimize equation 3 enforces:
+∥f(φ(ot), at) −φ(ot+1)∥= 0 ⇐⇒f(φ(ot), at) = φ(ot+1).
+(5)
+Therefore f can be understood as a model in embedding space. Critically, this is not the only equation
+being ﬁtted, otherwise the embedding would tend to collapse (equation 5 is trivially satisﬁed by
+f(·, ·) = 0, φ(·) = 0). Indeed Q is also trained to satisfy equation 3 which enforces ∥f(φ(ot), at) −
+φ(ot+h)∥= h when h steps are the minimum needed to reach ot+h from ot. Assuming that equation 5
+holds true, we are imposing that the embedding satisﬁes ∥φ(ot+1) −φ(ot+h)∥= h. Therefore this
+can be understood as a model enhanced with stronger planning capabilities, also giving an embedding
+where distances are proportional to shortest paths between points.
+As an additional observation, the sample efﬁciency of model-based RL is often attributed to the ability
+to make use of all observed data, as any valid transition is informative of the dynamics. Relabeling
+procedures as the one used here achieves a similar effect, and along with the speciﬁc structure
+introduced above we blur the lines between both types of methods.
+5
+Experiments
+We investigate the following questions: 1) Can we learn a goal-reaching policy solely from visual
+input and no rewards? 2) Does adding structure to the Q function improve the performance of the
+algorithm? 3) Does the learned embedding carry dynamics information like time-steps between
+points along a trajectory? We analyze this questions in three environments implemented with the
+physics simulator MuJoCo [Todorov et al., 2012]: visual point-mass, wall point-mass, and Jaco arm
+reacher. The ﬁrst two environments have a two-dimensional action-space corresponding to a force
+applied to a spherical object. For both the observation is a fully top-down view of the scene, as seen
+in Fig. 2a-2b. The only difference is a wall blocking 3/4 of the middle division in the wall task,
+creating a sort of U-maze. The Jaco arm has a seven-dimensional action-space to control the velocity
+of each joint actuator. The observation is a frontal view. All trajectories last 10 seconds and the
+agents operate at 10Hz for the point-mass and at 20Hz for the Jaco. Our algorithm works solely from
+visual inputs with the resolution observed in Fig. 2: 64x64 pixels for the point-mass environments
+and 96x96 pixels for the Jaco arm.
+5
+
+(a) Point mass
+(b) Wall point mass
+(c) Jaco arm reacher
+Figure 2: Task observation, at the resolution given to the agent. No other proprioceptive or geometric
+information is used. The goal is also speciﬁed as an observation like the above.
+5.1
+Self-supervised learning image-conditioned policies
+In this subsection we show that we can learn goal-conditioned policies that control the agent to
+reach a state which observation matches any previously seen goal observation. No reward, nor
+state information, is ever used in the learning process. Nevertheless, we use the L1 distance in
+position-space as learning progress metric given that distances in pixel-space are more noisy and less
+interpretable. For the point-mass tasks, the position is the (x, y) coordinates of the Center of Mass.
+For the Jaco arm, it is the seven-dimensional joint angles.
+In Fig. 3 we compare three versions of the algorithm, differing only in the structure of the Q-function.
+Q unstructured does not impose any structure on the Q function, Q shared encoding uses the same
+vision stack to process the current observation and the goal observation, and Q structured additionally
+imposes the structure given in equation 4. To answer our ﬁrst question, we observe that the algorithm
+is able to reduce the ﬁnal distance to the given goal using any of the three models. The performance
+reported in these plots is computed based on collecting trajectories conditioned on previously seen
+observations as goals. Therefore, as the replay buffer grows, the evaluation criteria gets harder at
+the start of learning, specially for the higher dimensional environments like the Jaco. To answer our
+second question, we see that the structure that we introduced in the previous section substantially
+increases convergence speed and ﬁnal performance attained.
+(a) Point mass
+(b) Wall point mass
+(c) Jaco arm reacher
+Figure 3: Learning curves for the three environments plotting ﬁnal L1 goal distance in position-space
+against collected environment steps.
+5.2
+Embedding analysis
+In this section we study the evolution of three types of distances to the goal along a successful
+trajectory for the Wall point-mass task. Similar plots can be found for the other environments. In the
+top row of Fig. 4 we observe three frames obtained at t = 0, 2, and 8 seconds, as well as the goal
+image og. In the bottom row we monitor, from left to right, our structured Q function, the distance in
+pixel space and the distance in position space. From the left ﬁgure we see that the agent reaches the
+exact position that generated the goal observation at t = 4, and stays there with small oscillations. We
+see in the pixel distance plot that this is an uninformative distance before having reached the vicinity
+of the goal (all observations before t = 4 seconds are at the same noisy distance), and even after
+reaching the goal it is never reduced to 0 because the observations never match exactly. Therefore
+6
+
+Figure 4: Analysis of some distances along a trajectory
+it is hard to interpret or use this distance as a reward to learn a goal-reaching policy. Finally, in the
+left ﬁgure we see that the distance in embedding space trained through our structured Q follows γh,
+where h is the remaining number of time-steps to the goal. The fact that it does not reach exactly 1 is
+because it never exactly reaches the same observation, but it understands that only a few time-steps
+would be needed (in theory, as in practice it will never match the exact same observation).
+6
+Failure modes and future work
+Both in the Wall point-mass, and the Jaco arm environments we do not obtain a complete convergence
+with our algorithm. Here we describe some existing issues, suggest an hypothesis about their source,
+and some experiments to check their validity.
+First, in all the environments we observe some oscillation around the goal position. For the point-mass
+environments this is not critical, but for the Jaco arm we have observed that this is the cause of
+most of the ﬁnal distance to goal. We know that in many robotic environments, a knowledge of the
+velocities is critical to act optimally to reach speciﬁed states (like estimating if the agent is going in
+the right direction). Nevertheless this information cannot be conveyed in a single image. Furthermore,
+working from images directly may introduce issues with observation aliasing when several states
+produce similar observations. Both problems could be mitigated by adding as input to the Q and π the
+observations from some previous time-steps. For example, the model could be f(φ(ot), φ(ot−1), at),
+or be an RNN taking in all previous observations. Another solution to the oscillation problem would
+be a change in the action space: if the system allows the use of delta-position commands this would
+greatly alleviate the issue.
+Second, in the wall point-mass we observe some difﬁculties in reaching goals that are very far into
+the other leg of the U-shape. We think this might be an exploration problem. Indeed our method
+completely overlooks this issue (ie, is orthogonal to it), solely relying on the random initialization,
+and on the maximum entropy policy given by MPO. This might not give enough structure to the
+space, speciﬁcally to link far away states. To alleviate this issue we could either use some intrinsic
+motivation reward to expand the set of observed goals, or add to the replay buffer some demonstrations
+performing the hardest connections.
+Finally, we would like to point out at some limitations of the exact formulation we propose here, and
+possible ﬁxes. An underlying assumption of our work is that the environment is reversible, otherwise
+there is no embedding space where a distance (which by deﬁnition is symmetric) can be equal to
+the minimum time-steps between states. This is true for a wide range of practical tasks like all
+quasi-static manipulation, but might not hold when acting on deformable objects or highly dynamic
+7
+
+tasks like throwing objects. In such cases, we should replace the distance in the Q function model by
+a non-symmetric comparison between states.
+7
+Conclusions
+We have shown it is possible to learn goal-reaching policies in a completely self-supervised setup,
+and only from high dimensional sensory inputs like images. Our approach does not use any auxiliary
+learning signal. Instead, it relies solely on computing the minimum number of time-steps needed to
+connect different states. This can be written as a Bellman equation that we efﬁciently solve with a
+modiﬁed off-policy algorithm paired with goal relabeling. We also introduce a novel structure of the
+Q function that connects model-free and model-based RL methods, as well as improving the learning
+speed and ﬁnal performance.

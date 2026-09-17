@@ -1,0 +1,766 @@
+“No, to the Right” – Online Language Corrections for Robotic
+Manipulation via Shared Autonomy
+Yuchen Cui∗
+
+Stanford University
+Stanford, CA, USA
+Siddharth Karamcheti∗
+
+Stanford University
+Stanford, CA, USA
+Raj Palleti
+Stanford University
+Stanford, CA, USA
+Nidhya Shivakumar
+The Harker School
+San Jose, CA, USA
+Percy Liang
+Stanford University
+Stanford, CA, USA
+Dorsa Sadigh
+Stanford University
+Stanford, CA, USA
+ABSTRACT
+Systems for language-guided human-robot interaction must satisfy
+two key desiderata for broad adoption: adaptivity and learning effi-
+ciency. Unfortunately, existing instruction-following agents cannot
+adapt, lacking the ability to incorporate online natural language
+supervision, and even if they could, require hundreds of demonstra-
+tions to learn even simple policies. In this work, we address these
+problems by presenting Language-Informed Latent Actions with
+Corrections (LILAC), a framework for incorporating and adapting
+to natural language corrections – “to the right”, or “no, towards
+the book” – online, during execution. We explore rich manipulation
+domains within a shared autonomy paradigm. Instead of discrete
+turn-taking between a human and robot, LILAC splits agency be-
+tween the human and robot: language is an input to a learned model
+that produces a meaningful, low-dimensional control space that the
+human can use to guide the robot. Each real-time correction refines
+the human’s control space, enabling precise, extended behaviors –
+with the added benefit of requiring only a handful of demonstra-
+tions to learn. We evaluate our approach via a user study where
+users work with a Franka Emika Panda manipulator to complete
+complex manipulation tasks. Compared to existing learned base-
+lines covering both open-loop instruction following and single-turn
+shared autonomy, we show that our corrections-aware approach
+obtains higher task completion rates, and is subjectively preferred
+by users because of its reliability, precision, and ease of use.1
+CCS CONCEPTS
+• Computing methodologies →Cooperation and coordina-
+tion; Natural language processing; Learning from demonstrations.
+∗Both authors contributed equally to this research.
+1Project website with videos & study interface: https://sites.google.com/view/hri-lilac.
+Code for data collection, model definition, training, and evaluation:
+https://github.com/Stanford-ILIAD/lilac.
+Permission to make digital or hard copies of part or all of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for third-party components of this work must be honored.
+For all other uses, contact the owner/author(s).
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+© 2023 Copyright held by the owner/author(s).
+ACM ISBN 978-1-4503-9964-7/23/03.
+https://doi.org/10.1145/3568162.3578623
+“Pick up the book 
+and insert it into 
+the bookshelf” 
+“Tilt down a 
+little bit!” 
+Shared Autonomy 
+Regime
+User reaches an 
+“irrecoverable” state 
+(gets stuck!)
+2
+1
+3
+Figure 1: LILAC: Whereas prior work only allows for issuing
+a single language utterance for the entire task (“Pick up the
+book and insert it into the bookshelf” – solid line), our ap-
+proach allows users to provide language corrections at any
+point during execution, allowing the robot to adapt online
+(“Tilt down a little bit!” – right window).
+KEYWORDS
+Online corrections, language & shared autonomy, robot learning
+ACM Reference Format:
+Yuchen Cui, Siddharth Karamcheti, Raj Palleti, Nidhya Shivakumar, Percy
+Liang, and Dorsa Sadigh. 2023. “No, to the Right” – Online Language Cor-
+rections for Robotic Manipulation via Shared Autonomy. In Proceedings of
+the 2023 ACM/IEEE International Conference on Human-Robot Interaction
+(HRI ’23), March 13–16, 2023, Stockholm, Sweden. ACM, New York, NY, USA,
+9 pages. https://doi.org/10.1145/3568162.3578623
+1
+INTRODUCTION
+Research in natural language for robotics has focused on dyadic,
+turn-based interactions between humans and robots, often in the
+instruction following regime [2, 3, 46, 49]. In this paradigm a human
+arXiv:2301.02555v1  [cs.RO]  6 Jan 2023
+
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Cui & Karamcheti et. al.
+“Pick up the book and insert it into the bookshelf!”
+I am stuck!
+“Tilt down a little bit”
+Figure 2: A user interacts with our system. [Left] The user utters “pick up the book and insert it into the bookshelf,” inducing
+a low-dimensional controller (depicted with the joystick and shaded inputs). [Middle] This control space is state and language-
+conditioned: pressing down brings the end-effector close to the book, while holding up/left after grasping the book moves the
+end-effector towards the shelf. However, this static controller is not enough; the user gets stuck! [Right] Our approach allows
+users to provide real-time corrections (“tilt down a little bit”) refining the control space so the user can complete the task.
+gives an instruction, then the robot executes autonomously – simul-
+taneously resolving the human’s goal as well as planning a course of
+actions to execute in the environment, without any additional user
+input. This explicit division of agency between humans and robots
+places a tremendous burden on learning; existing systems either
+require large amounts of language-aligned demonstration data to
+learn policies [10, 34, 44, 45], or make other restrictive assumptions
+about known environment dynamics, in addition to the ability to
+perform perfect object localization and affordance prediction to
+plug into task and motion planners [27, 37].
+Coupled with the sample inefficiency of these approaches is
+their lack of adaptivity. Consider the robot in Figure 1, trying to
+execute “Pick up the book and insert it into the bookshelf.” This
+is a long-horizon task with several critical states requiring precise
+manipulation – from grasping the book by its spine, to raising
+it above the table without hitting the side table, to lining it up
+precisely with the bookshelf for insertion (with less than a few
+millimeters of clearance on either side). In such circumstances, even
+the best existing approaches fail to complete the task repeatably.
+Yet these “task failures” are often predictable and recoverable. A
+user watching a robot diving towards a glass bowl knows that
+catastrophe is seconds away, and how to avert it; similarly, fine-
+grained errors such as a missed grasp, or a misaligned end-effector
+are similarly fixable – as long as the user is provided with the right
+mechanism to adapt the robot’s behavior.
+One way to enable such adaptation is through natural language
+corrections – from the simple “left!” or “tilt down a little bit” (as
+in Figure 1), to the more complex “no, towards the blue marker.”
+While recent work tries to get at the spirit of this idea by learning
+from dialogue [47, 48], post-hoc corrections [7, 8, 12, 43], or implicit
+feedback [22], none of these approaches work in real-time. Instead,
+we argue that scalable systems for language-driven human-robot
+interaction must be able to handle online corrections in a manner
+that is both adaptive and sample efficient.
+We introduce a novel approach – LILAC: Language-Informed
+Latent Actions with Corrections – that presents a generalizable
+framework for adapting to online natural language corrections built
+within a shared autonomy [1, 14, 20, 30] paradigm for human-robot
+collaboration. With LILAC, a user provides a stream of language
+utterances, starting with a high-level goal (“Pick up the book and
+insert it into the bookshelf”), with each utterance shaping the con-
+trol the user is afforded over the robot. At any point during ex-
+ecution, a user can provide a new utterance – a correction like
+“tilt down a little bit!” – which updates that control space online,
+reflecting the user’s intent in real time. Working in a shared auton-
+omy setting like this gives us the adaptivity mentioned above, but
+also allows us to develop correction-aware systems with extreme
+sample efficiency. With LILAC, we can learn to perform complex
+manipulation tasks like those in Figure 1 from 10-20 demonstrations
+instead of the thousands to tens of thousands of demonstrations
+required by fully autonomous imitation or reinforcement learning
+approaches[10, 19, 33, 34]. These gains are rooted in the idea of
+splitting agency between the human and robot; during execution,
+both parties influence the ultimate actions of the robot, sharing the
+burden of reasoning over actions.
+We evaluate LILAC via a within-subjects user study (𝑛= 12),
+where users complete a complex set of manipulation tasks on a
+Franka Emika Panda arm using LILAC and two baselines – the state-
+of-the-art language-informed latent actions (LILA) model [23], as
+well as a fully autonomous language-conditioned imitation learning
+approach. We find that LILAC obtains higher task success rates
+than either baseline because of its ability to adapt given online
+language instructions, and that users qualitatively find LILAC to
+be more reliable, precise, and easy to use.
+2
+MOTIVATING EXAMPLE
+The learned latent actions paradigm [21, 32] was initially conceived
+of in the context of assistive teleoperation; given users with lim-
+ited mobility, finding an intuitive manner of controlling a 7-DoF+
+assistive robotic arm with low-dimensional controllers (e.g., a 2-
+DoF joystick attached to a wheelchair) is extremely difficult. Naive
+
+Online Language Corrections via Shared Autonomy
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+approaches for mapping the high-dimensional robotic control prob-
+lem to a low-DoF interface – for example, by controlling the (x/y,
+z/roll, pitch/yaw) axes of the end-effector independently with the
+joystick – lead to high amounts of user discomfort, with frequent
+mode-switching, imprecise controls, and high cognitive load for
+users [1, 16]. Learned latent actions – and specifically, the latest
+work on Language-Informed Latent Actions (LILA) [23] – offer a
+compromise: use a small number of task-specific demonstrations to
+learn a nonlinear mapping from joystick axes to end-effector con-
+trol axes, such that each axis of the joystick represents semantically
+meaningful movement through task space.
+As a concrete example, consider Figure 2 for the task of “pick up
+the book and insert it into the bookshelf.” LILA learns a single, static
+mapping to use for the entirety of the episode, and hits a key failure
+mode; due to compounding errors as the user navigated the book
+from the table up towards the shelf, the end-effector is misaligned
+with the shelf, making a clean insertion impossible! This is where
+we need online language corrections – the mechanism that allows
+the user to quickly diagnose the problem and refine the robot’s
+behavior. With LILAC, the user provides the correction “tilt down
+a little bit,” in the midst of execution and switch into a new control
+space. Pressing left on the joystick now provides explicit, precise
+control over the robot’s orientation, allowing the user to even-out
+the end-effector and complete the task.
+3
+RELATED WORK
+LILAC builds off of a rich body of work spanning methods for
+incorporating language corrections, learning language-conditioned
+policies, and incorporating other forms of corrective feedback.
+Incorporating Language Corrections for Manipulation. Most
+relevant to our approach are recent methods for incorporating var-
+ious types of natural language corrections in the context of robotic
+manipulation. These methods can be stratified based on the as-
+sumptions they make, and when during execution a user provides a
+correction. For example, Broad et al. [5] enables data-efficient online
+corrections (similar to LILAC) using distributed correspondence
+graphs to ground language, via use of a semantic parser that maps
+language to a predefined space of correction groundings; these
+groundings are brittle and hand-designed, additionally requiring
+access to a motion planner (and fully known environment dynam-
+ics) to identify a fulfilling set of actions for the robot to execute.
+In contrast, later work in incorporating corrections removes the
+need for brittle, hand-designed correction primitives, instead using
+post-hoc corrections provided at the end of task execution to define
+composable cost functions that are fed to a trajectory optimizer [43];
+the post-hoc nature of these corrections is limiting, especially in
+cases where tasks have irreversible or “hard-to-reset” components,
+and the trajectory optimizer requires non-trivial knowledge of the
+environment. Later work relaxes these prior knowledge assump-
+tions, but can only incorporate correction information post-hoc,
+directly “modifying” trajectory waypoints following a language
+correction in both 2D [7] and 3D [8] environments using massive
+datasets of paired corrections and demonstrations. In contrast to
+these approaches, LILAC is a shared autonomy approach that op-
+erates online, in real-time, without a need for massive amounts of
+data, prior environment dynamics, or full state knowledge.
+Learning Language-Conditioned Policies. More general than
+incorporating corrections is a tremendous body of work on learning
+language-conditioned policies in both the full and shared autonomy
+regimes. Early work in this space used semantic parsers to map natu-
+ral language instructions to predefined motion planning primitives,
+given modest sized datasets [2, 3, 27, 46]. While these approaches
+were able to accomplish a limited range of tasks with high reliabil-
+ity, reliance on predefined primitives and motion planners made
+it hard to scale these approaches to more complex manipulation
+domains, where environment knowledge is hard to come by, and
+hand-defined primitives are brittle and limiting. As a result, more
+recent work in this space learn language-conditioned policies di-
+rectly via imitation learning from large datasets of paired (language,
+demonstration) pairs [19, 34, 38, 44, 45]. While expressive, these
+approaches are still tremendously data hungry, requiring hundreds
+or thousands of examples to learn even the simplest tasks. To ad-
+dress the sample efficiency problem, other work such as LILA [23]
+have turned to the shared autonomy regime, learning collaborative
+human-robot policies from orders of magnitude fewer demonstra-
+tions. LILA is the starting point of our proposed approach.
+Incorporating Other Forms of Corrective Feedback. Other ap-
+proaches tackle learning from other forms of corrective feedback,
+such as physical corrections [28, 31], targeted interventions wherein
+a human fully assumes control over a robot via remote teleopera-
+tion [17, 25, 35], critiques [9, 13], as well as trajectory preferences
+[4, 11]. More recently, Schmittle et al. [42] have proposed a meta-
+algorithm for online learning from multiple types of corrective
+feedback (excluding language). While this work is promising, we
+focus our approach on language corrections, a natural communica-
+tion modality for human users. Learning to incorporate language
+corrections also allows for transfer across tasks as correction lan-
+guage such as “to the left” are general and often independent of the
+current state of the robot, whereas other correction modalities can
+be more context-dependent.
+4
+LILAC: FRAMING CORRECTIONS
+LILAC builds off of LILA as introduced by Karamcheti et al. [23]
+by incorporating natural language corrections during the course
+of execution. The LILAC architecture is depicted in Figure 3; solid
+lines denote inference, while dashes denote training. LILAC incor-
+porates natural language corrections in a data-driven way; this
+work focuses on directional corrections (e.g., “to the left”) and ref-
+erential corrections (e.g., “towards the blue marker”) – all with a
+generalizable and scalable procedure that can be extended to other
+more complex types of corrections. This section outlines all the
+elements of our approach.
+4.1
+Problem Statement
+Our setting is that of a sequential decision making problem defined
+by elements (S, A, T, U, C∗, Z) where 𝑠∈S ⊆R𝑛denotes the
+state of the robot and environment, 𝑎∈A ⊆R𝑘denotes a robot’s
+𝑘-dimensional action (in our case, a 6-DoF delta in end-effector pose
+– Cartesian coordinates for position and Euler angles for orienta-
+tion), and T : S × A →S is a (stochastic) unobserved transition
+function. Furthermore, 𝑢∈U denotes a high-level natural lan-
+guage instruction provided by the user, c ∈C∗denotes the ordered
+
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Cui & Karamcheti et. al.
+=
+“Pick up the book and 
+insert it into the bookshelf.”
+Instruction & Correction  
+“Gating” Function
+hstate
+hlanguage
+α = 1
+×
+Projection
+Basis 1 — (6-DoF)
+Basis 2 — (6-DoF)
+z1
+z2
+⋅
+Inference 
+Human controls!
+Predicted 
+ Robot 
+Action
+“Tilt down a little bit!”
+α = 0
+Distil-RoBERTa
+Training Utterances
+Distil-RoBERTa
+“Tilt downwards” 
+“Towards the marker.”
+“Place the book up on 
+the shelf”
+Similarity  
+Search
+State 
+Encoder
+Proprioceptive 
+State
+Object Poses
++
+=
+State
+[Train-Only] 
+Action 
+Encoder
+Action
+Figure 3: LILAC Overview – solid lines represent the inference pipeline, while dashed lines indicate training-only steps. Part
+of LILAC’s ability to incorporate language corrections efficiently is the “gating” module (orange) which controls the amount
+of state-context for a given input – for example, grounding a correction such as “tilt down a little bit” requires no state context
+(𝛼= 0), whereas a high-level instruction such as “pick up the book and insert it into the bookshelf” does require context (𝛼= 1).
+We use GPT-3, a pretrained language model, to provide 𝛼(see §4.3 for discussion).
+(possibly empty) stack of natural language corrections the user has
+provided, and 𝑧∈Z ⊆R𝑑where 𝑑≪𝑘denotes a user-provided
+input via their low-dimensional control device (e.g., a 2-DoF joy-
+stick). Users can provide an arbitrary number of online corrections
+throughout the episode to adapt the robot’s behavior.
+The goal of LILAC is to learn a function F𝜃(𝑠𝑡,𝑧𝑡,𝑢𝑡, c𝑡) : S ×
+Z × U × C∗→A that maps the current robot and environment
+state 𝑠𝑡, low-dimensional control input 𝑧𝑡, initial high-level utter-
+ance 𝑢provided by the user (held constant throughout the given
+episode), and (possibly empty) stack of language corrections c𝑡
+to a high-dimensional robot action 𝑎𝑡that is to be executed in
+the environment. The corresponding low-DoF control manifold
+Ð
+𝑧𝑡∈Z F𝜃(𝑠𝑡,𝑧𝑡,𝑢𝑡, c𝑡) provides an intuitive interface for the user
+to maneuver the robot towards satisfying the task in question. At
+each new timestep 𝑡+ 1, a user can either provide a new language
+correction 𝑐′ which is “pushed” onto the stack, press a button to
+“pop” their latest correction off of the stack c𝑡signalling that their
+correction has been addressed, or provide a control input 𝑧𝑡that is
+mapped to the corresponding robot action 𝑎𝑡.
+4.2
+Modeling: Inference & Learning
+Given the current state 𝑠and language 𝑢and c, F𝜃maps low-
+dimensional user control inputs 𝑧to the high-dimensional robot
+actions 𝑎. Crisply, we define ˆ𝑎= F𝜃(𝑠,𝑧,𝑢, c) as:
+ℎstate ∈R𝑚= EncodeState𝜃(𝑠)
+ℎlanguage ∈R𝑚= EncodeLanguage𝜃(𝑢, c)
+𝛼∈[0, 1] = GPTGating(𝑢, c)
+ℎgated ∈R𝑚= 𝛼· ℎstate + (1 −𝛼) · bias𝜃
+ℎfused ∈R𝑚= FiLM𝜃(ℎgated,ℎlanguage)
+𝐵bases ∈R𝑘×𝑑= Gram-Schmidt(Projection𝜃(ℎfused))
+ˆ𝑎∈R𝑘= 𝐵bases · 𝑧
+where 𝑚is a hyperparameter denoting the hidden dimensionality
+of the model (we set 𝑚= 128 for this work).
+We first learn a state encoder EncodeState𝜃. The state space we
+use in this work consists of the robot’s proprioceptive state (joint
+angles & end-effector pose) concatenated with a vector of (𝑥,𝑦,𝑧)
+positions for each object in the scene; EncodeState𝜃is a two-layer
+MLP that takes this input and outputs ℎstate.
+To encode language (𝑢and c), we adopt a last-in-first-out strat-
+egy for selectively encoding utterances, only encoding on the most
+recent utterance – 𝑢at the beginning of an interaction, then the
+most recent correction 𝑐′. We embed this utterance with a frozen
+variant of the Distil-RoBERTa language model [41] as released by
+the Sentence-BERT project [40]. This process is backed by an “un-
+natural language processing” nearest neighbors index [36] where
+inference-time utterances are mapped onto the closest existing
+training exemplars, which are then retrieved and fed to the rest
+of the model. This process, similar to that used in LILA [23] pre-
+vents LILAC from degenerating in the presence of slight varia-
+tions of language, which could lead to practical user safety issues.
+EncodeLanguage𝜃is another two-layer MLP that takes in the re-
+trieved embedding and outputs ℎlanguage.
+Next, we consider how to fuse the state and language embeddings.
+A key component of LILAC and its ability to remain data efficient
+is the GPT-3 [6] “gating” module (shown in orange in Figure 3),
+and denoted by the scalar value 𝛼∈[0, 1] in the equations above.
+The gating value 𝛼reflects a simple insight – certain utterances
+require different amounts of object/state dependence. For example,
+an utterance such as “go left” does not require reasoning over any
+objects in the environment (𝛼= 0). A detailed discussion on gating
+and how we operationalize GPT-3 can be found in §4.3. We use this
+gating value 𝛼to module the amount of state information in ℎgated
+by taking the convex combination of 𝛼with ℎstate and a vector
+bias𝜃, where 𝛼= 0 obviates 𝑥state.
+We incorporate language by using FiLM [39], mapping ℎlanguage
+to affine transformation parameters 𝛾∈R𝑚and 𝛽∈R𝑚via sepa-
+rate learned two-layer MLPs. We then apply the resulting transfor-
+mation elementwise to ℎgated, producing ℎfused = 𝛾· ℎgated + 𝛽.
+
+Online Language Corrections via Shared Autonomy
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Finally, we predict basis vectors 𝐵bases ∈R𝑘×𝑑(recall that 𝑘
+is the dimensionality of the high-DoF robot action space, while
+𝑑is the dimensionality of the user’s low-DoF control interface).
+𝐵bases uniquely defines the user’s control manifold for the given
+timestep; we learn a two-layer MLP Projection𝜃that takes ℎfused
+and outputs a matrix with the required dimensions. To serve as
+an appropriately conditioned control manifold, we run modified
+Gram-Schmidt to orthonormalize the bases. The final high-DoF
+robot action ˆ𝑎∈R𝑘is then the matrix-vector product between
+𝐵bases and the user’s input 𝑧∈R𝑑.
+Learning from Language & Demonstrations. To learn F𝜃, we
+assume a dataset of (𝑢= language, 𝜏= trajectory) pairs, where
+each trajectory is comprised of a sequence of (𝑠,𝑎) pairs; 𝜏=
+{(𝑠1,𝑎1) . . . (𝑠𝑇,𝑎𝑇)}, and a desired latent action dimensionality
+𝑑(e.g., 𝑑= 2 in this work for the number of axes on a joystick).
+The action space we use are deltas in end-effector space (Cartesian
+position, Euler angle orientation). Note that these inputs don’t fully
+line up with the signature of F𝜃– notably, we do not have access
+to “ground-truth” latent actions 𝑧for each given robot action 𝑎. To
+address this, we adopt the insight used in prior work on learned
+latent actions [23, 24, 32]: frame the training process as learning a
+state-and-language conditional autoencoder, using compression as
+a way to induce meaningful latent action control manifolds.
+Specifically, we implement this by adding a layer to compress
+high-DoF robot actions down to a 𝑑-dimensional latent:
+𝑧compressed ∈R𝑑= Compress𝜃(𝑎)
+𝑎reconstruct ∈R𝑘= 𝐵bases · 𝑧compressed
+where 𝐵bases is computed from state and language as above.
+Given this reconstruction objective, we can write a compact
+loss function for training: L(𝜃) = ||𝑎−𝑎reconstruct||2
+2 – in other
+words, minimize the mean squared error between the action high-
+DoF robot action 𝑎and 𝑎reconstruct. Compress𝜃is implemented as a
+two-layer MLP, and is discarded after training.
+4.3
+Gating Instructions vs. Corrections
+Key to scaling LILAC is the insight that various forms of correction
+language are generalizable across states – in other words, different
+language utterances require different amounts of object/environment
+state-dependence. Formally defining the “state-dependence” of a
+language utterance is hard; one heuristic might be to categorize
+different utterances based on the number of referents present; an
+utterance like “grab the thing on the side table and place it on the
+table” as in Figure 1 has 3 referents, indicating a large degree of state
+dependence; the robot must ground the utterance in the objects
+of the environment to resolve the correct behavior. However, an
+utterance like “no, to the left!” has no explicit referents; one can
+resolve the utterance by relying solely on the user’s static reference
+frame and induced deltas in end-effector space.
+To operationalize this idea with LILAC, further contributing to
+the sample efficiency of our approach,2 we use a gating function
+(orange, in Figure 3) that given language, predicts a discrete value
+2A valid question is why not treat all utterances as requiring uniform, or the same
+amount of state-dependence; the answer is rooted in the small data regime we operate
+in. We’d need to collect several instances of the same correction “to the left” in different
+states to generalize, whereas with LILAC “gating” approach, we only need one!
+𝛼∈{0, 1}. A value of 0 signifies a state-independent utterance –
+for example, the correction “tilt down a little bit.” Appropriately, in
+our architecture, this zeroes out any state-dependent information
+(see the 𝛼term in Figure 3), and predicts an action solely based
+on the provided language. Critically, the fused representation of
+language and state provided to the rest of the network defining in
+F𝜃is modulated by 𝛼– more detail in §4.4.
+Using GPT-3 to Identify Corrections. In this work, we construct
+a prompt harness with GPT-3 [6] to output 𝛼. We do this because
+characterizing the state-dependence of an utterance is difficult;
+while the aforementioned reference counting heuristic may work in
+some cases, utterances such as “no, the blue!” have implicit referents
+(in this case, perhaps a marker, or cup) that need to be grounded in the
+environment state. Many other phenomena make it hard to define
+heuristics for computing 𝛼– anaphora, null referents (“move the
+robot left”), etc. Instead of crafting grammars or heuristics, we opt to
+tap into the power of large language models with in-context learning
+abilities, that learn to extrapolate given a prompt and small set of
+examples. We specifically build off of GPT-3 text-davinci-002
+(175B parameters) [6]. To define our prompt, we allocated a 10
+minute budget to iteratively engineer the input/output examples
+and task description, using a held-out set of 5 language utterances
+to provide signal.3
+4.4
+Reproducibility
+To facilitate reproducibility and future work, we release an open-
+source codebase (https://github.com/Stanford-ILIAD/lilac) with the
+complete pipeline spanning data collection, model definition, train-
+ing, and real-robot deployment.
+Model Architecture. All MLPs detailed in §4.2 use 𝑚= 128 and
+the GELU activation [15]. For stability, we add a single Batch Nor-
+malization layer [18] before feeding the concatenated state repre-
+sentation to the state encoder. As implemented, LILAC is extremely
+lightweight at only 188K parameters.
+Training Details. Training LILAC is efficient, and can be run on
+consumer laptop CPUs, eschewing the need for expensive GPUs.
+We train for 50 epochs, with a batch size of 512, using the AdamW
+optimizer [26] with default learning rate of 0.001 and weight de-
+cay of 0.01. We do not use any other form of regularization (e.g.,
+dropout). We select models based on validation loss with respect to
+a small number (𝑛= 5) of held out (language, trajectory) pairs.
+As mentioned in §4.2, we assume a dataset of utterances and
+corresponding trajectories. These utterances consist of both the
+high-level task utterances (e.g., “pick up the book and insert it into
+the bookshelf”) and correction utterances (e.g., “tilt down a little
+bit”). We run the GPT-3 alpha labeling procedure as a preprocessing
+step, marking each example with the degree of context-dependence
+required, then train F𝜃jointly, on all of our data.
+5
+USER STUDY PRELIMINARIES
+To evaluate LILAC with respect to prior methods for language-
+informed policy learning, we conduct a within-subjects user study
+with 𝑛= 12 participants, with each participant evaluating LILAC
+3Prompt: https://github.com/Stanford-ILIAD/lilac/tree/main/scripts/alphas.py.
+
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Cui & Karamcheti et. al.
+Figure 4: Results from our user study (𝑛= 12) across three conditions: 1) Language-Conditioned Imitation Learning, 2)
+Language-Informed Latent Actions (LILA) – an instantiation of language-informed shared autonomy without online correc-
+tions, and 3) LILAC – our approach where users can provide online corrections at any point during robot execution.
+against language-conditioned approaches for full and shared au-
+tonomy – namely, a language-informed imitation learning baseline
+(“Imitation”) trained on the same demonstrations as LILAC, as well
+as a non-corrective shared autonomy baseline (“LILA”), also trained
+on the same demonstrations. The following sections detail the en-
+vironment, tasks, data collection process, as well as user study
+procedure. Finally, we list our independent variables, dependent
+measures and concrete hypotheses.
+Environment & Tasks. We consider a multi-task “desk” environ-
+ment (Figure 5) with the following tasks listed by complexity:
+(1) clean-trash: throw away a piece of crumpled paper (de-
+formable) into the black trash bin.
+(2) transfer-pen: transfer the blue marker (upper left of Fig-
+ure 5) from the shelf into the metal tin holder (lower left).
+(3) open-drawer: Open the bottom drawer on the shelf by grasp-
+ing the small knob, and sliding out horizontally (requires
+fine-grained end-effector orientation control).
+2
+1
+3
+4
+5
+Figure 5: Setup of our tabletop manipulation environment
+with sketches of our high-level tasks (further details in §5).
+(4) insert-book: Pick up the book on the table by its spine, and
+insert it into the bookshelf (has only a few millimeters of
+clearance on either side).
+(5) water-plant: Water the succulent (white bowl on the upper
+right of Figure 5) using the water in the yellow cup (rather
+than actual water, we use marbles for easy cleanup).
+Each of the 5 tasks we define are difficult from a manipulation
+perspective, especially in the small data regime we operate in. For
+fine-grained comparison between the three approaches under study,
+we define a set of subtasks to use to measure partial task success
+(turning a sparse full-task success rate into a denser measure of
+progress): a) reaching the desired object to manipulate (e.g., the book
+in the insert-book task), b) successfully grasping the manipulable
+object, c) transferring the desired object to the target location (e.g.,
+moving the water cup above the plant for the water-plant task),
+and finally, d) completing the full task.
+Demonstration & Correction Data Collection. For each task,
+we collected dense, human-guided kinesthetic demonstrations – 50
+full-task demonstrations total (orders of magnitude fewer demon-
+strations than what is typically required for fully autonomous in-
+struction following approaches [34, 38]). The robot’s proprioceptive
+state is encoded as the concatenation of its joint states (7-DoF; in
+radians), as well as the end-effector poses computed via forward
+kinematics (expressed as 3-DoF Cartesian position, and 3-DoF Euler
+angle orientation), and compute the high-level robot actions as
+the deltas in end-effector space between consecutive time steps
+in our demonstrations (resulting in 6-DoF high-level actions). We
+record our demonstrations and run our controllers at 10 Hz; we use
+Polymetis [29] as the basis for our robot control platform.
+For LILAC, we additionally collect a small set of correction
+demonstrations (collected under 2 hours of interaction with the ro-
+bot) with associated correction language utterances, spanning two
+loose categories: 1) directional corrections such as “tilt down,” “to
+the right,” “rotate counterclockwise”, and 2) contextual referential
+corrections such as “towards the blue marker” or “no, move down
+towards the knob on the drawer.” We collect these demonstrations
+by replaying the full-task demonstrations, and sampling random
+intermediate states during playback to initiate corrections. The
+
+Online Language Corrections via Shared Autonomy
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Imitation Learning
+LILA (No Corrections)
+LILAC (Ours)
+“Go up”
+“Lower”
+“Tilt left”
+High-Level Instruction
+Correction
+“Water the succulent 
+with the yellow cup.”
+“Open the bottom 
+drawer of the shelf.”
+Figure 6: Qualitative trajectories across the different control strategies for the open-drawer and water-plant tasks. The fully
+autonomous imitation learning approach fails to make it beyond the first stage of the task, while LILA is able to reach the
+drawer as well as the cup but fails to precisely aim and grasp the object. LILAC gets stuck at the same place, but is able to
+recover as the user issues low-level corrections to precisely maneuver the end-effector and fully complete the tasks.
+authors of this work served as the expert demonstrators for both
+full-task and correction demonstrations.
+Participants & Procedures. All user studies were conducted sub-
+ject to a university-approved IRB protocol, with participants re-
+cruited from a pool of 12 university students (8 male/4 female, age
+range 20-30 with mean 24.8). Of the 12 total participants, only 4
+users had prior experience teleoperating a robot. All our studies
+used a Franka Emika Panda robot (as depicted in Figure 5), a 7-DoF
+fixed-arm manipulator with a parallel-jaw gripper. In all settings,
+the maximum joint velocity norm of the Panda was bounded to 1
+rad/sec, with conservative torque limits of 40.0 Nm.
+We conducted a within subjects user study where each participant
+used all three candidate methods (denoted as Imitation, LILA, and
+LILAC (Ours) in Figure 4) to complete 3 of the 5 high-level tasks. We
+shuffled the order of candidate methods between users to ensure a
+fair comparison. Upon starting, each user read a detailed written
+description of each control method (the explicit text can be found
+on the project website), viewed a video depicting the high-level task
+to perform, and were allowed a single “practice” session to with the
+control method in question. Each user performed two trials for a
+given task; we recorded partial success rates and asked the user to
+fill out a qualitative survey before switching to the next strategy.
+Hypotheses. In this study, we vary the control strategy (Imita-
+tion, LILA and LILAC) and use the objective measures of subtask
+and full-goal success rates to assess efficacy. We additionally track
+qualitative aspects such as “ease of use,” “smooth control,” and “like-
+lihood of using this control strategy again” (the full set of qualitative
+measures can be found in Figure 4) by surveying our users via a 7-
+point Likert scale. We test the following two hypotheses regarding
+LILAC’s performance relative to the baseline strategies:
+H1 – LILAC allows users to obtain higher subtask and full-goal
+success rates when completing complex manipulation tasks relative
+to specifying tasks for a language-conditioned imitation learning
+agent, or LILA trained on the same amount of data.
+H2 – LILAC is qualitatively preferred by users over both baseline
+strategies in terms of overall usability measured by their subjective
+responses to the survey questions.
+Baseline Implementations. Both the LILA and Imitation (language-
+conditioned behavioral cloning) baselines are trained on the exact
+same data as LILAC following nearly identical processes.4 LILA
+is trained following the exact same architecture as LILAC from
+Figure 3, without the GPT-3 gating component. The imitation learn-
+ing model is implemented as a history-aware policy that is able to
+attend to prior states (in this work, we truncate history at 1 second).
+We use the same state and language encoder as LILAC, but use a
+2-layer Transformer [50] to encode the full history sequence. We
+use again use a FiLM layer to fuse language and state embeddings,
+then use a final 2-layer MLP to directly predict the action to execute
+in the environment (for open-loop control).
+6
+USER STUDY RESULTS
+We report the success rate for each subtask averaged across users
+in Figure 4 (Left). Objectively, we find that LILAC achieves the high-
+est success rate across all subtasks, and is significantly (𝑝< 0.05)
+more performant than the imitation learning and LILA baselines
+for the latter three subtasks – grasping, transfer, and full task com-
+pletion – results that fully support H1. We also find that LILAC is
+subjectively preferred by users, as evidenced by Figure 4 (Right).
+Looking at the survey results, we find that LILAC is significantly
+(𝑝< 0.05) preferred on 6 out of the 7 metrics, including “ease of use,”
+“intuitiveness,” and “willingness to use again,” amongst others. The
+subjective results support H2; LILAC is favored for its adaptability,
+allowing users to execute targeted, precise motions.
+Visualizations. To further understand the value of LILAC and
+incorporating online corrections, we visualize example trajectories
+for each of the three control strategies for two high-level tasks in
+Figure 6. On the left are trajectories for the simple open-drawer
+task: we see that the fully autonomous imitation learning model
+fails to reach the drawer entirely, whereas LILA and LILAC are able
+to successfully reach the drawer, but get stuck trying to precisely
+aim and grasp the small knob. While LILA cannot recover, LILAC
+is receptive to the user’s correction, producing a refined control
+space allowing for the user to complete the grasp and finish out the
+task. We see a similar story with the more difficult water-plant
+4Implementations: https://github.com/Stanford-ILIAD/lilac/tree/main/models.
+
+HRI ’23, March 13–16, 2023, Stockholm, Sweden
+Cui & Karamcheti et. al.
+Training State Distribution
+LILA (No Corrections)
+LILAC (Ours)
+Shelf
+Shelf
+Shelf
+Figure 7: Observed trajectories for LILA and LILAC on the open-drawer task (with train trajectories shown on the left). While
+LILA deviates from the observed state distribution, states traversed with LILAC are close to those seen at training.
+task: imitation learning fails catastrophically by knocking over the
+cup, causing irreversible damage to the environment, while LILA
+reaches the cup, but does not afford the user enough precision
+to make a successful grasp. With LILAC, two tightly sequenced
+corrections allow the user precise, targeted control, first in acquiring
+the cup, then in aligning the end-effector orientation to complete
+the pouring motion successfully. These trajectory visualizations
+offer insight into where and when corrections are most useful –
+specifically showing the need for adaptivity in critical states.
+Figure 7 additionally plots the 3D end-effector trajectories (po-
+sition; orientation is omitted for clarity) across all users for the
+open-drawer task for both LILA and LILAC, in addition to the tra-
+jectories represented in the training data. We find that states LILAC
+allows the users to stay closer to the training state distribution
+compared to LILA, further explaining LILAC’s strong performance.
+7
+DISCUSSION
+While the results of the user study are compelling, we find it im-
+portant to be transparent about the shortcomings of the current
+approach, addressing possible avenues for future work.
+Limitations. Future work should address different types of lan-
+guage corrections that are more context sensitive; as a concrete
+example, due to the way we encode incoming corrections (as de-
+scribed in §4), we interpret each utterance on its own, independent
+of what was said previously. This is limiting for interpreting phe-
+nomena such as anaphora or implicit coreference – corrections such
+as “no, the other way,” or “undo that” cannot be correctly interpreted
+using the current instantiation of the framework. Furthermore, we
+find that while corrections offer additional flexibility over the base
+shared autonomy control space, they can be easily overused – we
+noticed that certain participants in our study quickly departed from
+the control space induced by the high-level instruction, instead
+opting to complete the bulk of the task in correction mode, effec-
+tively turning LILAC into a glorified end-effector control, with
+users moving one axis at a time. Work on making the underlying
+high-level control spaces more natural and intuitive – naturalizing
+the control interface – will be crucial for scaling LILAC to more
+complex, temporally extended tasks where low-level corrections
+alone may not afford users enough expressivity to solve tasks. Some
+scenarios where this may occur would be in tasks requiring modu-
+lating 3+ degrees-of-freedom simultaneously, or where sequences
+of low-level corrections only allow users to make frustratingly slow
+progress at the task at hand (e.g., for long-horizon tasks like making
+a cup of tea). Finally, we find that corrections such as “rotate” or
+“tilt” can be ambiguously interpreted, with some users intending
+for the correction to be interpreted subject to their reference frame
+rather than the robot’s reference frame, or vice-versa.
+Conclusion. Throughout this work, we have argued that scalable
+systems for language-driven human-robot interaction must be able
+to exhibit both adaptivity and sample efficiency. We identified the
+ability to handle online natural language corrections as a way to
+enrich existing systems with such adaptivity, presenting LILAC –
+Language-Informed Latent Actions with Corrections – as a poten-
+tial answer. LILAC is built within the shared autonomy paradigm
+whereby natural language utterances are mapped to meaningful,
+low-dimensional control spaces that humans can use to guide the
+robot, with each correction provided by the user working to refine
+the underlying control space, allowing for precise, targeted control.
+Our user study comparing LILAC with language-conditioned imita-
+tion learning and language-informed shared autonomy shows the
+importance of being able to adapt to online corrections, as LILAC
+is both subjectively preferred by users and objectively performant
+than both baselines. LILAC marks a strong step forward in adaptive
+language-driven approaches for shared autonomy, and we hope that
+its core tenets of reliability, precision, and ease of use are carried
+forward throughout future work.

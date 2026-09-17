@@ -1,0 +1,1493 @@
+Distribution-Free, Risk-Controlling Prediction Sets
+Stephen Bates∗, Anastasios Angelopoulos∗, Lihua Lei∗, Jitendra Malik, Michael I. Jordan
+August 6, 2021
+Abstract
+While improving prediction accuracy has been the focus of machine learning in recent years, this
+alone does not suﬃce for reliable decision-making. Deploying learning systems in consequential settings
+also requires calibrating and communicating the uncertainty of predictions. To convey instance-wise un-
+certainty for prediction tasks, we show how to generate set-valued predictions from a black-box predictor
+that control the expected loss on future test points at a user-speciﬁed level. Our approach provides
+explicit ﬁnite-sample guarantees for any dataset by using a holdout set to calibrate the size of the pre-
+diction sets. This framework enables simple, distribution-free, rigorous error control for many tasks, and
+we demonstrate it in ﬁve large-scale machine learning problems: (1) classiﬁcation problems where some
+mistakes are more costly than others; (2) multi-label classiﬁcation, where each observation has multiple
+associated labels; (3) classiﬁcation problems where the labels have a hierarchical structure; (4) image
+segmentation, where we wish to predict a set of pixels containing an object of interest; and (5) pro-
+tein structure prediction. Lastly, we discuss extensions to uncertainty quantiﬁcation for ranking, metric
+learning and distributionally robust learning.
+1
+Introduction
+Black-box predictive algorithms have begun to be deployed in many real-world decision-making settings.
+Problematically, however, these algorithms are rarely accompanied by reliable uncertainty quantiﬁcation.
+Algorithm developers often depend on the standard training/validation/test paradigm to make assertions
+of accuracy, stopping short of any further attempt to indicate that an algorithm’s predictions should be
+treated with skepticism. Thus, prediction failures will often be silent ones, which is particularly alarming in
+high-consequence settings.
+While one reasonable response to this problem involves retreating from black-box prediction, such a
+retreat raises many unresolved problems, and it is clear that black-box prediction will be with us for some
+time to come. A second response is to modify black-box prediction procedures so that they provide reliable
+uncertainty quantiﬁcation, thereby supporting a variety of post-prediction activities, including risk-sensitive
+decision-making, audits, and protocols for model improvement.
+We introduce a method for modifying a black-box predictor to return a set of plausible responses that
+limits the frequency of costly errors to a level chosen by the user. Returning a set of responses is a useful way
+to represent uncertainty, since such sets can be readily constructed from any existing predictor and, moreover,
+they are often interpretable. We call our proposed technique risk-controlling prediction sets (RCPS). The
+idea is to produce prediction sets that provide distribution-free, ﬁnite-sample control of a general loss.
+As an example, consider classifying MRI images as in Figure 1. Each image can be classiﬁed into one of
+several diagnostic categories. We encode the consequence (loss) of making a mistake on an image as 100 for
+the most severe mistake (class stroke) and as 0.1 for the least severe mistake (class normal). Our procedure
+returns a set of labels, such as those denoted by the red, blue, and green brackets in Figure 1. This output set
+∗equal contribution
+see project website at angelopoulos.ai/blog/posts/rcps/
+1
+arXiv:2101.02703v3  [cs.LG]  4 Aug 2021
+
+{
+}
+normal,
+,
+cancer,
+,
+stroke,
+P=0.8, L=0.1
+R=0.08
+P=0.0005, L=20
+R=0.01
+P=0.05, L=100
+R=5.0
+high risk
+high + medium risk
+high + medium + low risk
+Figure 1: A stylized example of risk-controlling prediction sets.
+Here, “P” gives the estimated
+probability for each class, the loss per class is labeled as “L,” and the loss times the probability is the
+estimated risk, labeled as “R.” The red, blue, and green brackets represent possible sets of labels that our
+procedure may output.
+represents the plausible range of patient diagnoses, accounting for their respective severities. Our procedure
+returns sets that are guaranteed to keep average loss (risk) on future data below a user-speciﬁed level, under
+a set of assumptions that we make explicit. To do this, the size of the output set is chosen based on the
+accuracy of the classiﬁer and the desired risk level—a lower accuracy classiﬁer or a more strict risk level will
+require larger sets to guarantee risk control. Because of the explicit guarantee on our output, a doctor could
+safely exclude diagnoses outside the set and test for those within.
+Formally, for a test point with features X ∈X, a response Y ∈Y, we consider set-valued predictors
+T (X) : X →Y′ where Y′ is some space of sets; we take Y′ = 2Y in the MRI above example and for most
+of this work. We then have a loss function on set-valued predictions L : Y × Y′ →R that encodes our
+notion of consequence, and seek a predictor T , that controls the risk R(T ) = E
+
+L(Y, T (X))]. For example,
+in our MRI setting, if the ﬁrst argument is a label y /∈T (X), and the second argument is T (X), the loss
+function outputs the cost of not predicting y. Our goal in this work is to create set-valued predictors from
+training data that have risk that is below some desired level α, with high probability. Speciﬁcally, we seek
+the following:
+Deﬁnition 1 (Risk-controlling prediction sets). Let T be a random function taking values in the space of
+functions X →Y′ (e.g., a functional estimator trained on data). We say that T is a (α, δ)-risk-controlling
+prediction set if, with probability at least 1 −δ, we have R(T ) ≤α.
+The error level (α, δ) is chosen in advance by the user. The reader should think of 10% as a representative
+value of δ; the choice of α will vary with the choice of loss function.
+Related work
+Prediction sets have a long history in statistics, going back at least to tolerance regions in the 1940s [1–4].
+Tolerance regions are sets that contain a desired fraction of the population distribution with high probability.
+For example, one may ask for a region that contains 90% of future test points with probability 99% (over
+the training data).
+See [5] for an overview of tolerance regions.
+Recently, tolerance regions have been
+instantiated to form prediction sets for deep learning models [6, 7]. In parallel, conformal prediction [8,
+9] has been recognized as an attractive way of producing predictive sets with ﬁnite-sample guarantees. A
+particularly convenient form of conformal prediction, known as split conformal prediction [10, 11], uses data
+splitting to generate prediction sets in a computationally eﬃcient way; see also [12, 13] for generalizations
+that re-use data for improved statistical eﬃciency. Conformal prediction is a generic approach, and much
+recent work has focused on designing speciﬁc conformal procedures to have good performance according
+to metrics such as small set sizes [14], approximate coverage in all regions of feature space [15–21], and
+errors balanced across classes [14, 22–24]. Further extensions of conformal prediction address topics such as
+distribution estimation [25], causal inference [26], and handling or testing distribution shift [27–29]. As an
+2
+
+Figure 2: Sample-splitting setup. The training data is used to ﬁt a predictive model ˆf. The remaining
+data is used to calibrate a set-valued predictor (based on ˆf) to control risk, as described in this work.
+alternative to conformal prediction and tolerance regions, there is also a set of techniques that approach the
+tradeoﬀbetween small sets and high coverage by deﬁning a utility function balancing these two considerations
+and ﬁnding the set-valued predictor that maximizes this utility [e.g., 30–32]. The present work concerns the
+construction of tolerance regions with a user-speciﬁed coverage guarantee, and we do not pursue this latter
+formulation here.
+In the current work, we expand the notion of tolerance regions to apply to a wider class of losses for
+set-valued predictors. Our development is inspired by the nested set interpretation of conformal prediction
+articulated in [33], and our proposed algorithm is somewhat similar to split conformal prediction. Unlike
+conformal prediction, however, we pursue the high-probability error guarantees of tolerance regions and thus
+rely on entirely diﬀerent proof techniques—see [34] for a discussion of their relationship. As one concrete
+instance of this framework, we introduce a family of set-valued predictors that generalizes those of [14] to
+produce small set-valued predictions in a wide range of settings.
+Our contribution
+The central contribution of this work is a procedure to calibrate prediction sets to have ﬁnite-sample control
+of any loss satisfying a certain monotonicity requirement. The calibration procedure applies to any set-
+valued predictor, but we also show how to take any standard (non-set-valued) predictor and turn it into a
+set-valued predictor that works well with our calibration procedure. Our algorithm includes the construction
+of tolerance regions as special case, but applies to many other problems; this work explicitly considers classi-
+ﬁcation with diﬀerent penalties for diﬀerent misclassiﬁcation events, multi-label classiﬁcation, classiﬁcation
+with hierarchically structured classes, image segmentation, prediction problems where the response is a 3D
+structure, ranking, and metric learning.
+2
+Upper Conﬁdence Bound Calibration
+This section introduces our proposed method to calibrate any set-valued predictor so that it is guaranteed
+to have risk below a user-speciﬁed level, i.e., so that it satisﬁes Deﬁnition 1.
+2.1
+Setting and notation
+Let (Xi, Yi)i=1,...,m be an independent and identically distributed (i.i.d.) set of variables, where the features
+vectors Xi take values in X and the response Yi take values in Y. To begin, split our data into a training set
+and a calibration set. Formally, let {Itrain, Ical} form a partition of {1, . . . , m}, and let n = |Ical|. Without
+loss of generality, we take Ical = {1, . . . , n}. We allow the researcher to ﬁt a predictive model on the training
+set Itrain using an arbitrary procedure, calling the result ˆf, a function from X to some space Z.
+The
+remainder of this paper shows how to subsequently create set-valued predictors from ˆf that control a certain
+statistical error notion, regardless of the quality of the initial model ﬁt or the distribution of the data. For
+this task, we will only use the calibration points (X1, Y1), . . . , (Xn, Yn). See Figure 2 for a visualization of
+our setting.
+Next, let T : X →Y′ be a set-valued function (a tolerance region) that maps a feature vector to a
+3
+
+set-valued prediction. This function would typically be constructed from the predictive model, ˆf, which
+was ﬁt on the training data—see the example in Figure 1. We will describe one possible construction in
+detail in Section 4. We further suppose we have a collection of such set-valued predictors indexed by a
+one-dimensional parameter λ taking values in a closed set Λ ⊂R ∪{±∞} that are nested, meaning that
+larger values of λ lead to larger sets:
+λ1 < λ2 =⇒Tλ1(x) ⊂Tλ2(x).
+(1)
+To capture a notion of error, let L(y, S) : Y × Y′ →R≥0 be a loss function on prediction sets. For
+example, we could take L(y, S) = 1{y /∈S}, which is the loss function corresponding to classical tolerance
+regions. We require that the loss function respects the following nesting property:
+S ⊂S′ =⇒L(y, S) ≥L(y, S′).
+(2)
+That is, larger sets lead to smaller loss. We then deﬁne the risk of a set-valued predictor T to be
+R
+ T ) = E
+
+L(Y, T (X))
+
+.
+Since we will primarily be considering the risk of the tolerance functions from the family {Tλ}λ∈Λ, we will
+use the notational shorthand R(λ) to mean R(Tλ). We further assume that there exists an element λmax ∈Λ
+such that R(λmax) = 0.
+2.2
+The procedure
+Recalling Deﬁnition 1, our goal is to ﬁnd a set function whose risk is less than some user-speciﬁed threshold
+α. To do this, we search across the collection of functions {Tλ}λ∈T and estimate their risk on data not used
+for model training, Ical. We then show that by choosing the value of λ in a certain way, we can guarantee
+that the procedure has risk less than α with high probability.
+We assume that we have access to a pointwise upper conﬁdence bound (UCB) for the risk function for
+each λ:
+P
+
+R(λ) ≤bR+(λ)
+| {z }
+UCB
+
+≥1 −δ,
+(3)
+where bR+(λ) may depend on (X1, Y1), . . . , (Xn, Yn). We will present a generic strategy to obtain such bounds
+by inverting a concentration inequality as well as concrete bounds for various settings in Section 3. We choose
+ˆλ as the smallest value of λ such that the entire conﬁdence region to the right of λ falls below the target risk
+level α:
+ˆλ
+△= inf
+n
+λ ∈Λ : bR+(λ′) < α, ∀λ′ ≥λ
+o
+.
+(4)
+See Figure 3 for a visualization.
+Figure 3: Visualization of UCB calibration.
+This choice of λ results in a set-valued predictor that controls the risk with high probability:
+4
+
+Theorem 1 (Validity of UCB calibration). Let (Xi, Yi)i=1,...,n be an i.i.d. sample, let L(·, ·) be a loss
+satisfying the monotonicity condition in (2), and let {Tλ}λ∈Λ be a collection of set predictors satisfying the
+nesting property in (1). Suppose (3) holds pointwise for each λ, and that R(λ) is continuous. Then for ˆλ
+chosen as in (4),
+P
+ R(Tˆλ) ≤α
+
+≥1 −δ.
+That is, Tˆλ is a (α, δ)-RCPS.
+All proofs are presented in Appendix A. Note that we are able to turn a pointwise convergence result
+into a result on the validity of a data-driven choice of λ. This is due to the monotonicity of the risk function;
+without the monotonicity, we would need a uniform convergence result on the empirical risk in order to get
+a similar guarantee. Next, we will show how to get the required concentration in (3) for cases of interest, so
+that we can carry out the UCB calibration algorithm. Later, in Section 5, we will introduce several concrete
+loss functions and empirically evaluate the performance of the UCB calibration algorithms in a variety of
+prediction tasks.
+Remark 1. Upper conﬁdence bound calibration holds in more generality than the concrete instantiation
+above. The result holds for any monotone R(λ) with a pointwise upper conﬁdence bound ˆR+(λ). We present
+the general statement in Appendix A.
+Remark 2. The above result also implies that UCB calibration gives an RCPS even if the data used to ﬁt
+the initial preditive model comes from a diﬀerent distribution. The only requirement is that the calibration
+data and the test data come from the same distribution.
+Remark 3. We assumed that R(·) is continuous for simplicity, but this condition can be removed with minor
+modiﬁcations. The upper conﬁdence bound is not assumed to be continuous.
+3
+Concentration Inequalities for the Upper Conﬁdence Bound
+In this section, we develop upper conﬁdence bounds as in (3) under diﬀerent conditions on the loss function,
+which will allow us to use the UCB calibration procedure for a variety of prediction tasks. In addition,
+for settings for which no ﬁnite-sample bound is available, we give an asymptotically valid upper conﬁdence
+bound. Software implementing the upper conﬁdence bounds is available in this project’s public GitHub
+repository along with code to exactly reproduce our experimental results.
+3.1
+Bounded losses
+We begin with the case where our loss is bounded above, and without loss of generality we take the bound
+to be one. We will present several upper conﬁdence bounds and compare them in numerical experiments.
+The conﬁdence bound of Waudby-Smith and Ramdas [35] is the clear winner, and ultimately we recommend
+this bound for use in all cases with bounded loss.
+3.1.1
+Illustrative case: the simpliﬁed Hoeﬀding bound
+It is natural to construct an upper conﬁdence bound for R(λ) based on the empirical risk, the average loss
+of the set-valued predictor Tλ on the calibration set:
+bR(λ)
+△= 1
+n
+n
+X
+i=1
+L (Yi, Tλ(Xi)) .
+As a warm-up, recall the following simple version of Hoeﬀding’s inequality:
+Proposition 1 (Hoeﬀding’s inequality, simple version [36]). Suppose the loss is bounded above by one. Then,
+P
+
+bR(λ) −R(λ) ≤−x
+
+≤exp{−2nx2}.
+5
+
+This implies an upper conﬁdence bound
+bR+
+sHoef(λ) = bR(λ) +
+s
+1
+2n log
+1
+δ
+
+.
+(5)
+Applying Theorem 1 with
+ˆλ = ˆλsHoef △= inf
+n
+λ ∈Λ : bR+
+sHoef(λ′) < α, ∀λ′ ≥λ
+o
+= inf
+(
+λ ∈Λ : bR(λ) < α −
+s
+1
+2n log
+1
+δ
+)
+,
+(6)
+we can generate an RCPS, which we record formally below.
+Theorem 2 (RCPS from Hoeﬀding’s inequality). In the setting of Theorem 1, assume additionally that the
+loss is bounded by one. Then, TˆλsHoef is a (α, δ)-RCPS.
+In view of (6), UCB calibration with this version of Hoeﬀding’s bound results in a procedure that is
+simple to state—one selects the smallest set size such that the empirical risk on the calibration set is
+below α −
+p
+log(1/δ)/2n. This result is only presented for illustration purposes, however. Much tighter
+concentration results are available, so in practice we recommend using the better bounds described next.
+3.1.2
+Hoeﬀding–Bentkus bound
+In general, an upper conﬁdence bound can be obtained if the lower tail probability of bR(λ) can be controlled,
+in the following sense:
+Proposition 2. Suppose g(t; R) is a nondecreasing function in t ∈R for every R:
+P( bR(λ) ≤t) ≤g(t; R(λ)).
+Then, bR+(λ) = sup
+n
+R : g( bR(λ); R) ≥δ
+o
+satisﬁes (3).
+This result shows how a tail probability bound can be inverted to yield an upper conﬁdence bound. Put
+another way, g( bR(λ); R) is a conservative p-value for testing the one-sided null hypothesis H0 : R(λ) ≥R.
+From this perspective, Proposition 2 is simply a restatement of the duality between p-values and conﬁdence
+intervals.
+The previous discussion of the simple Hoeﬀding bound is a special case of this proposition, but stronger
+results are possible.
+The rest of this section develops a sharper tail bound that builds on two stronger
+concentration inequalities.
+We begin with a tighter version of Hoeﬀding’s inequality.
+Proposition 3 (Hoeﬀding’s inequality, tighter version [36]). Suppose the loss is bounded above by one. Then
+for any t < R(λ),
+P
+
+bR(λ) ≤t
+
+≤exp{−nh1(t; R(λ))},
+where h1(t; R) = t log(t/R) + (1 −t) log((1 −t)/(1 −R)).
+The weaker Hoeﬀding inequality is implied by Proposition 3 using the fact that h1(t; R) ≥2(t −R)2.
+Another strong inequality is the Bentkus inequality, which implies that the Binomial distribution is the worst
+case up to a small constant. The Bentkus inequality is nearly tight if the loss function is binary, in which
+case n bR(λ) is binomial.
+6
+
+Proposition 4 (Bentkus inequality [37]). Suppose the loss is bounded above by one. Then,
+P
+
+bR(λ) ≤t
+
+≤eP (Binom(n, R(λ)) ≤⌈nt⌉) ,
+where Binom(n, p) denotes a binomial random variable with sample size n and success probability p.
+Putting Proposition 3 and 4 together, we obtain a lower tail probability bound for bR(λ):
+gHB(t; R(λ))
+△= min
+ 
+exp{−nh1(t; R(λ))}, eP (Binom(n, R(λ)) ≤⌈nt⌉)
+!
+.
+By Proposition 2, we obtain a (1 −δ) upper conﬁdence bound for R(λ) as
+bR+
+HB(λ) = sup
+n
+R : gHB( bR(λ); R) ≥δ
+o
+.
+(7)
+We obtain ˆλHB from bR+
+HB(λ) as in (4) and conclude the following:
+Theorem 3 (RCPS from the Hoeﬀding–Bentkus bound). In the setting of Theorem 1, assume additionally
+that the loss is bounded by one. Then, TˆλHB is a (α, δ)-RCPS.
+Remark 4. The Bentkus inequality is closely related to an exact conﬁdence region for the mean of a binomial
+distribution. In the special where the loss takes values only in {0, 1}, this exact binomial result gives the most
+precise upper conﬁdence bound and should always be used; see Appendix B.
+3.1.3
+Waudby-Smith–Ramdas bound
+Although the Hoeﬀding–Bentkus bound is nearly tight for binary loss functions, for non-binary loss functions,
+it can be very loose because it does not adapt to the variance of L(Yi, Tλ(Xi)). As an example, consider the
+extreme case where Var(L(Yi, Tλ(Xi))) = 0, then bR(λ) = R(λ) almost surely, and hence bR+(λ) can be set
+as bR(λ). In general, when Var(L(Yi, Tλ(Xi))) is small, the tail probability bound can be much tighter than
+that given by the Hoeﬀding–Bentkus bound. We next present a bound that is adaptive to the variance and
+improves upon the previous result in most settings.
+The most well-known concentration result incorporating the variance is Bernstein’s inequality [38]. To
+accommodate the case where the variance is unknown and must be estimated, [39] proposed an empiri-
+cal Bernstein inequality which replaces the variance by the empirical variance estimate. This implies the
+following upper conﬁdence bound for R(λ):
+bR+
+eBern(λ) = bR(λ) + ˆσ(λ)
+r
+2 log(2/δ)
+n
++ 7 log(2/δ)
+3(n −1) ,
+where ˆσ2(λ) =
+1
+n −1
+n
+X
+i=1
+(L(Yi, Tλ(Xi)) −bR(λ))2. (8)
+However, the constants in the empirical Bernstein inequality are not tight, and improvements are possible.
+As an alternative bound that adapts to the unknown variance, [35] recently proposed the hedged capital
+conﬁdence interval for the mean of bounded random variables, drastically improving upon the empirical
+Bernstein inequality. Unlike all aforementioned bounds, it is not based on inverting a tail probability bound
+for bR(λ), but instead builds on tools from online inference and martingale analysis. For our purposes, we
+consider an one-sided variant of their result, which we refer to as the Waudby-Smith–Ramdas (WSR) bound.
+Proposition 5 (Waudby-Smith–Ramdas bound [35]). Let Li(λ) = L(Yi, Tλ(Xi)) and
+ˆµi(λ) =
+1/2 + Pi
+j=1 Lj(λ)
+1 + i
+, ˆσ2
+i (λ) =
+1/4 + Pi
+j=1(Lj(λ) −ˆµj(λ))2
+1 + i
+, νi(λ) = min
+(
+1,
+s
+2 log(1/δ)
+nˆσ2
+i−1(λ)
+)
+.
+Further let
+Ki(R; λ) =
+iY
+j=1
+{1 −νj(λ)(Lj(λ) −R)} ,
+bR+
+WSR(λ) = inf
+
+R ≥0 :
+max
+i=1,...,n Ki(R; λ) > 1
+δ
+
+.
+Then bR+
+WSR(λ) is a (1 −δ) upper conﬁdence bound for R(λ).
+7
+
+Since the result is a small modiﬁcation of the one stated in [35], for completeness we present a proof in
+Appendix A. As before, we then set ˆλWSR as in (4) to obtain the following corollary:
+Theorem 4 (RCPS from the Waudby-Smith–Ramdas bound). In the setting of Theorem 1, assume addi-
+tionally that the loss is bounded by 1. Then, TˆλWSR is a (α, δ)-RCPS.
+3.1.4
+Numerical experiments for bounded losses
+We now evaluate the aforementioned bounds on random samples from a variety of distributions on [0, 1].
+As an additional point of comparison, we also consider a bound based on the central limit theorem (CLT)
+that does not have ﬁnite-sample guarantees, formally deﬁned later in Section 3.3.
+In particular, given
+a distribution F for the loss L(Y, Tλ(X)), we sample L1, . . . , Ln
+i.i.d.
+∼
+F and compute the (1 −δ) upper
+conﬁdence bound of the mean for n ∈{⌊10r⌋: r = 2, 2.5, 3, 3.5, 4} and δ ∈{0.1, 0.01, 0.001}. We present the
+results for δ = 0.1 here and report on other choices of δs in Appendix D. Based on one million replicates
+of each setting, we report the coverage and the median gap between the UCB and true mean; the former
+measures the validity and the latter measures the power.
+We consider the Bernoulli distribution, F = Ber(µ), and the Beta distribution, F = Beta(a, b) with
+b = a(1/µ −1). Note that both distributions have mean µ. Since a user would generally be interested in
+setting α in [0.001, 0.1] in practice, we set µ ∈{0.1, 0.01, 0.001}. To account for diﬀerent levels of variability,
+we set a ∈{0.1, 1, 10} for the Beta distribution, with a larger a yielding a tighter concentration around
+the mean. We summarize the results in Figure 4a. First, we observe that the CLT does not always have
+correct coverage, especially when the true mean is small, unless the sample size is large. Accordingly, we
+recommend the bounds with ﬁnite-sample guarantees in this case. Next, as shown in Figure 4b, the WSR
+bound outperforms the others for all Beta distributions and has a similar performance to the HB bound for
+Bernoulli distributions. It is not surprising that the HB bound performs well for binary variables since the
+Bentkus inequality is nearly tight here. Based on these observations, we recommend the WSR bound for
+any non-binary bounded loss. When the loss is binary, one should use the exact result based on quantiles of
+the binomial distribution; see Appendix B.
+3.2
+Unbounded losses
+We now consider the more challenging case of unbounded losses. As a motivating example, consider the
+Euclidean distance of a point to its closest point in the prediction set as a loss:
+L (y, S) = inf
+n
+||y −y′||2 : y′ ∈S)
+o
+.
+Based on the well-known results of [40], we can show that it is impossible to derive a nontrivial upper conﬁ-
+dence bound for the mean of nonnegative random variables in ﬁnite samples without any other restrictions—
+see Proposition A.1 in Appendix A. As a result, we must restrict our attention to distributions that satisfy
+some regularity conditions. One reasonable approach is to consider distributions satisfying a bound on the
+coeﬃcient of variation, and we turn our attention to such distributions next.
+3.2.1
+The Pinelis–Utev inequality
+For nonnegative random variables with bounded coeﬀecient of variation, the Pinelis–Utev inequality gives a
+tail bound as follows:
+Proposition 6 (Pinelis and Utev [41], Theorem 7). Let cv(λ) = σ(λ)/R(λ) denote the coeﬃcient of varia-
+tion. Then for any t ∈(0, R(λ)],
+P( bR(λ) ≤t) ≤exp
+
+−
+n
+c2v(λ) + 1
+
+1 +
+t
+R(λ) log
+
+t
+eR(λ)
+
+.
+8
+
+µ = 0.1
+µ = 0.01
+µ = 0.001
+Ber(µ)
+Beta(0.1, ⋅)
+Beta(1, ⋅)
+Beta(10, ⋅)
+102
+102.5
+103
+103.5
+104 102
+102.5
+103
+103.5
+104 102
+102.5
+103
+103.5
+104
+0.25
+0.50
+0.75
+1.00
+0.80
+0.85
+0.90
+0.95
+1.00
+0.90
+0.95
+1.00
+0.92
+0.96
+1.00
+n
+Coverage
+methods
+Bernstein
+CLT
+HB
+sim−Hoef
+WSR
+(a) Coverage P( bR(λ) ≥R(λ))
+µ = 0.1
+µ = 0.01
+µ = 0.001
+Ber(µ)
+Beta(0.1, ⋅)
+Beta(1, ⋅)
+Beta(10, ⋅)
+102
+102.5
+103
+103.5
+104 102
+102.5
+103
+103.5
+104 102
+102.5
+103
+103.5
+104
+10−3
+10−2
+10−1
+10−3
+10−2
+10−1
+10−3
+10−2
+10−1
+10−3
+10−2
+10−1
+n
+R^ + −R
+methods
+Bernstein
+HB
+sim−Hoef
+WSR
+(b) Median of bR+(λ) −R(λ)
+Figure 4: Numerical evaluations of concentration results for bounded losses. We show the simple
+Hoeﬀding bound (5), HB bound (7), empirical Bernstein bound (8), CLT bound (10), and WSR bound
+(Proposition 5) with sample size n.
+Each row corresponds to a type of distribution and each column
+corresponds to a value of the mean. The CLT bound is excluded in (b) because it does not achieve the target
+coverage in most of the cases.
+By Proposition 2, this implies an upper conﬁdence bound of R(λ):
+bR+
+PU(λ) = sup
+(
+R : exp
+(
+−
+n
+c2v(λ) + 1
+"
+1 +
+bR(λ)
+R
+log
+ bR(λ)
+eR
+!#)
+≥δ
+)
+.
+(9)
+This result shows that a nontrivial upper conﬁdence bound can be derived if cv(λ) is known. When cv(λ) is
+unknown, we can treat it as a sensitivity parameter or estimate it based on the sample moments. Using this
+inequality and plugging in an upper bound cv for cv(λ), we deﬁne ˆλPU with the UCB calibration procedure
+(i.e, as in (4)) to get the following guarantee:
+Theorem 5 (RCPS from Pinelis–Utev inequality). In the setting of Theorem 1, suppose in addition that
+for each λ ∈Λ, cv(λ) ≤cv for some constant cv. Then, TˆλPU is a (α, δ)-RCPS.
+3.2.2
+Numerical comparisons of upper conﬁdence bounds
+Next, we numerically study the unbounded case with two competing bounds—the PU bound with cv esti-
+mated by the ratio between the standard error and the average, and a bound based on the CLT described
+explicitly later in Section 3.3 (which does not have ﬁnite-sample coverage guarantees). We consider three
+types of distributions—the Gamma distribution Γ(a, 1), the square-t distribution t2(v) (the distribution of
+the square of a t-distributed variable with degree of freedom v), and the log-normal distribution LN(µ, σ)
+(the distribution of exp(Z) where Z ∼N(µ, σ)). For each distribution, we consider a light-tailed and a
+heavy-tailed setting, and normalize the distributions to have mean µ = 1.
+The parameter settings are
+summarized in Table 1.
+Conducting our experiments as in the bounded case, we present the coverage and median gap with δ = 0.1
+in Figure 5. From Figure 5a, we see that the CLT bound nearly achieves the desired coverage for light-tailed
+distributions but drastically undercovers for heavy-tailed distributions. By contrast, the PU bound has valid
+9
+
+Light−tailed
+Heavy−tailed
+Gamma
+Squared−t
+Log−normal
+102
+102.5
+103
+103.5
+104
+102
+102.5
+103
+103.5
+104
+0.75
+0.80
+0.85
+0.90
+0.95
+1.00
+0.8
+0.9
+1.0
+0.7
+0.8
+0.9
+1.0
+n
+Coverage
+methods
+CLT
+PU
+(a) Coverage P( bR(λ) ≥R(λ))
+Light−tailed
+Heavy−tailed
+Gamma
+Squared−t
+Log−normal
+102
+102.5
+103
+103.5
+104
+102
+102.5
+103
+103.5
+104
+0
+1
+2
+0.0
+0.2
+0.4
+0.6
+0.00
+0.25
+0.50
+0.75
+1.00
+n
+R^ + −R
+methods
+CLT
+PU
+(b) Median of bR+(λ) −R(λ)
+Figure 5: Numerical evaluations of the PU bound. We compare the bound from (9) with the estimated
+coeﬃcient of variation and the CLT bound (10), with sample size n from each distribution in Table 1. Each
+row corresponds to a type of distribution and each column corresponds to a value of the mean.
+coverage in these settings. From Figure 5b, we see that the CLT bound is much tighter in all cases, though
+the gap bewteen two bounds shrink as the sample size grows. Therefore, we recommend the CLT bound
+when the losses are believed to be light-tailed and the sample size is moderately large, and the PU bound
+otherwise.
+Gamma
+Squared-t
+Log-normal
+light-tailed
+a = 1
+v = 100
+(µ, σ) = (−0.125, 0.5)
+heavy-tailed
+a = 0.05
+v = 4
+(µ, σ) = (−2, 2)
+Table 1: Distributions considered for the unbounded case.
+3.3
+Asymptotic results
+When no ﬁnite-sample result is available, we can still use the UCB calibration procedure to get prediction
+sets with asymptotic validity. Suppose the loss L(Y, Tλ(X)) has a ﬁnite second moment for each λ. Then,
+since the losses for each λ are i.i.d., we can apply the CLT to get
+lim
+n→∞P
+ √n( bR(λ) −R(λ))
+ˆσ(λ)
+≤−t
+!
+≤Φ (−t) ,
+where Φ denotes the standard normal cumulative distribution function (CDF). This yields an asymptotic
+upper conﬁdence bound for R(λ):
+bR+
+CLT(λ) = bR(λ) + Φ−1(1 −δ)ˆσ(λ)
+√n
+.
+(10)
+Let ˆλCLT = inf{λ ∈Λ : bR+
+CLT(λ′) < α, ∀λ′ ≥λ}. Then, TˆλCLT is an asymptotic RCPS, as stated next.
+10
+
+Theorem 6 (Asymptotically valid RCPS). In the setting of Theorem 1, assume additionally that L(Y, Tλ(X))
+has a ﬁnite second moment for each λ. Then,
+lim sup
+n→∞P
+ R(TˆλCLT) > α
+
+≤δ.
+As a technical remark, note this result requires only a pointwise CLT for each λ ∈Λ, analogously to
+the ﬁnite-sample version presented in Theorem 1. Since this asymptotic guarantee holds for many realistic
+choices of loss function and data-generating distribution, this approximate version of UCB calibration greatly
+extends the reach of our proposed method.
+3.4
+How large should the calibration set be?
+The numerical results presented previously give rough guidance as to the required size of the calibration set.
+While UCB calibration is always guaranteed to control the risk by Theorem 1, if the calibration set is too
+small then the sets may be larger than necessary. Since our procedure ﬁnds the last point where the UCB
+bR+(λ) is above the desired level α, it will produce sets that are nearly as small as possible when bR+(λ) is
+close to the true risk R(λ). As a rule of thumb, we say that we have a suﬃcient number of calibration points
+when bR+(λ) is within 10% of R(λ). The sample size required will vary with the problem setting, but use
+this heuristic to analyze our simulation results to get a few representative values.
+Figure 4b reports on the bounded loss case. The left column shows that when we seek to control the
+risk at the relatively loose α = 0.1 level, around 1, 000 calibration points suﬃce; the middle panel shows
+that when we seek to control the risk at level α = 0.01, a few thousand calibration points suﬃce; and the
+right column shows that for the strict risk level α = 0.001, about 10, 000 calibration points suﬃce. The
+required number of samples will increase slightly if we ask for a higher conﬁdence level (i.e., smaller δ),
+but the dependence on δ is minimal since the bounds will roughly scale as log(1/δ)—this scaling can be
+seen explicitly in the simple Hoeﬀding bound (5). Examining the unbounded loss examples presented in
+Figure 5b, we see that about 1, 000 calibration points suﬃce for the student-t and log-normal examples, but
+that about 10, 000 calibration points are needed for the Gamma example. In summary, 1, 000 to 10, 000
+calibration points are suﬃcient to generate prediction sets that are not too conservative, i.e., sets that have
+risk that are not far below the desired level α.
+4
+Generating the Set-Valued Predictors
+In this section, we describe one possible construction of the nested prediction sets Tλ(x) from a given predictor
+ˆf. Any collection of the sets can be used to control the risk by Theorem 1, but some may produce larger
+sets than others. Here, we present one choice and show that it is approximately optimal for an important
+class of losses.
+In the following subsections, we denote the inﬁnitesimal risk of a continuous response y with respect to
+a set S ⊆Y as its conditional risk density,
+ρx(y, S) = L(y, S)pY |X=x(y).
+We will present the results for the case where y is continuous, but the same algorithm and theoretical result
+hold in the discrete case if we instead take ρx(y, S) = L(y, S)P(Y = y|X = x).
+4.1
+A greedy procedure
+We now describe a construction of the tolerance functions Tλ based on the estimated conditional risk density.
+We assume that our predictor is ˆpx(y), an estimate of pY |X=x(y), and we let ˆρx(y, S) = L(y, S)ˆpx(y).
+Algorithm 1 indexes a family of sets Tλ nested in λ ≤0 by iteratively including the riskiest portions of Y, then
+11
+
+Algorithm 1 Greedy Sets
+Input: λ, risk density estimate ˆρx, step size dζ
+1: procedure GreedySets(λ, ˆρx)
+2:
+T ←∅
+3:
+ζ ←a large number (e.g., B in the bounded case)
+4:
+while ζ > −λ do
+5:
+ζ ←ζ −dζ
+6:
+T ←T ∪
+
+y′ ∈T c : ˆρx(y′, T ) > ζ
+	
+7:
+return T
+Output: The nested set with parameter λ at x: Tλ(x)
+Figure 6: Optimal prediction sets. In the special case where ˆρx(y, S) does not depend on S, Tλ(x) from
+Algorithm 1 is made up of the y ∈Y whose conditional risk density exceeds a threshold ζ.
+re-computing the risk densities of the remaining elements. The general greedy procedure is computationally
+convenient; moreover, it is approximately optimal for a large class of useful loss functions, as we will prove
+soon.
+Remark 5. Algorithm 1 is greedy because it only considers the next dζ portion of risk to choose which
+element to add to the current set. One can imagine versions of this algorithm which look ahead several steps.
+Such schemes may be tractable in some cases, but are generally much more computationally expensive.
+4.2
+Optimality properties of the greedy procedure
+Next, we outline a setting where our greedy algorithm is optimal. Suppose our loss function has the simple
+form L(y, S) = Ly1{y̸∈S}, for constants Ly. This assumption on L describes the case where every y has a
+diﬀerent, ﬁxed loss if it is not present in the prediction set, such as in our MRI classiﬁcation example in the
+introduction. In this case, the sets returned by Algorithm 1 have the form
+Tλ(x) =
+
+y′ : ˆρx(y′, ∅) ≥ζ(λ)
+	
+.
+That is, we return the set of response variables with risk density above some threshold; see Figure 6 for a
+visualization.
+Now, imagine that we know the exact conditional probability density, pY |X=x(y), and therefore the
+exact ρx(y, S). The prediction sets produced by Algorithm 1 then have the smallest average size among all
+procedure that control the risk, as stated next.
+Theorem 7 (Optimality of the greedy sets). In the setting above, let T ′ : X →Y′ be any set-valued predictor
+such that R(T ′) ≤R(Tλ), where Tλ is given by Algorithm 1. Then,
+E[|Tλ(X)|] ≤E[|T ′(X)|].
+12
+
+Here, | · | denotes the set size: Lebesgue measure for continuous variables and counting measure for
+discrete variables. This result is a generalization of a result of [14] to our risk-control setting. While we do
+not exactly know the risk density in practice and must instead use a plug-in estimate, this result gives us
+conﬁdence that our set construction is a sensible one. The choice of the parameterization of the nested sets
+is the analogue to the choice of the score function in the more specialized setting of conformal prediction
+[33], and it is known in that case that there are many choices that each have their own advantages and
+disadvantages. See [14, 16] for further discussion of this point in that context.
+4.3
+Optimality in a more general setting
+Next, we characterize the set-valued predictor that leads to the smallest sets for a wider class of losses.
+Suppose our loss takes the form
+L(y; S) =
+Z
+z∈Sc ℓ(y, z)dµ(z),
+for some nonnegative ℓand a ﬁnite measure µ. The function ℓmeasures the cost of not including z in the
+prediction set when true response is y. For instance, ℓ(y, z) = LyI(y = z) and µ is the counting measure in
+the case considered above. Then the optimal Tλ is given by
+Tλ(x) = {z : E[ℓ(Y ; z) | X = x] ≥−λ},
+(11)
+for λ ∈Λ ⊂(−∞, 0], as stated next.
+Theorem 8 (Optimality of set predictors, generalized form). In the setting above, let T ′ : X →Y′ be any
+set-valued predictor such that R(T ′) ≤R(Tλ), where Tλ is given by (11). Then,
+E[|Tλ(X)|] ≤E[|T ′(X)|].
+For the case considered in Section 4.2, E[ℓ(Y ; z) | X = x] = Lzp(z | x), so we see Theorem 8 includes
+Theorem 7 as a special case. As before, in practice we must estimate the distribution of Y given X from
+data, so we would not typically be able to implement this predictor exactly. Moreover, even if we perfectly
+knew the distribution of Yi given X = x, the sets in (11) may not be easy to compute. Nonetheless, it is
+encouraging that we can understand the optimal set predictor for this important set of losses.
+5
+Examples
+Next, we apply our proposed method to ﬁve prediction problems. For each task, we introduce a relevant loss
+function and set-valued predictor, and then evaluate the performance of UCB calibration. The reader can
+reproduce our experiments using our public GitHub repository.
+5.1
+Classiﬁcation with a class-varying loss
+Suppose each observation has a single correct label y, and each label incurs a diﬀerent, ﬁxed loss if it is not
+correctly predicted:
+L(y, S) = LyI{y /∈S}.
+This was the setting of our oracle result in Section 4.2, and the medical diagnostic setting from the intro-
+duction also has this form. We would like to predict a set of labels that controls this loss. Towards that end,
+we deﬁne the family of nested sets
+Tλ(x) =
+
+y : ˆπx(y) > −λ
+	
+,
+where ˆπx : Y →[0, 1] represents a classiﬁer, usually designed to estimate P(Y |X). This family of nested
+sets simply returns the set of classes whose estimated conditional probability exceeds the value −λ, as in
+Figure 6. (The negative on λ comes from the deﬁnition of nesting, which asks sets to grow as λ grows.)
+13
+
+0.090
+0.095
+0.100
+0.105
+risk
+0
+100
+density
+2
+4
+6
+8
+10
+size
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+RCPS-CLT
+RCPS-HB
+RCPS-WSR
+Figure 7: Prediction set results on Imagenet.
+The risk and set sizes for an RCPS are plotted as
+histograms over 100 diﬀerent random splits of Imagenet, with parameters α = 0.1 and δ = 0.1. For details
+see Section 5.1. The set sizes for all three methods overlap.
+Here, we conduct an experiment on Imagenet—the gold-standard computer vision classiﬁcation dataset—
+comprised of one thousand classes of natural images [42]. For this experiment, we assign the loss Ly of class
+y ∈{1, ..., 1000} as L(y)
+i.i.d.
+∼Unif(0, 1). We use a pretrained ResNet-152 from the torchvision repository
+as the base model ˆπx [43, 44]. We then choose ˆλ as in Theorem 4. Figure 7 summarizes the performance of
+our prediction sets over 100 random splits of Imagenet-Val with 30,000 points used for calibration and the
+remaining 20,000 used for evaluation. The RCPS procedure controls the risk at the correct level and the
+sets have reasonable sizes.
+5.2
+Multi-label classiﬁcation
+Next, we consider the multi-label classiﬁcation setting where each observation may have multiple correspond-
+ing correct labels; i.e., the response y is a subset of {1, ..., K}. Here, we seek to return prediction sets that
+control the loss
+L(y, S) = 1 −|y ∩S|
+|y|
+(12)
+at level α. That is, we want to capture at least a 1 −α proportion of the correct labels for each observation,
+on average. In this case, our nested sets
+Tλ(x) =
+
+z ∈{1, ..., K} : ˆπx(z) > −λ
+	
+depend on a classiﬁer ˆπx that does not assume classes are exclusive, so their conditional probabilities generally
+do not sum to 1. Note that in this example we choose the output space Y′ to be Y = 2{1,...,K} (rather than
+2Y as was done our previous example), since here Y is already a suitable space of sets.
+To evaluate our method, we use the Microsoft Common Objects in Context (MS COCO) dataset, a
+large-scale, eighty-category dataset of natural images in realistic and often complicated contexts [45]. We
+use TResNet as the base model, since it has the state-of-the-art classiﬁcation performance on MS COCO
+at the time of writing [46]. The standard procedure for multi-label estimation in computer vision involves
+training a convolutional neural network to output the vector of class probabilities, and then thresholding the
+probabilities in an ad-hoc manner return a set-valued prediction. Our method follows this general approach,
+but rigorously chooses the threshold so that the risk is controlled at a user-speciﬁed level α, which we take
+to be 10%. To set the threshold, we choose ˆλ as in Theorem 4 using 4,000 calibration points, and then
+we evaluate the risk on an additional test set of 1,000 points. In Figure 8 we report on our our method’s
+performance on ten randomly selected images from MS COCO, and in Figure 9 we quantitatively summarize
+the performance of our prediction sets. Our method controls the risk and gives sets with reasonable sizes.
+In this setting, it is also possible to consider a conformal prediction baseline. To frame this problem in a
+way such that conformal prediction can be used, we follow [19] and say that a test point is covered correctly
+if y ⊂T(x) and miscovered otherwise. That is, a point is covered only if the prediction set contains all true
+labels. The conformal baseline then uses the same set of set-valued predictors as above, but chooses the
+threshold as in [19] so that there is probability 1 −α that all of the labels per image are correctly predicted.
+14
+
+person
+backpack
+handbag
+suitcase
+chair
+dining table
+potted plant
+dining table
+potted plant
+handbag
+person
+backpack
+suitcase
+chair
+zebra
+zebra
+car
+parking meter
+car
+parking meter
+bicycle
+car
+bench
+dog
+bicycle
+car
+bench
+dog
+person
+bicycle
+car
+skateboard
+bench
+bench
+bicycle
+person
+car
+skateboard
+cup
+potted plant
+dining table
+vase
+cup
+potted plant
+dining table
+vase
+train
+clock
+train
+clock
+person
+horse
+carrot
+car
+car
+person
+horse
+carrot
+giraffe
+giraffe
+potted plant
+vase
+potted plant
+vase
+Figure 8: Multi-label prediction set examples on MS COCO. Black classes are correctly identiﬁed
+(true positives), blue ones are spurious (false positives), and red ones are missed (false negatives).
+0.025
+0.050
+0.075
+0.100
+risk
+0
+100
+density
+0
+5
+10
+15
+20
+25
+30
+size
+0.00
+0.05
+0.10
+0.15
+0.20
+0.25
+RCPS-CLT
+RCPS-HB
+RCPS-WSR
+Conformal
+Figure 9: Multi-label prediction set results on MS COCO. The risk and set sizes are plotted as
+histograms over 1000 diﬀerent random splits of MS COCO, with parameters α = 0.1 and δ = 0.1. We also
+include a conformal baseline. For details see Section 5.2.
+In Figure 8, we ﬁnd that the conformal baseline returns larger prediction sets. The reason is that the notion
+of coverage used by conformal prediction is more strict, requiring that all classes are covered. By contrast,
+the RCPS method can incorporate less brittle loss functions, such as the false negative rate in (12).
+5.3
+Hierarchical classiﬁcation
+Next, we discuss the application of RCPS to prediction problems where there exists a hierarchy on K labels.
+Here, we have a response variable y ∈{1, . . . , K} with the structure on the labels encoded as a tree with
+nodes V and edges E with a designated root node, ﬁnite depth D, and K leaves, one for each label. To
+represent uncertainty while respecting the hierarchical structure, we seek to predict a node ˆy ∈V that is as
+precise as possible, provided that that is an ancestor of y. Note that with our tree structure, each v ∈V
+can be interpreted as a subset of {1, . . . , K} by taking the set of all the leaf-node descendants of v, so this
+setting is a special case of the set-valued prediction studied in this work.
+We now turn to a loss function for this hierarchical label structure. Let d : V × V →Z be the function
+that returns the length of the shortest path between two nodes, let A : V →2V be the function that returns
+the ancestors of its argument, and let P : V →2V be the function that returns the set of leaf nodes that are
+descendants of its argument. Further deﬁne a hierarchical distance
+dH(v, u) =
+inf
+a∈A(v){d(a, u)}.
+15
+
+hot pot
+dish
+soup bowl
+sandal
+footwear
+Loafer
+window screen
+screen
+fire screen
+hot pot
+dish
+consomme
+jack-o'-lantern
+lamp
+candle
+burrito
+dish
+meat loaf
+candle
+lamp
+table lamp
+candle
+lamp
+spotlight
+dish
+burrito
+meatloaf
+pizza
+pot pie
+stew
+soup
+consomme
+hot pot
+nutriment
+Figure 10: Hierarchical predictions. We show randomly selected examples of hierarchical prediction sets
+on Imagenet where the point prediction is incorrect but the prediction sets cover the true label. The black
+label is the ground truth class, the blue label is our prediction, and the red label is the top-1 output of a
+ResNet-18. Our prediction is an ancestor in the WordNet hierarchy of both the true class and the model’s
+top-1 prediction. See the rightmost panel for an example subtree from the WordNet hierarchy.
+0.045
+0.046
+0.047
+0.048
+0.049
+0.050
+0.051
+risk
+0
+100
+density
+0
+1
+2
+3
+4
+5
+6
+7
+8
+height
+10
+5
+10
+3
+10
+1
+RCPS-CLT
+RCPS-HB
+RCPS-WSR
+Figure 11: The risk and height of RCPS for hierarchical classiﬁcation. We show histograms of
+risk and height (distance from the leaf node) over 100 diﬀerent random splits of the Imagenet dataset, with
+parameters α = 0.05 and δ = 0.1. For details see Section 5.3.
+For a set of nodes S ∈2V , we then deﬁne the set-valued loss
+L(y, S) = inf
+s∈S{dH(y, s)}/D.
+This loss returns zero if y is a child of any element in S, and otherwise returns the minimum distance between
+any element of S and any ancestor of y, scaled by the depth D.
+Lastly, we develop set-valued predictors that respect the hierarchical structure. Deﬁne a model ˆf : X →
+[0, 1]K that outputs an estimated probability for each class. For any x ∈X, let ˆy(x) = arg maxk ˆf(x)k be
+the class with highest estimated probability. We also let g(v, x) =
+P
+k∈P(v)
+ˆf(x)k be the sum of scores of leaves
+descended from v. Then, we choose our family of set-valued predictors as:
+Tλ(x) =
+\
+{a∈A(ˆy(x)) : g(a,x)≥−λ}
+P(a).
+In words, we return the leaf nodes of the smallest subtree that includes ˆy(x) that has estimated probability
+mass of at least −λ. This subtree has a unique root v ∈V , so can equivalently view Tλ(x) as returning the
+node v.
+We return to the Imagenet dataset for our empirical evaluations. The Imagenet labels form a subset of
+the WordNet hierarchy [47], and we parsed them to form the tree. Our results are akin to those of [48],
+although their work does not have distribution-free statistical guarantees and instead takes an optimization
+approach to the problem. The maximum depth of the WordNet hierarchy is D = 14. Similarly to Section 5.1,
+16
+
+Figure 12: Polyp segmentations. We show examples of polyps along with prediction sets that capture
+90% of the true polyp pixels per polyp per image, generated with our method using the CLT bound. White
+pixels are correctly identiﬁed polyp pixels (true positives), blue ones are spurious (false positives), and red
+ones are missed (false negatives). The top two rows show examples with a single polyp per image, and the
+second two rows show examples with two polyps per image.
+0.06
+0.08
+0.10
+0.12
+risk
+0
+10
+20
+30
+density
+0
+25
+50
+75
+100
+125
+150
+175
+200
+225
+set size as a fraction of polyp size
+10
+6
+10
+4
+10
+2
+RCPS-CLT
+RCPS-HB
+RCPS-WSR
+Figure 13: Polyp segmentation results. The risk and normalized set size are plotted as histograms over
+diﬀerent random splits of the polyp dataset, with parameters α = 0.1 and δ = 0.1. For details see Section 5.4.
+we used a pretrained ResNet-18 from the torchvision repository as the base model for Algorithm 1, and
+chose ˆλ as in Theorem 4. Figure 10 shows several examples of our hierarchical predictions on this dataset,
+and Figure 11 summarizes the performance of the predictor. As before, we ﬁnd that RCPS controls the risk
+at the desired level, and the predictions are generally relatively precise (i.e., of low depth in the tree).
+5.4
+Image segmentation
+In the binary segmentation setting, we are given an d1 × d2 × c-dimensional image x ∈Rd1×d2×c and seek
+to predict a set of object pixels y ⊆G, where G =
+
+(i, j) : 1 ≤i ≤d1, 1 ≤j ≤d2
+	
+. Intuitively, y is a set of
+pixels that diﬀerentiates objects of interest from the backdrop of the image.
+Using the technique in Section 5.2, one may easily return prediction sets that capture at least a 1 −α
+proportion of the object pixels from each image with high probability. However, if there are multiple objects
+in the image, we may want to ensure our algorithm does not miss an entire, distinct object. Therefore, we
+target a diﬀerent goal: returning prediction sets that capture a 1 −α fraction of the object pixels from each
+object with high probability. Speciﬁcally, consider h : Y →2Y to be an 8-connectivity connected components
+function [49]. Then h(y) is a set of distinct regions of object pixels in the input image. For example, in the
+bottom right image of Figure 12, h(y) would return two subsets of G, one for each connected component.
+With this notation, we want to predict sets of pixels S ⊆G that control the proportion of missed pixels per
+17
+
+object:
+L(y, S) =
+P
+y′∈h(y)
+|y′ \ S|/|y′|
+|h(y)|
+.
+With this loss, if there are regions of diﬀerent sizes, we would still incur a large loss for missing an entire
+small region, so this loss better captures our goal in image segmentation.
+Having deﬁned our loss, we now turn to our set construction. Standard object segmentation involves a
+model ˆf : Rd1×d2 →[0, 1]d1×d2 that outputs approximate scores (e.g., after a sigmoid function) for each pixel
+in the image, then binarizes these scores with some threshold. To further our goal of per-object validity,
+in this experiment we additionally detect local peaks in the raw scores via morphological operations and
+connected components analysis, then re-normalize the connected regions by their maximum value. We will
+refer to this renormalization function as r : [0, 1]d1×d2 →[0, 1]d1×d2, and describe it precisely in Appendix E.
+We choose our family of set-valued predictors as
+Tλ =
+
+(i, j) : r( ˆf(x))i,j ≥−λ
+	
+,
+and then select ˆλ as in Theorem 4 or as in Theorem 6.
+We evaluated our method with an experiment combining several open-source polyp segmentation datasets:
+Kvasir [50], Hyper-Kvasir [51], CVC-ColonDB and CVC-ClinicDB [52], and ETIS-Larib [53].
+Together,
+these datasets include 1,781 examples of segmented polyps, and in each experiment we use 1,000 examples
+for calibration and the remainder as a test set. We used PraNet [54] as our base segmentation model. In
+Figure 12 we report on our method’s performance on 20 randomly selected images from the polyp datasets
+that contain at least two polyps, and in Figure 13 we summarize the quantitative performance of our
+prediction sets. RCPS again control the risk at the desired level, and the average prediction set size size is
+comparable to the average polyp size.
+5.5
+Protein structure prediction
+We ﬁnish the section by demonstrating RCPS for protein structure prediction, inspired by the recent success
+of AlphaFold. Proteins are biomolecules comprising one or more long chains of amino acids; when amino acids
+form a chemical bond to form a protein, they eject a water molecule and become amino acid residues. Each
+amino acid residue has a common amine-carboxyl backbone and a diﬀerent side chain with electrical and
+chemical properties that together determine the 3D conformation of the whole protein, and thus its function.
+The so-called protein structure prediction problem is to predict a protein’s three dimensional structure from
+a list of its residues. A critical step in AlphaFold’s protein structure prediction pipeline involves predicting
+the distance between the β-carbons (the second-closest carbon to the side-chain) of each residue. These
+distances are then used to determine the protein’s 3D structure. We express uncertainty directly on the
+distances between β-carbons.
+Concretely, consider the alphabet Σ = {A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y }, where
+each letter is the common abbreviation for an amino acid (for example, A denotes Alanine). The feature
+space consists of all possible words over Σ, commonly denoted as X = Σ∗. The label space Y is the set of
+all symmetric matrices with positive elements of any side length. In an example (x, y) ∈X × Y, the entry
+yi,j deﬁnes the distance in 3D space of residues xi and xj; hence, y ∈R|x|×|x|, and yi,j = yj,i. We seek to
+predict sets S that control the ℓ1 projective distance from y to S:
+L(y, S) = inf
+s∈S
+
+
+
+1
+|x|2
+X
+i,j
+|yi,j −si,j|
+
+
+.
+Now we turn to the set construction, which we specialize to the AlphaFold pipeline. Because the Al-
+phaFoldv2 codebase was not released at the time this paper was written, we use AlphaFoldv1 here [55]. For
+a residue chain x ∈X, consider a variadic function h(x) ∈[0, 1]|x|×|x|×K, where K is a positive integer and
+18
+
+3D rendering of T0995
+prediction (Å)
+length of lower interval (Å)
+length of upper interval (Å)
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0
+Uncertainty sets for protein T0995
+Figure 14: Protein distograms. We show AlphaFold’s predicted distances between residues of protein
+T0995 along with prediction sets at α = 2˚A and δ = 0.1. The prediction set for the whole protein is the
+union of distance intervals for each pair of residues, and the right two panels report the distance from the
+point prediction to the lower and upper endpoints for each of these intervals.
+1.6
+1.8
+2.0
+2.2
+risk (Å)
+0
+1
+2
+3
+density
+0
+2
+4
+6
+8
+10
+12
+14
+16
+size
+10
+2
+10
+1
+RCPS-CLT
+Figure 15: Protein structure prediction results. The risk in ˚A and interval size (pooling all entries of
+each distogram) in ˚A are plotted as histograms, repeating for many random splits of the CASP-13 test-set.
+P
+k
+h(x)i,j,k = 1 for all ﬁxed choices of i and j. The function h represents a probability distribution over
+distances d1, ..., dK for each distance between residues as a histogram; the output of h is referred to as a
+distogram. Given a distogram, we construct the family of set valued predictors
+Tλ(x) =
+Y
+0≤i,j≤|x|
+
+dk : h(x)i,j,k ≥−λ
+	
+and choose ˆλ as in (4), as usual.
+We evaluated our set construction algorithm on the 71 test points from the CASP-13 challenge on which
+DeepMind released the output of their model.
+In the AlphaFoldv1 pipeline, K = 64 and d1, ..., dk =
+2˚A, ..., 20˚A. Since the data prepossessing pipepline was not released, no ground truth distance data is avail-
+able. Instead, we generated semi-synthetic data points by sampling once from the distogram corresponding
+to each protein. We choose parameters α = 2˚A and δ = 0.1, and, due to the small sample size (35 calibration
+and 36 test points), we only report results using the CLT bound, because the exact concentration results are
+hopelessly conservative with only 35 calibration points.
+Figure 14 shows an example of our prediction sets on protein T0995 (PDB identiﬁer 3WUY) [56]. Fig-
+ure 15 shows the quantitative performance of the CLT, which nearly controls the risk. The strong performance
+of the CLT in this small-sample regime is encouraging and suggests that our methodology can be applied to
+problems even with small calibration sets.
+6
+Other Risk Functions
+Thus far we have deﬁned the risk to be the mean of the loss on a single test point. In this section we consider
+generalizations to a broader range of settings in which the risk function is a functional other than the mean
+19
+
+and/or the loss is a function of multiple test points. To this end, recall that there are two mathematical
+ingredients to the UCB calibration framework. First, there is a family of possible predictors such that the
+notion of error is monotone in the parameter indexing the family, λ ∈Λ. Second, for each element λ, we have
+a pointwise concentration result that gives the upper conﬁdence bound for the error at that λ. With these
+two ingredients, we carry out UCB calibration by selecting ˆλ as in (4), which has error-control guarantees
+as in Theorem 1. We demonstrate the scope of this more general template with a few examples.
+6.1
+Uncertainty quantiﬁcation for ranking
+We consider the problem of uncertainty quantiﬁcation for learning a ranking rule [see, e.g., 57]. We assume
+we have an i.i.d. sequence of points, (X1, Y1), . . . , (Xm, Ym), where Y ∈{1, . . . , k}. We wish to learn a ranking
+rule: r : X ×X →R such that r(Xi, Xj) tends to be positive when Yi > Yj and tends to be negative otherwise.
+Given a ranking rule ˆr : X ×X →R that has been estimated based on the data (Xn+1, Yn+1), . . . , (Xm, ym),
+we consider calibrating this ranking rule to control loss based on (X1, Y1), . . . , (Xn, Yn).
+To quantify uncertainty in this setting, we use a set-valued ranking rule Tλ : X × X →2R.
+Here,
+higher uncertainty is encoded by returning a larger set. We assume that we have a family of such predictors
+satsifying the following monotonicity property:
+λ < λ′ =⇒Tλ(x1, x2) ⊂Tλ′(x1, x2).
+(13)
+For example, we could take Tλ(x1, x2) = (ˆr(x1, x2) −λ, ˆr(x1, x2) + λ) for λ ≥0. Our notion of error control
+here is that we wish to correctly determine which response is larger, so we use the following error metric:
+L(y1, y2, S) = 1{sup S<0}1{y1>y2} + 1{inf S>0}1{y1<y2},
+which says that we incur loss one if the prediction S contains no values of the correct sign and zero otherwise.
+More generally, we could use any loss function with the following nesting property:
+S ⊂S′ =⇒L(y1, y2, S) ≥L(y1, y2, S′).
+(14)
+We then deﬁne the risk as
+R(Tλ) = E[L(Y1, Y2, Tλ(X1, X2)],
+(15)
+which can be estimated via its empirical version on the holdout data:
+bR(Tλ) =
+X
+1≤i<j≤n
+L(Yi, Yj, Tλ(Xi, Xj)).
+(16)
+Suppose additionally that we have an upper conﬁdence bound for R(Tλ) for each λ, as in (3). In this setting,
+we can arrive at such an upper bound using the concentration of U-statistics, such as the following result.
+Proposition 7 (Hoeﬀding–Bentkus–Maurer inequality for bounded U-statistics of order two). Consider the
+setting above with any loss function L bounded by one. Let m = ⌊n/2⌋. Then, for any t ∈(0, R(λ)),
+P( bR(λ) ≤t) ≤gU(t; R(λ))
+△= min
+
+exp {−mh1(t; R(λ))} , eP (Binom(m; R(λ)) ≤⌈mt⌉)
+inf
+ν>0 exp
+
+−nν
+2
+
+R(λ)
+1 + 2G(ν) −t
+ !
+,
+where G(ν) = (eν −ν −1)/ν.
+With this upper bound, we can implement UCB calibration by selecting ˆλ through Proposition 2. This
+gives a ﬁnite-sample, distribution-free guarantee for error control of the uncertainty-aware ranking function
+Tˆλ:
+20
+
+Theorem 9 (RCPS for ranking). Consider the setting above with any loss function bounded by one. Then,
+with probability at least 1 −δ, we have R(Tˆλ) ≤α.
+This uncertainty quantiﬁcation is natural; as λ grows, the set Tλ(Xi, Xj) will more frequently include
+both positive and negative numbers, in which case the interpretation is that our ranking rule Tλ abstains
+from ranking those two inputs. The UCB calibration tunes λ so that we abstain from as few pairs as possible,
+while guaranteeing that the probability of making a mistake on inputs for which we do not abstain is below
+the user-speciﬁed level α.
+6.2
+Uncertainty quantiﬁcation for metric learning
+We next consider the problem of supervised metric learning, where we have an i.i.d. sequence of points
+(X1, Y1), . . . , (Xm, Ym), with Y = {1, . . . , k}.
+We wish to train a metric d : X × X →R such that it
+separates the classes well. That is, we wish for d(Xi, Xj) to be small for points such that Yi = Yj and
+large otherwise. We assume that we have ﬁt a metric ˆd based on the data (Xn+1, Yn+1), . . . , (Xm, Ym) and
+our goal is to calibrate this metric based on (X1, Y1), . . . , (Xn, Yn). Our development will closely track the
+ranking example, again leveraging U-statistics of order two.
+To formulate a notion of uncertainty quantiﬁcation for metric learning, we express uncertainty by intro-
+ducing a set-valued metric,Tλ : X × X →2R, where greater uncertainty is represented by returning a larger
+subset of R. We assume that we have a family of such set-valued metrics that have the monotonicity property
+in (13). For example, we could take Tλ(x1, x2) = ( ˆd(x1, x2) −λ, ˆd(x1, x2) + λ) for λ ≥0. To formalize our
+goal that the classes be well separated, we take as our loss function the following:
+L(y1, y2, S) = (inf(S) −1)+1{y1=y2} + (sup(S) −1)−1{y1̸=y2},
+where S is a set-valued prediction of the distance between x1 and x2. This choice implies that we take
+a distance of one to be the decision boundary between classes, so that points with distance less than one
+should correspond to the same class. We incur an error if two points in the same class are predicted to have
+distance above one. This particular parameterization is somewhat arbitrary, and we could instead take any
+loss satisfying the nesting property in (14). We then deﬁne the risk as in (15) and the empirical risk as in
+(16). From here we can adopt the upper bound from Proposition 7 if we additionally restrict ˆd to return
+values in a bounded set. We again implement UCB calibration by selecting ˆλ as in (4), which yields the
+following guarantee.
+Theorem 10 (RCPS for metric learning). In the setting above, suppose the loss function is bounded by 1.
+Then, with probability at least 1 −δ, we have R(Tˆλ) ≤α.
+6.3
+Adversarially robust uncertainty quantiﬁcation
+Finally, we brieﬂy remark how our framework might be extended to handle uncertainty quantiﬁcation with
+adversarial robustness [see, e.g., 58, 59]. In this setting, the goal is to ﬁt a model that performs well even
+for the worst-case perturbation of each input data point over some limited set of perturbations, such as an
+ℓ∞ball. This notion of robust loss can be translated into our framework by deﬁning the appropriate risk
+function. For example, we could consider the risk function
+R(rob)(T ) = E
+"
+sup
+x′∈Bϵ(X)
+L(Y, T (x′))
+#
+,
+where Bϵ(X) is an ℓ∞ball of radius ϵ centered at X. For a family of set-valued functions {Tλ}λ∈Λ, one can
+estimate the risk on a holdout set and then choose the value of λ with the UCB calibration algorithm, resulting
+in a ﬁnite-sample guarantee on the risk. While carrying out this procedure would require computational
+innovations, our results establish that it is statistically valid.
+21
+
+7
+Discussion
+Risk-controlling prediction sets are a new way to represent uncertainty in predictive models. Since they
+apply to any existing model without retraining, they are straightforward to use in many situations. Our
+approach is closely related to that of split conformal prediction, but is more ﬂexible in two ways. First,
+our approach can incorporate many loss functions, whereas conformal prediction controls the coverage—i.e,
+binary risk. The multilabel classiﬁcation setting of Section 5.2 is one example where RCPS enables the use of
+a more natural loss function: the false negative rate. Second, risk-controlling prediction sets apply whenever
+one has access to a concentration result, whereas conformal prediction relies on exchangeability, a particular
+combinatorial structure. Concentration is a more general tool and can apply to a wider range of problems,
+such as the uncertainty quantiﬁcation for ranking presented in Section 6.1. To summarize, in contrast to the
+standard train/validation/test split paradigm which only estimates global uncertainty (in the form of overall
+prediction accuracy), RCPS allow the user to automatically return valid instance-wise uncertainty estimates
+for many prediction tasks.

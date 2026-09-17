@@ -1,0 +1,544 @@
+Learning Goal-Conditioned Policies Ofﬂine with
+Self-Supervised Reward Shaping
+Lina Mezghani
+Meta AI, Inria∗
+
+Sainbayar Sukhbaatar
+Meta AI
+Piotr Bojanowski
+Meta AI
+Alessandro Lazaric
+Meta AI
+Karteek Alahari
+Inria∗
+Abstract:
+Developing agents that can execute multiple skills by learning from pre-collected
+datasets is an important problem in robotics, where online interaction with the en-
+vironment is extremely time-consuming. Moreover, manually designing reward
+functions for every single desired skill is prohibitive. Prior works [1, 2] targeted
+these challenges by learning goal-conditioned policies from ofﬂine datasets with-
+out manually speciﬁed rewards, through hindsight relabeling.
+These methods
+suffer from the issue of sparsity of rewards, and fail at long-horizon tasks. In
+this work, we propose a novel self-supervised learning phase on the pre-collected
+dataset to understand the structure and the dynamics of the model, and shape a
+dense reward function for learning policies ofﬂine. We evaluate our method on
+three continuous control tasks, and show that our model signiﬁcantly outperforms
+existing approaches [1, 2], especially on tasks that involve long-term planning.
+Keywords: Ofﬂine RL, Self-Supervised Learning, Goal-Conditioned RL
+1
+Introduction
+While the goal of realizing general autonomous agents requires mastery of a large and diverse set
+of skills, achieving this by focusing on each skill individually with standard reinforcement learning
+(RL) frameworks is prohibitive. This is primarily due to the need for manually designed reward func-
+tions and environment interactions for each skill. Unsupervised RL has opened a way for learning
+agents that can execute diverse abilities without supervision (i.e., hand-crafted rewards), and then be
+further adapted to downstream tasks through few-shot or zero-shot generalization [3, 4, 5, 6]. How-
+ever, learning policies with such methods is impractical with real robots as they require millions of
+interactions when trained online.
+Recently, a line of study has emerged that uses pre-collected datasets of trajectories and trains poli-
+cies ofﬂine (i.e., without additional interactions with the environment) [7, 8]. More precisely, given
+a dataset of reward-free trajectories and a reward function designed to solve a speciﬁc task, the agent
+learns ofﬂine by relabeling the transitions in the dataset with the reward function. This setting is par-
+ticularly relevant in robotics, where data collection is extremely time-consuming: disentangling data
+collection and policy learning in this context allows for faster policy iteration. However, it would
+require designing one speciﬁc reward function and learning one policy for each individual task.
+An important question to scale ofﬂine robot learning is therefore to ﬁnd ways of learning multi-task
+policies from already collected datasets. Recent works [1, 9, 10], have targeted this problem from a
+goal-conditioned perspective: given a dataset of previously collected trajectories, the objective is to
+learn a goal-oriented agent that can reach any state in the dataset. The advantages of this formulation
+are two-fold: ﬁrst, it makes it easy to interpret skills, and second it does not require any adaptation at
+∗Univ. Grenoble Alpes, Inria, CNRS, Grenoble INP, LJK, 38000 Grenoble, France
+Project page: https://linamezghani.github.io/go-fresh
+6th Conference on Robot Learning (CoRL 2022), Auckland, New Zealand.
+arXiv:2301.02099v1  [cs.RO]  5 Jan 2023
+
+test time. Making this framework unsupervised requires to break free from hand-crafted rewards, as
+proposed by Chebotar et al. [1], where they learn goal-conditioned policies ofﬂine through hindsight
+relabeling [2]. However, their approach is subject to the pitfall of learning from sparse rewards, and
+can be inefﬁcient in long-horizon tasks.
+In this work, we present a self-supervised reward shaping method that enables building an ofﬂine
+dataset with dense rewards. To this end, we develop a self-supervised learning phase that aims
+at learning the structure and dynamics of the environment before training the policy. During this
+phase, we: (i) train a reachability network [11] to estimate the local distance in the state space S,
+then (ii) extract a set of representative states that covers S, and ﬁnally (iii) build a graph on this
+set to approximate the global distance in S. When training the goal-conditioned policy, we use the
+graph in two ways: to compute rewards through shortest path distance, and to create transitions of
+intermediate difﬁculty on the path to the goal.
+We evaluate our method on complex continuous control tasks, and compare it to previous state-
+of-the-art ofﬂine [1, 2] approaches. We show that our graph-based reward method learns good
+goal-conditioned policies by leveraging transitions from a dataset of past experience with neither
+any additional interactions with the environment nor manually-designed rewards. Moreover, we
+show that, contrary to prior work that uses datasets collected with a policy trained with supervised
+rewards [1], our method allows for learning goal-conditioned policies even from datasets of poor
+quality, e.g. containing trajectories sampled with a random policy. Our work is thus the ﬁrst to learn
+goal-conditioned policies from ofﬂine datasets without any supervision, as it does not require any
+hand-crafted reward function at any stage: data collection, policy training and evaluation.
+2
+Related Work
+Goal-conditioned RL.
+In its original formulation, goal-conditioned reinforcement learning was
+tackled by several methods [12, 13, 2, 14]. The policy learning process is supervised in these works:
+the set of evaluation goals is available at train time as well as a reward function that guides the agent
+to the goal. Several works propose solutions for generating goals automatically when training goal-
+conditioned policies, including self-play [15, 16, 17], and adversarial student-teacher policies [18].
+A recent line of research [19, 20, 21, 22, 23, 24, 25, 26] focuses on learning goal-conditioned policies
+in an unsupervised fashion. The objective is to train general agents that can reach any goal state in
+the environment without any supervision (reward, goal-reaching function) at train time. In particular,
+Mendonca et al. [25] trains a model-based agent that learns to discover novel goals with an explorer
+model, and reach them with an achiever policy via imagined rollouts.
+Ofﬂine RL.
+The data collection technique is an important aspect when studying the training of
+policies from pre-collected datasets. In this context, the ﬁrst works assumed access to policies
+trained with task-speciﬁc rewards [27, 28]. More recently, methods proposed to leverage unsuper-
+vised exploration to collect datasets for ofﬂine RL [7, 8]. In particular, Yarats et al. [7] creates a
+dataset of pre-collected trajectories, ExoRL, on the DeepMind control suite [29] generated without
+any hand-crafted rewards. Similar to URLB [30], ExoRL benchmarks a number of exploration al-
+gorithms [3, 6, 31, 5], and evaluates the performance of a policy trained on the corresponding ofﬂine
+datasets relabeled with task-speciﬁc rewards.
+Multi-task Ofﬂine RL.
+Recent works proposed to learn multiple tasks from pre-collected datasets,
+starting with methods [32] that generate goals to improve the ofﬂine data collection process in a self-
+supervised way. This connection has also been studied in the supervised setting [9, 33] and when
+learning hierarchical policies [10]. In a setting closely related to our work, Actionable Models [1]
+considers the problem of learning goal-conditioned policies from ofﬂine datasets without interacting
+with the environment, and with no task-speciﬁc rewards. They employ goal-conditioned Q-learning
+with hindsight relabeling [2]. As opposed to their work that relies on learning from sparse rewards,
+we propose to leverage a self-supervised training stage to densely shape rewards.
+3
+Preliminaries
+Let E = (S, A, P, p0, γ, T) deﬁne a reward-free Markov decision process (MDP), where S and A
+are state and action spaces respectively, P : S × A × S →IR+ is a state-transition probability
+2
+
+add edge
+add node
+Figure 1: Overview of the graph building algo-
+rithm. Given a transition (si, si+1) ∈D, we add
+si as node if it is distant enough from existing
+nodes in the graph. Moreover, we add an edge in
+the graph between the incoming nearest neighbor
+of si and the outgoing nearest neighbor of si+1.
+function, p0 : S →IR+ is an initial state distribution, γ is the discount factor, and T is the task
+horizon. In the goal-conditioned setting, the objective is to learn a policy π : S × G →A that
+maximizes the expectation of the cumulative return over the goal distribution, where G denotes the
+goal space. Here, we make the common assumption that states and goals are deﬁned in the same
+form, i.e., G ⊂S.
+We assume that we have access to a dataset D of pre-collected episodes generated by using any data
+collection algorithm in E. Each episode is stored in D as a series of (s, a, s′) tuples, where s, s′ ∈S
+and a ∈A. In the general ofﬂine formulation introduced by Yarats et al. [7], the dataset D can be
+relabeled by evaluating any reward function r : S × A →IR at each tuple in D, and adding the
+resulting tuple (s, a, r(s, a), s′) in the relabeled dataset Dr. We can extend this protocol to the goal-
+oriented setting by considering a goal distribution pG in the goal space, and any goal-conditioned
+reward function r : S × A × G →IR. Given a tuple (s, a, s′) in D, we relabel it by sampling a goal
+g ∼pG, computing r(s, a, g) and adding the resulting tuple (s, a, g, r(s, a, g), s′) in the relabeled
+dataset Dr,pG.
+Once the relabeled dataset Dr,pG is generated, we can learn a goal-conditioned policy by executing
+any ofﬂine RL algorithm. The algorithm runs completely ofﬂine, by sampling tuples from Dr,pG and
+without any interaction with the environment. The goal-conditioned policy is then evaluated online
+in E on a set of ﬁxed evaluation goals that is not known during training.
+4
+Self-supervised Reward Shaping
+We now describe our self-supervised reward shaping method. It comprises three stages that we will
+detail below. In the ﬁrst stage, we train a Reachability Network (RNet) [11] on the trajectories in D
+to predict whether two states are reachable from one another. The second stage consists in building
+a directed graph M whose nodes are a subset of states in D, and edges connect reachable states.
+We employ the RNet as a criterion to avoid adding similar states to M so that its nodes cover the
+states in D uniformly. The ﬁnal stage consists in training the goal-conditioned policy on transitions
+and goals sampled from D. It is trained with dense rewards computed as the sum of a global (based
+on the graph distance in M) and local (based on the RNet) distance terms. The important aspect of
+our method is that the whole training only uses trajectories from the pre-collected dataset D without
+running a single action in the environment. We now describe each component in more detail.
+4.1
+Reachability network
+In order to learn a good local distance between states in D, we adopt an asymmetric version of
+the Reachability Network (RNet) [11]. The general idea of RNet is to approximate the distance
+between states in the environment by the average number of steps it takes for a random policy to
+go from one state to another. We adapted the original formulation with two modiﬁcations: ﬁrst,
+we use exploration trajectories from D instead of random trajectories and second, we leverage the
+temporal direction because a state can be reachable from another without the converse being true.
+Let (sa
+1, ..., sa
+T ) denote a trajectory in D, where a is a trajectory index. We deﬁne a reachability label
+yab
+ij for each pair of observations (sa
+i , sb
+j) by
+yab
+ij =
+1
+if a = b and 0 ≤j −i ≤τreach,
+0
+otherwise,
+for 1 ≤i, j ≤T,
+(1)
+where the reachability threshold τreach is a hyperparameter. The reachability label is equal to 1 iff
+the states are in the same trajectory and the number of steps from sa
+i to sb
+j is below τreach, as shown
+3
+
+(a) Training labels for RNet
+1
+0.2
+0.5
+0.8
+shortest path
+(b) Visualisation of the reward computation
+Figure 2: Visualization of our dense reward shaping method. (a) shows how training labels are
+generated for training the RNet: given a state si, positive pairs are sampled in the same trajectory
+within a threshold τreach, and the rest of the trajectory forms negative pairs. (b) presents how rewards
+are implemented as a combination of a global distance term (green), computed with the shortest
+path in the graph between the outgoing nearest neighbor (NNout) of the state st+1 and the incoming
+nearest neighbor of the goal (NNin), and a local distance term (red) computed using the RNet value
+between NNin and g.
+in Figure 2a. Note that yab
+ij ̸= yab
+ji . We train a siamese neural network R, the RNet, to predict the
+reachability label yab
+ij from a pair of observations (sa
+i , sb
+j) in D. The RNet consists of an embedding
+network g, and a fully-connected network f to compare the embeddings, i.e.,
+R(sa
+i , sb
+j) = σ
+
+f(g(sa
+i ), g(sb
+j))
+
+,
+(2)
+where σ is a sigmoid function. A higher R value indicates two states reachable easily with random
+walk, so they can be considered close in the environment. More precisely, R takes values in (0, 1)
+and s′ is reachable from s if R(s, s′) ≥0.5. RNet is learned in a self-supervised fashion, as the
+ground-truth labels needed to train the network are generated automatically.
+4.2
+Directed graph
+In the next phase, we use trajectories in D to build a directed graph M that captures high-level
+dynamics of the environment, as illustrated in Figure 1. We want the nodes of M to evenly represent
+the states in D. This is achieved by ﬁltering the states in D: a state is added to M only if it is distant
+enough from all the other nodes in M. More precisely, a state s ∈D is added to M if and only if
+R(s, n) < 0.5 and R(n, s) < 0.5,
+for all n ∈M.
+(3)
+Note that we require both the directions to be novel. This ﬁltering avoids redundancy by preventing
+similar states to be added to the memory. It also has a balancing effect because it limits the number
+of states that can be added from a certain area even if it is visited by the agent many times in D.
+Once the nodes are selected, we connect pairs that are reachable from one to another. To this end, we
+employ trajectories in D because they contain actual feasible transitions. Given a transition si →sj
+in D, we add edge ni →nj if si can be reached from node ni and node nj can be reached from
+sj. This way, we have a chain ni →si →sj →nj and can assume nj is reachable from ni.
+Concretely, we select node ni to be the incoming nearest neighbor (NNin) to si, and nj to be the
+outgoing nearest neighbor (NNout) from sj, i.e.,
+ni = NNin(si) = argmax
+n∈M
+R(n, si),
+nj = NNout(sj) = argmax
+n∈M
+R(sj, n).
+(4)
+By performing this action over all the transitions in D, we turn M into a directed graph where edges
+represent reachability from one node to another.
+4.3
+Distance function for policy training
+We then use the obtained directed graph to compute a global distance in the state space. Indeed,
+RNet predicts reachability between si and sj so we can directly use it as a distance metric
+dl(si, sj) = 1 −R(si, sj),
+∀si, sj ∈S.
+(5)
+4
+
+However, this reachability metric is conﬁned to a certain threshold, so there is no guarantee that the
+RNet predictions will have good global properties.
+In contrast, the directed graph M captures high-level global dynamics of the environment. We can
+easily derive a distance function dM(ni, nj) between any pair of nodes in M by computing the
+length of the shortest path in this graph, provided the graph is connected. In practice, we can use a
+trick to connect the graph if necessary, by adding an edge between the pair of nodes from different
+connected components with the maximum RNet value. Moreover, we can extend this distance dM
+to a global distance function dg in the state space S by ﬁnding, for any pair si and sj in S their
+nearest neighbors in the corresponding direction. More precisely,
+dg(si, sj) = dM(NNout(si), NNin(sj)),
+∀si, sj ∈S.
+(6)
+The distance dg between two states in the state space becomes the length of the shortest path between
+their respective closest nodes in the graph. This process, summarized in Figure 2b, propagates
+the good local properties of RNet to get a well-shaped distance function for states that are further
+away. Since dg captures global distances while dl captures local ﬁne-grained distance, we use their
+combination as a ﬁnal distance function: ∀si, sj ∈S,
+d(si, sj) = dg(si, sj) + dl(si, sj).
+4.4
+Policy training
+The last phase of our method is training the goal-conditioned policy ofﬂine. Here, we create an of-
+ﬂine replay buffer B that is ﬁlled with relabeled data. We randomly sample a transition (st, at, st+1)
+from D as well as a goal g and relabel the transition with reward rt = −d(st+1, g). We then push the
+relabeled transition (st, at, g, rt, st+1) to B. In order to create a curriculum that artiﬁcially guides
+the agent towards the goal, we experimented with two different transition augmentation techniques:
+Sub-goal augmentation.
+Let (st, at, g, rt, st+1) denote a relabeled transition and (n0, ..., nP −1)
+the shortest path in the graph M between n0 = NNout(st) and nP −1 = NNin(g). The augmen-
+tation technique consists in adding to the replay buffer every transition (st, at, ni, ri
+t, st+1) for all
+i ∈{0, P −1}, where ri
+t = −d(st+1, ni). In other words, given a transition (st, at, st+1) and
+a goal g from D, we push to the replay buffer a set of relabeled transitions with all goals on the
+shortest path from st to g (and their corresponding rewards).
+Edge augmentation.
+Similar to the subgoal augmentation technique, we consider a relabeled tran-
+sition (st, at, g, rt, st+1) and the associated shortest path (n0, ..., nP −1). This time, we keep the
+same goal g for every augmented transition, but for every edge (ni−1, ni), i ∈{1, P −1}, we
+add the relabeled transition (si
+t, ai
+t, g, ri
+t, si
+t+1) to B where (si
+t, ai
+t, si
+t+1) ∈D, NNout(si
+t) = ni−1,
+NNin(si
+t+1) = ni and ri
+t = −d(si
+t, g). Note that the existence of such a transition in D is guaranteed
+by construction: an edge is added to the graph from one node to another iff there exist a transition
+in D whose corresponding nearest neighbors are these two nodes (in the same order).
+Once the replay buffer B is ﬁlled, the goal-conditioned policy can be trained using any off-policy
+algorithm. In our implementation, we chose Soft Actor-Critic [34], as it is known to require few
+hyper-parameter tuning, and is widely used in the literature.
+5
+Experiments
+5.1
+Environments & data collection
+We perform experiments on three continuous control tasks with state-based inputs.
+UMaze [35].
+The ﬁrst environment, shown in Figure 3a, is a two-dimensional U-shaped maze
+with continuous action space and a ﬁxed initial position. We generate the training data for this
+environment by deploying a random policy with randomized start position in the maze. We collect
+10k trajectories of length 1k. We evaluate the goal-conditioned agent by giving the agent a goal
+sampled at random in the environment and computing the ﬁnal euclidean distance to the goal.
+RoboYoga Walker [25].
+Introduced by Mendonca et al. [25], the challenging RoboYoga bench-
+mark is based on the Walker domain of the DeepMind control suite [29], and consists of 12 goals
+5
+
+(a) UMaze
+(b) RNet distance
+(c) Graph distance
+Avg Room1Room2Room3Room4
+0.0
+0.25
+0.5
+Success Rate
+Graph Reward
+RNet Reward
+(d) RNet vs. Graph Rewards
+Figure 3: (a) UMaze environment, Heatmap of rewards computed with RNet (b) and graph (c)
+distances, and (d) Performance of the goal-conditioned policy trained with RNet and graph-based
+rewards on UMaze. In (b) and (c), high rewards are shown in yellow, and low rewards in black.
+that correspond to body poses inspired from yoga (e.g. lying down, raising one leg or balancing). We
+consider the state-based version of the task, and use the task-agnostic dataset from Yarats et al. [7]
+generated with an unsupervised exploration policy. It contains 10k trajectories of length 1k obtained
+by deploying the “proto” [5] algorithm in the Walker domain. The success metric of the evaluation
+policy is assessed by the pose of the humanoid at the end of the episode.
+Pusher [20].
+We also apply our method on Pusher, a realistic robotic environment shown in Fig-
+ure 7 (left), where a robot arm (red) needs to push a puck (blue) to a speciﬁed location on a table.
+To build the ofﬂine dataset, we generated 10k random trajectories of length 200. Similar to prior
+works [20, 22, 26], we generated 500 goals at random in the state space, and we measured the
+performance as the ﬁnal Euclidean distance between the puck and its target location.
+5.2
+Ablation & design choices
+We ﬁrst show that the graph structure is necessary for long-term planning. Then, we explain the
+importance of the directness of the graph on tasks with asymmetric behaviours. Finally, we show
+the impact of transition augmentation techniques when labeling data for the goal-conditioned policy.
+Necessity of graph-based rewards.
+An important component of our method is the construction of
+the graph M that enables computing a distance with good global properties. To empirically validate
+this hypothesis, we performed a comparison between the goal-conditioned policy trained with RNet
+rewards (i.e., by using the distance dl from equation (5)) and the one trained with both distance
+terms as reward. We run this experiment on the UMaze environment, and show results in Figure 3d.
+We note that the model trained with graph rewards outperforms the one trained with RNet rewards
+overall, particularly for distant goals (ie. rooms 3 and 4). We also notice that the model trained with
+RNet rewards is slightly better for goals that are close to the initial position. This highlights the
+fact that RNet is good at estimating local distances. The qualitative visualization in Figure 3b & 3c
+conﬁrms this observation, as it shows low values between states in the ﬁrst and fourth rooms.
+Importance of graph directness.
+We then investigate the importance of the asymmetry of the
+RNet and the directness of the graph. To this end, we implement an undirected version of our
+method where the RNet is symmetric and the graph is undirected. All other components of our
+method are unchanged. First, we compare the performance of both variants in the UMaze task in
+Figure 4a, and note that asymmetric RNet and directed graph in our approach signiﬁcantly improve
+the goal-conditioned policy performance (+11% on success rate), especially on goals close to the
+initial location, i.e., goals in rooms 1 and 2. We then analyze qualitative visualizations of the shortest
+path in the undirected and directed graphs in the RoboYoga task, as shown in Figure 4b. In the
+undirected case, the humanoid deﬁes the laws of gravity and is encouraged to stand its head by
+ﬂipping backwards, which might be extremely difﬁcult, or even infeasible. In the directed case, the
+shortest path fosters the agent to ﬁrst get back on its legs, and then lean forward. In this exemple,
+the gravity makes the dynamics of the environment non-symmetric and non-fully reversible, which
+justiﬁes the directed formulation described in our method.
+Transition sampling strategy.
+As a ﬁnal ablation study, we study the utility of the transition aug-
+mentation techniques described in subsection 4.4. We evaluate four possible variants of our method:
+6
+
+Avg
+Room1
+Room2
+Room3
+Room4
+0.0
+0.25
+0.5
+Success Rate
+Directed
+Undirected
+(a) Comparison on the UMaze task
+(b) Shortest Path visualization for undirected (top) and directed
+(bottom) graphs
+Figure 4: Importance of graph directness on (a) the UMaze task and (b) the RoboYoga Walker task.
+(i) without any augmentation, (ii) with edge augmentation only, (iii) with subgoal augmentation
+only, and (iv) with both augmentations. We execute this experiment on the RoboYoga task, and
+show results in Figure 6b. We observe that both of the augmentation techniques improve the per-
+formance of the goal-conditioned agent, with subgoal augmentation showing greater improvement.
+Moreover, we note that combining both augmentations improves the performance further. For the
+reminder of the experiments, we use both these augmentation techniques.
+0
+500
+1000
+epoch
+0.0
+0.2
+0.4
+0.6
+Success Rate
+Average
+0
+500
+1000
+epoch
+Room 1
+0
+500
+1000
+epoch
+Room 2
+0
+500
+1000
+epoch
+Room 3
+0
+500
+1000
+epoch
+Room 4
+Ours
+HER
+HER + random negative action
+Actionable Models
+Figure 5: Performance on the UMaze task. We show the success rate for goals sampled at random
+in each of the four rooms, as well as the average over all rooms.
+5.3
+Comparison to prior work
+Baselines. We compare our method to prior work on unsupervised goal-conditioned policy learning.
+We perform an apples-to-apples comparison by implementing the baselines using the same learn-
+ing framework as our method, and changing the reward relabeling process. We compare with the
+following baselines:
+• Hindsight Experience Replay [HER] [2] This is a re-implementation of the standard un-
+supervised RL technique, adapted to the ofﬂine setting. More precisely, we relabel sub-
+trajectories from D with a sparse reward, which is equal to 1 only for the ﬁnal transition
+of the sub-trajectory, and 0 everywhere else. Following Chebotar et al. [1], we also label
+sub-trajectories with goals sampled at random in D and zero reward.
+• HER [2] with random negative action is a variant of HER where, for a transition in D
+we sample an action uniformly at random in the action space and label it with zero reward.
+This helps overcoming the problem of over-estimation of the Q-values for unseen actions
+mentioned in Chebotar et al. [1].
+• Actionable Models [1] This approach is based on goal-conditioned Q-learning with hind-
+sight relabeling. We re-implemented the goal relabeling procedure that uses the Q-value at
+the ﬁnal state of sub-trajectories in D to enable goal chaining, as well as the negative action
+sampling trick.
+Comparison on UMaze. We compare our method to the baselines on the UMaze task, and show
+results in Figure 5. We observe that our model outperforms all baselines overall, and shows greater
+improvements on challenging goals that are far from the initial position. Interestingly, we note
+that Actionable Models reaches goals in the ﬁrst room only. This conﬁrms the intuition that sparse
+rewards make it difﬁcult for the policy to learn long-horizon tasks.
+7
+
+0
+500
+1000
+epoch
+0.0
+0.2
+0.4
+Success Rate
+Ours
+HER
+HER + random neg action
+Actionable Models
+(a) Comparison to baselines
+0.0
+0.2
+0.4
+Success Rate
+Subgoal + Edge
+Subgoal Only
+Edge Only
+No Augmentation
+(b) Impact of Transition Augmentation
+Figure 6: Performance on the RoboYoga Walker task
+Comparison on RoboYoga Walker. In a second experiment, we compare our method to baselines
+on the RoboYoga task, as shown in Figure 6a. Here again, our method outperforms prior work, and
+Actionable Models does not make any signiﬁcant improvement over HER. The results broken down
+by goal are shown in the supplementary material. Overall these results suggest that our dense reward
+shaping method allows for faster and more robust ofﬂine goal-conditioned policy training.
+0
+500
+1000
+epoch
+0.00
+0.04
+0.08
+0.12 Average Distance
+0
+500
+1000
+epoch
+Hand Distance
+0
+500
+1000
+epoch
+Puck Distance
+Ours
+HER
+HER + random neg action
+Actionable Models
+Figure 7: Performance on the Pusher task (lower is better). We report the ﬁnal average, hand, and
+puck distance to the goal for our model and all baselines.
+Comparison on Pusher. As a ﬁnal experiment, we compared our method to prior work on a realistic
+robotic environment, as shown in Figure 7. Our policy trained ofﬂine is evaluated by sampling
+a goal at random in the state space, and measuring three different metrics: (i) the hand distance,
+which corresponds to the ﬁnal distance between the end of the robot arm and the target, (ii) the puck
+distance, which measures the distance between the ﬁnal puck location and the target, and (iii) the
+average distance, the average of the ﬁrst two metrics. Our method outperforms the baselines on this
+task, and our goal-conditioned agent is able to sequentially place the puck at the goal location, and
+then place the hand at its target location. On the contrary, HER [2] places the puck at the target
+location with a performance similar to our method, but lacks precision on the hand location.
+6
+Conclusion: Summary and Limitations
+We proposed a method for learning multi-task policies from pre-generated datasets in an ofﬂine
+and unsupervised fashion, i.e., without requiring any additional interaction with the environment,
+nor manually designed rewards. Our method leverages a self-supervised stage that aims at learn-
+ing the dynamics of the environment from the ofﬂine dataset, and that allows for shaping a dense
+reward function. It shows signiﬁcant improvement over prior works based on hindsight relabeling,
+especially on long-horizon tasks, where dense rewards are crucial for learning a good policy.
+The main limitation of our method is that it relies on the availability of a pre-collected dataset of
+trajectories, with a sufﬁciently large coverage of the state space for proper policy learning. Although
+such data can be already available, as for the RoboYoga Walker task, or that ofﬂine dataset collection
+could be done with random policies, as we did on the UMaze and Pusher tasks, this step can be
+challenging for other environments. Another limitation is that we evaluated our method exclusively
+on simulated environments, and we did not perform any experiments on real robots, for which pre-
+collected dataset with expert demonstrations can be available [1].
+8

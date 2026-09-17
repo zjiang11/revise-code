@@ -1,0 +1,1020 @@
+IMPROVED INPUT REPROGRAMMING FOR GAN CONDITIONING
+Tuan Dinh†, Daewon Seo§, Zhixu Du¶, Liang Shang†, Kangwook Lee†
+† University of Wisconsin-Madison, USA
+§ Daegu Gyeongbuk Institute of Science and Technology, South Korea
+¶ University of Hong Kong, Hong Kong
+February 8, 2022
+ABSTRACT
+We study the GAN conditioning problem, whose goal is to convert a pretrained unconditional GAN
+into a conditional GAN using labeled data. We ﬁrst identify and analyze three approaches to this
+problem – conditional GAN training from scratch, ﬁne-tuning, and input reprogramming. Our
+analysis reveals that when the amount of labeled data is small, input reprogramming performs the best.
+Motivated by real-world scenarios with scarce labeled data, we focus on the input reprogramming
+approach and carefully analyze the existing algorithm. After identifying a few critical issues of
+the previous input reprogramming approach, we propose a new algorithm called INREP+. Our
+algorithm INREP+ addresses the existing issues with the novel uses of invertible neural networks and
+Positive-Unlabeled (PU) learning. Via extensive experiments, we show that INREP+ outperforms
+all existing methods, particularly when label information is scarce, noisy, and/or imbalanced. For
+instance, for the task of conditioning a CIFAR10 GAN with 1% labeled data, INREP+ achieves an
+average Intra-FID of 76.24, whereas the second-best method achieves 114.51.
+1
+Introduction
+Generative Adversarial Networks (GANs) [1] have introduced an effective paradigm for modeling complex high
+dimensional distributions, such as natural images [2, 3, 4, 5, 6, 7, 8], videos [9, 10], audios [7, 11] and texts [7, 8, 12, 13].
+With recent advancements in the design of well-behaved objectives [14], regularization techniques [15], and scalable
+training for large models [16], GANs have achieved impressively realistic data generation.
+Conditioning has become an essential research topic of GANs. While earlier works focus on unconditional GANs
+(UGANs), which sample data from unconditional data distributions, conditional GANs (CGANs) have recently gained
+a more signiﬁcant deal of attention thanks to their ability to generate high-quality samples from class-conditional
+data distributions [2, 17, 18]. CGANs provide a broader range of applications in conditional image generation [17],
+text-to-image generation [19], image-to-image translation [5], and text-to-speech synthesis [20, 21].
+In this work, we deﬁne a new problem, which we dub GAN conditioning, whose goal is to learn a CGAN given (a) a
+pretrained UGAN and (b) labeled data. The pretrained UGAN is given in the form of an unconditional generator. Also,
+we assume that the classes of the labeled data are exclusive to each other, that is, the true class-conditional distributions
+are separable. Fig. 1 illustrates the problem setting with a two-class MNIST dataset. The ﬁrst input, shown on the
+top left of the ﬁgure, is an unconditional generator G, which is trained on a mixed dataset of classes 0 and 1. The
+second input, shown on the bottom left of the ﬁgure, is a labeled dataset. In this example, the goal of GAN conditioning
+algorithms is to learn a two-class conditional generator G′ from these two inputs, as shown on the right of Fig. 1.
+Formally, given an unconditional generator G trained with unlabeled data drawn from pdata(x) and a conditional
+dataset D where D = S
+y∈Y D(y) with Y being the label set and D(y) being drawn from pdata(x|y), GAN conditioning
+algorithms learn a conditional generator G′ that generates y-conditional samples given label y ∈Y. The formulation of
+the GAN conditioning problem is motivated by several practical scenarios. The ﬁrst scenario is pipelined training. For
+
+arXiv:2201.02692v3  [cs.LG]  7 Feb 2022
+
+Improved Input Reprogramming for GAN Conditioning
+Figure 1: GAN conditioning setting (illustrated with two-class MNIST). GAN conditioning algorithms convert an unconditional
+generator G (top left) into a conditional generator G′ (right) using a labeled dataset (bottom left). On the two-class MNIST
+data, unconditional generator G uniformly generates images of 0s or 1s from random noise vector z. The labeled data contains
+class-conditional images with labels 0 and 1. The output of the GAN conditioning algorithm is the conditional generator G′ that
+generates samples of class y from random noise z and the provided class label y in {y0 = 0, y1 = 1}.
+illustration, we consider a learner who wants to learn a text-to-speech algorithm using CGANs. While labeled data is
+being collected (that is, text-speech pairs), the learner can start making use of a large amount of unlabeled data, which is
+publicly available, by pretraining a UGAN. Once labeled data is collected, the learner can then use both the pretrained
+UGAN and the labeled data to learn a CGAN more efﬁciently. This approach enables a pipelined training process to
+utilize better the long waiting time required for labeling. Secondly, GAN conditioning is helpful in a speciﬁc online
+or streaming learning setting, where the ﬁrst part of the data stream is unlabeled, and the remaining data stream is
+labeled. Assuming that it is impossible to store the streamed data due to storage constraints, one must learn something
+in an online fashion when samples are available and then discard them right away. Now consider the setting where
+the ﬁnal goal is to train a CGAN. One may discard the unlabeled part of the data stream and train a CGAN on the
+labeled part, but this will be strictly suboptimal. One plausible approach to this problem is to train a UGAN on the
+unlabeled part of the stream and then apply GAN conditioning with the labeled part of the stream. The third scenario
+is in transferring knowledge from models pretrained on private data. In many cases, pretrained UGAN models
+are publicly available while the training data is not, primarily because of privacy. An efﬁcient algorithm for GAN
+conditioning can be used to transfer knowledge from such pretrained UGANs when training a CGAN.
+Existing approaches to GAN conditioning can be categorized into three classes. The ﬁrst and most straightforward
+approach is discarding UGAN and applying the CGAN training algorithms [2, 17, 18] on the labeled data. However,
+training a CGAN from scratch not only faces performance degradation if the labeled data is scarce or noisy [22, 23, 24]
+but also incurs enormous resources in terms of time, computation and memory. The second approach is ﬁne-tuning the
+UGAN into a CGAN. While ﬁne-tuning GANs [25, 26] provides a more efﬁcient solution than the full CGAN training,
+this method may suffer from the catastrophic forgetting phenomenon [27].
+Recent studies [28, 29] propose a new approach to GAN conditioning, called input reprogramming. They show that this
+approach can achieve promising performances with remarkable computing savings. However, their frameworks [28, 29]
+are designed to handle only one-class datasets. Therefore, to handle multi-class datasets, one must repeatedly apply
+the algorithm to each class, incurring huge memory when the number of classes is large. Furthermore, the full CGAN
+training methods still achieve better conditioning performances than the existing input reprogramming methods when
+the labeled data is sufﬁciently large. Also, it remains unclear how the performance of input reprogramming-based
+approaches compares with that of the other approaches as the quality and amount of labeled data vary.
+In this work, we thoroughly study the possibility of the input reprogramming framework for GAN conditioning.
+We analyze the limitations of the existing algorithms and propose INREP+ as an improved input reprogramming
+framework to fully address the problems identiﬁed. Shown in Fig. 2 is the design of our framework. INREP+ learns a
+conditional network M, called modiﬁer, that transforms a random noise z into a y-conditional noise zy from which the
+unconditional generator G generates a y-conditional sample. We learn the modiﬁer network via adversarial training.
+INREP+ adopts the invertible architecture [30, 31, 32] for the modiﬁer to prevent the class-overlapping in the latent
+space. We address the large memory issue by sharing the learnable networks between classes. Also, we make use of
+Positive-Unlabeled learning (PU-learning) [33] for the discriminator loss to overcome the training instability.
+Via theoretical analysis, we show that INREP+ is optimal with the guaranteed convergence given the optimal UGAN. Our
+extensive empirical study shows that INREP+ can efﬁciently learn high-quality samples that are correctly conditioned,
+achieving state-of-the-art performances regarding various quantitative measures. In particular, INREP+ signiﬁcantly
+outperforms other approaches on various datasets when the amount of labeled data is as small as 1% or 10% of the
+amount of unlabeled data used for training UGAN. We also demonstrate the robustness of INREP+ against label-noisy
+and class-imbalanced labeled data.
+The rest of our paper is organized as follows. We ﬁrst review the existing approaches to GAN conditioning in Sec. 2. In
+Sec. 3, we analyze the existing input reprogramming framework for GAN conditioning and propose our new algorithm
+2
+
+Improved Input Reprogramming for GAN Conditioning
+Figure 2: Modular design of INREP+ (Improved Input Reprogramming) framework. Given a ﬁxed unconditional generator
+G, INREP+ learns a modiﬁer network M and conditional discriminator networks Dy, y ∈Y. Each Dy is built on a weight-sharing
+network D followed by a class-speciﬁc linear head Hy, i.e. Dy = Hy ◦D. We embed each label y into a vector y with the
+embedding module E, then concatenate y to a random noise vector u to get vector z. The modiﬁer M converts z into a y-conditional
+noise zy so that G(zy) is a sample of class y (a 0-image of fakey in the illustration). We train our networks using GAN training.
+INREP+. In Sec. 4, we empirically evaluate INREP+ and other GAN conditioning methods in various training settings.
+Finally, Sec. 5 provides further discussions on the limitation of our proposed approach as well as the applicability of
+INREP+ to other generative models and prompt tuning. We conclude our paper in Sec. 6.
+Notation
+We follow the notations and symbols in the standard GAN literature [1, 34]. That is, a, a, a, a, A denote a
+scalar, vector, random scalar variable, random vector variable, and set; x, y, z denote a feature vector, label, and input
+noise vector, respectively.
+2
+Preliminaries on GAN conditioning
+We review three existing approaches to GAN conditioning: (1) discarding UGAN and training a CGAN from scratch,
+(2) ﬁne-tuning [25, 26], and (3) input reprogramming [28, 29]. In particular, we analyze their advantages, drawbacks,
+and requirements for GAN conditioning. Sec. 2.4 summarizes our high-level comparison of their performances in
+various training settings of labeled data and computing resources.
+2.1
+Learning CGAN without using UGAN
+One can discard the given UGAN and apply the existing CGAN training algorithms on the labeled dataset to learn a
+CGAN. This approach is the most straightforward approach for GAN conditioning.
+We can group CGAN training algorithms by strategies of incorporating label information into the training procedure.
+The ﬁrst strategy is to concatenate or embed labels to inputs [17, 35] or to middle-layer features [19, 36]. The second
+strategy, which generally achieves better performance, is to design the objective function to incorporate conditional
+information. For instance, ACGAN [18] adds a classiﬁcation loss term to the original discriminator objective via
+an auxiliary classiﬁer. Recent algorithms adopt label projection in the discriminator [2] by linearly projecting the
+embedding of the label vector into the feature vector. Based on the projection-based strategy, ContraGAN [4] further
+utilizes the data-data relation between samples to achieve better quality and diversity in data generation.
+Directly applying such CGAN algorithms for GAN conditioning may achieve state-of-the-art conditioning performances
+if sufﬁcient labeled data and computing resources are available. However, this is not always the case in practice, and the
+approach also has some other drawbacks. The scarcity of labeled data in practice can severely degrade the performance
+of CGAN algorithms [24]. Though multiple techniques [3, 37] were proposed to overcome this scarcity issue, mainly by
+using data augmentation to increase labeled data, these techniques are orthogonal to our work, and we consider only the
+standard algorithms. Furthermore, training CGAN from scratch is notoriously challenging and expensive. Researchers
+observed various factors that make CGAN training difﬁcult, such as instability [22, 23], mode collapse [38, 23], or
+mode inventing [38]. Also, the training usually entails enormous resources in terms of time, computation, and memory,
+which are not available for some settings, such as mobile or edge computing. For instance, training BigGAN [39] takes
+approximately 15 days on a node with 8x NVIDIA Tesla V100/32GB GPUs [16].
+Additionally, some CGAN training algorithms have inductive biases, which may cause failures in learning the true
+distributions. The following lemmas investigate several failure scenarios of the two most popular conditioning strategies
+– ACGAN [18] and ProjGAN [2], and we defer the formal statements and proofs to Appendix A.1.
+Failures of auxiliary classiﬁer conditioning strategy
+The discriminator and generator of ACGAN learn to maximize
+λLC + LS and λLC −LS, respectively. Here, LS models the log-likelihood of samples belonging to the real data, LC
+models the log-likelihood of samples belonging to the correct classes, and λ is a hyperparameter balancing the two
+3
+
+Improved Input Reprogramming for GAN Conditioning
+terms. In this game, G might be able to maximize λLC −LS by simply learning a biased distribution (increased LC)
+at the cost of compromised generation quality (increased LS). Our following lemmas show that ACGAN indeed suffers
+from this phenomenon, for both non-separable datasets (Lemma 1) and separable datasets (Lemma 2). We also note
+that the failure in non-separable datasets has been previously studied in [40], while the one with separable datasets has
+not been shown before in the literature.
+Lemma 1 (ACGAN provably fails on a non-separable dataset). Suppose that the data follows a Gaussian mixture
+distribution with a known location but unknown variance, and the generator is a Gaussian mixture model parameterized
+by its variance. Assume the perfect discriminator. For some values of λ, the generator’s loss function has strictly
+suboptimal local minima, thus gradient descent-based training algorithms fail to ﬁnd the global optimum.
+Lemma 2 (ACGAN provably fails on a separable dataset). Suppose that the data are vertically uniform in 2D space:
+conditioned on y ∈{±1}, x = (d · y, u) with some d > 0 and u is uniformly distributed in [−1, 1]. An auxiliary
+classiﬁer is a linear classiﬁer, passing the origin. Assume the perfect discriminator. For some single-parameter
+generators, gradient descent-based training algorithms converge to strictly suboptimal local minima.
+Failures of projection-based conditioning strategy
+The objective function of a projection-based discriminator [2]
+measures the orthogonality between the data feature vector and its class-embedding vector in the form of an inner
+product. Thus, even when the generator learns the correct conditional distributions, it may continue evolving to further
+orthogonalize the inner product term if the class embedding matrix is not well-chosen. This behavior of the generator
+can result in learning an inexact conditional distribution, illustrated in the following lemma.
+Lemma 3 (ProjGAN provably fails on a two-class dataset). Consider a simple projection-based CGAN with two
+equiprobable classes. With some particular parameterizations of the discriminator, there exist bad class-embedding
+vectors that encourage the generator to deviate from the exact conditional distributions.
+2.2
+Fine-tuning UGAN into CGAN
+The ﬁne-tuning approach aims to adjust the provided unconditional generator into a conditional generator using the
+labeled data. Previous works [25, 26] studied ﬁne-tuning GANs for knowledge transfer in GANs. We can further adapt
+these approaches for GAN conditioning. TransferGAN [25] introduces a new framework for transferring GANs between
+different datasets. They propose to ﬁne-tune both the pretrained generator and discriminator networks. MineGAN [26]
+later suggests ﬁxing the generator and training an extra network (called the miner) to optimize the latent noises for the
+target dataset before ﬁne-tuning all networks. We note that in the GAN conditioning setting, the pretrained discriminator
+is not available. Furthermore, to be applicable for GAN conditioning, TransferGAN and MineGAN frameworks
+may require further modiﬁcations of unconditional generators’ architecture to incorporate the conditional information.
+Unlike ﬁne-tuning approaches, our method freezes the G and does not modify its architecture or use the pretrained
+unconditional discriminator.
+Compared to the full CGAN training, ﬁne-tuning approaches usually require much less training time and amount of
+labeled data while still achieving competitive performance. However, it is not clear how one will modify the architecture
+of the unconditional generator for a conditional one. Also, ﬁne-tuning techniques are known to suffer from catastrophic
+forgetting [27], which may severely affect the quality of generated samples from well-trained unconditional generators.
+2.3
+Input reprogramming
+The overarching idea of input reprogramming is to keep the well-trained UGAN intact and add a controller module to
+the input end for controlling the generation. In particular, this approach aims to repurpose the unconditional generator
+into a conditional generator by only learning the class-conditional latent vectors.
+Input reprogramming can be considered as neural reprogramming [41] applied to generative models. Neural repro-
+gramming (or adversarial reprogramming) [41] has been proposed to repurpose pretrained classiﬁers for alternative
+classiﬁcation tasks by just preprocessing their inputs and outputs. Recent works extend neural reprogramming to differ-
+ent settings and applications, such as the discrete input space for text classiﬁcation tasks [42] and the black-box setting
+for transfer learning [43]. More interestingly, it has been shown that large-scale pretrained transformer models can also
+be efﬁciently repurposed for various downstream tasks, with most of the pretrained parameters being frozen [44]. On
+the theory side, the recent work [45] shows that the risk of a reprogrammed classiﬁer can be upper bounded by the sum
+of the source model’s population risk and the alignment loss between the source and the target tasks.
+Input reprogramming has been previously studied under various generative models and learning settings. Early
+works attempt to reprogram the latent space of GAN with pretrained classiﬁers [46] or the latent space of variational
+autoencoder (VAE) [28] via CGAN training. Flow-based models can also be repurposed for the target attributes via
+posterior matching [47]. The recent work [48] proposes to formulate the conditional distribution as an energy-based
+4
+
+Improved Input Reprogramming for GAN Conditioning
+Table 1:
+A high-level comparison of GAN conditioning approaches under various settings (✓= poor, ✓✓= okay,
+✓✓✓= good). When labeled data and computing resources are both sufﬁcient, we can discard the unconditional generator
+and directly apply CGAN algorithms on the labeled data to achieve the best performances. When the amount of labeled data is
+large, but resources are restricted, the ﬁne-tuning approach becomes a good candidate for GAN conditioning. However, when
+both labeled data and resources are restricted, input reprogramming becomes the best solution for GAN conditioning. Our method
+INREP+ improves both the conditioning performance and the memory scalability of the existing input reprogramming algorithm
+(GAN-REPROGRAM).
+Setting
+Learning CGAN w/o UGAN
+Fine-tuning
+Input reprogramming
+GAN-REPROGRAM
+INREP+ (ours)
+Large labeled data
+✓✓✓
+✓✓
+✓
+✓✓
+Limited labeled data
+✓
+✓✓
+✓✓
+✓✓✓
+Limited computation
+✓
+✓✓
+✓✓✓
+✓✓✓
+model and train a classiﬁer on the latent space to control conditional samples of unconditional generators. However,
+their training requires manually labeling latent samples and a new sampling method based on ordinary differential
+equation solvers. We also notice that our work has a different assumption on the input as the only source of supervision
+in GAN conditioning comes from the labeled data. Recently, GAN-REPROGRAM [29] via CGAN training obtains
+high-quality conditional samples with signiﬁcant reductions of computing and label complexity. GAN-REPROGRAM is
+our closest input reprogramming algorithm for GAN conditioning.
+For the advantages, input reprogramming methods obtain the competitive performances in the conditional generation
+on various image datasets, even with limited labeled data. Input reprogramming signiﬁcantly saves computing and
+memory resources as the approach requires only an extra lightweight network for each inference. However, the existing
+algorithm of input reprogramming for GAN conditioning, GAN-REPROGRAM [29], still underperforms the latest
+CGAN algorithms on complex datasets. In addition, it focuses solely on one condition per time, leading to the huge
+memory given a large number of classes, which will be detailed in the next section.
+Our proposed method (INREP+) makes signiﬁcant improvements on GAN-REPROGRAM. We improve the conditioning
+performance with invertible networks and a new loss based on the Positive Unlabeled learning approach. We reduce
+the memory footprints by sharing weights between class-conditional networks. Our study will exhibit that input
+reprogramming can generate sharper distribution even with small amounts of supervision, leading to consistent
+performance improvements. We also explore the robustness of input reprogramming in the setting of imbalanced
+supervision and noisy supervision, which have not been discussed in the literature yet.
+2.4
+Summary of comparison
+Table 1 summarizes our high-level comparison of the analyzed approaches. For input reprogramming, we distinguish
+between the existing approach GAN-REPROGRAM and our proposed INREP+. First, when both the labeled data and
+computation resources are sufﬁcient, using CGAN algorithms without UGAN probably achieves the best conditioning
+performance, followed by the ﬁne-tuning and INREP+ methods. However, when the labeled data is scarce (e.g., less
+than 10% of the unlabeled data), directly training CGAN from scratch may suffer from the degraded performance.
+Methods that reuse UGAN (ﬁne-tuning, GAN-REPROGRAM, INREP+) are better alternatives in this scenario, and
+our experimental results show that INREP+ achieves the best performance among these methods. Furthermore, if
+the computation resources are more restricted, input reprogramming approaches are the best candidates as they gain
+signiﬁcant computing savings while achieving good performances.
+3
+Improved Input Reprogramming for GAN conditioning
+We ﬁrst justify the use of the general input reprogramming method for GAN conditioning and analyze issues in the
+design of the current input reprogramming framework (Sec. 3.1). To address these issues, we propose a novel INREP+
+framework in Sec. 3.2. We theoretically show the optimality of INREP+ in learning conditional distributions in Sec. 3.3.
+Algorithm 1 presents the full INREP+ training algorithm.
+3.1
+Revisiting input reprogramming for GAN conditioning
+The idea of input reprogramming is to repurpose the pretrained unconditional generator G into a conditional generator
+simply by preprocessing its input without making any change to G. Intuitively, freezing the unconditional generator
+5
+
+Improved Input Reprogramming for GAN Conditioning
+Figure 3: Highlights of design differences between GAN-REPROGRAM [29] and INREP+ (ours). GAN-REPROGRAM (left)
+learns a pair of modiﬁer Mi and discriminator Di per each of n conditions. INREP+ (right) makes three improvements over
+GAN-REPROGRAM: i) using a single conditional modiﬁer M and sharing weights between {Di}n
+1 to improve memory scalability
+when n is large, ii) adopting the invertible architecture for modiﬁer network M to prevent class-conditional latent regions from
+overlapping, iii) replacing the standard GAN loss with a new PU-based loss to overcome the false rejection issue.
+does not necessarily limit the input reprogramming’s capacity of conditioning GANs. Consider a simple setting with
+the perfect generator G : G(z) =d x, where z and x are discrete random variables. For any discrete random variable
+y, possibly dependent on x, we can construct a random variable zy such that G(zy) =d x|y = y by redistributing the
+probability mass of z into the values corresponding to the target x|y = y. We provide Proposition 2 in Appendix A.2 as
+a formal statement to illustrate our intuition in the general setting with continuous input spaces.
+The input reprogramming approach aims at learning conditional noise vectors {zy} such that G(zy) =d x|y for all y.
+We can view this problem as an implicit generative modeling problem. For each y, we learn a function My(·) = M(·, y)
+such that zy =d My(u) and G(zy) =d x|y for standard random noise u via GAN training with a discriminator Dy.
+The existing algorithm for input reprogramming, GAN-REPROGRAM [29], proposes to separately learn My, Dy
+for each value of y, where My is a neural network, called modiﬁer network. Fig. 3 (left) visualizes the design of
+the GAN-REPROGRAM framework for an n-class condition. GAN-REPROGRAM requires n pairs of modiﬁer and
+discriminator networks, each per class condition. This design has several issues in learning to condition GANs.
+Issues of GAN-REPROGRAM in GAN conditioning
+First, there might be overlaps between the latent regions
+learned by modiﬁer My and My′ (y′ ̸= y) due to the imperfection in learning. These overlaps might result in incorrect
+class-conditional sampling. The second issue is the training dynamic of conditional discriminators. Assume the perfect
+pretrained unconditional generator, for instance, G(z) =d x with random Gaussian z and two equiprobable classes for
+simplicity. Then, we can view G(z) as a mixture of x|y = 0 and x|y = 1. At the beginning of (My, Dy) training, a
+fraction of the generated data is distributed as x|y = y, which we desired, but labeled as fake and rejected by Dy. As
+My(u) approaches zy, a larger fraction of desired samples will be wrongly labeled as fake. This phenomenon can
+cause difﬁculty in reprogramming, especially under the regime of low supervision. The last issue is the vast memory
+when the number of classes is large because GAN-REPROGRAM trains separately each pair of (My, Dy) per condition.
+3.2
+INREP+: An improved input reprogramming algorithm
+We propose INREP+ to address identiﬁed issues of GAN-REPROGRAM. Shown in Fig. 2 is the design of our INREP+
+framework. We adopt the weight-sharing design for modiﬁer and discriminator networks to improve memory scalability.
+Also, we design our modiﬁer network to be invertible to prevent the overlapping issue in the latent space. Lastly, we
+derive a new loss for more stable training based on the recent Positive-Unlabeled (PU) learning framework [33]. We
+highlight differences of INREP+ over previous GAN-REPROGRAM in Fig. 3.
+Weight-sharing architectures
+For the modiﬁer, we use only a single conditional modiﬁer network M for all classes.
+For the discriminator, we share a base network D for all classes and design multiple linear heads Hy on top of D,
+each head for a conditional class, that is, Dy = Hy ◦D. This design helps maintain the separation principle of input
+reprogramming while signiﬁcantly reducing the number of trainable parameters and weights needed to store.
+Invertible modiﬁer network
+The modiﬁer network M learns a mapping Rdz →Rdzy , where z is the input noise
+and zy is the y-conditional noise. The input noise z is an aggregation of a random noise vector u and the label y in the
+form of label embedding [2]. We use a learnable embedding module E to convert each discrete label into a continuous
+vector with dimension dy. The use of label embedding instead of one-hot encoding has been shown to help GANs learn
+better [2]. Here, dz = du + dy with dz, du, and dy being dimensions of z, u, and y respectively. In this work, we
+6
+
+Improved Input Reprogramming for GAN Conditioning
+use the concatenation function as the aggregation function. To prevent outputs of modiﬁers on different classes from
+overlapping, we design the modiﬁer to be invertible using the architecture of invertible neural networks [30, 31, 32].
+Intuitively, the invertible modiﬁer maps different random noises to different latent vectors, guaranteeing uniqueness.
+Notably, the use of invertibility leads to a dimension gap between the random noise u and the conditional noise zy
+as du < dz = dzy. However, the small dimension gap does not signiﬁcantly affect the performance of the modiﬁer
+network on capturing the true distribution of the conditional latent because the underlying manifold of complex data
+usually has a much lower dimension in most practical cases [49]. Modiﬁer M needs to be sufﬁciently expressive to
+learn the target noise partitions while maintaining the computation efﬁciency.
+Training conditional discriminator with Positive-Unlabeled learning
+Assume that G generates y-class data with
+probability pclass(y). At the beginning of discriminator training, pclass(y) fraction of generated samples are high-quality
+and in-class but labeled as fake by the discriminator. This results in the training instability of the existing GAN
+reprogramming approach [29]. To deal with this issue, we view the discriminator training through Positive-Unlabeled
+(PU) learning lens. PU learning has been studied in binary classiﬁcation, where only a subset of the dataset is labeled
+with one particular class, and the rest is unlabeled [50, 51, 52]. Considering the generated data as unlabeled, we can
+cast the conditional discriminator learning as a PU learning problem: classifying positive (in-class and high-quality)
+data from unlabeled (generated) data.
+Now, we consider training (My, Dy) for a ﬁxed y. As discussed, the distribution of generated data G(My(u)) can
+be viewed as a mixture of pdata(x|y) and the residual distribution, say pgf(x), where ‘g’ stands for generated and ‘f’
+means that they should be labeled as fake because they are out-class. That is, letting πy be the fraction of y-class data
+among generated data, we have pG(My(u))(x) = πy · pdata(x|y) + (1 −πy) · pgf(x). Given this decomposition, the
+ideal discriminator objective function is:
+V P U
+y
+= Ex∼pdata(x|y) [log Dy(x)] + πyEx∼pdata(x|y) [log(Dy(x))] + (1 −πy)Ex∼pgf(x) [log(1 −Dy(x))]
+(1)
+= (1 + πy)Ex∼pdata(x|y) [log Dy(x)] + Eu∼pu(u) [log(1 −Dy(G(My(u))))] −πyEx∼pdata(x|y) [log(1 −Dy(x))]
+(2)
+where the last equation follows from (1 −πy)pgf(x) = pG(My(u))(x) −πypdata(x|y).
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Dy(x)
+−4
+−2
+0
+2
+4
+6
+8
+loss
+πy = 1.0
+πy = 0.8
+πy = 0.6
+πy = 0.4
+πy = 0.2
+πy = 0.0
+Figure 4: Visualization of INREP+’s discrimina-
+tor loss on real data. We visualize the loss with
+different values of πy (in [0, 1]) and Dy(x) (in [0, 1]).
+Compared to the standard negative log-loss (πy = 0),
+the new loss (πy > 0) more strongly encourages Dy
+to predict values near 1 for positive samples.
+The discriminator loss is −V P U
+y
+. For real data x ∼pdata(x|y), dis-
+criminator minimizes a new loss −(1+πy) log(Dy(x))+πy log(1−
+Dy(x)) instead of the standard negative log-loss −log(Dy(x)).
+Fig. 4 visualizes this new loss with various values of πy. Compared
+to the standard loss (πy = 0), our loss function strongly encourages
+the discriminator to assign positively labeled data higher scores that
+are very close to 1. Also, when the prediction is close to 1, the loss
+takes an unboundedly large negative value, indirectly assigning more
+weights to the ﬁrst term in (2). If πy is close to 1, the relative weights
+given to the real samples become even higher. An intuitive justiﬁ-
+cation is that the loss computed on the generated data becomes less
+reliable when πy gets larger, so one should focus more on the loss
+computed on the real data.
+Note that the last term in (1) is always negative as Dy outputs a
+probability value, but its empirical estimate, shown in the sum of the
+last two terms in (2), may turn out to be positive due to ﬁnite samples.
+We correct this by clipping the estimated value to be negative as
+shown below:
+V P U
+y
+= (1 + πy)bEx∼pdata(x|y) [log Dy(x)] + min
+n
+0, bEu∼pu(u) [log(1 −Dy(G(My(u))))] −πybEx∼pdata(x|y) [log(1 −Dy(x))]
+o
+We set πy =
+1
+|Y| initially when the generated data is well-balanced between classes, and gradually increase π to 1 by
+temperature scaling to capture the increasing fraction of y-class data.
+Remark 1. In the context of the UGAN training, recent work [33] studies a similar PU-based approach to address the
+training instability caused by the false rejection issue discussed above. However, unlike our approach, their approach
+does not consider the term Ex∼pdata(x|y) [log Dy(x)] in their loss function design. This design makes their loss function
+invalid when πy is close to 0, that is, at the beginning of GAN training. On the other hand, our loss function is valid for
+all πy ∈[0, 1]. We also note that the false rejection issue is more relevant near the end of the standard GAN training
+when the generated samples are more similar to the real ones, while it occurs right at the beginning of GAN conditioning
+training. This difference leads to different uses of the PU-based loss for the standard GAN and GAN conditioning.
+7
+
+Improved Input Reprogramming for GAN Conditioning
+Algorithm 1: InRep+
+Input: Pretrained unconditional generator G, class-conditional dataset D with label set Y, noise dimension d, batch
+size m, learning rates α, β, number of discriminator steps k, number of training iterations t
+Result: Class-conditional generator G′
+Initialize parameters: θM for modiﬁer network M, θE for embedding module E, θD for discriminator network D,
+and {θy : y ∈Y} for linear heads {Hy : y ∈Y}.
+Let Dy = Hy(D(·; θD); θy), wDy = [θD, θy] for each y ∈Y, wEM = [θM, θE]
+for t iterations do
+for k steps do
+sample {xi, yi}m
+i=1 ∼D, {ui}m
+i=1 ∼N(0, Id)
+yi = E(yi; θE) for all i;
+˜xi ←G(M(ui, yi; θM)) for all i
+for each y ∈Y do
+V (i)
+y
+←V P U
+y
+(˜xi, xi) for all i
+∇wDy = Adam(∇wDy
+1
+m
+Pm
+i=1 V (i)
+y ); wDy ←wDy + α∇wDy
+sample {ˆui}m
+i=1 ∼N(0, Id)
+for each y ∈Y do
+y = E(y; θE); ˆxi ←G(M(ˆui, y; θM)) for all i; V (i)
+y
+←V P U
+y
+(˜xi, xi) for all i
+∇wEM = Adam(−∇wEM
+1
+m
+Pm
+i=1 V (i)
+y ); wEM ←wEM + β∇wEM
+G′(·, ·) ←G ◦M(·, E(·; θE); θM)
+3.3
+INREP+’s optimality under ideal setting
+In this section, we highlight that the GAN’s global equilibrium theorem [1] still holds under the PU-learning principle
+incorporated in the discriminator training. Speciﬁcally, INREP+ attains the global equilibrium if and only if generated
+samples follow the true conditional distribution. This theorem guarantees that INREP+ learns the exact conditional
+distribution under the ideal training. We provide the proofs for the proposition and the theorem in Appendix A.3.
+Proposition 1. Fix the ideal unconditional generator G and arbitrary modiﬁer My, the optimal discriminator for y is
+D∗
+y(My(u)) =
+(1 + πy)pdata(x|y)
+(1 + πy)pdata(x|y) + (1 −πy)pgf(x).
+The proposition shows that the optimal discriminator D∗learns a certain balance between pdata(x|y) and pgf(x). Fixing
+such an optimal discriminator, we can prove the equilibrium theorem.
+Theorem 1 (Adapted from [1]). When the ideal unconditional generator G∗and discriminator D∗are ﬁxed, the
+globally optimal modiﬁer is attained if and only if pgf(x) = pG(My(u))(x) = pdata(x|y).
+4
+Experiments
+In this section, we ﬁrst describe our experiment settings, including datasets, baselines, evaluation metrics, network
+architectures, and the training details. In Sec. 4.1, we present conditioned samples from INREP+ on various data.
+In Sec. 4.2, we quantify the learning ability of INREP+ varying the amount of labeled data on different datasets. In
+Sec. 4.3, we evaluate the robustness of INREP+ in settings of class-imbalanced and label-noisy labeled data. We also
+conduct an ablation study on the role of INREP+’s components (Sec. 4.4). Our code and pretrained models are available
+at https://github.com/UW-Madison-Lee-Lab/InRep.
+Datasets and baselines
+We use a synthetic Gaussian mixture dataset (detailed in Sec. 4.1) and various real datasets:
+MNIST [53], CIFAR10 [54], CIFAR100 [54], Flickr-Faces-HQ (FFHQ) [55], CelebA [56]. Our baselines are GAN-
+REPROGRAM [29], ﬁne-tuning [25, 26], and three popular standard CGANs (ACGAN, ProjGAN, and ContraGAN).
+Fine-tuning is a combined approach of TransferGAN [25] and MineGAN [26], which ﬁrst learns a discriminator and a
+miner network given the condition set [26], then ﬁne-tunes all networks using ACGAN loss.
+Evaluation metrics
+We use the popular Fréchet Inception Distance (FID) [57] and recall [58] to measure the quality
+and diversity of learned distributions. FID measures the Wasserstein-2 (Fréchet) distance between the learned and true
+8
+
+Improved Input Reprogramming for GAN Conditioning
+Figure 5: Conditional samples from INREP+ on different datasets.
+(a) Gaussian mixture: We synthesize a mixture of four
+Gaussian distributions on two-dimensional space with 10 000 samples. Four Gaussian components have unit variance and their
+means are (0, 2), (−2, 0), (0, −2), (2, 0), respectively. The synthesized data is visualized in the left ﬁgure (Real). The central ﬁgure
+visualizes the distribution learned by unconditional GAN (UGAN). The right ﬁgure (INREP+) shows the conditional samples from
+INREP+. As we can see, the INREP+’s distribution is highly similar to the real data distribution. Also, it covers all four distribution
+modes. (b) MNIST: We visualize class-conditional samples of CGANs learned by INREP+, each row per class. Our samples have
+correct labels, with high-quality and diverse shapes. (c) Face data: Unconditional GAN model is StyleGAN pretrained on the FFHQ
+dataset, which contains high-resolution face images. We use CelebA data as the labeled data, with two classes: wearing glasses and
+male. Most conditional samples are high-quality and with correct labels. We further show conditional samples of CIFAR10 in Fig. 6.
+distributions in the feature space of the pretrained Inception-v3 model. Lower FID indicates better performance. To
+measure the conditioning performance, we use Intra-FID [2] and Classiﬁcation Accuracy Score (CAS) [59, 60, 61].
+Speciﬁcally, Intra-FID is the average of FID scores measured separately on each class, and CAS is the testing accuracy
+on the real data of the classiﬁer trained on the generated data.
+Network architectures and training
+Our architectures and conﬁgurations of networks are mainly based on GANs’
+best practices [3, 4, 62, 63]. We adopt the same network architectures for all models. For INREP+, we set the dimension
+of label embedding vectors to 10 for all experiments. Our modiﬁer network uses the i-ResNet architecture [31], with
+three layers for simple datasets (Gaussian mixture, MNIST, CIFAR10) and ﬁve layers for more complex datasets
+(CIFAR100, FFHQ). We design the modiﬁer networks to be more lightweight than generators and discriminators. For
+instance, our modiﬁer for CIFAR10 has only 0.1M parameters while the generator and the discriminator have 4.3M
+and 1M parameters, respectively. The latent distribution is the standard normal distribution with 128 dimensions. For
+training, we employ Adam optimizer with the learning rates of 2 · 10−4 and 2 · 10−5 for modiﬁer and discriminator
+networks. β1, β2 are 0.5, 0.999, respectively. We train 100 000 steps with ﬁve discriminator steps before each generator
+step. INREP+ takes much less time compared to other approaches. For instance, training ACGAN and ContraGAN on
+CIFAR10 may take up to several hours, while training INREP+ takes approximately half of an hour to achieve the best
+performance. For implementation, we adopt the widely used third-party GAN library [4] with PyTorch implementations
+for reliable and fair assessments. We run our experiments on two RTX8000 (48 GB memory), two TitanX (11GB),
+two 2080-Ti (11GB) GPUs. For pretrained unconditional generators, we mostly pretrain unconditional generators on
+simple datasets (Gaussian mixture, MNIST, CIFAR10, CIFAR100), and make use of large-scale pretrained models for
+StyleGAN trained on FFHQ.1 We provide more details in Appendix B.
+4.1
+Performing GAN conditioning with INREP+ on various data
+Fig. 5 visualizes conditional samples of CGANs learned by INREP+ on different datasets: Gaussian mixture, MNIST,
+and the face dataset. Shown in Fig. 5a are samples on Gaussian mixture data. We synthesize a dataset of 10 000 samples
+drawn from the Gaussian mixture distribution with four uniformly weighted modes in 2D space, depicted on the left
+of the ﬁgure (Real). Four components have unit variance with means (0, 2), (−2, 0), (0, −2), (2, 0), respectively. As
+seen in the ﬁgure, generated distribution from INREP+ covers all four modes of data and shares a similar visualization
+with the real distribution. For MNIST (Fig. 5b), each row represents a class of generated conditional samples. We see
+that all ten rows have correct images with high quality and highly diverse shapes. Similarly, Fig. 5c shows two classes
+(wearing glasses and male) of high-resolution face images, which are generated using INREP+’s conditional generator.
+In this setting, UGAN is the StyleGAN model [55] pretrained on the unlabeled FFHQ data, and labeled data is the
+CelebA data. For CIFAR10, the last row of Fig. 6 shows our conditional samples from INREP+ with different levels of
+supervision. These visualizations show that INREP+ is capable of well-conditioning GANs correctly.
+1https://github.com/rosinality/stylegan2-pytorch
+9
+
+Improved Input Reprogramming for GAN Conditioning
+Method
+Class
+1%
+10%
+20%
+50%
+100%
+CGAN (ACGAN)
+airplane
+automobile
+bird
+CGAN (ProjGAN)
+airplane
+automobile
+bird
+CGAN (ContraGAN)
+airplane
+automobile
+bird
+Fine-tuning
+airplane
+automobile
+bird
+GAN-REPROGRAM
+airplane
+automobile
+bird
+INREP+ (ours)
+airplane
+automobile
+bird
+Figure 6: CIFAR10 conditional images from GAN conditioning methods. We compare the samples in terms of quality and
+class-correctness, varying amounts of labeled data. A row of each ﬁgure represents images conditioned on one of three classes:
+airplane, automobile, bird (top to bottom). At 1% and 10%, samples from ACGAN, ProjGAN, and CGAN are blurrier and in lower
+resolutions than those of methods reusing UGAN (INREP+, ﬁne-tuning, and GAN-REPROGRAM). Furthermore, INREP+’s samples
+have both high quality and correct labels while some samples from GAN-REPROGRAM and ﬁne-tuning methods have incorrect
+classes. When more labeled data is provided (20%, 50%, 100%), CGAN algorithms (ACGAN, ProjGAN, and ContraGAN) gradually
+synthesize samples with higher quality and correctly conditioned classes. Noticeably, while all samples of ContraGAN models
+have high quality, some of them are mistakenly conditioned. This behavior probably causes higher Intra-FID scores in spite of
+low FID scores. Among methods reusing UGANs, most samples from INREP+ have both high quality and correct classes, while
+GAN-REPROGRAM and the ﬁne-tuning method show more wrong-class conditional samples.
+4.2
+GAN conditioning with different levels of supervision
+We compare GAN conditioning methods under different amounts of labeled data. Speciﬁcally, we use different
+proportions of the training dataset (1%, 10%, 20%, 50%, and 100%) as the labeled data. Table 2 shows the comparison
+in terms of FID and Intra-FID on CIFAR10 and CIFAR100 datasets. Table 3 provides additional measures (recall and
+CAS scores) of the methods on CIFAR10. We also compare the quality of conditional samples on CIFAR10 in Fig. 6.
+INREP+ outperforms baselines in the regime of low supervision.
+When the supervision level is 10% or less,
+INREP+ consistently achieves the best scores (FID and Intra-FID) over all datasets. For instance, FID scores of INREP+
+at 1% are 16.39 and 20.22 for CIFAR10 and CIFAR100 (Table 2). The corresponding Intra-FID scores of INREP+
+are 76.24 and 238.24, showing large gaps (38.27 and 11.53) to the second-best models. Notably, these score gaps
+between INREP+ and other models become larger as less supervision is provided. Regarding recall and CAS metrics
+on CIFAR10, Table 3 also supports our ﬁndings: INREP+ outperforms baselines in both recall and CAS when small
+amounts of labeled data are available.
+We attribute good performances of INREP+ to its design that utilizes the representation of trained generators and
+efﬁciently uses limited labels in separating conditional latent vectors (Sec. 3.2). Interestingly, thanks to well-trained
+generators, GAN-REPROGRAM and ﬁne-tuning also achieve better performances than other CGANs. For the qualitative
+comparison, Fig. 6 partly illustrates that most samples from INREP+ have higher image quality than those from CGAN
+methods and are more correctly conditioned than samples from ﬁne-tuning and GAN-REPROGRAM.
+As more labeled data is provided (20% and more), CGANs gradually obtain better scores and outperform INREP+, but
+INREP+ manages to keep relatively small gaps to the best CGANs. For instance, with full supervision on CIFAR10,
+these gaps between INREP+ and the best model, ProjGAN, are just 1.1 and 7.5 in terms of FID and Intra-FID.
+10
+
+Improved Input Reprogramming for GAN Conditioning
+Table 2: FID and Intra-FID evaluations. We compare INREP+ with baselines on CIFAR10 and CIFAR100 under various amounts
+of labeled data (x% on CIFAR10 means that x% of labeled CIFAR10 is randomly selected). When the labeled dataset is small (1%,
+10%), INREP+ outperforms baselines, shown in the smallest FID and Intra-FID scores over all datasets. As more labeled data is
+given, directly applying CGANs results in better performances (lower FID and Intra-FID). INREP+ maintains small FID gaps to best
+models. Values of GAN-REPROGRAM and standard deviations on CIFAR100 are not obtained due to the computing limitation.
+Dataset
+Method
+FID (↓)
+Intra-FID (↓)
+1%
+10%
+20%
+50%
+100%
+1%
+10%
+20%
+50%
+100%
+CIFAR10
+CGAN (ACGAN)
+69.01±0.28
+30.55±0.45
+21.50±0.14
+16.10±1.37
+12.38±2.76
+141.71±0.33
+88.33±0.15
+73.47±0.55
+68.24±2.47
+54.86±8.65
+CGAN (ProjGAN)
+67.54±0.22
+30.35±0.88
+21.21± 0.14
+14.81± 0.11
+11.86± 1.86
+124.35±0.62
+84.41±1.91
+67.13±0.23
+58.77±0.27
+52.16±0.86
+CGAN (ContraGAN)
+43.11±3.28
+29.44±1.73
+25.53±0.49
+12.44±0.16
+12.19±0.14
+271.79±6.56 155.29±7.12 145.07±8.37 132.97±8.90
+132.43±0.44
+Fine-tuning
+22.01±0.19
+15.97±0.70
+16.13±0.17
+15.40±0.58
+13.98±1.12
+117.85±0.16 108.00±0.55
+99.44±0.19
+92.02±11.36
+90.11±6.29
+GAN-REPROGRAM
+23.12±3.47
+22.62±0.33
+19.81±0.12
+16.27±0.16
+15.45±0.37
+114.51±1.33
+78.04±5.51
+74.40±6.47
+67.52±5.05
+68.32±5.14
+INREP+ (ours)
+16.39±1.37
+14.52±0.97
+14.84±1.22
+13.45±3.18
+12.99±1.21
+76.24±3.35
+65.45±3.25
+62.19±3.22
+61.81±1.34
+59.62±2.21
+CIFAR100
+CGAN (ACGAN)
+83.09
+33.40
+38.15
+23.78
+17.48
+256.37
+230.41
+207.10
+191.54
+191.35
+CGAN (ProjGAN)
+99.54
+42.28
+24.91
+22.22
+13.90
+256.61
+212.70
+196.53
+175.59
+170.55
+CGAN (ContraGAN)
+74.34
+47.89
+31.59
+17.19
+13.45
+256.69
+213.73
+216.42
+200.58
+208.18
+Fine-tuning
+25.87
+18.43
+17.64
+15.57
+14.45
+249.77
+249.72
+237.16
+239.64
+236.70
+INREP+ (ours)
+20.22
+18.42
+17.87
+17.04
+16.92
+238.24
+207.18
+202.28
+201.19
+187.09
+Table 3: Recall and CAS evaluations on CIFAR10. We measure GAN conditioning performance with recall and CAS varying
+amounts of labeled data (x% on CIFAR10 means that x% of labeled CIFAR10 is randomly selected). INREP+ outperforms baselines
+in terms of recall and CAS when small amounts of labeled data (1%, 10%, 20%) are available. The performance gap between
+INREP+ and others becomes larger as less supervision is provided. When more labeled data is provided (50%, 100%), INREP+
+performs competitively to the best models in terms of recall and still outperforms others in terms of CAS.
+Method
+Recall (↑)
+CAS (↑)
+1%
+10%
+20%
+50%
+100%
+1%
+10%
+20%
+50%
+100%
+CGAN (ACGAN)
+0.12
+0.59
+0.66
+0.72
+0.78
+11.63
+29.83
+33.04
+39.70
+43.99
+CGAN (ProjGAN)
+0.12
+0.56
+0.67
+0.72
+0.80
+21.52
+28.09
+30.03
+32.43
+35.06
+CGAN (ContraGAN)
+0.23
+0.59
+0.67
+0.79
+0.77
+12.00
+14.50
+15.02
+21.91
+18.78
+Fine-tuning
+0.64
+0.76
+0.77
+0.77
+0.79
+11.50
+12.68
+15.75
+15.56
+15.66
+GAN-REPROGRAM
+0.65
+0.69
+0.72
+0.75
+0.76
+21.08
+23.95
+26.94
+27.56
+29.64
+INREP+ (ours)
+0.72
+0.77
+0.78
+0.78
+0.79
+22.03
+31.37
+35.19
+47.80
+46.38
+4.3
+Robustness to class-imbalanced data and noisy supervision
+We analyze two practical settings of the labeled data, when the data is class-imbalanced and when the labels are noisy.
+INREP+ outperforms GAN conditioning baselines on class-imbalanced CIFAR10
+The class-imbalanced CI-
+FAR10 has two minor classes (0 and 1) that use 10% of their labeled data, while other classes remain unchanged.
+Training on this augmented dataset, we observe that INREP+ obtains the lowest overall FID (13.26), shown in Table 4.
+INREP+ also achieves the best Intra-FID scores for both two minor classes (69.48 and 61.68), which are close to the
+average Intra-FID of major classes (60.06). On the other hand, other methods show larger gaps between Intra-FID of
+minor classes and the average Intra-FID of major classes. For instance, these score gaps in ProjGAN and ACGAN are
+all greater than 20. This result validates the advantage of INREP+ in learning with class-imbalanced labeled data.
+Remark 2 (Fairness in the data generation). The under-representation of minority classes in training data may bias
+models towards generating samples with more features of majority classes or samples of minority classes with lower
+quality and less diversity [64, 65, 66]. Being more robust against the class imbalance, INREP+ is a promising candidate
+for GAN conditioning with fair generation.
+INREP+ is more robust to label noises in CIFAR10
+We adopt the class-dependent noise setting in robust image
+classiﬁcation [67, 68], and corrupt clean labels with ﬂipping probability 0.4 as follows: bird →airplane, cat →dog,
+deer →horse, truck →automobile. Shown in Table 5 are evaluated FID and Intra-FID. Though label corruption
+causes FID increases in all models, the increase of INREP+ is only 0.16 (compared to clean-label FID in Table 2),
+comparable to GAN-REPROGRAM and stark contrast with large gaps of CGAN methods. In terms of Intra-FID, INREP+
+achieves the smallest score (63.15), and enjoys the smallest Intra-FID increases together with GAN-REPROGRAM
+(3.5 and 3.2) among evaluated methods. Also, their clean classes are less affected by label noises, while we observe
+non-negligible deviations in other models. These results show the strong robustness of input reprogramming methods
+against label noises. We attribute this robustness to their modular design, which preserves the representation learned
+by unconditional generators and focuses on learning the conditional distribution. Also, the multi-head design of the
+conditional discriminator contributes to preserving the separation between data of different classes. Thus, corrupted
+11
+
+Improved Input Reprogramming for GAN Conditioning
+Table 4: FID evaluation on class-imbalanced CIFAR10. The dataset has 10 classes where classes 0 and 1 are minor. Compared
+to the FID on class-balanced data (Table 2), INREP+ and GAN-REPROGRAM obtain the smallest FID increases among methods,
+indicating that they are less affected by the imbalance in labels. Also, INREP+ achieves the best Intra-FIDs for minor classes, close
+to the average score of major classes, while the Intra-FID gaps between the minor and major classes are larger in other models.
+Method
+FID (↓)
+Intra-FID (↓)
+Class 0
+Class 1
+Major classes
+CGAN (ACGAN)
+19.87
+124.25
+141.89
+89.29
+CGAN (ProjGAN)
+14.80
+75.87
+80.59
+53.13
+CGAN (ContraGAN)
+18.95
+139.75
+84.20
+135.08
+Fine-tuning
+14.43
+117.52
+100.03
+89.29
+GAN-REPROGRAM
+16.01
+73.06
+88.92
+68.59
+INREP+ (ours)
+13.26
+69.48
+61.68
+60.06
+Table 5: FID evaluation on label-noisy CIFAR10. The label-noisy CIFAR10 is constructed by corrupting labels of CIFAR10 with
+asymmetric noises. Compared to reported scores on the label-clean data (Table 2), INREP+ and GAN-REPROGRAM maintain
+small FIDs (13.15 and 15.84) and Intra-FIDs (63.15 and 71.51) under the label corruption, while other methods suffer from high
+increases. For instance, the increased Intra-FID gaps of ACGAN and ProjGAN are all greater than 30. Furthermore, INREP+
+and GAN-REPROGRAM also maintain the smallest Intra-FIDs for both noisy and clean classes. These results indicate that input
+reprogramming approaches are more robust against label noises.
+Method
+FID (↓)
+Intra-FID (↓)
+All classes
+Noisy classes
+Clean classes
+CGAN (ACGAN)
+27.63
+129.11
+140.64
+121.42
+CGAN (ProjGAN)
+15.44
+86.85
+91.30
+83.90
+CGAN (ContraGAN)
+14.10
+149.49
+96.49
+184.83
+Fine-tuning
+16.18
+115.91
+125.52
+106.00
+GAN-REPROGRAM
+15.84
+71.51
+73.10
+69.92
+INREP+ (ours)
+13.15
+63.15
+65.93
+61.30
+labels only signiﬁcantly affect the corresponding classes in INREP+ (and GAN-REPROGRAM) while affecting all
+classes in the joint training of other methods (CGANs and ﬁne-tuning).
+4.4
+Ablation study
+Table 6: Analyzing the effect of INREP+’s components.
+Each row compares INREP+ (w/ PU-loss) with its version
+without PU-based loss (w/ PU-loss). Each column compares
+INREP+ (w/ invertibility) with its version when the modiﬁer
+network is not invertible (w/o invertibility). The scores are
+Intra-FID on CIFAR10. Both two components help improve
+INREP+. Enabling invertibility reduces Intra-FID by nearly
+11.7 and 15.1, while enabling the PU-based loss improves
+approximately 2.9 and 6.3. These results indicate the stronger
+effect of the invertibility than the PU-based loss on the ﬁnal
+performance of INREP+.
+Setting
+w/ PU-loss
+w/o PU-loss
+w/ invertibility
+64.25
+67.14
+w/o invertibility
+75.92
+82.26
+We investigate the empirical effect of the invertible architec-
+ture and the PU-based loss on INREP+. We construct four
+INREP+ versions from enabling or disabling each of two
+components. We use ResNet architecture [69] and the stan-
+dard GAN loss as replacements for the i-ResNet architecture
+and our PU-based loss. UGAN is pretrained on unlabeled CI-
+FAR10, and the labeled data is 10% of CIFAR10 (to observe
+better the effect of PU-based loss under the low-label regime).
+Shown in Table 6 are the Intra-FID scores of four models.
+The original INREP+ achieves the best score (64.25), while
+removing all components causes a higher Intra-FID (82.26).
+Using PU-based loss and invertibility help INREP+ reduce
+Intra-FID, with the biggest decreases being 6.3 and 15.1, re-
+spectively. Thus both components have positive effects on
+the INREP+’s performance, and invertibility shows a higher
+impact on INREP+.
+5
+Discussion
+Limitation
+INREP+ depends greatly on the pretrained unconditional generator: how perfectly the unconditional
+generator learns the underlying data distribution and how well its latent space organizes. The latest research [3, 70]
+observes the existing capacity gaps between unconditional GANs and conditional GANs on large-scale datasets.
+12
+
+Improved Input Reprogramming for GAN Conditioning
+Therefore, how to improve INREP+ on large-scale datasets is still a challenging problem, especially when GANs’ latent
+space structure has still not been well-understood. We leave this open problem for future work.
+Beyond GAN: Can we apply INREP+ to other generative models?
+Our work currently focuses on GANs for
+studying GAN conditioning because GANs attain state-of-the-art performances in various ﬁelds [3, 4, 5, 6, 7, 8], and
+numerous well-trained GAN models are publicly available. Nevertheless, INREP+ can be applied to other unconditional
+generative models. We can replace the unconditional generator from UGAN with one from other generative models,
+such as Normalizing Flows (Glow [71]) or Variational Autoencoders (VAEs) [72]. Interestingly, we notice that GAN
+training (as of INREP+) using generators pretrained on VAEs probably helps stabilize the training, reducing the mode
+collapse issue [73].
+Enhancing input reprogramming to prompt tuning
+Text prompts, which are textual descriptions of downstream
+tasks and target examples, have been shown to be effective at conditioning the GPT-3 model [12]. Multiple works
+have been proposed to design and adapt prompts for different linguistic tasks, such as prompt tuning [74] and preﬁx
+tuning [75]. The latter approach freezes the generative model and learns the preﬁx activations in the encoder stack.
+Sharing similar merit to prompt tuning, INREP+ can be a promising solution for learning better prompts in conditioning
+generative tasks while achieving signiﬁcant computing savings by freezing the generative model.
+6
+Conclusion
+In this study, we deﬁne the GAN conditioning problem and thoroughly review three existing approaches to this problem.
+We focus on input reprogramming, the best performing approach under the regime of scarce labeled data. We propose
+INREP+ as a new algorithm for improving the existing input reprogramming algorithm over critical issues identiﬁed in
+our analysis. In INREP+, we adopt the invertible architecture for the modiﬁer network and a multi-head design for the
+discriminator. We derive a new GAN loss based on the Positive-Unlabeled learning to stabilize the training. INREP+
+exhibits remarkable advantages over the existing baselines: The ideal INREP+ training provably learns true conditional
+distributions with perfect unconditional generators, and INREP+ empirically outperforms others when the labeled data
+is scarce, as well as bringing more robustness against the label noise and the class imbalance.

@@ -1,0 +1,766 @@
+Ravnest: Decentralized Asynchronous Training on
+Heterogeneous Devices
+Anirudh Rajiv Menon†
+Unnikrishnan Menon†
+Kailash Ahirwar†
+†Raven Protocol
+Abstract
+Modern deep learning models, growing larger and more complex, have demonstrated excep-
+tional generalization and accuracy due to training on huge datasets. This trend is expected
+to continue.
+However, the increasing size of these models poses challenges in training, as
+traditional centralized methods are limited by memory constraints at such scales.
+This pa-
+per proposes an asynchronous decentralized training paradigm for large modern deep learning
+models that harnesses the compute power of regular heterogeneous PCs with limited resources
+connected across the internet to achieve favourable performance metrics. Ravnest facilitates
+decentralized training by efficiently organizing compute nodes into clusters with similar data
+transfer rates and compute capabilities, without necessitating that each node hosts the en-
+tire model. These clusters engage in Zero-Bubble Asynchronous Model Parallel training, and
+a Parallel Multi-Ring All-Reduce method is employed to effectively execute global parameter
+averaging across all clusters. We have framed our asynchronous SGD loss function as a block
+structured optimization problem with delayed updates and derived an optimal convergence rate
+of O
+
+1
+√
+K
+
+.
+We further discuss linear speedup with respect to the number of participating
+clusters and the bound on the staleness parameter.
+1
+Introduction
+Large Language Models, Diffusion based models and various large scale multi modal architectures
+[46, 3, 1, 49, 5, 53] becoming the zeitgeist in recent years have created growing requirements for
+hardware than can handle their training. With the number of model parameters going into the
+billions and data-sets ranging in terabytes of space [45, 39], it has become infeasible for an individual
+system to conduct the entire training process [26].
+Towards distributing the training process across multiple systems, Data Parallelism has been
+a very effective mechanism in which each system is responsible for a portion of the training data
+batch [54, 15].
+In Synchronous Data Parallelism, the workers have to wait for gradients to be
+computed across all peers so that parameter updates can take place and the next data batch can
+be processed. However, the presence of workers that are much slower than others will significantly
+impede efficiency. To overcome this, asynchronous mechanisms were introduced where peers don’t
+have to wait for each other to make parameter updates [51]. Though asynchronous mechanisms may
+give rise to updates with stale gradients, they have been observed to converge efficiently under certain
+constraints [11]. In distributed training setups, communication-efficient All-Reduce mechanisms,
+such as the widely-used Nvidia Collective Communications Library (NCCL) [29, 41], are preferred
+1
+arXiv:2401.01728v2  [cs.LG]  23 May 2024
+
+for data transmission between peers. This approach is favored over a common parameter server,
+which can become a bottleneck when the number of communicating peers is significantly large.
+Despite its advantages, data parallelism still requires each system to host the entire model which
+may not always be practicable. Model parallelism helps alleviate this by dividing the model across
+multiple workers which communicate with each other to conduct forward and backward passes
+[2, 59, 19]. Traditional model parallelism requires each worker to wait for data from its preceding
+or succeeding peers in the computation graph before proceeding with a forward or backward pass
+respectively. This not only leads to bubbles during which multiple workers remain idle but is also
+vulnerable to stragglers that can hold up the training process.
+This paper details an asynchronous decentralized parallel training approach that utilizes both
+data and model parallelism, allowing weaker systems to participate in distributed training while
+minimizing idle time bubble. The proposed method eliminates the need for workers to host entire
+models and mitigates the reduction in efficiency due to stragglers by grouping workers into clusters
+within which Zero-Bubble Asynchronous Model Parallelism is executed. Periodic parameter synchro-
+nisation across clusters is conducted via a communication efficient Parallel Multi-Ring All-Reduce
+mechanism. Theoretical analysis and derivations for convergence rate in terms of the number of
+updates (K) show consistencies with local SGD. We also discuss linear speedup with respect to
+the number of participating clusters and constraints on the delay parameter under which this can
+be achieved. This mechanism can efficiently train large state of the art models while significantly
+reducing hardware requirements and training costs, opening up new possibilities for groundbreaking
+research and real-world applications.
+The main contributions of this paper are summarised as follows:
+• Ravnest, a novel asynchronous parallel training approach that amalgamates the best features
+of data and model parallelism to facilitate the distributed training of complex deep learning
+models over large datasets on clusters of heterogeneous consumer grade PCs over the internet,
+is introduced.
+• A Parallel Multi-Ring approach which improves on single Ring All-Reduce has been utilized
+for parameter averaging.
+• Under realistic assumptions, the proposed algorithm is outlined and and a theoretical analysis
+which includes derivations for convergence rate of O
+
+1
+√
+K
+
+, which is consistent with local SGD,
+is provided. Constraints under which the algorithm can observe linear speedup are detailed.
+• Our experiments show significant memory reductions and competitive convergence rates with
+conventional synchronous training, complementing the theoretical analysis.
+2
+Related Works
+2.1
+Data and Model Parallelism
+Due to exponential growth in dataset and model sizes, the need for parallelization and memory usage
+reduction led to the development of data parallelism. This technique involves using multiple systems,
+each hosting copies of the entire model, to process portions of a larger data batch in parallel followed
+by gradient aggregation and parameter updates [38, 44, 23]. This approach presents some advantages
+such as smaller batch sizes per system, full utilization of compute resources, faster training times
+[57], scalable infrastructures and support for synchronous and asynchronous updates based on the
+2
+
+problem requirements. However, it is evident that on weaker systems with limited memory resources,
+hosting the entire model may not necessarily be feasible.
+(a) Model Parallelism
+(b) Pipeline Parallelism
+Figure 1: Illustration of how pipeline parallelism reduces idle time bubble [19]
+.
+Recent research has introduced model parallelism, a decentralized training paradigm enabling
+large model training across multiple devices, with each device holding only a portion of the main
+model it can store [52, 28, 16]. A pipeline of GPU devices is created with each device hosting a
+submodel processing data batches and passing results to the next device for further operations.
+Network traffic and compute demand are key factors for scalability. However, this sequential nature
+leads to under-utilization of compute resources since there occurs an idle bubble of timesteps as can
+be observed in Figure 1a. To address the issue, pipeline parallelism divides mini-batches into smaller
+micro-batches, processing them simultaneously across multiple devices (as shown in Figure 1b),
+thereby reducing the idle time bubble and resulting in almost linear speedup [19]. Pipeline parallelism
+inherently requires the participating devices to regularly communicate micro-batch results with each
+other. Recent works have improved communication efficiency by overlapping an optimized cross-
+mesh resharding technique with the computations on the workers, thereby reducing latency [59].
+Asynchronously performing the forward and backward jobs at each pipeline stage while maintaining
+a balance between communication and computation can significantly reduce communication overhead
+and idle bubble time [17]. This has been achieved by scheduling the forward and backward passes
+in a round robin fashion. Significant reduction in idle time bubble has been successfully achieved in
+CNN architectures by considering varying degrees of staleness for each layer [50].
+2.2
+Asynchronous Stochastic Gradient Descent
+Initially, data parallelism relied on Synchronous Stochastic Gradient Descent (SSGD), which peri-
+odically synchronized all workers’ gradients before each parameter update. However, this caused
+delays as workers waited for each other, slowing training and increasing idle time [4]. Asynchronous
+Stochastic Gradient Descent (ASGD) lets workers train independently by accepting updates with
+outdated gradients while minimizing wait times caused by straggling peers. Enhanced versions in-
+clude adjusted averaging mechanisms and approximation functions to handle staleness, enabling
+ASGD to rival synchronous methods in non-convex optimization problems [58, 17, 50]. Distributed
+training traditionally relied on workers communicating with a dedicated parameter server for gradi-
+ent aggregation and weight updates [22, 33, 55, 56]. However, bottleneck and scalability issues arise
+since the parameter server has to transmit large model-sized payloads to all workers regularly [12].
+Workers update their local models by communicating with peers, often using all-reduce mechanisms
+for efficient averaging, which are preferred over gossip-based methods due to their efficiency with
+3
+
+more peers [7, 36, 43]. Reduction mechanisms are also employed to limit worker communication,
+spanning multiple rounds to minimize network traffic [6, 34, 42].
+2.3
+Reduction Techniques
+In parallel computing, all-reduce algorithms are responsible for combining and redistributing the
+results originating from multiple processes. One of the most popular approach to achieve this has
+been the Butterfly All-Reduce algorithm [32, 31]. This technique primarily uses a recursively halving
+all-scatter operation followed by a recursively doubling all-gather operation [47]. This technique is
+well suited in scenarios where network contention issues don’t generally arise.
+It minimises the
+number of communication rounds while ensuring each node only shares the minimum amount of
+data required for reduction. However, in widely deployed clusters, the butterfly all-reduce algorithm
+bottlenecks due to high network contention. These issues led to more research on alternate reduction
+techniques like Ring All-Reduce algorithm which requires comparatively lower working memory and
+has significantly outperformed other algorithms for sufficiently large sizes of data [31]. One of the
+most popular implementations of the Ring All-Reduce algorithm is Uber’s Horovord framework,
+which adds a layer of All-Reduce based MPI training to Tensorflow. [37]. Figure 2 illustrates how
+3 nodes can perform 4 rounds (1 cycle) of Ring All-Reduce to aggregate their weights.
+Figure 2: One cycle of Ring All-Reduce across 3 nodes
+Consider a system of N devices that are connected under a ring topology. Let i ∈[1, 2, ..., N]
+represent the ID assigned to each worker in this system increasing in clockwise direction.
+The
+main dataset (of size D) is first split into N chunks, each of which are distributed evenly across all
+4
+
+devices. This means each device holds a mini dataset of size D/N. One cycle of Ring All-Reduce
+comprises 2 ∗(N −1) rounds of sharing among these devices. In each of these rounds, device i sends
+its parameters to device (i + 1) mod N. As and when a device receives the parameters from the
+preceding device, they apply the reduce operator on it and a new set of averaged parameters are
+calculated and shared with the subsequent device in the ring. These new averaged parameters keep
+getting propagated in clockwise direction 2 ∗(N −1) times, after which all N devices will be having
+a common set of averaged parameters. Each device reduces O(D/N) data at a time but has to
+communicate with only its immediate left and right neighbours. While Ring All-Reduce beats most
+approaches in terms of communication cost, latency issues arise when the number of participating
+nodes is very large.
+2.4
+Training over the Internet
+Advancements in Natural Language Processing, Computer Vision and other domains of artificial in-
+telligence have shown us that training models with an increasingly larger number of parameters with
+all the more complex architectures on gigantic datasets yields systems that can make extremely ac-
+curate predictions. The caveat is that efficiently training these massive models requires the spending
+of millions of dollars in setting up high-end GPU server pods (each containing thousands of GPUs)
+that are interconnected with low latency links in specialized environments.
+This hinders breakthroughs in the field as researchers without access to such high-computing
+systems are left with no other options. This restricts competitive research and making breakthroughs
+in the field of AI exclusively to organizations with massive funds and hardware resources [10]. In the
+future, as models get more and more complex, this approach might not be scalable and sustainable.
+Combating these constraints led to more extensive research on how regular desktop systems and
+laptops with varying specifications can be pooled together to train large models over the internet
+[35]. Compared to the high-performance computing accelerators, these individual PCs are slow and
+unreliable. However, paradigms that make use of these PCs can lay the foundation for the future
+of AI training as it democratizes research among those with limited resources at the cost of higher
+training times. An interesting application of this approach of pooling compute nodes across the
+internet can be seen in the project Leela Chess Zero [30]. It relies on volunteer compute power to
+generate self play data for chess games and uses it to train reinforcement learning agents.
+3
+Proposed Method
+We present a communication efficient method for asynchronous decentralised model parallel SGD.
+The proposed algorithm aims to facilitate distributed learning across a network of nodes without
+depending on a parameter server setup and each node having to operate on only a portion of the
+entire model.
+We aim to solve the following block structured optimization problem of minimizing the loss
+function:
+min
+x f(x) = 1
+C
+C
+X
+i=1
+fi(x)
+(1)
+where C is the number of clusters, fi is the loss function associated with the ith cluster having
+ni disjoint blocks such that x = (xi,1, xi,2, ...., xi,ni) on the ith cluster, where xi,j represents the
+parameters of submodel j.
+5
+
+The algorithm involves assigning participating nodes into clusters within which they will fur-
+ther be assigned a submodel to participate in Zero-Bubble Asynchronous Model Parallel training.
+The clusters will also periodically communicate with each other to conduct a global averaging of
+parameters. The following sections detail the various procedures involved.
+3.1
+Zero-Bubble Asynchronous Model Parallel Training
+Within each cluster, an Asynchronous Model Parallel procedure is used which eliminates the idle
+time bubble observed in traditional Model Parallel techniques.
+We can view each cluster as a computation graph where each peer (containing a submodel) forms
+a node and communicates with a subset of peers in order to perform forward and backward passes.
+The submodel on each peer asynchronously conducts forward and backward passes as and when it
+receives data from its preceding or succeeding peers in the computation graph as seen in Algorithm
+1.
+Algorithm 1 Zero-Bubble Asynchronous Model Parallelism Within A Cluster
+Require: cluster id: c, cluster model parameters: xc, learning rate: η
+1: while training is not terminated do:
+2:
+for each peer p in cluster running parallelly do
+3:
+if gradients received in backward-buffer then
+4:
+Pop gradients from backward-buffer
+5:
+Calculate update using gradients from backward-buffer: xc,p ←xc,p −ηˆgc,p
+6:
+Propagate required gradients to preceding peers in Cluster Graph
+7:
+end if
+8:
+if activations received in forward-buffer then
+9:
+Pop activations from forward-buffer
+10:
+O = forward pass(xc,p, forward-buffer values)
+11:
+Forward activations O to succeeding peers in Cluster Graph
+12:
+end if
+13:
+end for
+14: end while
+▷Blocks 3-7 and 8-12 can be run in parallel with the communication process using Process Locks.
+More details are available in the Implementation Details section
+The submodels don’t wait for gradients of the current data mini-batch from the succeeding
+peer before proceeding with the forward pass for the next one. When a submodel receives back-
+propagated gradients from its succeeding nodes, it conducts the update step with respect to its
+parameters immediately as per the following equation:
+xk+1
+c,p = xk
+c,p −ηˆgk
+c,p
+(2)
+where ˆgk
+c,p = gk−τk
+c,p
+= ∇pF(xk−τk
+c
+, bk
+c), where F denotes the loss function utilized in the training
+process, and xk−τk
+c
+is used to denote the state of the model parameters when the forward pass of
+batch bt
+c was being conducted, depicting that the gradient being used for the update is stale as the
+submodel may have undergone updates during the intermediate time-steps.
+It can be seen from Figure 3 that the degree of staleness τk increases as we move towards peers
+containing the initial parameters of the model. Once backward pass and parameter updates have
+6
+
+Figure 3: Zero-Bubble Asynchronous Model Parallelism within one cluster
+been conducted the required gradients are then propagated to the preceding node.
+Due to the
+asynchronous nature of the forward and backward passes, the idle time bubble is reduced to zero.
+Note that the degree of staleness decreases in the latter nodes, reducing to zero in the final edge
+node.
+3.2
+Parallel Multi-Ring All-Reduce Mechanism for Parameter Averaging
+Ravnest runs multiple Ring All-Reduces simultaneously to parallelize the averaging of model pa-
+rameters across all clusters.
+Figure 4: One round of Parallel Multi-Ring All-Reduce, with 5 parallel rings, during global parameter
+averaging.
+As discussed in section 2.3, one cycle of ring all-reduce comprises of 2 ∗(C −1) rounds for C
+clusters. Figure 4 illustrates one round of this parallel reduction procedure across 4 heterogeneous
+clusters, each containing a different number of peers. Note that the area of each node (N1, N2, ...) is
+proportional to the size of the submodel hosted on it. For instance, size(Cluster2 : N1) is equivalent
+to size(Cluster1 : N1) + size(Cluster1 : N2).
+Before training commences, our cluster formation approach (discussed in section 3.5.2) optimally
+groups together nodes into clusters. Each peer is also provided necessary information for the reduc-
+tion procedure in the form of mappings that indicate the corresponding workers from other clusters
+that it needs to form a ring with so that its submodel parameters can participate in averaging.
+Within a cluster, since peers contain submodels of varying sizes, a node may have to be a part of
+multiple rings and share/receive the required submodel parameters with one or more peers of the
+7
+
+neighbouring clusters. This also implies that the number of rings that will be formed is equivalent
+to the number of maximum nodes across all clusters.
+All peers of a cluster can now simultaneously send over their respective chunks of model param-
+eters for aggregation to the responsible peers in the successor cluster. This marks one round of our
+Parallelized Multi Ring All-Reduce. Once received, each peer aggregates their existing parameters
+with the received parameters and keeps it ready for the next round. 2∗(C −1) such rounds make up
+one cycle of parameter aggregation post which, all clusters effectively should be having the averaged
+model parameters.
+The complexity of each parallel ring is O
+
+2 ∗(C −1) ∗S
+C
+
+, S being the size of the parameters
+being averaged in that ring. The complexity for one entire all-reduce process can thus be represented
+as O
+
+2 ∗(C −1) ∗Smax
+C
+
+where Smax is the maximum data size being averaged across all the rings.
+Since this value will be a fraction of the entire model’s size and each peer is averaging only a portion
+of a submodel at a time, this mechanism performs favourably compared to having a single ring for
+the entire model which would face either high latency issues or large bandwidth usage depending on
+the number of participating workers.
+3.3
+Ravnest Algorithm
+The participating nodes in a training session are first grouped together into clusters based on their
+individual RAM and bandwidth specifications such that no cluster is significantly more capable than
+the others as shown in section 3.5.2, following which each node is assigned a submodel that it is
+capable of training.
+Algorithm 2 Ravnest Algorithm
+Require: common initial weight for all clusters: x0, learning rate: η, communication period κ
+1: for t = 0, 1, ... do
+2:
+Randomly Sample a cluster it from [C]
+3:
+Randomly Sample a peer pit,t ∈cluster it
+4:
+if t + 1 mod κ = 0 then
+5:
+xt+1
+i
+= Parallel Multi-Ring All-Reduce(xt
+1, xt
+2, ..., xt
+it −ηSpit,tˆgt
+it, ..., xt
+C)
+∀i ∈[C]
+6:
+else
+7:
+xt+1
+it,pit,t = xt
+it,pit,t −ηˆgt
+it,pit,t
+8:
+end if
+9: end for
+▷Here each peer participates in Zero-Bubble Asynchronous Model Parallelism within their cluster
+and conducts updates as shown in Algorithm 1
+Each cluster can effectively be viewed as a graph of interconnected nodes wherein each individual
+node is responsible for a portion of the model, i.e. the parameters on the ith cluster can be represented
+as xi = (xi,1, xi,2, ...xi,Pi) where Pi is the number of submodels/nodes on the ith cluster. Note that
+the minimum number of submodels that a cluster can have is denoted by Nm.
+In Algorithm 2, all workers across all clusters run parallelly in an asynchronous fashion and
+Zero-Bubble Asynchronous Model Parallelism is used within each cluster as shown in Algorithm 1
+and updates are made as and when Gradients are received by a peer pi in cluster i:
+8
+
+xt+1
+i,pi = xt
+i,pi −ηˆgt
+i,pi
+(3)
+where xt+1
+i,pi represents the parameters of peer pi on cluster i and ˆgt
+i,pi = ∇piF(xt−τt
+i
+, bt
+i)
+Model parameters are also averaged periodically across clusters using the reduction mechanism
+detailed in section 3.2. Since at any given time-step a submodel on a peer updates its weights, we
+represent these updates in terms of the parameters at the cluster level as follows:
+xt+1
+i
+= xt
+i −ηSpiˆgt
+i
+(4)
+xi being the model parameters on cluster i, ˆgt
+i = ∇F(xt−τt
+i
+, bt
+i) and Spi is a sampling matrix
+such that for a vector v with vi as its ith block, Siv has vi in its ith block and 0 in the others.
+Note that t is a global iteration counter and increments whenever an update is performed by any
+peer on any cluster. This can be interpreted such that at any time-step t a peer pit,t on cluster it
+updates its parameters and increments t.
+The convergence rate of the proposed mechanism has been explored in section 3.4.
+3.4
+Theoretical Analysis
+We explore the convergence of the proposed method in this section.
+Towards this, we use the
+following assumptions in our theoretical analysis, proofs and derivations.
+Assumption 1
+1. Unbiased Gradient: We assume that the data has been distributed appropriately allowing for
+the stochastic gradients to be unbiased:
+Ebi [∇F(x, bi)] = ∇fi(x)
+(5)
+where bi is a data minibatch from the data belonging to ith cluster, and
+Ei [fi(x)] = f(x)
+(6)
+2. Lipschitz condition: All fi’s are L −smooth and their gradients are Lipschitzian, i.e.
+∥∇fi(y) −∇fi(x)∥≤L ∥y −x∥
+(7)
+and
+f(y) ≤f(x) + ⟨∇f(x), y −x⟩+ L
+2 ∥y −x∥2
+(8)
+3. Bounded Variance: The variance of the stochastic gradient is bounded for all i’s:
+Ebi
+h
+∥∇F(x, bi) −∇fi(x)∥2i
+≤σ2, ∀x
+(9)
+The gradient of all fi’s is bounded:
+Ei
+h
+∥∇fi(x) −∇f(x)∥2i
+≤s2, ∀x
+(10)
+9
+
+4. Bound for Parameters during Averaging: (Based on Assumption 3.2 of [34]) The average
+difference between the ith cluster’s parameters and the global average of the parameters at the time
+of averaging is bounded i.e., for any integer a ≥0 there exists a value ∆a ≥0 such that
+E
+"
+1
+C
+C
+X
+i=1
+∥xaκ
+i
+−xaκ∥2
+#
+≤η2∆2
+a
+(11)
+where κ is the communication period and xt = 1
+C
+PC
+i=1 xt
+i.
+5. Bound for Delay Values: All staleness values are bounded i.e. maxt τt ≤T
+6. Independence: The random variables in [bi,t]t=0,1,2,... and [it]t=0,1,2,... are independent of each
+other.
+Under the aforementioned assumptions we detail the following theorem and corollary that de-
+scribe the convergence rate of the defined optimisation problem, the full derivations of which are
+shown in Appendix A and B.
+3.4.1
+Notations and Definitions Used
+We define the following constants for concision:
+A1 =1 −24η2L2e(κ −1)2
+C2Nm
+A2 = η2L
+C2Nm
+−
+η
+2CNm
++ 2η3L2T 2
+C3N 2m
++ 4η2e(κ −1)2
+A1C2Nm
+ 6η2L3
+C2Nm
++ ηL2
+CNm
++ 12η3L4T 2
+C3N 2m
+
+A3 = 1
+A1
+12η2L3
+C2Nm
++ ηL2
+CNm
+ 
+∆2
+a + 8es2(κ −1)2
+CNm
++ eσ2(κ −1)
+CNm
+
+Theorem 1 Under Assumptions 1-6 and while η satisfies the constraints set by A1 > 0, A2 ≤0,
+A3 ≤1 and 2ηLT 2
+CNm ≤1, the proposed algorithm satisfies:
+1
+K
+K−1
+X
+t=0
+E
+h
+
+∇f(xt)
+
+2i
+≤2CNm
+ηK
+(f(x0) −f(x∗)) + 2η
+C (2Nm + L(σ2 + 8s2))
+(12)
+Corollary 1.1 In accordance with Theorem 1, by setting
+η =
+C√Nm
+p
+K [2Nm + L(σ2 + 8s2)]
+(13)
+and making the number of iterations, K, large enough
+K ≥
+4L2
+2Nm + L(σ2 + 8s2) max
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+5T 4, 25Nm, 20e(κ −1)2N
+1
+3
+m,
+9T√e(κ −1), 24L∆2
+aC,
+24Le(κ −1)(σ2 + 8s2(κ −1))
+Nm
+, 16L2∆2
+aC2
+Nm
+,
+16L2e2(κ −1)2(σ2 + 8s2(κ −1))2
+N 3m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(14)
+10
+
+we get the following convergence rate:
+1
+K
+K−1
+X
+t=0
+E
+h
+
+∇f(xt)
+
+2i
+≤2(f(x0) −f(x∗))
+√
+K
+p
+2N 2m + LNm(σ2 + 8s2)
+(15)
+It can be observed that for values of K that are large enough, the convergence rate of the proposed
+algorithm is O
+
+1
+√
+K
+
+which is consistent with the convergence rate of Local-SGD for convex and
+non-convex optimizations [24, 8, 13].
+We can see that if the staleness parameter T is bounded by O
+
+K
+1
+4
+
+, linear speedup is achieved.
+Note that in case κ −1 > T 3, the bound for staleness is O (K) allowing for convergence with the
+same iteration complexity for larger number of workers and hence larger magnitudes of staleness
+compared to [25].
+In the proposed system, each update on any of the clusters is considered an increment in time-
+step. Consequently the greater the number of clusters, the greater is the number of update iterations
+that can be achieved within the same time period allowing for a linear speed up with respect to
+the number of participating clusters. Thus, we can even allow for clusters to join dynamically in
+the global averaging graph after downloading the latest global average of model parameters and
+participate in subsequent averaging rounds leading to an increase in convergence efficiency.
+3.5
+Implementation Details
+3.5.1
+Parallel Communication and Training
+On every peer we maintain separate buffers for forward and backward passes that are responsible
+for receiving and storing the activations and gradients from the neighbouring peers in the cluster’s
+computation graph. The communication thread responsible for populating the buffers and sending
+data to other peers is run on a separate process parallel to the training process.
+The training
+process is responsible for conducting forward and backward passes along with gradient updates
+as and when the respective buffers are populated. To avoid race conditions during additions or
+deletions in the buffers, both processes use Blocking Locks to prevent simultaneous modifications.
+Once computations are done by the training process, the communication process sends the required
+data to the appropriate peers only when the respective buffer of the receiving worker is empty, i.e.
+the training process on that peer has popped values from it’s buffer for computation.
+3.5.2
+Cluster Formation Methodology
+The peak memory usage of a model constitutes of the forward/backward pass size and memory
+taken up by the parameters. The forward/backward size can serve as a good approximation for the
+memory required to process one batch of data. Let the peak memory usage of the entire model
+(which comprises of the above components) be:
+M = size(data batch) × size(forward/backward pass) + size(parameters)
+(16)
+We define a pool of tuples containing usable RAM and bandwidth values for N nodes:
+P = [(r1, b1), (r2, b2), ..., (ri, bi)]
+∀i ∈[1, 2, ..., N]
+where ri and bi represents the RAM and steady bandwidth of the ith compute node. Let’s say
+we form Q optimal clusters. Our aim is to find a new set C = [ci] where ci can take discrete values
+11
+
+in [1, 2, ..., Q]. In other words, every (ri, bi) is mapped to a corresponding discrete valued ci which
+represents the ID of the cluster that (ri, bi) belongs to. Note that P and C have the same number
+of elements. Since we need to effectively fit the entire model of size M on each cluster, the first
+constraint in our optimization problem is that the sum of all peer’s RAM values need to be greater
+than M. Across all clusters in a training session, the sum of individual times to transfer data taken
+by each node in a cluster should be comparable. This is equivalent to saying that the maximum
+difference in sums of data transfer times across any 2 clusters needs to be minimized.This forms our
+second constraint.
+This is an NP-hard problem(meaning there’s no polynomial time solution), a heuristic/greedy
+approach might be better suited for finding optimal solutions.
+This optimization problem can
+be solved using a Meta-Heuristic Genetic Algorithm [14].
+We initialize a random population of
+individual chromosomes, iteratively evolve them across generations while introducing mutations and
+select the best performing ones based on a fitness function to create new successor generations [20].
+The aforementioned set C serves as a representation for an individual chromosome, which are
+assigned random values initially. A collection of such chromosomes are spawned to form a population,
+which are together evolved across generations.
+A penalty based fitness function (that uses the
+problem constraints) is then used to evaluate all individuals in a population out of which, the best
+ones are selected for crossover, resulting in offsprings that make up the next generation’s population.
+The individual with the best fitness value observed is tracked across all generations and returned.
+Since each cluster formed will typically contain a mix of nodes with varying RAM values, the main
+model parameters will undergo a proportionate non-uniform split such that each peer can accomodate
+the largest chunk possible.
+For a communication infrastructure orchestrated over the internet, fault tolerance plays a crucial
+role in ensuring successful model training. Ravnest allows new peers to join any ongoing distributed
+training sessions. Based on the session’s fault tolerance requirements, they can either join a pre-
+existing cluster and participate as backups nodes or wait till enough new peers are available to form
+an entirely new cluster that, once formed, will fetch the latest set of aggregated parameters and
+join the ring topology. The latter case provides an advantage, since having more clusters improves
+the efficiency of the training process as was shown in Corollary 1.1. In the former scenario, the
+new peer will be mapped as a backup for the most unreliable node in the cluster. An extra pair of
+communication channels will be spawned that shares a copy of forward/backward pass results with
+the backup node so that it can take over in case the primary node disconnects.
+4
+Experiments
+This section elucidates upon a series of experimental training sessions conducted to evaluate the
+performance and efficiency of our proposed methodology across both single and multi-cluster setups
+with comparisons to baseline synchronous training.
+4.1
+Single Cluster Experiments with Homogeneous Nodes
+We trained a ResNet-50 network [18] on the Tiny ImageNet dataset [48] for 50 epochs with a batch
+size of 100. SGD was utilized with a momentum of 0.9, weight decay of 0.0005 and learning rate
+of 0.01 which was reduced by a factor of 10 every 30 epochs. Images were pre-processed by scaling
+to 224x224x3, then normalized to [0,1], with a mean of [0.485, 0.456, 0.406] and standard deviation
+of [0.229, 0.224, 0.225]. We also trained an Inception-V3 model [40] on the CIFAR-10 dataset [21]
+for 50 epochs with a batch size of 64 and SGD with a momentum of 0.9, weight decay of 0.0005
+12
+
+and learning rate of 0.01, reducing by a factor of 10 every 30 epochs. Images were pre-processed
+by normalization (mean: [0.4914, 0.4822, 0.4465], standard deviation: [0.2023, 0.1994, 0.2010]).
+Augmentation techniques including random flipping, cropping and padding were applied for both
+datasets. While these settings provide a robust starting point, it is important to note that further
+fine-tuning of hyperparameters could potentially lead to improved performance.
+(a) ResNet-50 model trained on Tiny ImageNet
+(b) Inception-V3 model trained on CIFAR-10
+Figure 5: Comparison of validation accuracies over epochs
+.
+For both models, conventional synchronous training was performed as a baseline, followed by
+decentralized training using proposed approach across 2 and 3 homogeneous nodes (within a single
+cluster), all hosted on Nvidia A10G GPUs with 24 GB VRAM. From Figures 5a and 5b, it is evident
+that as the number of nodes within the single cluster grows, initial validation accuracy registers lower
+values compared to scenarios with fewer nodes. This can be ascribed to the accumulation of more
+stagnant gradients as the size of the cluster increases. However, as training advances, the rates of
+convergence are at par with those of the baselines. We also observed that the average memory usage
+per node reduced by around 56% (3 nodes case) and by 42% (2 nodes case) for both models when
+compared to conventional training on a single GPU instance with the same batch sizes.
+4.2
+Multi-Cluster Experiments with Heterogeneous Nodes
+We evaluated a multi-cluster setup using the proposed method on the BERT model following the
+BERT base (uncased) architecture [9].
+Pretraining was done on Masked LM (MLM) and Next
+Sentence Prediction (NSP) tasks using the LAMB optimizer [54] with a learning rate of 0.00176
+and weight decay of 0.01, on the WikiText-103 dataset [27]. A linear scheduler with 5000 warmup
+steps was also utilized. The sum of the losses for these 2 tasks was used as the convergence metric.
+The multi-cluster setup consisted of 10 nodes across A10G, V100 and T4 GPUs hosted on cloud
+instances. They were grouped into 4 clusters by the cluster formation genetic algorithm in order to
+ensure that the total compute times were similar across all clusters.
+Each cluster consisted of either 2 or 3 nodes, allowing for varying degrees of staleness, and
+gradients were accumulated over 32 batches of 8 samples before performing updates. Parameter
+averaging was done whenever each cluster completed 1400 update iterations. Conventional syn-
+chronous baseline training was done with the same hyperparameters. Figure 6 shows that in 11797
+13
+
+Figure 6: BERT pre-training on multi-cluster setup
+update iterations, the proposed algorithm achieves a learning curve comparable to that of the base-
+line. Training for more iterations or increasing the number of clusters can lead to even better results.
+Additionally, we noted that the average GPU memory usage across all nodes was approximately 67%
+less than that seen during training on a single GPU instance with the same batch size of 8.
+5
+Conclusion
+This research paper proposes an novel asynchronous parallel decentralised training paradigm that
+leverages the strengths of both data and model parallelism techniques.
+It incorporates Parallel
+Multi-Ring All-Reduce for efficient parameter averaging across clusters, to train contemporary deep
+learning models across heterogeneous consumer grade PCs. Zero-bubble Asynchronous Model Par-
+allelism within each cluster further minimizes the idle time bubble on every node. Comprehensive
+theoretical analysis was performed to validate the convergence and linear speedup characteristics of
+the approach.

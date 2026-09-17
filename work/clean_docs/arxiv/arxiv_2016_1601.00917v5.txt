@@ -1,0 +1,790 @@
+DrMAD: Distilling Reverse-Mode Automatic Differentiation for Optimizing
+Hyperparameters of Deep Neural Networks
+Jie Fuˆ*
+Hongyin Luo ˆ
+Jiashi Fengˆ*
+Kian Hsiang Lowˆ*
+Tat-Seng Chuaˆ*
+ˆ* National University of Singapore
+ˆ Tsinghua University
+Abstract
+The performance of deep neural networks is well-
+known to be sensitive to the setting of their hy-
+perparameters. Recent advances in reverse-mode
+automatic differentiation allow for optimizing hy-
+perparameters with gradients. The standard way
+of computing these gradients involves a forward
+and backward pass of computations. However, the
+backward pass usually needs to consume unafford-
+able memory to store all the intermediate variables
+to exactly reverse the forward training procedure.
+In this work we propose a simple but effective
+method, DrMAD, to distill the knowledge of the
+forward pass into a shortcut path, through which we
+approximately reverse the training trajectory. Ex-
+periments on two image benchmark datasets show
+that DrMAD is at least 45 times faster and con-
+sumes 100 times less memory compared to state-
+of-the-art methods for optimizing hyperparameters
+with minimal compromise to its effectiveness. To
+the best of our knowledge, DrMAD is the ﬁrst re-
+search attempt to make it practical to automatically
+tune thousands of hyperparameters of deep neu-
+ral networks. The code can be downloaded from
+https://github.com/bigaidream-projects/drmad
+1
+Introduction
+Modern
+machine
+learning
+algorithms
+are
+rarely
+hyperparameter-free.
+Hyperparameters,
+such as learn-
+ing rate or L2-norm penalties are important for training
+deep models. Many works [Bergstra et al.2011, Shahriari et
+al.2016, Snoek et al.2012] have shown that the performance
+of large-sized deep models is sensitive to the setting of their
+hyperparameters. So, tuning hyperparameters is now recog-
+nized as a crucial step in the process of applying machine
+learning algorithms to achieve best performance and drive
+industrial applications [Shahriari et al.2016]. For decades,
+the de-facto standard for hyperparameter tuning in machine
+learning has been a simple grid search [Shahriari et al.2016].
+Recently, it has been shown that optimizing hyperparameter
+in a principled and automatic way can reach or surpass
+human expert-level hyperparameter settings for deep neural
+networks in a variety of benchmark datasets [Shahriari et
+al.2016,Snoek et al.2012].
+A common choice for hyperparameter optimization is
+gradient-free Bayesian optimization [Wang et al.2013].
+Bayesian optimization builds a probability model to describe
+the distribution of validation loss conditioned on speciﬁc hy-
+perparameters, which is obtained by multiple observations
+over the pairs of hyperparameter and validation loss. This
+probability model is then used to optimize the validation
+loss after complete training of the model’s elementary1 pa-
+rameters.
+Although those techniques have been shown to
+achieve good performance with a variety of models on bench-
+mark datasets [Shahriari et al.2016], they can hardly scale
+up to handle more than 20 hyperparameters [Maclaurin et
+al.2015, Shahriari et al.2016]. Here we mean effective hy-
+perparameters. It has been shown in [Wang et al.2013] that
+Bayesian optimization can handle high-dimensional inputs
+only if the number of effective hyperparameters is small. Due
+to this inability, hyperparameters are often considered nui-
+sances, encouraging researchers to develop machine learning
+algorithms with fewer of them. We argue that being able to
+richly hyperparameterize our models is more than a pedantic
+trick. For example we can set a separate L2-norm penalty
+for each layer,which has been shown to improve the perfor-
+mance of deep models on several benchmark datasets [Snoek
+et al.2012].
+On the other hand, automatic differentiation (AD), as a me-
+chanical transformation of an objective function, can calcu-
+late gradients with respect to hyperparameters (thus called
+hypergradients) accurately [Baydin et al.2015, Maclaurin et
+al.2015].
+Although hypergradients enable us to optimize
+thousands of hyperparameters, all the prior attempts [Ben-
+gio2000, Baydin et al.2015, Maclaurin et al.2015] insist on
+exactly tracing the training trajectory backwards, which is
+impossible for real-world data and deep models from a mem-
+ory perspective. Suppose we are to train a neural network on
+MNIST dataset, the iteration number is 200,000, and every el-
+ementary parameter vector takes up 0.1 GB. In order to trace
+the training trajectory backwards, a naïve solution has to store
+all the intermediate variables (e.g. weights) at every iteration,
+1Following the convention in [Maclaurin et al.2015], we use el-
+ementary to unambiguously denote the traditional parameters up-
+dated by back-propagation, e.g. weights and biases in a neural net-
+work.
+arXiv:1601.00917v5  [cs.LG]  6 Apr 2016
+
+thus costing memory up to 200, 000 × 0.1 GB = 20 TB. The
+improved method proposed in [Maclaurin et al.2015] needs
+at least 100 GB memory even for this small-scale dataset.
+The high memory cost stems from pursuing the exact re-
+verse of the training procedure. In this work, we propose Dis-
+tilling Reverse-Mode Automatic Differentiation (DrMAD),
+to reduce the memory cost and make the hyperparameter op-
+timization feasible in practice. Compared with exact reverse
+methods, DrMAD chooses to reverse training dynamics in
+an approximate manner. Doing so allows us to reduce the
+memory consumption of tuning hyperparameters by a fac-
+tor of 100,000 at least. On the MNIST dataset, our method
+only needs 0.2 GB memory, thus enabling the use of modern
+GPUs. More importantly, the memory consumption is inde-
+pendent of the problem size as long as the deep model has
+converged. Our convergence requirement is reasonable, as
+it has been demonstrated that modern deep neural networks
+are relatively easy to converge in practice [Choromanska et
+al.2014,Goodfellow and Vinyals2014]. In addition, DrMAD
+only incurs negligible performance drop. Section 2 and Sec-
+tion 3 describe this problem and our solution in detail respec-
+tively, which is the main technical contribution of this paper.
+In short, we make the following contributions in this work:
+• We propose an algorithm that approximately reverses
+stochastic gradient descent to compute gradients w.r.t.
+hyperparameters. Our method can reduce memory con-
+sumption signiﬁcantly without sacriﬁcing its effective-
+ness, compared with state-of-the-art methods based on
+automatic differentiation.
+• We propose a hyperparameter server framework to solve
+distributed hyperparameter optimization problems.
+2
+Background and Related Work
+We review the general framework of automatic hyperparame-
+ter tuning and previous work on automatic differentiation for
+hyperparameters of machine learning models.
+A learning algorithm Aw,λ is described by a vector of
+m elementary parameters w = (w1, ..., wm) ∈W , where
+W = W1 × ... × Wm deﬁne the parameter space, and a
+vector of n hyperparameters λ = (λ1, ..., λn) ∈Λ, where
+Λ = Λ1 × ... × Λn deﬁne the hyperparameter space. We fur-
+ther use ltrain = L(Aw,λ, Xtrain) to denote the training loss,
+and lvalid = L(Aw,λ, Xvalid; Xtrain) to denote the valida-
+tion loss that Aw,λ achieves on validation data Xvalid when
+trained on training data Xtrain. An automatic hyperparame-
+ter tuning algorithm then tries to ﬁnd λ ∈Λ that minimizes
+lvalid in an efﬁcient and principled way.
+To make the deﬁnitions more concrete and concise, we
+further denote the training objective function as: ltrain =
+L(w|λ, Xtrain) = C(w|λ, Xtrain) + P(w, λ) = Ctrain +
+P(w, λ), where C(·) is the cost function on either training
+(denoted by Ctrain) or validation (denoted by Cvalid) data,
+and P(·) is the penalty term.
+2.1
+Automatic differentiation (AD)
+Most training of machine learning models is driven by the
+evaluation of derivatives, which can be handled by automatic
+differentiation (AD). AD systematically applies the chain rule
+⇓
+Forward Pass
+v−1
+= x1
+= 3
+v0
+= x2
+= 6
+v1
+= ln(v0)
+= ln(6)
+v2
+= v2
+−1
+= 32
+v3
+= cos(v−1)
+cos(3)
+v4
+= v1 + v2
+= 1.79 + 9
+v5
+= v4 + v3
+= 10.79 −0.98
+y
+= v5
+= 9.80
+⇑
+Backward Pass
+¯x1
+= ¯v−1
+= 5.86
+¯x2
+= ¯v0
+= 0.16
+¯v−1
+= ¯v−1 + ¯v2 ∂v2
+∂v−1
+= 5.86
+¯v0
+= ¯v1 ∂v1
+∂v0
+= 0.16
+¯v−1
+= ¯v3 ∂v3
+∂v−1
+= −0.14
+¯v1
+= ¯v4 ∂v4
+∂v1
+= 1
+¯v2
+= ¯v4 ∂v4
+∂v2
+= 1
+¯v3
+= ¯v5 ∂v5
+∂v3
+= 1
+¯v4
+= ¯v5 ∂v5
+∂v4
+= 1
+¯v5
+= ¯y
+= 1
+Table 1: Reverse-mode automatic differentiation example,
+with y = f(x1, x2) = ln(x2) + x2
+1 + cos(x1) at (x1, x2) =
+(3, 6). Setting ¯y = 1, ∂y/∂x1 and ∂y/∂x2 are computed in
+one backward pass.
+of calculus at the elementary operator level [Griewank and
+Walther2008]. It also guarantees the accuracy of evaluation
+of derivatives with a small constant factor of computational
+overhead and ideal asymptotic efﬁciency [Baydin et al.2015].
+AD has two modes: forward and reverse [Griewank and
+Walther2008]. Here we only consider the reverse-mode au-
+tomatic differentiation (RMAD) [Baydin et al.2015]. RMAD
+is a generalization of the back-propagation [Goodfellow et
+al.2015] used in the deep learning community. In fact, one of
+the most popular deep learning libraries, Theano [Bastien et
+al.2012], can be described as a limited version of RMAD and
+a heavily optimized version of symbolic differentiation [Bay-
+din et al.2015]. RMAD allows the gradient of a scalar loss
+with respect to its parameters to be computed in a single
+backward pass after a forward pass [Baydin et al.2015]. Ta-
+ble 1 shows an example of RMAD for y = f(x1, x2) =
+ln(x2) + x2
+1 + cos(x1), using the “three-part” notation in
+[Griewank and Walther2008], a trace of f : RN →RM is
+constructed from (a) vi−N = xi, i=1,...,N input variables,
+(b) vi,i = 1, ..., l working variables, and (c) yM−i = vl−i,
+i = M −1, ..., 0 output variables.
+2.2
+Gradient-based methods for hyperparameters
+In this paper we focus on studying the tuning of continu-
+ous hyperparameters. However, we can still hyperparame-
+terize certain discrete designs using our proposed method,
+which will be shown in Section 4.3. We consider stochas-
+tic gradient descent (SGD), as it is widely used to opti-
+mize large-sized neural networks [Goodfellow et al.2015].
+
+The elementary parameters updating formula is: wt+1 =
+wt + ηw∇wL(wt|λ, Xtrain), where the subscript t denotes
+the count of iteration (i.e. one forward and backward pass
+over one mini-batch), and ηw is the learning rate for elemen-
+tary parameters.
+The gradients of hyperparameters (hypergradients) are
+computed on the validation data Xvalid without consider-
+ing the penalty term [Foo et al.2008, Maclaurin et al.2015,
+Luketina et al.2015]:
+∇λCvalid = ∇wCvalid
+∂wt
+∂λ = ∇wCvalid
+∂2ltrain
+∂λ∂w ,
+(1)
+where Cvalid = C(w|Xvalid) is the validation cost.
+The hyperparameters are updated at every iteration in
+[Luketina et al.2015, Foo et al.2008]. In [Foo et al.2008],
+given the elementary optimization has converged, the hyper-
+parameters are updated as:
+λt+1 = λt + ηλ∇wCvalid(∇2
+wltrain)−1 ∂2ltrain
+∂λ∂w ,
+(2)
+where ηλ is the learning rate for hyperparameters. The
+authors in [Luketina et al.2015] propose to update hyperpa-
+rameters by simply approximating the Hessian in Eq. 2 as
+∇2
+wltrain = I:
+λt+1 = λt + ηλ∇wCvalid
+∂2ltrain
+∂λ∂w .
+(3)
+However, updating hyperparameters at every iteration
+would result in unstable hypergradients.
+Because this ap-
+proach only considers the inﬂuence of the regularization hy-
+perparameters on the current elementary parameter update, it
+can hardly scale up to handle more than 20 hyperparameters
+as shown in [Luketina et al.2015].
+In this paper, we adopt RMAD for computing hypergra-
+dients, like [Maclaurin et al.2015,Bengio2000,Domke2012]
+by taking into account the effects of the hyperparameters
+on the entire learning trajectory. Speciﬁcally, different from
+Eq. 1 that only considers ∂wt
+∂λ , DrMAD considers the term
+∂wT
+∂λ
+(here T represents the ﬁnal iteration number till con-
+vergence): wT = P
+0<t<T △wt,t+1(wt(λk), λk, Xt, ηλ) +
+w0, where the subscript k in λk stands for the counter of
+meta-iterations used for hyperparameter optimization (i.e.
+the number of entire training of elementary parameters),
+Xt is the mini-batch of training data used in iteration t,
+and w0 is the initial parameter vector. Update of hyperpa-
+rameters in this paper and also [Maclaurin et al.2015, Ben-
+gio2000,Domke2012] is:
+λk+1 = λk + ηλ∇wCvalid
+∂wT
+∂λ .
+(4)
+Unfortunately, RMAD requires all the intermediate vari-
+ables obtained in the forward pass should be maintained in
+memory for the backward pass [Griewank and Walther2008].
+Conventional RMAD with exact arithmetic stores the entire
+training trajectory {w0, ..., wT } in memory, which is totally
+impractical for even small-sized tasks.
+An “information buffer” method is proposed in [Maclau-
+rin et al.2015] to recompute the learning trajectory on the
+ﬂy during the backward pass of RMAD rather than storing
+it in memory by making use of the SGD momentum mecha-
+nism. Certain amount of auxiliary bits as information buffer,
+which depend on the speciﬁc learning dynamics, to handle
+ﬁnite precision arithmetic is needed in this case. Although
+the proposed method in [Maclaurin et al.2015] is shown to
+be able to tune thousands of hyperparameters and reduce the
+memory consumption by a factor of 200 in the most ideal set-
+ting, it needs 8 hours to run 10 epochs on a subset (10,000
+training samples) of MNIST dataset. Furthermore, its mem-
+ory and computational requirements grow without bound as
+the problem size increases, which makes it impossible to run
+on modern GPUs. In contrast, we will present in the next sec-
+tion how to approxiate RMAD to reduce memory consump-
+tion dramatically, thus enabling it to leverage the power of
+GPUs in principle.
+3
+Approximating RMAD with a Shortcut
+In this paper, we raise a crucial yet rarely investigated ques-
+tion: do we really need to exactly trace the whole training
+procedure backwards, starting from the trained parameter val-
+ues and working back to the initial random parameters? If all
+that we care about are good enough hyperparameters given
+limited resources and time budget, the answer might be no.
+Driven by this question, we demonstrate that a shortcut can
+be established by distilling the knowledge from the forward
+pass of RMAD with minimal compromise to its solution qual-
+ity.
+3.1
+Distilling knowledge from the forward pass
+Trying to trace backwards exactly can be wasteful as this ap-
+proach does not take into account the highly structured nature
+of training dynamics of deep models. One intuition motivat-
+ing the investigation of this paper is the observation [Good-
+fellow and Vinyals2014] that if we knew the direction deﬁned
+by the ﬁnal learned weights after convergence, a single coarse
+line search is sufﬁcient to visualize the training dynamics of
+a neural network. In other words, there exists a linear sub-
+space in which the training of a neural network rarely encoun-
+ters any signiﬁcant difﬁculties. This observation is consistent
+with other recent empirical and theoretical work demonstrat-
+ing that modern deep neural networks are relatively easy to
+optimize [Choromanska et al.2014,Montufar et al.2014].
+It is also well-known that when doing elementary param-
+eter optimization, second-order methods are more efﬁcient
+with fewer iterations compared to the naïve gradient descent,
+but they cannot be easily applied to high-dimensional models
+due to heavy computations [Raiko et al.2012]. In practice, it
+is usually approximated by a diagonal or block-diagonal ap-
+proximation [Schaul and LeCun2013]. Inspired by these ap-
+proximation techniques, we make an aggressive approxima-
+tion for RMAD here – discard all the intermediate variables
+altogether. In other words, we choose a shortcut, which sim-
+ply approximates the forward pass learning history used in
+Eq. 4 as a series of parameter vectors w = (1−β)w0+βwT
+for varying values of 0 < β < 1, which can be generated on
+the ﬂy almost without storing anything. Figure 1 shows the
+contour for the backward passes used by DrMAD and RMAD
+respectively.
+
+Elementary parameter 1
+Elementary parameter 2
+RMAD & Forward DrMAD
+DrMAD Backward
+Initial weights
+Meta-iteration 1
+Meta-iteration 2
+Figure 1: Comparisons on the paths of hyperparameter opti-
+mization by DrMAD and RMAD. RMAD uses the same path
+for its forward and backward passes. While the backward
+pass of DrMAD follws a shortcut, which is established by
+distilling the knowledge from its forward pass.
+More concretely, DrMAD works by ﬁrst obtaining the ﬁnal
+trained elementary parameter values using SGD algorithms.
+Algorithm 1 demonstrates the procedure formally. Here we
+could use any SGD variant and do not put constraints on the
+momentum term. In contrast, the previous most similar work
+[Maclaurin et al.2015] is highly dependent on the momentum
+setting in order to save memory during the backward pass of
+RMAD.
+Algorithm 2 shows how to compute the gradients of hyper-
+parameters by DrMAD, where in step 4 we approximate the
+learning dynamics. These hypergradients are used to update
+hyperparameters using Eq. 4. In DrMAD, the approximated
+intermediate elementary parameters are independent of each
+other. Whereas in RMAD proposed in [Maclaurin et al.2015]
+each elementary parameter relies on the previous one implic-
+itly, and thus a “information buffer” is needed. Since that ex-
+tra buffer is dataset and model dependent, RMAD’s memory
+consumption is growing without bound.
+In addition to reduction in memory, compared to [Maclau-
+rin et al.2015], Algorithm 2 also reduces the computational
+operations as a byproduct, because it does not need to recom-
+pute the elementary parameters exactly.
+Algorithm 1 Stochastic gradient descent (SGD).
+1: inputs: initial parameters w0, learning rate α, weight de-
+cay γ, hyperparameters λ, loss function ltrain, iteration
+number T.
+2: initialize v1 ←0
+3: for t = 1 to T −1 do
+4:
+gt ←∇wltrain
+evaluate gradient
+5:
+vt+1 ←γvt −(1 −γ)gt
+6:
+wt+1 ←wt + αtvt
+update position
+7: end for
+8: output: trained parameters wT
+3.2
+Discussions on DrMAD
+In fact, DrMAD can be seen as an operation of knowledge
+distillation. As explained in [Hinton et al.2014], the knowl-
+edge acquired by an ensemble of large-sized models as a
+“teacher” can be distilled into a single small model, which is
+called the “student”. For example, one can construct a teacher
+Algorithm 2 Distilling reverse-mode automatic differentia-
+tion (DrMAD) of SGD.
+1: inputs: initial parameter w0, learned parameter wT ,
+training loss ltrain, validation loss lvalid, weight decay
+γ, learning rate α
+2: initialize dλ ←0, dw ←∇wlvalid, βT −1 ←1 −1
+T
+3: for t = T −1 to 1 do
+4:
+wt−1 ←(1 −βt)w0 + βtwT
+5:
+βt−1 ←βt −1
+T
+6:
+dv ←dv + αdw
+7:
+dλ ←dλ −(1 −γ)dv∇λ∇wltrain
+8: end for
+9: output: gradient of lvalid w.r.t. λ
+model by training an ensemble of 5 deep neural networks with
+10 layers. Then, a student model with 5-layer can be con-
+structed to achieve similar performance as the teacher. How-
+ever, it requires much less parameters as it only approximates
+the teacher’s behavior rather than learning from scratch.
+Considering our situation, the most valuable knowledge is
+the initial random and ﬁnal trained weight vectors once the
+training process of a deep model has converged. Therefore,
+the forward pass of SGD training provides the ﬁnal weight
+vector after convergence, which is deﬁned as a teacher; the
+reverse pass given by shortcut is a student here.
+Obviously, obtaining derivatives from the shortcut may
+never reveal more information about hyperparameters than
+calculating derivatives from the exact trajectories. However,
+when memory and computational costs are taken into ac-
+count, the shortcut may convey more information per unit
+cost.
+In fact, our approach explicitly separates the opti-
+mization of the elementary parameters and hyperparameters,
+which serves as a trade-off between accuracy and computa-
+tional expense. In the experimental part, we will show that the
+accuracy performance of DrMAD is slightly worse than the
+RMAD with exact arithmetic. Nonetheless, this separation
+gives rise to several positive implications. For example, we
+can use distributed deep learning libraries, such as CNTK2, to
+speed up the forward pass, because currently none of the au-
+tomatic differentiation libraries, such as Autograd3, support
+multiple GPUs. DrMAD is also orthogonal to the choices as-
+sociated with the internal elementary parameter optimization;
+it can work alongside other recent advances in neural network
+training without modiﬁcation.
+3.3
+Hyperparameter server
+With current generation hardware such as large computer
+clusters with GPUs, the optimal allocation of computing cy-
+cles should include more hyperparameter exploration than
+has been typical in the past [Bergstra et al.2011]. It is thus de-
+sirable to parallelize hyperparameter optimization processes.
+Motivated by the parameter server approach to distributed el-
+ementary parameter optimization [Li et al.2013], we propose
+a hyperparameter server framework for distributed hyper-
+parameter optimization using hypergradients. In parameter
+2https://github.com/Microsoft/CNTK
+3https://github.com/HIPS/autograd
+
+Hyperparameters
+Server
+Update
+Client_1
+Average
+Hypergradients
+DrMAD
+……
+Client_N
+Hypergradients
+DrMAD
+Figure 2: Hyperparameter server architecture.
+server [Li et al.2013], computational nodes are partitioned
+into clients and servers, and communication between nodes
+is asynchronous. In our hyperparameter server framework,
+there is only one server and several clients, and the communi-
+cation between them is synchronous. Each client is in charge
+of training a model replica with the same hyperparameters on
+a subset of data, and the server maintain the globally shared
+hyperparameters. At every meta-iteration, we accumulate the
+hypergradients from the clients and average them. The aver-
+aged hypergradients then are used to update the global hyper-
+parameters maintained by the server. The overall architecture
+is shown in Figure 2.
+4
+Experiments
+In this section, we empirically demonstrate how DrMAD of-
+fers high memory and computational efﬁciency yet achiev-
+ing comparable predictive performance as computationally
+expensive RMAD. Note that here we do not strive for state-
+of-the-art performance on benchmark datasets, but focus on
+showcasing the merits of DrMAD by comparing it with
+RMAD. Therefore, even though we use image data in the ex-
+periments, we do not use or compare to any image-speciﬁc
+processing such as convolutional networks. Note that even
+the best results achieved by RMAD [Maclaurin et al.2015]
+are not comparable with those obtained with for instance
+convolutional networks. All the experiments are done on a
+Microsoft Azure G5 server with 32 CPU cores and 448 GB
+memory.
+4.1
+Optimizing continuous regularization
+hyperparameters
+Although DrMAD could work in principle for many different
+types of continuous hyperparameters, we focus on tuning hy-
+perparameters for regularization here. Following the settings
+in [Maclaurin et al.2015], we evaluate DrMAD for optimiz-
+ing continuous regularization hyperparameters on a subset of
+MNIST dataset (10,000 for training, 3,000 for validation, and
+3,000 for testing) using a multilayer perceptron (MLP) with
+tanh activation function. We do not include data shufﬂing and
+use a ﬁxed set of random initial parameters for every meta-
+iteration. The MLP has 4 layer, containing 784, 50, 50, and
+50 neurons respectively. Each neuron has its own L2-norm
+0
+5
+10
+15
+20
+25
+30
+Meta iterations
+0.5
+0.0
+0.5
+1.0
+1.5
+Average L2 regularizations
+DrMAD (2,000)
+DrMAD (20,000)
+RMAD (2,000)
+0
+5
+10
+15
+20
+25
+30
+Meta iterations
+6
+8
+10
+12
+14
+16
+Test error rate (%)
+DrMAD (2,000)
+DrMAD (20,000)
+RMAD (2,000)
+Figure 3: Left: The average values of hyperparameters with
+variances obtained by DrMAD (2,000 iterations), DrMAD
+(20,000 iterations) and RMAD (2,000 iterations), respec-
+tively. Right: The test error rates obtained by DrMAD (2,000
+iterations), DrMAD (20,000 iterations) and RMAD (2,000 it-
+erations), respectively.
+penalty on its parameter and thus we are going to optimize
+934 hyperparameters in total. The learning rate for optimiz-
+ing elementary parameters is ﬁxed as 0.05, the number of el-
+ementary iterations is set as 2000, the learning rate for hyper-
+parameters is 0.07, the mini-batch size is 50, and the number
+of meta-iterations is 30. The adopted data pre-processing op-
+erations only includes centering each feature. The code of
+DrMAD is modiﬁed from a public toolbox for hypergradient
+calculation4. We use the original code from [Maclaurin et
+al.2015] for experiments on RMAD.
+Figure 3 shows the curve of averaged hyperparameter val-
+ues w.r.t. optimization iterations and the corresponding test
+error from DrMAD and RMAD. The running time of Dr-
+MAD and RMAD are 16 minutes and 717 minutes, respec-
+tively. One can observe that the average hyperparameter val-
+ues and test error rate curves of DrMAD are close to RMAD
+on MNIST dataset while DrMAD only costs 2% computation
+time of RMAD.
+In contrast to [Maclaurin et al.2015], we set the mini-batch
+size to a small number (v.s. 300 in [Maclaurin et al.2015])
+and the number of elementary iterations to a large one (v.s.
+200 elementary iterations in [Maclaurin et al.2015]) on pur-
+pose, because these settings result in highly zigzag and long
+learning trajectories. The shaded areas in Figure 3 (left) rep-
+resent the variances of individual hyperparameters. We can
+see that the variances are quite high, which implies that di-
+verse hyperparameter values might be beneﬁcial to the pre-
+dictive performance. Another observation is that the tuned
+hyperparameters seem to prefer positive values.
+Figure 3
+(right) shows that DrMAD can provide similar performance
+of RMAD. Also note that DrMAD consumes 100 times less
+memory than RMAD does.
+To demonstrate that DrMAD can handle even longer learn-
+ing trajectories, we increase the number of elementary itera-
+tions to 20,000. But due to the time budget, we do not com-
+pare it with RMAD, which is at least 45 times slower. Fig-
+ure 3 (left) shows that for DrMAD with 20,000 iterations, the
+mean of hyperparameters tends to be larger compared to the
+ones obtained using 2,000 iterations. Also, the variances of
+4https://github.com/HIPS/hypergrad
+
+0
+5
+10
+15
+20
+Meta iterations
+1.5
+1.0
+0.5
+0.0
+0.5
+1.0
+1.5
+2.0
+Average L2 regularizations
+Hyperparameter server
+Original
+0
+5
+10
+15
+20
+Meta iterations
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+Test error rate (%)
+Hyperparameter server
+Original
+Figure 4: Left: The average values of hyperparameters with
+variances obtained by the hyperparameter server version of
+DrMAD and the original DrMAD, respectively. Right: Test
+error rates obtained by the hyperparameter server version of
+DrMAD and the original DrMAD, respectively.
+the hyperparameters obtained by DrMAD with 20,000 itera-
+tions are towards larger positive values. One possible expla-
+nation could be that taking more iterations increases the risk
+of overﬁtting, and thus heavier penalties are needed. We can
+observe in Figure 3 (right) that DrMAD with 20,000 itera-
+tions achieves better performance compared to DrMAD and
+RMAD with only 2,000 iterations.
+4.2
+Hyperparameter server
+We apply the hyperparameter server framework to a subset
+of MNIST dataset. Speciﬁcally, the number of total train-
+ing datapoints is 30,000, and the numbers of both validation
+and test data are 5,000. For the hyperparameter server based
+DrMAD, we have 5 clients, each being trained with 12,000
+training samples. The number of meta-iterations is 20. All
+the other settings are the same as our previous experiments.
+Figure 4 (right) shows the effectiveness of our proposed
+hyperparameter server framework on MNIST dataset. For
+the hyperparameter server, the test errors are estimated by
+a model trained with 30,000 datapoints and the average hy-
+perparameters from clients. We can observe that in Figure 4
+(left), the evolution of the average values and the variances
+of L2 penalties obtained by the hyperparameter server looks
+similar to that of the original DrMAD. Figure 4 (right) shows
+that DrMAD with the hyperparameter server framework can
+approach the performance of the original DrMAD. Overall,
+it seems that diversity of hyperparameters is beneﬁcial to the
+predictive performance of deep neural networks on MNIST
+dataset.
+We can see from Figure 4 (left) that the variance of hyper-
+parameters seems unbounded. One might be tempted to fur-
+ther increase the number of meta-iterations to make the vari-
+ance even larger. But Figure 4 (right) indicates that with the
+increase in variance, the predictive performance increases ini-
+tially and then stops changing dramatically. Furthermore, ac-
+cording to our experiments and the observations in [Maclau-
+rin et al.2015], hypergradients become unstable after certain
+number of meta-iterations.
+The computations of hypergradients are dependent on
+their hyperparameters through thousands of iterations of
+SGD. Furthermore, within each iteration of SGD, it involves
+forward- and then back-propagations through a deep neural
+network. Overall, the stacking of all the above operations
+would result in vanishing gradient problems [Glorot and Ben-
+gio2010]. It should be noted that both DrMAD and RMAD
+have this problem.
+We would argue that this instability may not be a serious
+problem in practice, because due to the limited computing
+and time budget, running too many meta-iterations (e.g. 50)
+is not reasonable anyway.
+4.3
+Learning continuously hyperparameterized
+architectures
+Popular deep learning architectures, such as convolutional
+neural networks, can be obtained by forcing particular
+weights to be zero and tying particular pairs of weights to-
+gether with hard constraints. It has been shown in [Maclau-
+rin et al.2015] that the learning of softened architectural con-
+straints can be seen as a multitask learning problem using a
+MLP with 2 hidden layers. They learn a penalty for each
+alphabet pair, separately for each layer in neural networks.
+Speciﬁcally, the hypergradients are computed by a pairwise
+quadratic penalty on the hyperparameters, λT Aλ, where A
+is described by three 10 × 10 matrices, each matrix for a par-
+ticular layer, and λ is the hyperparameter vector. They also
+use the Omniglot dataset [Lake et al.2015]. The dataset con-
+sists of 10 alphabets with up to 55 characters in each alphabet
+but only 15 examples of each character. Each character is
+represented by a 28 × 28 pixel greyscale image. More details
+about the dataset are presented in [Lake et al.2015].
+Here, we reproduce the above experiment with the same
+settings in [Maclaurin et al.2015], but use DrMAD instead.
+Our experiments show that the training and test error obtained
+by DrMAD are 0.42 and 1.13 respectively, whereas RMAD’s
+training and test error are 0.60 and 1.13 respectively. If we in-
+crease the number of elementary iterations from 50 to 2,000,
+the training and test error of DrMAD are 0.52 and 1.10 re-
+spectively.
+5
+Conclusion and Future Work
+In this paper, we proposed a highly memory efﬁcient hyper-
+parameter optimization method – distilling reverse-mode au-
+tomatic differentiation (DrMAD) to optimize continuous hy-
+perparameters in deep neural networks.
+We demonstrated
+how DrMAD is able to optimize validation loss w.r.t. thou-
+sands of hyperparameters in practice, which was previously
+impossible due to its unreasonably large memory consump-
+tion. We demonstrated its effectiveness and efﬁciency on two
+benchmark datasets.
+While DrMAD gives comparable results on small image
+datasets, it is not clear if this approach will work for larger
+datasets. Since DrMAD makes it possible for the ﬁrst time
+to run on GPUs, rewriting DrMAD to train models on larger
+datasets with GPUs would be our future work.

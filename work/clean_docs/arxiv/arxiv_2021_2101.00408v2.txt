@@ -1,0 +1,1127 @@
+End-to-End Training of Neural Retrievers for
+Open-Domain Question Answering
+Devendra Singh Sachan1,2∗, Mostofa Patwary3, Mohammad Shoeybi3, Neel Kant3,
+Wei Ping3, William L Hamilton1,2,4, Bryan Catanzaro3
+1Mila - Quebec AI Institute; 2McGill University; 3NVIDIA; 4Canada CIFAR AI Chair
+
+Abstract
+Recent work on training neural retrievers for
+open-domain question answering (OpenQA)
+has employed both supervised and unsuper-
+vised approaches.
+However, it remains un-
+clear how unsupervised and supervised meth-
+ods can be used most effectively for neural
+retrievers.
+In this work, we systematically
+study retriever pre-training. We ﬁrst propose
+an approach of unsupervised pre-training with
+the Inverse Cloze Task and masked salient
+spans, followed by supervised ﬁnetuning using
+question-context pairs.
+This approach leads
+to absolute gains of 2+ points over the previ-
+ous best result in the top-20 retrieval accuracy
+on Natural Questions and TriviaQA datasets.
+We next explore two approaches for end-to-
+end training of the reader and retriever compo-
+nents in OpenQA models, which differ in the
+manner the reader ingests the retrieved docu-
+ments. Our experiments demonstrate the ef-
+fectiveness of these approaches as we obtain
+state-of-the-art results. On the Natural Ques-
+tions dataset, we obtain a top-20 retrieval ac-
+curacy of 84%, an improvement of 5 points
+over the recent DPR model. We also showcase
+good results on answer extraction, outperform-
+ing recent models such as REALM and RAG
+by 3+ points. Our code is available at: https:
+//github.com/NVIDIA/Megatron-LM.
+1
+Introduction
+The task of open-domain question answering
+(OpenQA) consists of ﬁnding answers to the
+information-seeking questions using a large knowl-
+edge source such as Wikipedia. This knowledge
+source is also referred to as evidence and it typically
+contains millions of documents. Most approaches
+for OpenQA consist of a two-stage pipeline (Chen
+et al., 2017; Chen, 2018). In the ﬁrst stage, given
+∗This work was done during an internship at NVIDIA.
+Corresponding authors: Devendra Sachan, Mostofa Patwary.
+Document 1: Bowling is a target sport and recreational activity in 
+which a player rolls a ball towards pins (in pin bowling) or another 
+target (in target bowling) …
+Document 2: “Hall of Fame” is a song by Irish pop rock band the 
+Script. It is the lead single from their studio album #3. The track 
+features American hip-hop artist will.i.am of The Black Eyed Peas.
+Document 3: The World Bowling Writers (WBW) International 
+Bowling Hall of Fame was established in 1993 and is located … on 
+the International Bowling campus in Arlington, Texas.
+Question: Where is the bowling hall of fame located?
+Stage 1: Retriever
+Stage 2: Reader
+Answer: Arlington, Texas
+Figure 1: An example illustrating OpenQA pipeline.
+a question, a retriever module identiﬁes the most
+relevant documents, which is often a very small
+subset of the evidence known as context documents.
+Traditionally, approaches based on document rank-
+ing such as BM25 (Robertson and Zaragoza, 2009)
+have been used for the retriever. In the second
+stage, these relevant documents are given as input
+to the reader module, which understands them and
+extracts the answer for the question (Figure 1).
+The main drawback of the BM25 method is that
+it is not trainable and hence it can’t be adapted to
+tasks involving open-retrieval. Recent work has ad-
+dressed this limitation by building upon advances
+in self-supervised learning, such as BERT (Devlin
+et al., 2019). These approaches model both the
+retriever and reader using neural networks, allow-
+ing the retriever to be trained using task-speciﬁc
+datasets (Lee et al., 2019; Guu et al., 2020). Typi-
+cally, the retriever model consists of a dual-encoder
+architecture (Bromley et al., 1994), where one en-
+coder processes the question and the other encoder
+processes the context document. Prior work has
+investigated both unsupervised and supervised ap-
+proaches to train the retriever. Unsupervised ap-
+proaches include separately training the retriever
+with Inverse Cloze Task (ICT) (Lee et al., 2019)
+or training the retriever and reader jointly by pre-
+arXiv:2101.00408v2  [cs.CL]  2 Jun 2021
+
+dicting masked salient spans (REALM) (Guu et al.,
+2020), while supervised approaches such as Dense
+Passage Retrieval (DPR) (Karpukhin et al., 2020)
+train the retriever using human-annotated sets of
+question and context pairs.
+However, there is no study that investigates the
+comparative advantages of using these two styles of
+training when the retrieval task is challenging, i.e.,
+when the evidence contains millions of documents.
+It is unclear if the unsupervised approaches can
+further help to improve the performance of strong
+supervised approaches, and, if so, under what con-
+ditions. A core focus of this work is systematically
+studying these aspects of retriever training.
+We propose a uniﬁed approach to train the re-
+triever: unsupervised pre-training followed by su-
+pervised ﬁnetuning. We also investigate key de-
+sign choices—such as relevance score scaling and
+longer training—and showcase their effectiveness.
+Our results demonstrate that the proposed approach
+obtains substantial accuracy gains when evaluated
+on benchmark OpenQA datasets. Extensive experi-
+ments also highlight the relative importance of dif-
+ferent pre-training strategies, revealing important
+trade-offs when varying the amount of supervised
+data available to train the retriever.
+Furthermore, motivated by recent work (Guu
+et al., 2020; Lewis et al., 2020a), we also explore
+two approaches for end-to-end supervised training
+of the reader and retriever components. In the ﬁrst
+approach, the reader considers each retrieved docu-
+ment separately while in the second approach, the
+reader takes as input all the retrieved documents
+together. We compare the effectiveness of these
+approaches on both retrieval accuracy and answer
+extraction. We show that the ﬁrst approach leads
+to an improved retrieval performance, while the
+second approach results in an improved answer ex-
+traction. With end-to-end training, we outperform
+previous best models to obtain new state-of-the-art
+results on retrieval accuracy and answer extraction.
+We also perform experiments by scaling the model
+size to a large conﬁguration for both retriever and
+reader and observe consistent improvements, com-
+pared with smaller models.
+In summary, the contributions of this work are:
+• We demonstrate that our proposed method of
+unsupervised pre-training of the retriever with
+ICT followed by supervised ﬁnetuning leads to
+absolute gains of more than 2 points in the top-20
+retrieval accuracy over the previous best result
+on Natural Questions and TriviaQA datasets.
+• We show that masked salient spans-based pre-
+training of the retriever is more effective when
+the supervised dataset sizes are small.
+• Our end-to-end training approach obtains new
+state-of-the-art performance on retrieval accu-
+racy. On Natural Questions, our top-20 accuracy
+is 84, which is a 5 points gain over DPR results.
+• We achieve competitive results on answer extrac-
+tion with gains of more than 3 points over recent
+models such as REALM (Guu et al., 2020) and
+RAG (Lewis et al., 2020c).
+• We scale up end-to-end training to large models
+and show consistent gains in performance.
+The rest of the paper is organized as follows.
+Sec. 2 and 3 explain the retriever model and end-
+to-end training, respectively. Sec. 4-6 describe the
+experimental details with the results. Sec. 7 reviews
+the related work followed by conclusion in Sec. 8.
+2
+Neural Retriever
+In this section, we ﬁrst describe the retriever ar-
+chitecture and then discuss different approaches to
+train it, including our proposed approach.
+2.1
+Background
+Given a collection of documents in the evidence
+Z = {z1, · · · , zm} and a question q, the task of the
+retriever is to select a relevant subset of documents
+for the question. To do this, the retriever performs a
+ranking of the evidence documents conditioned on
+the question and outputs the top-ranked documents.
+The retriever model consists of two modules: a
+question encoder (fQ) and a context encoder (fZ).
+Such a model is often referred to as a dual-encoder
+model (Bromley et al., 1994). Here, we detail the
+training methodology of the dual-encoder model
+given a questions (q) and context documents (zi)
+from Z. First, we compute the relevance score
+between the question and context. We deﬁne the
+relevance score to be the dot-product between the
+question and context representations
+s(q, zi; φ) = fQ(q)⊤fZ(zi)
+(1)
+where fQ(q) ∈Rd and fZ(z) ∈Rd denote the
+question and context encoders, respectively, which
+are parameterized by φ = [φQ, φZ]. We model
+the fQ and fZ using BERT-style transformer net-
+works (Devlin et al., 2019; Vaswani et al., 2017).
+We consider the hidden states of the ﬁrst token of
+
+the sequence (i.e. [CLS] token) as the encoder’s
+output. The probability of a context document zi
+being relevant to the question q is calculated as
+p(zi | q, Z; φ) =
+exp(s(q, zi; φ)/τ)
+P|Z|
+j=1 exp(s(q, zj; φ)/τ)
+(2)
+where τ is a scaling factor. While previous work
+had used the setting of τ = 1, in this work, we set
+τ =
+√
+d. Bigger scaling factor helps in better opti-
+mization when the model hidden size (d) is large.
+We refer to this as relevance score scaling. To
+train the retriever, we maximize the log-likelihood
+computed from Eq. 2.
+In practice, as the evidence set consists of mil-
+lions of documents, the normalization term would
+be expensive to compute. Hence, we approximate
+the denominator of the above equation by using the
+context documents in the batch as negative exam-
+ples, a technique that has shown to perform well in
+practice (Chen et al., 2020).
+2.2
+Training
+In this section, we discuss different approaches to
+train the retriever. In all the approaches, we initial-
+ize the parameters of both the question and context
+encoders using BERT weights as implemented in
+Megatron-LM (Shoeybi et al., 2019). We also ex-
+perimented with random initialization but it vastly
+underperformed BERT initialization.
+2.2.1
+Supervised Training
+In the supervised setting, human-annotated ques-
+tions, answers, and sometimes context are provided.
+If the context is not included, then a common ap-
+proach is to use distant supervision (Mintz et al.,
+2009) to obtain the context document. Speciﬁ-
+cally, we select the top-ranked document using
+BM25 (Robertson and Zaragoza, 2009) from the
+evidence that contains the answer as the context.
+We also select other top-ranked documents that do
+not contain the answer as additional hard negative
+examples. This approach to train neural retriever
+was popularized by (Karpukhin et al., 2020).
+2.2.2
+Unsupervised Training
+Inverse Cloze Task (ICT):
+In this setup, we do
+not consider the human-annotated question-context
+pairs. Instead, the retriever is trained in an unsu-
+pervised manner. Speciﬁcally, a randomly sampled
+sentence from a paragraph is considered as the
+query while other sentences as the context. This
+approach was ﬁrst proposed by (Lee et al., 2019).
+Masked salient spans training:
+(Guu et al.,
+2020) showcased that the ICT initialized retriever
+can be further improved by training it with an ob-
+jective where the reader predicts the masked salient
+spans such as named entities conditioned on the
+retrieved documents. In this work, we adopt the
+same approach. However, unlike (Guu et al., 2020)
+who use BERT for the reader, we use a generative
+language model based on T5 (Raffel et al., 2020).
+2.3
+Proposed Approach: Unsupervised
+Pre-training and Supervised Finetuning
+To improve the retriever training, we propose the
+approach of unsupervised pre-training of the re-
+triever followed by supervised ﬁnetuning. In this
+approach, we ﬁrst pre-train the retriever weights
+with ICT training or masked salient spans training
+(Sec. 2.2.2). After pre-training, we ﬁnetune the
+retriever with supervised training (Sec. 2.2.1).
+3
+End-to-End Retriever and Reader
+Training
+In this section, we explore two supervised train-
+ing approaches to end-to-end train the reader and
+retriever components from the task-speciﬁc data.
+In the ﬁrst approach, the reader considers each re-
+trieved document separately (Sec. 3.1) while in
+the second approach, the reader takes as input all
+retrieved documents together (Sec. 3.2). These ap-
+proaches are designed such that when predicting
+the answer conditioned on the question, the learn-
+ing process improves both the reader and retriever.
+Background and notation:
+In end-to-end train-
+ing, the trainable components consists of the
+retriever (φ) and reader (θ) parameters.
+For
+retriever, we use the dual-encoder architecture
+and train it as discussed previously in Sec. 2.3.
+Our reader is a generative model designed ac-
+cording to the sequence-to-sequence modeling
+paradigm (Sutskever et al., 2014). Speciﬁcally, we
+use pre-trained T5 as the reader. The inputs to the
+training process are questions (q) and its answers
+(a), both in string form. Given a question, ﬁrst the
+retriever obtains the k relevant context documents
+(K) from the evidence (Z) as
+K = arg sort
+zi∈Z
+s(q, zi; φ)[: k]
+(3)
+The reader then takes the question and one or more
+context documents (zi) as input to predict the an-
+
+Question (q)
+Evidence embeddings
+Top-k inner product search
+Encoder
+Decoder
+T5 Model
+Top-k documents (z)
+Reader
+X
+Dot-product
+Relevance score
+Stale weights from 
+previous checkpoint
+   Evidence Documents
+Asynchronous
+embedding
+update
+Loss
+Answer (a)
+Retriever
+Figure 2: A schematic diagram illustrating end-to-end supervised training of the retriever and reader components.
+swer, the likelihood of which is deﬁned as
+p(a | q, zi; θ) =
+N
+Y
+j=1
+p (aj | a1:j−1, q, zi; θ) , (4)
+where N is the number of answer tokens. Next,
+we describe the two proposed approaches. A block
+diagram illustrating the end-to-end training process
+is shown in Figure 2.
+3.1
+Approach 1: Individual Top-k
+In this approach, similar to (Guu et al., 2020), the
+reader’s likelihood is ﬁrst computed conditioned
+on the question and each retrieved document. The
+marginal likelihood is deﬁned as the weighted av-
+erage of the individual likelihoods as
+p(a | q; θ, φ) =
+X
+zi∈K
+p(a | q, zi; θ)p(zi | q, Z; φ),
+(5)
+where p(zi | q, Z; φ) is computed using Eq. 2.
+However, the normalization is done over K instead
+of Z. The ﬁnal loss is deﬁned as the negative
+marginal log-likelihood
+L(q, a) = −log p(a | q; θ, φ).
+(6)
+We note that the RAG model (Lewis et al., 2020c)
+also proposed a similar approach, but there are two
+main differences. The ﬁrst is that while we update
+all the parameters of the retriever (both the query
+and context encoders), RAG just updates the query
+encoder. The second is that we use T5 model as
+the reader while RAG uses BART model (Lewis
+et al., 2020b). These enhancements help us obtain
+substantial gains over the RAG model, which we
+will discuss in Sec. 6.
+3.2
+Approach 2: Joint Top-k
+In this approach, similar to (Lewis et al., 2020a),
+the likelihood is deﬁned as the reader’s likelihood
+conditioned on the question, all the retrieved docu-
+ments, and the retrieval score
+p(a | q; θ, φ) = p(a | q, z1:k, p(z | q, Z; φ); θ).
+(7)
+As the T5 reader consists of separate encoder
+and decoder modules, it provides the ﬂexibility to
+customize the input or output of the encoder. We
+concatenate each retrieved document with the ques-
+tion and feed them as input to the encoder, which
+computes their hidden representations. Next, we
+stack the hidden representations of all the retrieved
+documents, which the decoder jointly attends to
+during the encoder-decoder attention, thus allowing
+a more powerful form of information aggregation
+from multiple retrieved documents. We also add re-
+triever similarity score to bias the encoder-decoder
+attention as it helps facilitate end-to-end training
+and enables the reader to pay higher attention to the
+relevant documents. The interaction score during
+the encoder-decoder attention is computed as
+attn(q, a, z1:k) ∝Q(a)⊤K(z1:k, q)+λp(z | q; φ),
+(8)
+where Q is the query vector computed from de-
+coder’s input, K is the key vector computed from
+encoder’s output, and λ is a trainable parameter.
+Final loss is deﬁned according to Eq. 6. We
+further note that a similar approach for OpenQA
+was proposed in (Izacard and Grave, 2020) but it
+only optimizes the reader model and didn’t perform
+end-to-end training of the retriever.
+
+Dataset
+Train
+Filtered Train
+Dev
+Test
+NQ
+79,168
+58,880
+8,757
+3,610
+TriviaQA
+78,785
+60,413
+8,837
+11,313
+Table 1: OpenQA dataset statistics. The training set is
+used for end-to-end training, while the ﬁltered version
+is used for retriever training. The ﬁltered set ignores
+those examples where the document retrieved from ev-
+idence does not align with the ground-truth document.
+4
+Experimental Setup
+In this section, we describe the datasets and model
+settings. For reproducibility, we provide training
+details and list the hyperparameters in Appendix A.
+4.1
+OpenQA Datasets
+We perform experiments using two widely used
+QA datasets whose details are provided below and
+their statistics are shown in Table 1.
+Natural Questions (NQ):
+This corpus con-
+sists of real questions asked from the Google
+search engine along with their long and short an-
+swer annotations from the top-ranked Wikipedia
+pages (Kwiatkowski et al., 2019). Following prior
+work (Karpukhin et al., 2020), we use the same
+subset of the short answer questions in our experi-
+ments, as it is more suited for OpenQA.
+TriviaQA:
+This corpus consists of a collection
+of trivia questions and their answers scraped from
+multiple sources in the Web (Joshi et al., 2017).
+Evidence:
+Following (Karpukhin et al., 2020),
+we make use of their released preprocessed En-
+glish Wikipedia dump from December 2018 as the
+source of evidence documents. Overall, there are
+21, 015, 324 documents, each 100 words long.
+4.2
+Model Details
+We use two models of different sizes, base and
+large, for the experiments. The base conﬁguration
+consists of 12 layers, 768-d hidden size, and 12
+attention heads. The BERT-base contains 110M
+parameters while the T5-base contains 220M pa-
+rameters. The large conﬁguration consists of 24
+layers, 1024-d hidden size, and 16 attention heads.
+The BERT-large contains 330M parameters while
+the T5-large contains 770M parameters.
+5
+Results: Retriever Training
+In this section, we compare different approaches to
+train the retriever. Retrieval accuracy is evaluated
+using the top-k metric (k ∈{1, 5, 20, 100}).
+Setting
+Top-1
+Top-5
+Top-20
+Top-100
+Base Conﬁguration
+[CLS], 40 epochs
+32.6
+60.1
+76.4
+85.9
++ score scaling
+34.1
+60.9
+77.6
+85.9
++ 80 epochs
+36.7
+62.2
+77.4
+86.0
++ 1 hard negative
+48.6
+74.5
+79.0
+85.8
+DPR (Ofﬁcial)
+–
+67.1
+78.4
+85.4
+Table 2: Effect of different factors on the supervised
+training of retriever when evaluated on NQ test set.
+5.1
+Effect of Relevance Score Scaling, Longer
+Training, and Hard Negatives
+We explore the best training settings for supervised
+training of the retriever. To do so, we perform a
+series of experiments on the NQ dataset starting
+with the training settings from the popular DPR
+model and then progressively improve it. DPR was
+initialized with BERT, trained for 40 epochs, with
+a scaling factor of 1, and utilized [CLS] token em-
+beddings from the retriever. Our result with this
+setting is shown in Table 2. We then observe that
+incorporating relevance score scaling and longer
+training till 80 epochs helps to improve the top-5
+and top-20 accuracy by 1.5-2 points. These results
+also signify that the original DPR model was sig-
+niﬁcantly undertrained and not fully optimized.
+In addition to score scaling, we further include 1
+additional hard-negative example (similar to DPR)
+for each question-context pair and train the model
+for 80 epochs. Our results, in sync with the re-
+sults of DPR, obtain substantial additional gains
+in performance. These ﬁndings highlight that rele-
+vance score scaling, longer training, and including
+a hard negative example are essential to improve
+the supervised retriever’s accuracy. These super-
+vised training results can be considered as a very
+strong baseline. Hence, we employ these settings
+in subsequent experiments.
+5.2
+Effect of Retriever Initialization
+We ﬁrst characterize the zero-shot retriever’s perfor-
+mance when its weights are initialized with either
+BERT or ICT or masked salient spans pre-training
+(Table 3). As is understood that unsupervised lan-
+guage models do not perform well in information
+retrieval tasks (Lee et al., 2019), evidently, BERT
+also leads to a poor retrieval accuracy. We note that
+ICT initialization is quite effective in providing a
+non-trivial zero-shot accuracy which is further im-
+proved by masked salient spans training by more
+than 8 points. Both being unsupervised approaches
+
+Model
+NQ
+TriviaQA
+Top-1
+Top-5
+Top-20
+Top-100
+Top-1
+Top-5
+Top-20
+Top-100
+Base Conﬁguration
+BERT (zero-shot)
+0.9
+3.9
+9.4
+20.3
+0.6
+2.8
+7.2
+17.8
+ICT (zero-shot)
+12.6
+32.3
+50.6
+66.8
+19.2
+40.2
+57.5
+73.6
+Masked salient spans (zero-shot)
+20.0
+41.7
+59.8
+74.9
+31.7
+53.3
+68.2
+79.4
+BERT + Supervised
+48.6
+68.8
+79.0
+85.8
+57.5
+72.2
+80.0
+85.1
+ICT + Supervised
+48.4
+72.1
+81.8
+88.0
+58.4
+73.9
+81.7
+86.3
+Masked salient spans + Supervised
+50.3
+71.9
+82.1
+87.8
+60.6
+74.8
+81.8
+86.6
+Large Conﬁguration
+ICT (zero-shot)
+13.0
+31.8
+49.3
+66.1
+20.1
+41.6
+58.5
+74.1
+BERT + Supervised
+51.4
+71.0
+81.0
+87.2
+60.4
+74.5
+81.4
+86.0
+ICT + Supervised
+52.4
+72.7
+82.6
+88.3
+61.9
+76.2
+82.9
+87.1
+Table 3: Effect of unsupervised pre-training on retrieval accuracy when evaluated on NQ and TriviaQA test sets.
+demonstrate their utility in effectively bootstrap-
+ping the retriever almost from scratch.
+We next empirically analyze our proposed ap-
+proach of pre-training with ICT and masked salient
+spans followed by supervised ﬁnetuning. We ob-
+serve that it provides absolute improvements of
+2-3 points over the already strong supervised train-
+ing results, with the gains being consistent across
+both the datasets. These results highlight that even
+after ﬁnetuning the retriever with thousands of la-
+beled examples, it does not lead to catastrophic
+forgetting of the discriminative properties learned
+by the retriever during ICT and masked salient
+spans pre-training. Another merit is that being un-
+supervised, large text collections can be leveraged
+to pre-train the retriever, a considerable advantage
+over data-augmentation methods which rely on the
+availability of human-annotated question-context
+pairs. Furthermore, when comparing ICT with
+masked salient spans initialization, we note that
+their accuracy gains are roughly similar.
+5.3
+Effect of Amount of Training Data
+We study the effect on accuracy when the retriever
+is pre-trained with BERT, ICT, or masked salient
+spans and the amount of supervised training data
+is varied. We train the retriever with 1%, 2%, 5%,
+10-50%, of NQ’s training data and plot the top-20
+accuracy in Figure 3. Results reveal that in the low-
+resource regime, masked salient spans pre-training
+is much more effective than ICT, consistently lead-
+ing to large gains. As the fraction of training data
+increases to beyond 40% towards a high-resource
+setup, the gains from salient spans pre-training
+saturates to that of ICT. We believe that these ﬁnd-
+ings will have important implications for future
+research in OpenQA—with only a few hundred ex-
+0.0
+0.01
+0.02
+0.05
+0.1
+0.2
+0.4
+0.5
+1.0
+fraction of the training data
+10
+20
+30
+40
+50
+60
+70
+80
+Top-20 accuracy
+BERT Init
+ICT Init
+Masked Salient Spans Init
+Figure 3: Effect of amount of training data on retrieval
+accuracy when evaluated on NQ test set.
+amples, performing expensive masked salient span
+training is beneﬁcial while if the training data has
+thousands of examples, ICT is just as optimal as
+masked salient spans training.
+5.4
+Effect of End-to-End Training
+For end-to-end training, retriever weights are ini-
+tialized with the previous best setting of ICT pre-
+training and supervised ﬁnetuning. The number
+of retrieved evidence documents for the reader is
+considered as a hyperparameter and is selected via
+performance on the dev set. The focus here is to
+analyze the effect on retrieval accuracy when up-
+dating the retriever weights using question-answer
+pairs in an end-to-end setting (Sec. 3). From the
+results in Table 4, we observe that for Individual
+Top-k, when only the query encoder is updated, it
+tends to improve retrieval accuracy. In addition,
+when the context encoder is also updated, the re-
+trieval accuracy improves to 75% at top-5, a big
+gain of 8 points over the previous best DPR re-
+triever. Larger models further help to improve the
+performance leading to new state-of-the-art results.
+On the other hand, in Joint Top-k, updating the
+
+Model
+NQ
+TriviaQA
+Q
+C
+Top-1
+Top-5
+Top-20
+Top-100
+Top-1
+Top-5
+Top-20
+Top-100
+Base Conﬁguration
+DPR (Karpukhin et al., 2020)
+–
+67.1
+78.4
+85.4
+–
+–
+79.4
+85.0
+ICT + Supervised
+48.4
+72.1
+81.8
+88.0
+58.4
+73.9
+81.7
+86.3
+Individual Top-k
+
+
+54.5
+73.7
+83.2
+88.6
+61.4
+75.6
+82.1
+86.7
+Individual Top-k
+
+
+56.8
+75.0
+84.0
+89.2
+63.5
+76.8
+83.1
+87.0
+Joint Top-k
+
+
+51.1
+72.1
+81.8
+87.8
+59.1
+74.1
+81.3
+86.3
+Large Conﬁguration
+ICT + Supervised
+52.4
+72.7
+82.6
+88.3
+61.9
+76.2
+82.9
+87.1
+Individual Top-k
+
+
+57.5
+76.2
+84.8
+89.8
+66.4
+78.7
+84.1
+87.8
+Joint Top-k
+
+
+53.7
+73.3
+83.2
+88.0
+61.2
+75.9
+82.7
+87.0
+Table 4: Effect of end-to-end training using question-answer pairs on retrieval accuracy. Q and C signify if the
+query encoder and the context encoder are updated during training or not, respectively.
+×
+√
+d
+Top-1
+Top-5
+Top-20
+Top-100
+Avg.
+Base Conﬁguration
+0.25
+48.8
+69.3
+78.7
+85.5
+70.6
+0.5
+51.4
+71.6
+81.5
+87.7
+73.1
+1
+51.1
+71.8
+82.1
+87.7
+73.2
+2
+50.2
+71.5
+81.9
+87.9
+72.9
+4
+50.6
+71.7
+81.7
+88.0
+73.0
+Table 5: Effect of score scaling factor (τ) on the re-
+trieval accuracy when evaluated on the NQ test set. The
+ﬁrst column denotes the multiple (m) that is multiplied
+by
+√
+d to obtain τ, i.e., τ = m ×
+√
+d in Equation 2.
+query encoder just improves the top-1 score but
+does not really lead to much accuracy gains for
+higher top-k’s. We also do not update the context
+encoder for Joint Top-k as it did not result in im-
+provements during our initial experiments.
+These results showcase that when the retriever
+is already well-initialized, the objective function
+of Individual Top-k method is designed such that it
+signiﬁcantly improves the retrieval accuracy while
+the Joint Top-k method does not result in improve-
+ments. As we will show next, that the usefulness
+of this method lies in answer extraction.
+5.5
+Intuition for Retriever Score Scaling
+Retrieval score scaling is used when computing the
+probability distribution of the retrieved documents
+according to Equation 2, where the retrieval score
+is normalized by the scaling factor (τ). To study the
+effect of τ on the retrieval accuracy, we perform an
+ablation study with different values of τ on the NQ
+retrieval task, whose results can be seen in Table 5.
+More speciﬁcally, we choose different values of τ
+as a multiple of
+√
+d, where d is the hidden size of
+the model. Our results indicate that the choice of
+τ =
+√
+d works well in practice.
+Here, we brieﬂy explain the intuition regarding
+the usage of the scaling factor. In our preliminary
+experiments on retriever training and end-to-end
+training without the scaling factor, we observed
+that a few of the top-k document’s similarity score
+with the query was very high that in turn led to it
+being assigned a high retrieval probability score.
+This high score was leading to a skewed probability
+distribution with most of the mass being centered
+over the top-1 or top-2 retrieved documents. A
+larger value of scaling factor results in a more even
+distribution of probability mass over the top-k doc-
+uments, which in turn leads to better results in both
+retrieval accuracy and in the end-to-end training.
+6
+Results: Answer Extraction
+We next present the results of end-to-end training
+on answer extraction. To train the model, retriever
+weights are initialized with ICT pre-training and
+supervised ﬁnetuning while the reader is initialized
+with pre-trained T5 weights. The number of re-
+trieved evidence documents for the reader is tuned
+on the dev set. Results are reported using the con-
+ventional Exact Match (EM) metric.
+6.1
+Individual Top-k Approach
+We compare our results as presented in Table 6 with
+the recent related approaches in OpenQA. For the
+base conﬁguration on NQ, our model outperforms
+both REALM and DPR by more than 4 points. For
+the large conﬁguration, we compare with the RAG
+model (Lewis et al., 2020c), where our approach
+outperforms it by 3.5+ points on NQ and by 2.8
+points on TriviaQA. Our improved results are be-
+cause of a more accurate initial retriever, stronger
+reader, and updating both the query and context
+encoders during training.
+
+Model
+NQ
+TriviaQA
+Base Conﬁguration
+ORQA (Lee et al., 2019)
+33.3
+45.0
+REALM (Guu et al., 2020)
+40.4
+–
+DPR (Karpukhin et al., 2020)
+41.5
+56.8
+Individual Top-k
+45.9
+56.3
+Large Conﬁguration
+RAG (Lewis et al., 2020c)
+44.5
+56.8
+Individual Top-k
+48.1
+59.6
+Table 6: Answer extraction results using Individual
+Top-k approach. The grouping under base and large
+conﬁgurations is based on the size of the reader model.
+10
+20
+30
+40
+50
+number of top-k documents
+42
+44
+46
+48
+50
+Exact match score
+reader + query enc. update (base)
+reader + query + context enc. update (base)
+reader + query + context enc. update (large)
+Figure 4: Effect of increasing top-k documents on an-
+swer generation for Individual Top-k approach.
+Our analysis in Figure 4 reveals that updating the
+context encoder improves the results for both the
+base and large conﬁgurations. Quite surprisingly,
+we also observe that the performance of Individ-
+ual Top-k approach is sensitive to the number of
+top-k documents and can also decrease with an in-
+crease in top-k documents. We leave an in-depth
+investigation of this as a future work.
+6.2
+Joint Top-k Approach
+We compare our results with the recent Fusion-in-
+Decoder (FiD) approach (Izacard and Grave, 2020)
+that also performs joint encoder-decoder attention.
+It consists of DPR as the retriever and T5 as the
+reader, which are initialized with their open-source
+weights. However, unlike our approach, FiD just
+ﬁnetunes the reader weights. Our results in Table 7
+show that for the base conﬁguration, Joint Top-
+k outperforms the FiD model by 1 point on NQ,
+highlighting the signiﬁcance of end-to-end training.
+For the large conﬁguration, we obtain a gain of 0.7
+points on TriviaQA.
+Our analysis in Figure 5 portrays that the EM
+scores improve with more retrieved documents.
+This highlights that in contrast to Individual Top-k,
+the Joint Top-k better aggregates the information
+Model
+NQ
+TriviaQA
+Base Conﬁguration
+FiD (Izacard and Grave, 2020)
+48.2
+65.0
+Joint Top-k
+49.2
+64.8
+Large Conﬁguration
+FiD (Izacard and Grave, 2020)
+51.4
+67.6
+Joint Top-k
+51.4
+68.3
+Table 7: Results on answer extraction using Joint Top-
+k approach.
+10
+20
+30
+40
+50
+number of top-k documents
+42
+44
+46
+48
+50
+52
+54
+Exact match score
+reader update (base)
+reader + query enc. update (base)
+reader + query enc. update (large)
+Figure 5: Effect of increasing top-k documents on an-
+swer generation for Joint Top-k approach.
+contained in the retrieved documents. This Fig-
+ure also illustrates the effect of similarity enriched
+attention on answer extraction for the base conﬁg-
+uration. For values of top-k=5, 10, and 25, using
+retrieval-similarity enriched encoder-decoder atten-
+tion, we consistently observe a gain of 0.8-1 EM
+points (comparing orange plot and blue plot in Fig-
+ure 5), while there is a smaller gain when top-k=50.
+This signiﬁes that with more retrieved documents,
+the utility of end-to-end training tends to dimin-
+ish, thus explaining the lower gains observed in
+retrieval performance for Joint Top-k in Table 4.
+6.3
+Overall Comparison
+Based on the discussions in Sec. 5.4 and Sec. 6,
+we remark that end-to-end training using the two
+approaches has a complementary effect on the re-
+trieval accuracy and answer extraction. While the
+Individual Top-k approach helps to signiﬁcantly
+improve the retrieval performance, the Joint Top-k
+approach is more useful for answer extraction.
+7
+Related Work
+(Yih et al., 2011) proposed a discriminative ap-
+proach to train a retriever by learning dense repre-
+sentations of query and context documents based
+on word frequency. However, this approach was
+data-hungry and not scalable. Recently, (Lee et al.,
+
+2019; Karpukhin et al., 2020) address this by lever-
+aging pre-trained BERT weights (Devlin et al.,
+2019) to train a dual-encoder retriever by using
+smaller amounts of question-context pairs. In par-
+ticular, (Lee et al., 2019) ﬁrst pre-train the retriever
+in an unsupervised manner using ICT and then
+jointly train the retriever and reader for OpenQA.
+On the other hand, (Karpukhin et al., 2020) per-
+form supervised training of the retriever using hard-
+negative examples, yielding impressive results on
+several retrieval benchmarks.
+To improve the retrieval accuracy of the dual-
+encoder model, (Chang et al., 2020) explore several
+paragraph-level pre-training strategies including
+the application of ICT. They demonstrated the ef-
+fectiveness of pre-training over sparse-retrieval ap-
+proaches such as BM25. Their evidence consisted
+of the training documents that was further increased
+to 1M documents for OpenQA. Our work differs
+from them in several ways. First, our OpenQA
+setup is more challenging as the evidence consists
+of 21M documents. Second, we pre-train with two
+strategies consisting of ICT and masked salient-
+spans and ﬁnetune using strong supervised meth-
+ods, which leads to much improved results. Third,
+we further update the retriever with end-to-end
+training leveraging question-answer pairs, which
+further improves the retrieval accuracy leading to
+new state-of-the-art results.
+A new line of work investigates task-speciﬁc pre-
+training of language models. For example, (Guu
+et al., 2020) predicts masked salient spans consist-
+ing of named entities to pre-train the reader and re-
+triever components for OpenQA. Similarly, (Lewis
+et al., 2020a) perform cross-lingual pre-training
+where the objective is to predict a sequence using
+its paraphrases in different languages, demonstrat-
+ing improved zero-shot performance in document
+translation tasks.
+8
+Conclusion
+We propose approaches to improve the retrieval ac-
+curacy of the dual-encoder model for the OpenQA
+task. We ﬁrst perform a systematic investigation
+of the importance of pre-training with ICT and
+masked salient spans tasks for supervised training
+of the retriever. We then present two approaches for
+end-to-end training of the reader and retriever com-
+ponents in OpenQA. In one approach, the reader
+considers each retrieved document individually
+while in the other approach where the reader con-
+siders all the retrieved documents jointly. Overall,
+these methods help achieve state-of-the-art results
+on both retrieval and answer extraction.

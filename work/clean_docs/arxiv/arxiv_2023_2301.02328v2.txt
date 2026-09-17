@@ -1,0 +1,1050 @@
+Published as a conference paper at ICLR 2023
+EXTREME Q-LEARNING: MAXENT RL WITHOUT EN-
+TROPY
+Divyansh Garg∗
+Stanford University
+
+Joey Hejna∗
+Stanford University
+
+Matthieu Geist
+Google Brain
+
+Stefano Ermon
+Stanford University
+
+ABSTRACT
+Modern Deep Reinforcement Learning (RL) algorithms require estimates of the
+maximal Q-value, which are difﬁcult to compute in continuous domains with an
+inﬁnite number of possible actions. In this work, we introduce a new update rule
+for online and ofﬂine RL which directly models the maximal value using Extreme
+Value Theory (EVT), drawing inspiration from economics. By doing so, we avoid
+computing Q-values using out-of-distribution actions which is often a substantial
+source of error. Our key insight is to introduce an objective that directly estimates
+the optimal soft-value functions (LogSumExp) in the maximum entropy RL setting
+without needing to sample from a policy. Using EVT, we derive our Extreme
+Q-Learning framework and consequently online and, for the ﬁrst time, ofﬂine
+MaxEnt Q-learning algorithms, that do not explicitly require access to a policy
+or its entropy. Our method obtains consistently strong performance in the D4RL
+benchmark, outperforming prior works by 10+ points on the challenging Franka
+Kitchen tasks while offering moderate improvements over SAC and TD3 on online
+DM Control tasks. Visualizations and code can be found on our website 1.
+1
+INTRODUCTION
+Modern Deep Reinforcement Learning (RL) algorithms have shown broad success in challenging
+control (Haarnoja et al., 2018; Schulman et al., 2015) and game-playing domains (Mnih et al., 2013).
+While tabular Q-iteration or value-iteration methods are well understood, state of the art RL algorithms
+often make theoretical compromises in order to deal with deep networks, high dimensional state
+spaces, and continuous action spaces. In particular, standard Q-learning algorithms require computing
+the max or soft-max over the Q-function in order to ﬁt the Bellman equations. Yet, almost all current
+off-policy RL algorithms for continuous control only indirectly estimate the Q-value of the next state
+with separate policy networks. Consequently, these methods only estimate the Q-function of the
+current policy, instead of the optimal Q∗, and rely on policy improvement via an actor. Moreover,
+actor-critic approaches on their own have shown to be catastrophic in the ofﬂine settings where
+actions sampled from a policy are consistently out-of-distribution (Kumar et al., 2020; Fujimoto et al.,
+2018). As such, computing max Q for Bellman targets remains a core issue in deep RL.
+One popular approach is to train Maximum Entropy (MaxEnt) policies, in hopes that they are more
+robust to modeling and estimation errors (Ziebart, 2010). However, the Bellman backup B∗used in
+MaxEnt RL algorithms still requires computing the log-partition function over Q-values, which is
+usually intractable in high-dimensional action spaces. Instead, current methods like SAC (Haarnoja
+et al., 2018) rely on auxiliary policy networks, and as a result do not estimate B∗, the optimal
+Bellman backup. Our key insight is to apply extreme value analysis used in branches of Finance
+and Economics to Reinforcement Learning. Ultimately, this will allow us to directly model the
+LogSumExp over Q-functions in the MaxEnt Framework.
+∗Equal Contribution
+1https://div99.github.io/XQL/
+1
+arXiv:2301.02328v2  [cs.LG]  28 Feb 2023
+
+Published as a conference paper at ICLR 2023
+Intuitively, reward or utility-seeking agents will consider the maximum of the set of possible future
+returns. The Extreme Value Theorem (EVT) tells us that maximal values drawn from any exponential
+tailed distribution follows the Generalized Extreme Value (GEV) Type-1 distribution, also referred
+to as the Gumbel Distribution G. The Gumbel distribution is thus a prime candidate for modeling
+errors in Q-functions. In fact, McFadden’s 2000 Nobel-prize winning work in Economics on discrete
+choice models (McFadden, 1972) showed that soft-optimal utility functions with logit (or softmax)
+choice probabilities naturally arise when utilities are assumed to have Gumbel-distributed errors.
+This was subsequently generalized to stochastic MDPs by Rust (1986). Nevertheless, these results
+have remained largely unknown in the RL community. By introducing a novel loss optimization
+framework, we bring them into the world of modern deep RL.
+Empirically, we ﬁnd that even modern deep RL approaches, for which errors are typically assumed
+to be Gaussian, exhibit errors that better approximate the Gumbel Distribution, see Figure 1. By
+assuming errors to be Gumbel distributed, we obtain Gumbel Regression, a consistent estimator over
+log-partition functions even in continuous spaces. Furthermore, making this assumption about Q-
+values lets us derive a new Bellman loss objective that directly solves for the optimal MaxEnt Bellman
+operator B∗, instead of the operator under the current policy Bπ. As soft optimality emerges from our
+framework, we can run MaxEnt RL independently of the policy. In the online setting, we avoid using
+a policy network to explicitly compute entropies. In the ofﬂine setting, we completely avoid sampling
+from learned policy networks, minimizing the aforementioned extrapolation error. Our resulting algo-
+rithms surpass or consistently match state-of-the-art (SOTA) methods while being practically simpler.
+In this paper we outline the theoretical motivation for using Gumbel distributions in reinforcement
+learning, and show how it can be used to derive practical online and ofﬂine MaxEnt RL algorithms.
+Concretely, our contributions are as follows:
+• We motivate Gumbel Regression and show it allows calculation of the log-partition func-
+tion (LogSumExp) in continuous spaces. We apply it to MDPs to present a novel loss
+objective for RL using maximum-likelihood estimation.
+• Our formulation extends soft-Q learning to ofﬂine RL as well as continuous action spaces
+without the need of policy entropies. It allows us to compute optimal soft-values V ∗and
+soft-Bellman updates B∗using SGD, which are usually intractable in continuous settings.
+• We provide the missing theoretical link between soft and conservative Q-learning, showing
+how these formulations can be made equivalent. We also show how Max-Ent RL emerges
+naturally from vanilla RL as a conservatism in our framework.
+• Finally, we empirically demonstrate strong results in Ofﬂine RL, improving over prior meth-
+ods by a large margin on the D4RL Franka Kitchen tasks, and performing moderately better
+than SAC and TD3 in Online RL, while theoretically avoiding actor-critic formulations.
+2
+PRELIMINARIES
+In this section we introduce Maximium Entropy (MaxEnt) RL and Extreme Value Theory (EVT),
+which we use to motivate our framework to estimate extremal values in RL.
+We consider an inﬁnite-horizon Markov decision process (MDP), deﬁned by the tuple (S, A, P, r, γ),
+where S, A represent state and action spaces, P(s′|s, a) represents the environment dynamics, r(s, a)
+represents the reward function, and γ ∈(0, 1) represents the discount factor. In the ofﬂine RL setting,
+we are given a dataset D = (s, a, r, s′) of tuples sampled from trajectories under a behavior policy
+πD without any additional environment interactions. We use ρπ(s) to denote the distribution of states
+that a policy π(a|s) generates. In the MaxEnt framework, an MDP with entropy-regularization is
+referred to as a soft-MDP (Bloem & Bambos, 2014) and we often use this notation.
+2.1
+MAXIMUM ENTROPY RL
+Standard RL seeks to learn a policy that maximizes the expected sum of (discounted) rewards
+Eπ [P∞
+t=0 γtr(st, at)], for (st, at) drawn at timestep t from the trajectory distribution that π
+generates. We consider a generalized version of Maximum Entropy RL that augments the standard
+reward objective with the KL-divergence between the policy and a reference distribution µ:
+2
+
+Published as a conference paper at ICLR 2023
+Eπ[P∞
+t=0 γt(r(st, at) −β log π(at|st)
+µ(at|st))], where β is the regularization strength. When µ is uniform
+U, this becomes the standard MaxEnt objective used in online RL up to a constant. In the ofﬂine RL
+setting, we choose µ to be the behavior policy πD that generated the ﬁxed dataset D. Consequently,
+this objective enforces a conservative KL-constraint on the learned policy, keeping it close to the
+behavior policy (Neu et al., 2017; Haarnoja et al., 2018).
+In MaxEnt RL, the soft-Bellman operator B∗: RS×A →RS×A is deﬁned as (B∗Q)(s, a) = r(s, a)+
+γEs′∼P(·|s,a)V ∗(s′) where Q is the soft-Q function and V ∗is the optimal soft-value satisfying:
+V ∗(s) = β log
+X
+a
+µ(a|s) exp (Q(s, a)/β) := Lβ
+a∼µ(·|s) [Q(s, a)] ,
+(1)
+where we denote the log-sum-exp (LSE) using an operator Lβ for succinctness2. The soft-Bellman
+operator has a unique contraction Q∗(Haarnoja et al., 2018) given by the soft-Bellman equation:
+Q∗= B∗Q∗and the optimal policy satisﬁes (Haarnoja et al., 2017):
+π∗(a|s) = µ(a|s) exp ((Q∗(s, a) −V ∗(s))/β).
+(2)
+Instead of estimating soft-values for a policy V π(s) = Ea∼π(·|s)
+h
+Q(s, a) −β log π(a|s)
+µ(a|s)
+i
+, our
+approach will seek to directly ﬁt the optimal soft-values V ∗, i.e. the log-sum-exp (LSE) of Q values.
+2.2
+EXTREME VALUE THEOREM
+The Fisher-Tippett or Extreme Value Theorem tells us that the maximum of i.i.d. samples from
+exponentially tailed distributions will asymptotically converge to the Gumbel distribution G(µ, β),
+which has PDF p(x) = exp(−(z + e−z)) where z = (x −µ)/β with location parameter µ and scale
+parameter β.
+Theorem 1 (Extreme Value Theorem (EVT) (Mood, 1950; Fisher & Tippett, 1928)). For i.i.d.
+random variables X1, ..., Xn ∼fX, with exponential tails, limn→∞maxi(Xi) follows the Gumbel
+(GEV-1) distribution. Furthermore, G is max-stable, i.e. if Xi ∼G, then maxi(Xi) ∼G holds.
+This result is similar to the Central Limit Theorem (CLT), which states that means of i.i.d. errors
+approach the normal distribution. Thus, under a chain of max operations, any i.i.d. exponential tailed
+errors3 will tend to become Gumbel distributed and stay as such. EVT will ultimately suggest us to
+characterize nested errors in Q-learning as following a Gumbel distribution. In particular, the Gumbel
+distribution G exhibits unique properties we will exploit.
+One intriguing consequence of the Gumbel’s max-stability is its ability to convert the maximum
+over a discrete set into a softmax. This is known as the Gumbel-Max Trick (Papandreou & Yuille,
+2010; Hazan & Jaakkola, 2012). Concretely for i.i.d. ϵi ∼G(0, β) added to a set {x1, ..., xn} ∈R,
+maxi(xi +ϵi) ∼G(β log P
+i exp (xi/β), β), and argmax(xi +ϵi) ∼softmax(xi/β). Furthermore,
+the Max-trick is unique to the Gumbel (Luce, 1977). These properties lead into the McFadden-Rust
+model (McFadden, 1972; Rust, 1986) of MDPs as we state below.
+McFadden-Rust model: An MDP following the standard Bellman equations with stochasticity
+in the rewards due to unobserved state variables will satisfy the soft-Bellman equations over the
+observed state with actual rewards ¯r(s, a), given two conditions:
+1. Additive separability (AS): observed rewards have additive i.i.d.
+Gumbel noise, i.e.
+r(s, a) = ¯r(s, a) + ϵ(s, a), with actual rewards ¯r(s, a) and i.i.d. noise ϵ(s, a) ∼G(0, β).
+2. Conditional Independence (CI): the noise ϵ(s, a) in a given state-action pair is conditionally
+independent of that in any other state-action pair.
+Moreover, the converse also holds: Any MDP satisfying the Bellman equations and following a
+softmax policy, necessarily has any i.i.d. noise in the rewards with AS + CI conditions be Gumbel
+distributed. These results were ﬁrst shown to hold in discrete choice theory by McFadden (1972),
+with the AS + CI conditions derived by Rust (1986) for discrete MDPs. We formalize these results
+in Appendix A and give succinct proofs using the developed properties of the Gumbel distribution.
+These results enable the view of a soft-MDP as an MDP with hidden i.i.d. Gumbel noise in the
+rewards. Notably, this result gives a different interpretation of a soft-MDP than entropy regularization
+to allow us to recover the soft-Bellman equations.
+2In continuous action spaces, the sum over actions is replaced with an integral over the distribution µ.
+3Bounded random variables are sub-Gaussian (Young, 2020) which have exponential tails.
+3
+
+Published as a conference paper at ICLR 2023
+3
+EXTREME Q-LEARNING
+In this section, we motivate our Extreme Q-learning framework, which directly models the soft-
+optimal values V ∗, and show it naturally extends soft-Q learning. Notably, we use the Gumbel
+distribution to derive a new optimization framework for RL via maximum-likelihood estimation and
+apply it to both online and ofﬂine settings.
+3.1
+GUMBEL ERROR MODEL
+0.2
+0.1
+0.0
+0.1
+0.2
+0.3
+Bellman Error
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+Normalized Frequency
+Gaussian
+Gumbel
+Figure 1:
+Bellman errors from SAC on
+Cheetah-Run (Tassa et al., 2018). The Gum-
+bel distribution better captures the skew versus
+the Gaussian. Plots for TD3 and more environ-
+ments can be found in Appendix D.
+Although assuming Gumbel errors in MDPs leads to
+intriguing properties, it is not obvious why the errors
+might be distributed as such.
+First, we empirically
+investigate the distribution of Bellman errors by
+computing them over the course of training. Speciﬁcally,
+we compute r(s, a) −γQ(s′, π(s′)) −Q(s, a) for
+samples (s, a, s′) from the replay-buffer using a single
+Q-function from SAC (Haarnoja et al., 2018) (See
+Appendix D for more details). In Figure 1, we ﬁnd
+the errors to be skewed and better ﬁt by a Gumbel
+distribution. We explain this using EVT.
+Consider ﬁtting Q-functions by learning an unbiased
+function approximator ˆQ to solve the Bellman equation.
+We will assume access to M such function approxima-
+tors, each of which are assumed to be independent e.g.
+parallel runs of a model over an experiment. We can see approximate Q-iteration as performing:
+ˆQt(s, a) = ¯Qt(s, a) + ϵt(s, a),
+(3)
+where E[ ˆQ] = ¯Qt is the expected value of our prediction ˆ
+Qt for an intended target ¯Qt over our
+estimators, and ϵt is the (zero-centered) error in our estimate. Here, we assume the error ϵt comes from
+the same underlying distribution for each of our estimators, and thus are i.i.d. random variables with a
+zero-mean. Now, consider the bootstrapped estimate using one of our M estimators chosen randomly:
+ˆ
+B∗ˆQt(s, a) = r(s, a) + γ max
+a′
+ˆQt(s′, a′) = r(s, a) + γ max
+a′ ( ¯Qt(s′, a′) + ϵt(s′, a′)).
+(4)
+We now examine what happens after a subsequent update. At time t + 1, suppose that we ﬁt a
+fresh set of M independent functional approximators ˆQt+1 with the target ˆ
+B∗ˆQt, introducing a new
+unbiased error ϵt+1. Then, for ¯Qt+1 = E[ ˆQt+1] it holds that
+¯Qt+1(s, a) = r(s, a) + γEs′|s,a[Eϵt[max
+a′ ( ¯Qt(s′, a′) + ϵt(s′, a′))]].
+(5)
+As ¯Qt+1 is an expectation over both the dynamics and the functional errors, it accounts for all
+uncertainty (here E[ϵt+1] = 0). But, the i.i.d. error ϵt remains and will be propagated through the
+Bellman equations and its chain of max operations. Due to Theorem 1, ϵt will become Gumbel
+distributed in the limit of t, and remain so due to the Gumbel distribution’s max-stability.4
+This highlights a fundamental issue with approximation-based RL algorithms that minimize the Mean-
+Squared Error (MSE) in the Bellman Equation: they implicitly assume, via maximum likelihood
+estimation, that errors are Gaussian. In Appendix A, we further study the propagation of errors using
+the McFadden-Rust MDP model, and use it to develop a simpliﬁed Gumbel Error Model (GEM) for er-
+rors under functional approximation. In practice, the Gumbel nature of the errors may be weakened as
+estimators between timesteps share parameters and errors will be correlated across states and actions.
+3.2
+GUMBEL REGRESSION
+The goal of our work is to directly model the log-partition function (LogSumExp) over Q(s, a) to
+avoid all of the aforementioned issues with taking a max in the function approximation domain.
+4The same holds for soft-MDPs as log-sum-exp can be expanded as a max over i.i.d. Gumbel random vars.
+4
+
+Published as a conference paper at ICLR 2023
+2
+1
+0
+1
+2
+3
+4
+x
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+pdf(x)
+Gumbel PDF
+beta=0.75
+beta=1
+beta=1.5
+beta=2
+2.0
+1.5
+1.0
+0.5
+0.0
+0.5
+1.0
+1.5
+2.0
+Residual
+0
+1
+2
+3
+4
+5
+6
+7
+8
+L(x)
+Gumbel Loss
+beta=0.75
+beta=1
+beta=1.5
+beta=2
+1.0
+0.5
+0.0
+0.5
+1.0
+x
+0.5
+0.0
+0.5
+1.0
+1.5
+f(x)
+Gumbel Regression
+beta=0.1
+beta=0.25
+beta=2
+Figure 2: Left: The pdf of the Gumbel distribution with µ = 0 and different values of β. Center: Our Gumbel
+loss for different values of β. Right: Gumbel regression applied to a two-dimensional random variable for
+different values of β. The smaller the value of β, the more the regression ﬁts the extrema.
+In this section we derive an objective function that models the LogSumExp by simply assuming
+errors follow a Gumbel distribution. Consider estimating a parameter h for a random variable X
+using samples xi from a dataset D, which have Gumbel distributed noise, i.e. xi = h + ϵi where
+ϵi ∼−G(0, β). Then, the average log-likelihood of the dataset D as a function of h is given as:
+Exi∼D [log p(xi)] = Exi∼D
+h
+−e((xi−h)/β) + (xi −h)/β
+i
+(6)
+Maximizing the log-likelihood yields the following convex minimization objective in h,
+L(h) = Exi∼D
+h
+e(xi−h)/β −(xi −h)/β −1
+i
+(7)
+which forms our objective function L(·), which resembles the Linex loss from econometrics (Parsian
+& Kirmani, 2002) 5. β is ﬁxed as a hyper-parameter, and we show its affect on the loss in Figure
+2. Critically, the minima of this objective under a ﬁxed β is given by h = β log Exi∼D[exi/β], which
+resembles the LogSumExp with the summation replaced with an (empirical) expectation. In fact, this
+solution is the the same as the operator Lβ
+µ(X) deﬁned for MaxEnt in Section 2.1 with xi sampled
+from µ. In Figure 2, we show plots of Gumbel Regression on a simple dataset with different values
+of β. As this objective recovers Lβ(X), we next use it to model soft-values in Max-Ent RL.
+3.2.1
+THEORY
+Here we show that Gumbel regression is well behaved, considering the previously deﬁned operator
+Lβ for random variables Lβ(X) := β log E
+
+eX/β
+. First, we show it models the extremum.
+Lemma 3.1. For any β1 > β2, we have Lβ1(X) < Lβ2(X). And L∞(X) = E [X], L0(X) =
+sup(X). Thus, for any β ∈(0, ∞), the operator Lβ(X) is a measure that interpolates between the
+expectation and the max of X.
+The operator Lβ(X) is known as the cumulant-generating function or the log-Laplace transform, and
+is a measure of the tail-risk closely linked to the entropic value at risk (EVaR) (Ahmadi-Javid, 2012) .
+Lemma 3.2. The risk measure L has a unique minima at β log E
+
+eX/β
+. And an empirical risk ˆL is
+an unbiased estimate of the true risk. Furthermore, for β ≫1, L(θ) ≈
+1
+2β2 Exi∼D[(xi −θ)2], thus
+behaving as the MSE loss with errors ∼N(0, β).
+In particular, the empirical loss ˆL over a dataset of N samples can be minimized using stochastic
+gradient-descent (SGD) methods to give an unbiased estimate of the LogSumExp over the N samples.
+Lemma 3.3. ˆLβ(X) over a ﬁnite N samples is a consistent estimator of the log-partition function
+Lβ(X). Similarly, exp(ˆLβ(X)/β) is an unbiased estimator for the partition function Z = E
+
+eX/β
+We provide PAC learning bounds for Lemma 3.3, and further theoretical discussion on Gumbel
+Regression in Appendix B.
+3.3
+MAXENT RL WITHOUT ENTROPY
+Given Gumbel Regression can be used to directly model the LogSumExp , we apply it to Q-learning.
+First, we connect our framework to conservative Q-learning (Kumar et al., 2020).
+5We add −1 to make the loss 0 for a perfect ﬁt, as ex −x −1 ≥0 with equality at x = 0.
+5
+
+Published as a conference paper at ICLR 2023
+Lemma 3.4. Consider the loss objective over Q-functions:
+L(Q) = Es∼ρµ,a∼µ(·|s)
+h
+e(T π ˆ
+Qk(s,a)−Q(s,a))/βi
+−Es∼ρµ,a∼µ(·|s)[(T π ˆQk(s, a) −Q(s, a))/β] −1
+(8)
+where T π := r(s, a) + γEs′|s,aEa′∼π[Q(s′, a′)] is the vanilla Bellman operator under the policy
+π(a|s). Then minimizing L gives the update rule:
+∀s, a, k ˆQk+1(s, a) = T π ˆQk(s, a) −β log π(a | s)
+µ(a | s) = Bπ ˆQk(s, a).
+The above lemma transforms the regular Bellman backup into the soft-Bellman backup without the
+need for entropies, letting us convert standard RL into MaxEnt RL. Here, L(·) does a conservative
+Q-update similar to CQL (Kumar et al., 2020) with the nice property that the implied conservative
+term is just the KL-constraint between π and µ.6 This enforces a entropy-regularization on our policy
+with respect to the behavior policy without the need of entropy. Thus, soft-Q learning naturally
+emerges as a conservative update on regular Q-learning under our objective. Here, Equation 8 is the
+dual of the KL-divergence between µ and π (Garg et al., 2021), and we motivate this objective for RL
+and establish formal equivalence with conservative Q-learning in Appendix C.
+In our framework, we use the MaxEnt Bellman operator B∗which gives our ExtremeQ loss, which is
+the same as our Gumbel loss from the previous section:
+L(Q) = Es,a∼µ
+h
+e( ˆ
+B∗ˆ
+Qk(s,a)−Q(s,a))/βi
+−Es,a∼µ[( ˆB∗ˆQk(s, a) −Q(s, a))/β] −1
+(9)
+This gives an update rule: ˆQk+1(s, a) = B∗ˆQk(s, a). L(·) here requires estimation of B∗which is
+very hard in continuous action spaces. Under deterministic dynamics, L can be obtained without B∗
+as shown in Appendix C. However, in general we still need to estimate B∗. Next, we motivate how
+we can solve this issue. Consider the soft-Bellman equation from Section 2.1 (Equation 1),
+B∗Q = r(s, a) + γEs′∼P (·|s,a)[V ∗(s′)],
+(10)
+where V ∗(s) = Lβ
+a∼µ(·|s′)[Q(s, a)]. Then V ∗can be directly estimated using Gumbel regression by
+setting the temperature β to the regularization strength in the MaxEnt framework. This gives us the
+following ExtremeV loss objective:
+J (V ) = Es,a∼µ
+h
+e( ˆ
+Qk(s,a)−V (s))/βi
+−Es,a∼µ[( ˆQk(s, a) −V (s))/β] −1.
+(11)
+Lemma 3.5. Minimizing J over values gives the update rule: ˆV k(s) = Lβ
+a∼µ(·|s)[ ˆQk(s, a)].
+Then we can obtain V ∗from Q(s, a) using Gumbel regression and substitute in Equation 10 to
+estimate the optimal bellman backup B∗Q. Thus, Lemma 3.4 and 3.5 give us a scheme to solve the
+Max-Ent RL problem without the need of entropy.
+3.4
+LEARNING POLICIES
+In the above section we derived a Q-learning strategy that does not require explicit use of a policy
+π. However, in continuous settings we still often want to recover a policy that can be run in the
+environment. Per Eq. 2 (Section 2.2), the optimal MaxEnt policy π∗(a|s) = µ(a|s)e(Q(s,a)−V (s))/β.
+By minimizing the forward KL-divergence between π and the optimal π∗induced by Q and V we
+obtain the following training objective:
+π∗= argmax
+π
+Eρµ(s,a)[e(Q(s,a)−V (s))/β log π].
+(12)
+If we take ρµ to be a dataset D generated from a behavior policy πD, we exactly recover the AWR
+objective used by prior works in Ofﬂine RL (Peng et al., 2019; Nair et al., 2020), which can easily
+be computed using the ofﬂine dataset. This objective does not require sampling actions, which may
+6In fact, theorems of CQL (Kumar et al., 2020) hold for our objective by replacing DCQL with DKL.
+6
+
+Published as a conference paper at ICLR 2023
+potentially take Q(s, a) out of distribution. Alternatively, if we want to sample from the policy
+instead of the reference distribution µ, we can minimize the Reverse-KL divergence which gives
+us the SAC-like actor update:
+π∗= argmax
+π
+Eρπ(s)π(a|s)[Q(s, a) −β log(π(a|s)/µ(a|s))].
+(13)
+Interestingly, we note this doesn’t depend on V (s). If µ is chosen to be the last policy πk, the
+second term becomes the KL-divergence between the current policy and πk, performing a trust
+region update on π (Schulman et al., 2015; Vieillard et al., 2020).7 While estimating the log ratio
+log(π(a|s)/µ(a|s)) can be difﬁcult depending on choice of µ, our Gumbel Loss J removes the need
+for µ during Q learning by estimating soft-Q values of the form Q(s, a) −β log(π(a|s)/µ(a|s)).
+3.5
+PRACTICAL ALGORITHMS
+Algorithm 1 Extreme Q-learning (X-QL)
+(Under Stochastic Dynamics)
+1: Init Qφ, Vθ, and πψ
+2: Let D = {(s, a, r, s′)} be data from πD (of-
+ﬂine) or replay buffer (online)
+3: for step t in {1...N} do
+4:
+Train Qφ using L(φ) from Eq. 14
+5:
+Train Vθ using J (θ) from Eq. 11
+(with a ∼D (ofﬂine) or a ∼πψ (online))
+6:
+Update πψ via Eq. 12 (ofﬂine) or Eq. 13
+(online)
+7: end for
+In this section we develop a practical approach to
+Extreme Q-learning (X-QL) for both online and of-
+ﬂine RL. We consider parameterized functions Vθ(s),
+Qφ(s, a), and πψ(a|s) and let D be the training data
+distribution. A core issue with directly optimizing
+Eq. 10 is over-optimism about dynamics (Levine,
+2018) when using simple-sample estimates for the
+Bellman backup. To overcome this issue in stochastic
+settings, we separate out the optimization of Vθ from
+that of Qφ following Section 3.3. We learn Vθ using
+Eq. 11 to directly ﬁt the optimal soft-values V ∗(s)
+based on Gumbel regression. Using Vθ(s′) we can
+get single-sample estimates of B∗as r(s, a) + γVθ(s′). Now we can learn an unbiased expectation
+over the dynamics, Qφ ≈Es′|s,a[r(s, a) + γVθ(s′)] by minimizing the Mean-squared-error (MSE)
+loss between the single-sample targets and Qφ:
+L(φ) = E(s,a,s′)∼D
+
+(Qφ(s, a) −r(s, a) −γVθ(s′))2
+.
+(14)
+In deterministic dynamics, our approach is largely simpliﬁed and we directly learn a single Qφ using
+Eq. 9 without needing to learn B∗or V ∗. Similarly, we learn soft-optimal policies using Eq. 12
+(ofﬂine) or Eq. 13 (online) settings.
+Ofﬂine RL. In the ofﬂine setting, D is speciﬁed as an ofﬂine dataset assumed to be collected with
+the behavior policy πD. Here, learning values with Eq. 11 has a number of practical beneﬁts. First,
+we are able to ﬁt the optimal soft-values V ∗without sampling from a policy network, which has
+been shown to cause large out-of-distribution errors in the ofﬂine setting where mistakes cannot be
+corrected by collecting additional data. Second, we inherently enforce a KL-constraint on the optimal
+policy π∗and the behavior policy πD. This provides tunable conservatism via the temperature β.
+After ofﬂine training of Qφ and Vθ, we can recover the policy post-training using the AWR objective
+(Eq. 12). Our practical implementation follows the training style of Kostrikov et al. (2021), but we
+train value network using using our ExtremeQ loss.
+Online RL. In the online setting, D is usually given as a replay buffer of previously sampled states
+and actions. In practice, however, obtaining a good estimate of V ∗(s′) requires that we sample
+actions with high Q-values instead of uniform sampling from D. As online learning allows agents
+to correct over-optimism by collecting additional data, we use a previous version of the policy
+network πψ to sample actions for the Bellman backup, amounting to the trust-region policy updates
+detailed at the end of Section 3.4. In practice, we modify SAC and TD3 with our formulation. To
+embue SAC (Haarnoja et al., 2018) with the beneﬁts of Extreme Q-learning, we simply train Vθ
+using Eq. 11 with s ∼D, a ∼πψk(a|s). This means that we do not use action probabilities when
+updating the value networks, unlike other MaxEnt RL approaches. The policy is learned via the
+objective maxψ E[Qφ(s, πψ(s))] with added entropy regularization, as SAC does not use a ﬁxed
+noise schedule. TD3 by default does not use a value network, and thus we use our algorithm for
+deterministic dynamics by changing the loss to train Q in TD3 to directly follow Eq. 9. The policy is
+learned as in SAC, except without entropy regularization as TD3 uses a ﬁxed noise schedule.
+7Choosing µ to be uniform U gives the regular SAC update.
+7
+
+Published as a conference paper at ICLR 2023
+4
+EXPERIMENTS
+We compare our Extreme Q-Learning (X-QL) approach to state-of-the-art algorithms across a wide
+set of continuous control tasks in both online and ofﬂine settings. In practice, the exponential nature
+of the Gumbel regression poses difﬁcult optimization challenges. We provide Ofﬂine results on
+Androit, details of loss implementation, ablations, and hyperparameters in Appendix D.
+4.1
+OFFLINE RL
+Table 1: Averaged normalized scores on MuJoCo locomotion and Ant Maze tasks. X-QL-C gives results with
+the same consistent hyper-parameters in each domain, and X-QL-T gives results with per-environment β and
+hyper-parameter tuning.
+Dataset
+BC
+10%BC
+DT
+AWAC
+Onestep RL
+TD3+BC
+CQL
+IQL
+X-QL C
+X-QL T
+Gym
+halfcheetah-medium-v2
+42.6
+42.5
+42.6
+43.5
+48.4
+48.3
+44.0
+47.4
+47.7
+48.3
+hopper-medium-v2
+52.9
+56.9
+67.6
+57.0
+59.6
+59.3
+58.5
+66.3
+71.1
+74.2
+walker2d-medium-v2
+75.3
+75.0
+74.0
+72.4
+81.8
+83.7
+72.5
+78.3
+81.5
+84.2
+halfcheetah-medium-replay-v2
+36.6
+40.6
+36.6
+40.5
+38.1
+44.6
+45.5
+44.2
+44.8
+45.2
+hopper-medium-replay-v2
+18.1
+75.9
+82.7
+37.2
+97.5
+60.9
+95.0
+94.7
+97.3
+100.7
+walker2d-medium-replay-v2
+26.0
+62.5
+66.6
+27.0
+49.5
+81.8
+77.2
+73.9
+75.9
+82.2
+halfcheetah-medium-expert-v2
+55.2
+92.9
+86.8
+42.8
+93.4
+90.7
+91.6
+86.7
+89.8
+94.2
+hopper-medium-expert-v2
+52.5
+110.9
+107.6
+55.8
+103.3
+98.0
+105.4
+91.5
+107.1
+111.2
+walker2d-medium-expert-v2
+107.5
+109.0
+108.1
+74.5
+113.0
+110.1
+108.8
+109.6
+110.1
+112.7
+AntMaze
+antmaze-umaze-v0
+54.6
+62.8
+59.2
+56.7
+64.3
+78.6
+74.0
+87.5
+87.2
+93.8
+antmaze-umaze-diverse-v0
+45.6
+50.2
+53.0
+49.3
+60.7
+71.4
+84.0
+62.2
+69.17
+82.0
+antmaze-medium-play-v0
+0.0
+5.4
+0.0
+0.0
+0.3
+10.6
+61.2
+71.2
+73.5
+76.0
+antmaze-medium-diverse-v0
+0.0
+9.8
+0.0
+0.7
+0.0
+3.0
+53.7
+70.0
+67.8
+73.6
+antmaze-large-play-v0
+0.0
+0.0
+0.0
+0.0
+0.0
+0.2
+15.8
+39.6
+41
+46.5
+antmaze-large-diverse-v0
+0.0
+6.0
+0.0
+1.0
+0.0
+0.0
+14.9
+47.5
+47.3
+49.0
+Franka
+kitchen-complete-v0
+65.0
+-
+-
+-
+-
+-
+43.8
+62.5
+72.5
+82.4
+kitchen-partial-v0
+38.0
+-
+-
+-
+-
+-
+49.8
+46.3
+73.8
+73.7
+kitchen-mixed-v0
+51.5
+-
+-
+-
+-
+-
+51.0
+51.0
+54.6
+62.5
+runtime
+10m
+10m
+960m
+20m
+20m
+20m
+80m
+20m
+10-20m
+10-20m∗
+∗We see very fast convergence for our method on some tasks, and saturate performance at half the iterations as IQL.
+Our ofﬂine results with ﬁxed hyperparameters for each domain outperform prior methods (Chen et al.,
+2021; Kumar et al., 2019; 2020; Kostrikov et al., 2021; Fujimoto & Gu, 2021) in several environments,
+reaching state-of-the-art on the Franka Kitchen tasks, as shown in Table 1. We ﬁnd performance on the
+Gym locomotion tasks to be already largely saturated without introducing ensembles An et al. (2021),
+but our method achieves consistently high performance across environments. Table 2 shows results
+for the Androit benchmark in D4RL. Again, we see strong results for X-QL. X-QL-C surpasses prior
+works on ﬁve of the eight tasks. While we attain good performance using ﬁxed hyper-parameters per
+domain, X-QL achieves even higher absolute performance and faster convergence than IQL’s reported
+results when hyper-parameters are turned per environment. With additional tuning, we also see par-
+ticularly large improvements on the AntMaze tasks, which require a signiﬁcant amount of “stitching”
+between trajectories (Kostrikov et al., 2021). Full learning curves are in the Appendix. Like IQL, X-
+QL can be easily ﬁne-tuned using online data to attain even higher performance as shown in Table 3.
+Table 2: Evaluation on Adroit tasks from D4RL. X-QL-C gives results with the same hyper-parameters used in
+the Franka Kitchen as IQL, and X-QL-T gives results with per-environment β and hyper-parameter tuning.
+Dataset
+BC
+BRAC-p
+BEAR
+Onestep RL
+CQL
+IQL
+X-QL C
+X-QL T
+pen-human-v0
+63.9
+8.1
+-1.0
+-
+37.5
+71.5
+85.5
+85.5
+hammer-human-v0
+1.2
+0.3
+0.3
+-
+4.4
+1.4
+2.2
+8.2
+door-human-v0
+2
+-0.3
+-0.3
+-
+9.9
+4.3
+11.5
+11.5
+relocate-human-v0
+0.1
+-0.3
+-0.3
+-
+0.2
+0.1
+0.17
+0.24
+pen-cloned-v0
+37
+1.6
+26.5
+60.0
+39.2
+37.3
+38.6
+53.9
+hammer-cloned-v0
+0.6
+0.3
+0.3
+2.1
+2.1
+2.1
+4.3
+4.3
+door-cloned-v0
+0.0
+-0.1
+-0.1
+0.4
+0.4
+1.6
+5.9
+5.9
+relocate-cloned-v0
+-0.3
+-0.3
+-0.3
+-0.1
+-0.1
+-0.2
+-0.2
+-0.2
+4.2
+ONLINE RL
+We compare ExtremeQ variants of SAC (Haarnoja et al., 2018) and TD3 (Fujimoto et al., 2018),
+denoted X-SAC and X-TD3, to their vanilla versions on tasks in the DM Control, shown in Figure
+3. Across all tasks an ExtremeQ variant matches or surpasses the performance of baselines. We
+see particularly large gains in the Hopper environment, and more signiﬁcant gains in comparison
+8
+
+Published as a conference paper at ICLR 2023
+0
+200
+400
+600
+800
+Reward
+Walker-Run
+SAC
+X-SAC
+0
+100
+200
+300
+400
+Hopper-Hop
+0
+200
+400
+600
+800
+1000
+Quadruped-Run
+0
+200
+400
+600
+800
+Cheetah-Run
+0.0
+0.5
+1.0
+1.5
+2.0
+Env Steps
+1e6
+0
+200
+400
+600
+800
+Reward
+TD3
+X-TD3
+TD3 - DQ
+X-TD3 - DQ
+0.0
+0.5
+1.0
+1.5
+2.0
+Env Steps
+1e6
+0
+100
+200
+300
+400
+500
+0.0
+0.5
+1.0
+1.5
+2.0
+Env Steps
+1e6
+0
+200
+400
+600
+0.0
+0.5
+1.0
+1.5
+2.0
+Env Steps
+1e6
+0
+200
+400
+600
+800
+1000
+Figure 3: Results on the DM Control for SAC and TD3 based versions of Extreme Q Learning.
+to TD3 overall. Consistent with SAC (Haarnoja et al., 2018), we ﬁnd the temperature β needs to
+be tuned for different environments with different reward scales and sparsity. A core component
+of TD3 introduced by Fujimoto et al. (2018) is Double Q-Learning, which takes the minimum of
+two Q functions to remove overestimate bias in the Q-target. As we assume errors to be Gumbel
+distributed, we expect our X-variants to be more robust to such errors. In all environments except
+Cheetah Run, our X-TD3 without the Double-Q trick, denoted X-QL - DQ, performs better than
+standard TD3. While the gains from Extreme-Q learning are modest in online settings, none of our
+methods require access to the policy distribution to learn the Q-values.
+5
+RELATED WORK
+Table 3: Finetuning results on the AntMaze environments
+Dataset
+CQL
+IQL
+X-QL T
+umaze-v0
+70.1 →99.4
+86.7 →96.0
+93.8 →99.6
+umaze-diverse-v0
+31.1 →99.4
+75.0 →84.0
+82.0 →99.0
+medium-play-v0
+23.0 →0.0
+72.0 →95.0
+76.0 →97.0
+medium-diverse-v0
+23.0 →32.3
+68.3 →92.0
+73.6 →97.1
+large-play-v0
+1.0
+→0.0
+25.5 →46.0
+45.1 →59.3
+large-diverse-v0
+1.0
+→0.0
+42.6 →60.7
+49.0 →82.1
+Our approach builds on works online
+and ofﬂine RL. Here we review the
+most salient ones. Inspiration for our
+framework comes from econometrics
+(Rust, 1986; McFadden, 1972), and
+our Gumbel loss is motivated by IQ-
+Learn (Garg et al., 2021).
+Online RL. Our work bridges the theoretical gap between RL and Max-Ent RL by introducing our
+Gumbel loss function. Unlike past work in MaxEnt RL (Haarnoja et al., 2018; Eysenbach & Levine,
+2020), our method does not require explicit entropy estimation and instead addresses the problem
+of obtaining soft-value estimates (LogSumExp) in high-dimensional or continuous spaces (Vieillard
+et al., 2021) by directly modeling them via our proposed Gumbel loss, which to our knowledge
+has not previously been used in RL. Our loss objective is intrinsically linked to the KL divergence,
+and similar objectives have been used for mutual information estimation (Poole et al., 2019) and
+statistical learning Parsian & Kirmani (2002); Atiyah et al. (2020). IQ-Learn (Garg et al., 2021)
+proposes learning Q-functions to solve imitation introduced the same loss in IL to obtain an unbiased
+dual form for the reverse KL-divergence between an expert and policy distribution. Other works have
+also used forward KL-divergence to derive policy objectives (Peng et al., 2019) or for regularization
+(Schulman et al., 2015; Abdolmaleki et al., 2018). Prior work in RL has also examined using other
+types of loss functions (Bas-Serrano et al., 2021) or other formulations of the argmax in order to
+ease optimization (Asadi & Littman, 2017). Distinct from most off-Policy RL Methods (Lillicrap
+et al., 2015; Fujimoto et al., 2018; Haarnoja et al., 2018), we directly model B∗like Haarnoja et al.
+(2017); Heess et al. (2015) but attain signiﬁcantly more stable results.
+Ofﬂine RL. Prior works in ofﬂine RL can largely be categorized as relying on constrained or
+regularized Q-learning (Wu et al., 2019; Fujimoto & Gu, 2021; Fujimoto et al., 2019; Kumar
+et al., 2019; 2020; Nair et al., 2020), or extracting a greedy policy from the known behavior policy
+(Peng et al., 2019; Brandfonbrener et al., 2021; Chen et al., 2021). Most similar to our work, IQL
+(Kostrikov et al., 2021) ﬁts expectiles of the Q-function of the behavior policy, but is not motivated to
+solve a particular problem or remain conservative. On the other hand, conservatism in CQL (Kumar
+9
+
+Published as a conference paper at ICLR 2023
+et al., 2020) is motivated by lower-bounding the Q-function. Our method shares the best of both
+worlds – like IQL we do not evaluate the Q-function on out of distribution actions and like CQL we
+enjoy the beneﬁts of conservatism. Compared to CQL, our approach uses a KL constraint with the
+behavior policy, and for the ﬁrst time extends soft-Q learning to ofﬂine RL without needing a policy
+or explicit entropy values. Our choice of using the reverse KL divergence for ofﬂine RL follows
+closely with BRAC (Wu et al., 2019) but avoids learning a policy during training.
+6
+CONCLUSION
+We propose Extreme Q-Learning, a new framework for MaxEnt RL that directly estimates the optimal
+Bellman backup B∗without relying on explicit access to a policy. Theoretically, we bridge the gap
+between the regular, soft, and conservative Q-learning formulations. Empirically, we show that our
+framework can be used to develop simple, performant RL algorithms. A number of future directions
+remain such as improving stability with training with the exponential Gumbel Loss function and inte-
+grating automatic tuning methods for temperature β like SAC (Haarnoja et al., 2018). Finally, we hope
+that our framework can ﬁnd general use in Machine Learning for estimating log-partition functions.

@@ -1,0 +1,783 @@
+Published as a conference paper at ICLR 2022
+SAMPLE EFFICIENT DEEP REINFORCEMENT LEARN-
+ING VIA UNCERTAINTY ESTIMATION
+Vincent Mai, Kaustubh Mani and Liam Paull ∗
+Robotics and Embodied AI Lab
+Mila - Quebec Institute of Artiﬁcial Intelligence
+Universit´e de Montr´eal, Quebec, Canada
+
+ABSTRACT
+In model-free deep reinforcement learning (RL) algorithms, using noisy value es-
+timates to supervise policy evaluation and optimization is detrimental to the sam-
+ple efﬁciency. As this noise is heteroscedastic, its effects can be mitigated using
+uncertainty-based weights in the optimization process. Previous methods rely on
+sampled ensembles, which do not capture all aspects of uncertainty. We provide
+a systematic analysis of the sources of uncertainty in the noisy supervision that
+occurs in RL, and introduce inverse-variance RL, a Bayesian framework which
+combines probabilistic ensembles and Batch Inverse Variance weighting. We pro-
+pose a method whereby two complementary uncertainty estimation methods ac-
+count for both the Q-value and the environment stochasticity to better mitigate the
+negative impacts of noisy supervision. Our results show signiﬁcant improvement
+in terms of sample efﬁciency on discrete and continuous control tasks.
+1
+INTRODUCTION
+Deep reinforcement learning (DRL) methods have proven to be powerful at solving sequential
+decision-making tasks across domains (Silver et al., 2016; OpenAI et al., 2019). Combining the
+ﬂexibility of the reinforcement learning framework with the representational power of deep neural
+networks enables policy optimization in complex and high-dimensional environments with unknown
+dynamics models to maximize the expected cumulative reward (Sutton & Barto, 2018).
+An important limitation of DRL methods is their sample inefﬁciency: an enormous amount of data is
+necessary and makes training expensive. This makes applying DRL in the real world challenging, for
+example in robotics (S¨underhauf et al., 2018; Dulac-Arnold et al., 2019). In tasks like manipulation,
+sample collection is a slow and costly process (Liu et al., 2021). It is even more expensive in risk-
+averse applications like autonomous driving (Kothari et al., 2021).
+Among the current state-of-the-art approaches to improve learning efﬁciency, a promising direction
+is to exploit the prevalence of uncertainty in the underlying DRL algorithm. By adopting a Bayesian
+framework, we can consider the sampled quantities in DRL as random variables and leverage infor-
+mation about their distributions to improve the learning process (Osband et al., 2018). In this paper,
+we consider the particular problem of unreliable supervision in the temporal difference update and
+the policy optimization process. In DRL, value predictions are used to supervise the training: in tem-
+poral difference-based algorithms, they are included in bootstrapped target values which are used as
+labels; in actor-critic frameworks, the policy is trained to optimize them. That these value predic-
+tions are noisy slows the learning and brings instability (Kumar et al., 2019; 2020). The amount of
+noise in the supervision depends on the uncertainty of the value prediction, which evolves during
+the training process and depends on the state (and action) evaluated. It is therefore heteroscedastic.
+While there is an extensive body of literature focused on using the uncertainty of the value prediction
+to guide the exploration/exploitation trade-off (Dearden et al., 1998; Strens, 2001; Osband et al.,
+2016; Pathak et al., 2017; Chen et al., 2017; Osband et al., 2018; Fortunato et al., 2019; Osband
+et al., 2019; Flennerhag et al., 2020; Clements et al., 2020; Jain et al., 2021; Aravindan & Lee, 2021),
+there are very few works focused on leveraging it to mitigate the impact of unreliable supervision.
+∗Canada CIFAR AI Chair
+1
+arXiv:2201.01666v3  [cs.LG]  3 May 2022
+
+Published as a conference paper at ICLR 2022
+Distributional RL (Bellemare et al., 2017) considers the value function as a distribution to be learned
+as such. It is orthogonal to our proposition: we consider the uncertainty of the labels used to learn
+a scalar value function. In the ofﬂine RL setting, where the dataset is limited, uncertainty-weighted
+actor-critic (UWAC) (Wu et al., 2021) uses inverse-variance weighting to discard out-of-distribution
+state-action pairs using Monte Carlo dropout (Gal & Ghahramani, 2016) for uncertainty estimation.
+Closer to our work, Lee et al. (2021) propose SUNRISE, in which each sample of the Bellman
+backup in the TD update step is weighted to lower the importance of the targets which have a high
+standard deviation. The weights w(s′, a′) are computed based on a sigmo¨ıd of the negative standard
+deviation ˆQstd(s′, a′) scaled by a temperature hyperparameter T, and then offset such that they are
+between 0.5 and 1: w(s, a) = σ(−ˆQstd(s′, a′) ∗T) + 0.5. The uncertainty of the target is estimated
+by sampled ensembles. While SUNRISE proposes other contributions such as an exploration bonus,
+the heuristic weighting scheme and the limitations of sampled ensembles in capturing the predictive
+uncertainty leave space for improvement in the mitigation of the effects of unreliable supervision.
+We propose inverse-variance reinforcement learning (IV-RL). IV-RL also uses weights to reduce the
+importance of uncertain targets in training. It does so by addressing the problem from two view-
+points. First, we use variance networks (Kendall & Gal, 2017), whose loss function for regression
+is the negative log-likelihood instead of the L2 distance. For a given state-action pair (s, a), the
+network learns the target’s noise, due for example to the stochasticity of the environment or the up-
+date of the policy. It then naturally down-weights the highly noisy samples in the training process.
+Second, we use variance ensembles (Lakshminarayanan et al., 2017) to estimate the uncertainty of
+the target due to the prediction of Q(s′, a′) during the temporal-difference update. We merge the
+predicted variances of several variance networks through a mixture of Gaussians, which has been
+shown to be a reliable method to capture predictive uncertainty (Ovadia et al., 2019). We then use
+Batch Inverse-Variance (BIV) (Mai et al., 2021), which has been shown to signiﬁcantly improve the
+performance of supervised learning with neural networks in the case of heteroscedastic regression.
+BIV is normalized, which makes it ideal to cope with different and time-varying scales of variance.
+We show analytically that these two different variance predictions for the target are complementary
+and their combination leads to consistent and signiﬁcant improvements in the sample efﬁciency and
+overall performance of the learning process.
+In summary, our contribution is threefold:
+1. We present a systematic analysis of the sources of uncertainty in the supervision of model-
+free DRL algorithms. We show that the variance of the supervision noise can be estimated
+with two complementary methods: negative log-likelihood and variance ensembles.
+2. We introduce IV-RL, a framework that accounts for the uncertainty of the supervisory sig-
+nal by weighting the samples in a mini-batch during the agent’s training. IV-RL uses BIV,
+a weighting scheme that is robust to poorly calibrated variance estimation.1
+3. Our experiments show that IV-RL can lead to signiﬁcant improvements in sample efﬁciency
+when applied to Deep Q-Networks (DQN) (Mnih et al., 2013) and Soft-Actor Critic (SAC)
+(Haarnoja et al., 2018).
+In section 2, we introduce BIV as a weighting scheme for heteroscedastic regression, and variance
+ensembles as an uncertainty estimation method. We analyse the sources of uncertainty in the target
+in section 3, where we also introduce our IV-RL framework. We ﬁnally present our experimental
+results in section 4.
+2
+BACKGROUND AND PRELIMINARIES
+2.1
+BATCH INVERSE-VARIANCE WEIGHTING
+In supervised learning with deep neural networks, it is assumed that the training dataset consists of
+inputs xk and labels yk. However, depending on the label generation process, the label may be noisy.
+In regression, we can model the noise as a normal distribution around the true label: ˜yk = yk + δk
+with δk ∼N(0, σ2
+k). In some cases, the label generation process leads to different variances for the
+label noises. When these variances can be estimated, each sample is a triplet
+ xk, ˜yk, σ2
+k
+
+.
+1The code for IV-RL is available at https://github.com/montrealrobotics/iv_rl.
+2
+
+Published as a conference paper at ICLR 2022
+Batch Inverse-Variance (BIV) weighting (Mai et al., 2021) leverages the additional information σ2
+k,
+which is assumed to be provided, to learn faster and obtain better performance in the case of het-
+eroscedastic noise on the labels. Applied to L2 loss, it optimizes the neural network parameters θ
+using the following loss function for a mini-batch D of size K 2:
+LBIV(D, θ) =
+ K
+X
+k=0
+1
+σ2
+k + ξ
+!−1
+K
+X
+k=0
+(fθ(xk) −˜yk)2
+σ2
+k + ξ
+(1)
+This is a normalized weighted sum with weights wk = 1/(σ2
+k + ξ). Normalizing in the mini-batch
+enables control of the effective learning rate, especially in cases where the training data changes
+over time, such as in DRL. By focusing on the relative scale of the variances instead of their absolute
+value, it also provides robustness to poor scale-calibration of the variance estimates.
+As explained in Mai et al. (2021), ξ is a hyperparameter that is important for the stability of the
+optimization process. A higher ξ limits the highest weights, thus preventing very small variance
+samples from dominating the loss function for a mini-batch. However, by controlling the discrimi-
+nation between the samples, ξ is also key when the variance estimation is not completely trusted. It
+provides control of the effective mini-batch size EBS, according to:
+EBS =
+PK
+k wk
+2
+PK
+k w2
+k
+=
+PK
+k
+1
+(σ2
+k + ξ)
+2
+PK
+k
+1
+(σ2
+k + ξ)2
+(2)
+For example, imagine a mini-batch where most samples have very high variances, and only one has
+a very low variance. If ξ = 0, this one low-variance sample is effectively the only one to count in
+the mini-batch, and EBS tends towards 1. Increasing ξ would give more relative importance to the
+other samples, thus increasing EBS. With a very high ξ compared to the variances, all weights are
+equal, and EBS tends towards K; in this case, the BIV loss tends towards L2.
+Tuning the ξ parameter
+The simplest way to set ξ is to choose a constant value as an additional
+hyperparameter. However, the best value is difﬁcult to evaluate a priori and can change when the
+proﬁle of variances changes during a task, as is the case in DRL.
+It is instead possible to numerically compute the value of ξ which ensures a minimal EBS for each
+mini-batch. This method allows ξ to automatically adapt to the different scales of variance while
+ensuring a minimal amount of information from the dataset is accounted for by the algorithm. The
+minimal EBS is also a hyper-parameter, but it is easier to set and to transfer among environments,
+as it is simply a fraction of the original batch size. As such, it can be set as a batch size ratio.
+2.2
+ESTIMATING THE UNCERTAINTY OF A NEURAL NETWORK PREDICTION
+The predictive uncertainty of a neural network can be considered as the combination of aleatoric and
+epistemic uncertainties (Kendall & Gal, 2017). Aleatoric uncertainty is irreducible and characterizes
+the non-deterministic relationship between the input and the desired output. Epistemic uncertainty is
+instead related to the trained model: it depends on the information available in the training data, the
+model’s capacity to retain it, and the learning algorithm (H¨ullermeier & Waegeman, 2021). There is
+currently no principled way to quantify the amount of task-related information present in the input,
+the training data, or the model. The state of the art for predictive uncertainty estimation instead
+relies on different sorts of proxies. These sometimes capture other elements, such as the noise of the
+labels, which we can use to our advantage. We focus here on the relevant methods to our work.
+2.2.1
+SAMPLED ENSEMBLES
+Several networks independently train an ensemble of size N that can be interpreted as a distribution
+over predictions. The expected behaviour is that different networks will only make similar pre-
+dictions if they were sufﬁciently trained for a given input. The sampled variance of the networks’
+outputs is thus interpreted as epistemic uncertainty. It is possible to include a random Bernoulli mask
+2We replaced ϵ in Mai et al. (2021) with ξ to avoid confusion with the reinforcement learning conventions.
+3
+
+Published as a conference paper at ICLR 2022
+of probability p to each training sample, to ensure that each network undergoes different training.
+This method, used by Clements et al. (2020) and Lee et al. (2021), has the same principle as single
+network Monte-Carlo dropout (Gal & Ghahramani, 2016). As the variance is sampled, the standard
+deviation is usually on the same scale as the prediction.
+When used at the very beginning of the training process, sampled ensembles present one particular
+challenge: as the networks are initialized, they all predict small values. The initial variance, instead
+of capturing the lack of knowledge, is then underestimated. To address this problem, Randomized
+Prior Functions (RPFs) enforce a prior in the variance by pairing each network with a ﬁxed, untrained
+network which adds its predictions to the output (Osband et al., 2019). RPFs ensure a high variance
+at regions of the input space which are not well explored, and a lower variance when the trained
+networks have learned to compensate for their respective prior and converge to the same output. The
+scale of the prior is a hyper-parameter.3
+2.2.2
+VARIANCE NETWORKS
+With variance networks, the uncertainty is predicted using loss attenuation (Nix & Weigend, 1994;
+Kendall & Gal, 2017). A network outputs two values in its ﬁnal layer given an input x: the predicted
+mean µ(x) and variance σ2(x). Over a minibatch D of size K, the network parameters θ are
+optimized by minimizing the negative log-likelihood of a heteroscedastic Gaussian distribution:
+LLA(D, θ) =
+K
+X
+k=0
+1
+K
+(µθ(xk) −y(xk))2
+σ2
+θ(xk)
++ ln σ2
+θ(xk)
+(3)
+Variance networks naturally down-weight the labels with high variance in the optimization process.
+The variance prediction is trained from the error between µθ(x) and y(x). Hence, noise on the labels
+or changes in the regression task over time will also be captured by loss attenuation. As the variance
+is predicted by a neural network, it may not be well-calibrated and may be overestimated (Kuleshov
+et al., 2018; Levi et al., 2020; Bhatt et al., 2021). This can (1) give wrong variance estimates but
+also (2) affect the learning process by ignoring a sample if the variance estimate is too high.
+2.2.3
+VARIANCE ENSEMBLES
+Variance ensembles, or deep ensembles (Lakshminarayanan et al., 2017), are ensembles composed
+of variance networks. The predictive variance is given by a Gaussian mixture over the variance
+predictions of each network in the ensemble. This method, when trained, is able to capture uncer-
+tainty more reliably than others (Ovadia et al., 2019), with N = 5 networks in the ensemble being
+sufﬁcient. Similarly to sampled ensembles, variance ensembles suffer from underestimated early
+epistemic variance estimation. However, compared to variance networks, they seem empirically
+less prone to calibration issues (1) in the ﬁnal variance estimation because the mixture of Gaussians
+dampens single very high variances, and (2) in the learning process because even if one network
+does not learn correctly, the others will.
+For better readability, we will use the terms var-network and var-ensemble in the rest of the paper.
+2.3
+UNCERTAINTY AND EXPLORATION IN DRL
+While our work focuses on using uncertainty estimates to mitigate the impact of unreliable super-
+vision, we can take advantage of the structure in place to better drive the exploration/exploitation
+trade-off. In particular, we used BootstrapDQN (Osband et al., 2016) for exploration. In this method,
+a single network is sampled from an ensemble at the beginning of each episode to select the action.
+This method is improved with the previously described RPFs (Osband et al., 2018). In continuous
+settings, we instead followed Lee et al. (2021) and added an Upper Conﬁdence Bound (UCB) explo-
+ration bonus based on uncertainty prediction. As the variance in UCB is added to Q-values, it must
+be calibrated: we evaluate it with sampled ensembles. Possible interactions between exploration
+strategies and IV-RL are discussed in Appendix H.
+3Using RPFs in the context of DRL can destabilize the exploration due to a signiﬁcant initial bias added to
+the value of each state-action. It must be compensated for with uncertainty-aware exploration, such as Bootstrap
+(Osband et al., 2016), where it leads to a signiﬁcant improvement in performance for exploration-based tasks.
+4
+
+Published as a conference paper at ICLR 2022
+3
+INVERSE-VARIANCE REINFORCEMENT LEARNING
+3.1
+TARGET UNCERTAINTY IN REINFORCEMENT LEARNING
+Many model-free DRL algorithms use temporal difference updates. In methods such as DQN (Mnih
+et al., 2013), PPO (Schulman et al., 2017) and SAC (Haarnoja et al., 2018), a neural network is
+trained to predict the Q-value of a given state-action pair Qπ(s, a) 4 by minimizing the error between
+the target T(s, a) and its prediction ˆQ(s, a). T(s, a) is computed according to Bellman’s equation:
+T(s, a) = r + γ ¯Q(s′, a′)
+(4)
+s′ and r are sampled from the environment given (s, a), and a′ is sampled from the current policy
+given s′.
+¯Q(s′, a′) is predicted by a copy of the Q-network (called the target network) which is
+updated less frequently to ensure training stability. The neural network’s parameters θ are optimized
+using stochastic gradient descent to minimize the following L2 loss function:
+Lθ =
+
+T(s, a) −ˆQθ(s, a)
+
+
+2
+(5)
+3.1.1
+THE TARGET AS A RANDOM VARIABLE
+The
+target
+T(s, a)
+is
+a
+noisy
+approximation
+of
+Qπ(s, a)
+that
+is
+distributed
+ac-
+cording
+to
+its
+distribution
+pT (T|s, a).
+The
+generative
+model
+used
+to
+produce
+samples
+of
+T(s, a)
+is
+shown
+in
+Figure
+1,
+and
+has
+the
+following
+components:
+Figure 1: Bayesian net-
+work
+representing
+the
+target sampling process
+1. if the reward r is stochastic, it is sampled from pR(r|s, a) 5;
+2. if the environment dynamics are stochastic, the next state s′ is
+sampled from pS′(s′|s, a);
+3. if the policy is stochastic a′ is sampled from the policy π(a′|s′);
+4. ¯Q is a prediction from a var-network p ¯
+Q( ¯Q|s′, a′);
+5. T is deterministically generated from r and ¯Q by equation (4).
+As the variance of the noise of T(s, a) is not constant, training the Q-
+network using Lθ as in equation (5) is regression on heteroscedastic
+noisy labels.
+3.1.2
+VARIANCE OF THE TARGET
+As seen in section 2.1, BIV can be used to reduce the impact of het-
+eroscedastic noisy labels in regression, provided estimates of the label
+variances. We thus aim to evaluate σ2
+T (T|s, a) based on the sampling
+process described in section 3.1.1. r and Q-value estimation are independent given s and a, hence:
+σ2
+T (T|s, a) = σ2
+R (r|s, a) + γ2σ2
+S′A′ ¯
+Q
+  ¯Q|s, a
+
+(6)
+where pS′A′ ¯
+Q is the compound probability distribution based on components 2-4 in Figure 1:
+pS′A′ ¯
+Q( ¯Q|s, a) =
+ZZ
+p ¯
+Q( ¯Q|s′, a′)pS′A′(s′, a′|s, a)da′ds′
+(7)
+where pS′A′(s′, a′|s, a) = pA′(a′|s′)pS′(s′|s, a). Using the law of total variance, the variance of ¯Q
+is given by:
+σ2
+S′A′ ¯
+Q
+  ¯Q|s, a
+
+= ES′A′
+h
+σ2
+¯
+Q
+  ¯Q|s′, a′
+|s, a
+i
++ σ2
+S′A′
+ E ¯
+Q
+ ¯Q|s′, a′
+|s, a
+
+(8)
+Plugging (8) into (6) gives:
+σ2
+T (T|s, a) = γ2 
+ES′A′
+h
+σ2
+¯
+Q
+  ¯Q|s′, a′
+|s, a
+i
+|
+{z
+}
+Predictive variance of Q-network
++ γ2  σ2
+S′A′
+ E ¯
+Q
+ ¯Q|s′, a′
+|s, a
+
++ σ2
+R(r|s, a)
+|
+{z
+}
+Policy and environment induced variance
+(9)
+4In this paper, we focus on Q-values, although the principle can also apply to state values.
+5Stochastic reward can happen for example if the reward is corrupted or estimated (Romoff et al., 2018;
+Campbell et al., 2015)
+5
+
+Published as a conference paper at ICLR 2022
+We can identify two distinct components in equation 9 that contribute to the overall variance of
+the target. The ﬁrst is the (expectation of the) variance that is due to the uncertainty in the neural
+network prediction of the value function, ES′A′[σ2
+¯
+Q
+  ¯Q|s′, a′
+]. The second is the uncertainty due to
+the stochasticity of the environment and of the policy, σ2
+R(r|s, a) + γ2σ2
+S′A′
+ E ¯
+Q
+ ¯Q|s′, a′
+.
+Uncertainty in neural network prediction
+For a given policy π and a given s′, a′, the agent may
+not have seen enough samples to have an accurate approximation of Qπ(s′, a′). This corresponds
+to an epistemic source of uncertainty that should be captured by sampled ensembles. However, as
+π is updated, the regression target, Qπ(s′, a′), is also changing. This can be interpreted as variabil-
+ity in the underlying process which will be captured by var-networks. We can thus combine both
+sampling-based and var-network methods and evaluate σ2
+¯
+Q
+  ¯Q(s′, a′)
+
+with var-ensembles.
+We assume that the estimate of σ2
+¯
+Q( ¯Q|s′, a′) given a sampled (s′, a′) is unbiased and can therefore
+use it to directly approximate the expectation ES′A′[σ2
+¯
+Q
+  ¯Q|s′, a′
+]. These values are used in the
+BIV loss LBIV (equation 1) across a mini-batch sampled from the replay buffer. In this case, ξ is
+used to control the trust in the variance estimation, as explained in section 2.1.
+Stochastic environment and policy
+The other potential source of variance in the target is the
+result of the stochasticity of the environment encapsulated by pR (r|s, a) and pS′(s′|s, a) and of the
+policy represented by π(a′|s′). Note that in model-free RL, we have no explicit representation of
+pR (r|s, a) or pS′(s′|s, a), which are necessary to estimate this source of uncertainty.
+Qπ(s, a) is deﬁned as the expected value of the return. As a result, even in the case where ¯Q(s′, a′)
+= Qπ(s, a) in (4), there is still noise over the value of the target that is being used as the label due to
+the stochasticity of the environment and policy that generate r, a′ and s′. Assuming a zero mean and
+normally distributed noise, this underlying stochasticity of the generating process is well-captured
+by a var-network with a loss attenuation using the negative log-likelihood formulation described in
+equation (3).
+3.1.3
+LOSS FUNCTION FOR IV-RL
+Based on the motivation above, we propose our IV-RL loss over minibatch D of size K as a linear
+combination of LBIV and LLA, balanced by hyperparameter λ:
+LIVRL(D, θ) = LBIV(D, θ) + λLLA(D, θ)
+=
+K
+X
+k=0
+
+
+
+
+K
+X
+j=0
+1
+γ2σ2
+¯
+Q,j + ξ
+
+
+−1 
+µ ˆ
+Qθ(sk, ak) −T(sk, ak)
+2
+γ2σ2
+¯
+Q,k + ξ
++ λ
+K
+
+
+
+
+µ ˆ
+Qθ(sk, ak) −T(sk, ak)
+2
+σ2
+ˆ
+Qθ(sk, ak)
++ ln σ2
+ˆ
+Qθ(sk, ak)
+
+
+
+
+
+(10)
+The var-network with parameters θ predicts both µ ˆ
+Qθ(sk, ak) and σ2
+ˆ
+Qθ(sk, ak) for each element
+k of the mini-batch. σ2
+¯
+Q,k is instead provided by the target var-ensemble which predicts ¯Q(s′
+k, a′
+k)
+when estimating the target T(sk, ak). In LBIV of equation (1), σ2
+k is replaced by γ2σ2
+¯
+Q,k according to
+equation (9). Empirically, the value of λ is usually optimal around 5 or 10. Its impact is studied more
+in details in appendix C. High-variance samples generated from the target estimation will be down-
+weighted in the BIV loss, while high-variance samples due to the stochasticity of the underlying
+environment and policy will be down-weighted in the LA loss. In the remainder of the paper, we
+show how this loss can be applied to different architectures and algorithms, and demonstrate that in
+many cases it signiﬁcantly improves sample efﬁciency.
+3.2
+Q-VALUE UNCERTAINTY AND ACTOR-CRITIC STRUCTURES
+In section 3.1, we discussed how the target’s uncertainty can be quantiﬁed and how the Bellman
+update can then be interpreted as a heteroscedastic regression problem. This is applicable in most
+6
+
+Published as a conference paper at ICLR 2022
+model-free DRL algorithms, whether they are based on Q-learning or policy optimization. In the
+special case of actor-critic algorithms, the state-values or Q-values predicted by the critic network
+are also used to train the policy πφ’s parameters by gradient ascent optimization. An estimate of
+their variance can also be used to improve the learning process.
+The objective is to maximize the expected Q-value:
+Es∼D,a∼πφ(s)[Q(s, a)]
+(11)
+where D is the state distribution over the probable agent trajectories. The expectation is computed
+by sampling a mini-batch of size K from a replay buffer containing state-action pairs (sk, ak). The
+Q-value is approximated by the critic as ˆQ(sk, ak). The actor’s parameters φ are then trained to
+maximize the unweighted average:
+1/K
+K
+X
+k=0
+ˆQ(sk, ak)
+(12)
+If we instead consider the critic’s estimation ˆQ(sk, ak) as a random variable sampled from
+p ˆ
+Q( ˆQ|s, a), with mean µ ˆ
+Q(sk, ak) and variance σ2
+ˆ
+Q(sk, ak), we can instead infer the expected value
+in equation (11) using Bayesian estimation (Murphy, 2012):
+ K
+X
+k=0
+1/σ2
+ˆ
+Q (sk, ak)
+!−1
+K
+X
+k=0
+1
+σ2
+ˆ
+Q(sk, ak)µ ˆ
+Q(sk, ak)
+(13)
+The normalized inverse-variance weights are a direct ﬁt with the BIV loss in equation 1: we therefore
+also use BIV to train the actor. As the target and the Q-networks have the same structure, σ2
+ˆ
+Q(sk, ak)
+can be estimated using the same var-ensembles used in section 3.1.2.
+3.3
+ALGORITHMS
+We have adapted IV-RL to DQN and SAC to produce IV-DQN and IV-SAC. Comprehensive pseudo-
+code, as well as implementation details for each algorithm, can be found in appendix A.
+4
+RESULTS
+We have tested IV-RL across a variety of different environments, using IV-DQN for discrete tasks
+and IV-SAC for continuous tasks. To determine the effects of IV-RL, we compare its performance to
+the original DQN and SAC, but also the ensemble-based baselines upon which IV-DQN and IV-SAC
+were built: BootstrapDQN and EnsembleSAC. We also include SUNRISE (Lee et al., 2021).
+All ensemble-based methods use an ensemble size of N = 5. Unless speciﬁed otherwise, each
+result is the average of runs over 25 seeds: 5 for the environment × 5 for network initialization. The
+hyperparameters are the result of a thorough ﬁne-tuning process explained in appendix B. As it uses
+ensembles, IV-RL is computationally expensive: computation time is discussed in Appendix D.
+4.1
+IV-DQN
+We tested IV-DQN on discrete control environments selected to present different characteristics.
+From OpenAI Gym (Brockman et al., 2016), LunarLander is a sparse reward control environment
+and MountainCar is a sparse reward exploration environment. From BSuite6 (Osband et al., 2020),
+Cartpole-Noise is a dense reward control environment. The BootstrapDQN baseline follows Osband
+et al. (2018) as explained in section 2.3. The reported SUNRISE results are obtained by applying the
+SUNRISE weights to BootstrapDQN. The learning curves are shown in ﬁgure 2, where the results
+are averaged on a 100 episode window.
+IV-DQN signiﬁcantly outperforms BootstrapDQN and SunriseDQN on control-based environments.
+However, in the exploration-based Mountain-Car where the challenge is to ﬁnd the state that pro-
+duces some reward, there is very little additional information in every other state for IV-DQN to
+improve over BootstrapDQN. All weighting schemes thus perform comparably.
+6The results from BSuite are averaged over 20 runs with different environment and network seeds
+7
+
+Published as a conference paper at ICLR 2022
+Figure 2: Using IV-RL shows improved performance over baseline methods in Cartpole Noise and
+LunarLander, and does not impact MountainCar.
+Figure 3: Ablation study: depending on the environment, the BIV or the var-ensemble component
+is the most important factor of improvement.
+Table 1 shows the median number of episodes necessary to reach a given score for which the en-
+vironment is considered as solved. IV-DQN shows a clear improvement over baselines in sample
+efﬁciency in both control-based environments but fails to improve the exploration in Mountain Car.
+Table 1:
+25th - 50th - 75th percentiles of the number of episodes necessary for the return averaged
+with a 100-episode window to reach the solved score on different environments. IV-DQN shows
+signiﬁcant improvements in sample efﬁciency when the environment is not exploration-based.
+LunarLander (200)
+Cartpole-Noise (750)
+MountainCar (-150)
+DQN
+296 - 316 - 349
+171 - 193 - max
+304 - 333 - 403
+BootstrapDQN
+287 - 305 - 317
+160 - 174 - 196
+134 - 149 - 206
+SunriseDQN
+291 - 309 - 368
+155 - 165 - 175
+152 - 197 - 257
+IV-DQN (ours)
+220 - 227 - 239
+105 - 112 - 117
+142 - 163 - 200
+In Figure 3 we perform an ablation study for LunarLander and Cartpole-Noise. In L2 + VarEnsem-
+bleDQN, the loss function LBIV in equation 10 is replaced by the L2 loss. In BIV + BootstrapDQN,
+sampled ensembles are used instead of var-ensembles, and trained only with LBIV. More details
+about these ablations are found in appendix A. In both cases, the use of BIV or var-ensembles
+improves the performance, and their combination leads to the best sample efﬁciency. In Cartpole-
+Noise, var-ensembles carry most of the improvement, maybe because the low amount of states
+leads to low epistemic uncertainty. We also show that using one single var-network as opposed to
+var-ensembles is sub-optimal. This is likely due to the unstable nature of the single uncertainty es-
+timate, which affects the learning process. More details are shown in appendix E and G. The use of
+var-ensembles stabilizes the variance estimation, as explained in section 2.2.3.
+4.2
+IV-SAC
+IV-SAC was applied to different continuous control environments from OpenAI Gym (Brockman
+et al., 2016) as implemented by MBBL (Wang et al., 2019). EnsembleSAC is a baseline using
+ensembles with an UCB exploration bonus (Lee et al., 2021). Table 2 shows the average return
+after 100k and 200k steps on 25 seeds. We note that the addition of an ensemble instead of a single
+network, along with the uncertainty-based exploration bonus, already allows the performance to
+increase compared to SAC. Except in Ant, the SUNRISE weights do not seem to lead to consistently
+better results. In comparison, IV-SAC leads to signiﬁcant improvements in performance.
+This improvement in performance after a ﬁxed amount of training steps can be explained by an
+improved sample efﬁciency. This can be seen in ﬁgure 4. Even when IV-SAC’s return is not signiﬁ-
+8
+
+Published as a conference paper at ICLR 2022
+Table 2: Performance at 100K and 200K time steps (100 and 200 episodes) for several robotics
+environments in OpenAI Gym. The results show the mean and standard error over 25 runs.
+Walker
+HalfCheetah
+Hopper
+Ant
+SlimHuman.
+100k steps
+SAC
+-392 ± 187
+3211 ± 136
+322 ± 177
+724 ± 29
+815 ± 74
+EnsembleSAC
+-389 ± 209
+3938 ± 112
+1597 ± 152
+852 ± 27
+1043 ± 31
+SunriseSAC
+46 ± 213
+3879 ± 204
+1618 ± 195
+834 ± 130
+1077 ± 41
+IV-SAC (ours)
+857 ± 231
+4260 ± 118
+2237 ± 116
+948 ± 46
+1122 ± 34
+200k steps
+SAC
+371 ± 189
+3978 ± 148
+1635 ± 162
+985 ± 82
+1020 ± 52
+EnsembleSAC
+1337 ± 278
+4757 ± 92
+2652 ± 91
+981 ± 65
+1294 ± 39
+SunriseSAC
+1423 ± 295
+4785 ± 228
+2572 ± 119
+1462 ± 154
+1383 ± 56
+IV-SAC (ours)
+3009 ± 193
+5451 ± 151
+2889 ± 50
+1281 ± 101
+2023 ± 114
+Figure 4: IV-SAC learns faster and leads to signiﬁcantly better results than the baselines.
+cantly better than the baselines at 200k steps, such as in Ant or Hopper, it clearly is learning faster,
+which is also reﬂected by the scores at 100k steps.
+Similarly to IV-DQN, we can separate the contribution from BIV and loss attenuation, as shown in
+the two ﬁrst plots of ﬁgure 5. While both BIV and var-ensembles alone have a signiﬁcant impact
+in Walker, it’s only their combination that brings the most improvement in HalfCheetah. Similarly
+to the discrete control case, a simple var-network leads to a small improvement over SAC, which is
+discussed in appendix G. We also show in ﬁgure 5 that the BIV weights provided with var-ensemble
+variance estimations than the SUNRISE weights, or even the inverse variance weights of UWAC
+(Wu et al., 2021). The normalization of BIV allows it to better cope with changes in the variance
+predictions, as seem in appendices E and F.
+Figure 5: Ablation Study: (ﬁrst two ﬁgures) Impact of using different uncertainty estimation meth-
+ods (last two ﬁgures) Comparing different weighting schemes with var-ensembles.
+5
+CONCLUSION
+We present Inverse Variance Reinforcement Learning (IV-RL), a framework for model-free deep
+reinforcement learning which leverages uncertainty estimation to enhance sample efﬁciency and
+performance. A thorough analysis of the sources of noise that contribute to errors in the target mo-
+tivates the use of a combination of Batch Inverse Variance (BIV) weighting and variance ensembles
+to estimate the variance of the target and down weight the uncertain samples in two complementary
+ways. Our results show that these two components are beneﬁcial and that their combination signif-
+icantly improves the state of the art in terms of learning efﬁciency, in particular for control tasks.
+We applied IV-RL to DQN and SAC, but it can be adapted to any model-free algorithm. Model-
+based, active or continuous learning could also beneﬁt from the underlying ideas presented in this
+paper. We thus believe that IV-RL is a signiﬁcant step to enable the application of DRL to real-world
+problems such as robotics, where sample efﬁciency is the main challenge.
+9
+
+Published as a conference paper at ICLR 2022
+ETHICS STATEMENT
+In this work, we present a method to enhance the sample efﬁciency of deep reinforcement learn-
+ing algorithms. As such, it is agnostic to the applications, and per se does not raise any particular
+ethical issue. We however strongly encourage the user of our algorithm to ensure they have care-
+fully thought about the ethical issues related to the particular ﬁeld of application, such as medicine,
+robotics, communication, ﬁnance, etc.
+As environmental sustainability can also be considered an ethical issue (Universit´e de Montr´eal,
+2018), we publish the carbon footprint of our work.
+Experiments were conducted using a private infrastructure, which has a carbon efﬁciency of 0.028
+kgCO2eq/kWh. A cumulative of 12367 days, or 296808 hours, of computation was mainly per-
+formed on the hardware of type RTX 8000 (TDP of 260W). We assume full power usage of the
+GPUs, although this was not always the case.
+Total emissions are estimated to be 2160.76 kgCO2eq of which 0 percents were directly offset. This
+is equivalent to 8730 km driven by an average car, or 1.08 metric tons of burned coal.
+Estimations were conducted using the MachineLearning Impact calculator presented in Lacoste et al.
+(2019).
+REPRODUCIBILITY STATEMENT
+To allow reproducibility of our results, the code, as well as the hyperparameters used to produce each
+result presented in this paper, are available at https://github.com/montrealrobotics/
+iv_rl.
+The environments and implementation we used (OpenAI Gym, BSuite, MBBL) are all publicly
+accessible, although a Mujoco license is needed to run some of them.

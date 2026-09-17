@@ -1,0 +1,802 @@
+What You See is What You GAN:
+Rendering Every Pixel for High-Fidelity Geometry in 3D GANs
+Alex Trevithick*2, Matthew Chan1, Towaki Takikawa1, Umar Iqbal1, Shalini De Mello1, Manmohan
+Chandraker2, Ravi Ramamoorthi2, and Koki Nagano1
+1NVIDIA
+2University of California, San Diego
+Figure 1. Left: Our results. The split view in the middle demonstrates the high degree of agreement between our 2D rendering and
+corresponding 3D geometry. Our method can learn fine-grained 3D details (e.g., eyeglass frame and cat’s fur) that are geometrically well-
+aligned to 2D images without multiview or 3D scan data. Right: Comparison with EG3D [7]. Our tight SDF prior provides smooth and
+detailed surfaces on the face and hat while EG3D exhibits geometry artifacts and discrepancies between geometry and rendering. Please
+see Fig. 5 and the accompanying video for more examples, and Fig. 6 for comparison to other baselines.
+Abstract
+3D-aware Generative Adversarial Networks (GANs)
+have shown remarkable progress in learning to generate
+multi-view-consistent images and 3D geometries of scenes
+from collections of 2D images via neural volume render-
+ing. Yet, the significant memory and computational costs of
+dense sampling in volume rendering have forced 3D GANs
+to adopt patch-based training or employ low-resolution ren-
+dering with post-processing 2D super resolution, which
+sacrifices multiview consistency and the quality of resolved
+geometry. Consequently, 3D GANs have not yet been able
+to fully resolve the rich 3D geometry present in 2D images.
+In this work, we propose techniques to scale neural vol-
+ume rendering to the much higher resolution of native 2D
+images, thereby resolving fine-grained 3D geometry with
+*This project was initiated and substantially carried out during an in-
+ternship at NVIDIA.
+unprecedented detail.
+Our approach employs learning-
+based samplers for accelerating neural rendering for 3D
+GAN training using up to 5 times fewer depth samples.
+This enables us to explicitly ”render every pixel” of the
+full-resolution image during training and inference without
+post-processing superresolution in 2D. Together with our
+strategy to learn high-quality surface geometry, our method
+synthesizes high-resolution 3D geometry and strictly view-
+consistent images while maintaining image quality on par
+with baselines relying on post-processing super resolution.
+We demonstrate state-of-the-art 3D gemetric quality on
+FFHQ and AFHQ, setting a new standard for unsupervised
+learning of 3D shapes in 3D GANs.
+1. Introduction
+Training 3D generative models from the abundance of 2D
+images allows the creation of 3D representations of real-
+world objects for content creation and novel view synthe-
+1
+arXiv:2401.02411v1  [cs.CV]  4 Jan 2024
+
+sis [59].
+Recently, 3D-aware generative adversarial net-
+works (3D GANs) [6, 7, 19, 43, 45, 49, 53, 69, 70, 74, 76]
+have emerged as a powerful way to learn 3D representations
+from collections of 2D images in an unsupervised fashion.
+These methods employ differentiable rendering to compare
+rendered 3D scenes with 2D data using adversarial train-
+ing [18]. Among the various 3D representations, Neural
+Radiance Fields (NeRF) [38] have become a popular choice
+among recent successful 3D GANs. However, the signifi-
+cant computational and memory cost of volume rendering
+has prevented 3D GANs from scaling to high-resolution
+output. For instance, generating a single 512x512 image via
+volume rendering requires evaluating as many as 25 million
+depth samples, if 96 depth samples are used per ray using
+importance sampling [7, 10, 38, 53]. Given that GAN train-
+ing typically requires rendering tens of millions of images,
+the training process could require evaluating hundreds of
+trillions of depth samples.
+During training, all intermediate operations must be
+stored in GPU memory for every depth sample for the back-
+ward pass. Therefore, existing methods resort to working
+on patches [10, 49, 53] or adopting a low resolution neural
+rendering combined with post-processing 2D super resolu-
+tion (SR) [7, 19, 43, 45, 70]. However, patch-based methods
+have limited receptive fields over scenes, leading to unsatis-
+factory results, and the hybrid low-resolution rendering and
+SR scheme inevitably sacrifices the multiview consistency
+and the accuracy of 3D geometry. While many techniques
+have been developed to improve the image quality of 3D
+GANs to match that of 2D GANs, the challenge of resolv-
+ing the corresponding high-resolution 3D geometry remains
+unsolved (see Figs. 1 and 6 for our results and comparison
+to the current state-of-the-art).
+Scaling 3D GANs to operate natively at the 2D pixel res-
+olution requires a novel approach for sampling. Fig. 2 com-
+pares the state-of-the-art 3D GAN, EG3D model, trained
+with and without1 SR. EG3D employs 96 dense depth sam-
+ples in total using two-pass importance sampling [38] dur-
+ing training, which requires half a terabyte of GPU memory
+at 256 × 256 resolution, making scaling to higher resolu-
+tions infeasible. Furthermore, Fig. 2 demonstrates that us-
+ing 96 dense samples still results in undersampling, as evi-
+denced by the speckle noise patterns visible in the zoomed-
+in view, leading to considerably worse FID (inset in Fig. 2).
+3D GANs relying on post-processing SR layers can repair
+these undersampling artifacts at the cost of a high-fidelity
+3D representation.
+In this work, we address the challenge of scaling neural
+volume rendering to high resolutions by explicitly rendering
+every pixel, ensuring that “what you see in 2D, is what you
+get in 3D” — generating an unprecedented level of geomet-
+ric details as well as strictly multiview-consistent images.
+Our contributions are the following:
+• We introduce an SDF-based 3D GAN to represent high-
+1Triplane resolution is doubled to compensate for the loss of capacity
+from removing the SR layers.
+Figure 2. Samples from EG3D 256 model. Right: Volume render-
+ing with 48 coarse samples and 48 fine samples per ray with two-
+pass importance sampling [38] results in undersampling, leading
+to noticeable noisy artifacts. Left: These artifacts are repaired by
+super resolution (SR). An unsharp mask has been applied to the
+zoomed views for presentation purposes.
+frequency geometry with spatially-varying surface tight-
+ness that increases throughout training (subsection 4.1
+and 4.5), in turn facilitating low sample rendering.
+• We propose a generalizable learned sampler conditioned
+on cheap low-resolution information to enable full-
+resolution rendering during training for the first time
+(subsection 4.2 and 4.3).
+• We show a robust sampling strategy for the learned sam-
+pler (subsection 4.4) that produces stable neural rendering
+using significantly fewer depth samples (see Fig. 8). Our
+sampler can operate with just 20 samples per ray com-
+pared to existing 3D GANs which must use at least 96
+samples per ray (see Table 3).
+• Together, our contributions result in the state-of-the-art
+geometry for 3D GANs while rendering with quality on
+par with SR baselines (see Fig. 1). For more results, see
+Fig. 5 and for comparison to other baselines, see Fig. 6.
+2. Related Work
+We begin by reviewing the prior-arts of 3D generative mod-
+els and their current shortcomings. We then cover founda-
+tional techniques for 3D geometry representation and neural
+rendering from which we take inspiration. We then discuss
+existing methods for accelerating neural volume rendering,
+which usually operate per-scene.
+2.1. 3D Generative Models
+Just like 2D GANs, 3D-aware GANs train from a collection
+of 2D images, but employ a 3D representation and differen-
+tiable rendering to learn 3D scenes without requiring multi-
+view images or ground truth 3D scans. Some of the most
+successful works use a neural field [68] in combination with
+a feature grid [7] as their 3D representation, and use neural
+volume rendering [38] as the differentiable renderer.
+2
+
+However, due to the significant memory and compu-
+tational cost of neural volume rendering, many previous
+works perform rendering at low-resolution and rely on a
+2D post-processing CNN [7, 19, 43, 45, 70], which hal-
+lucinates the high-frequency details in a view-inconsistent
+manner while sacrificing 3D consistency and the quality of
+the resolved 3D geometry.
+To ensure strict 3D consistency, other previous works
+seek to render at high-resolutions and propose techniques
+to address the prohibitive computational costs. One line
+of work leverages the sparse nature of 3D scenes to speed
+up rendering, in particular, structures such as 2D manifolds
+[14, 67], multiplane images [75] and sparse voxels [50]. Al-
+though they are more efficient, sparse representations pro-
+vide only coarse [50] or category-specific [14, 67] accel-
+eration structures, which poses constraints on the diversity
+and viewing angles of the generated scenes. Our sampling-
+based method, on the other hand, generalizes to every new
+scene and adaptively accelerates rendering on a per ray
+basis. Another line of work enables high-resolution ren-
+dering with patch-based training [10, 53].
+In particular,
+Mimic3D [10] achieves significantly improved 2D image
+quality, but the patch-based training limits the receptive
+fields, and the generated geometry does not faithfully repre-
+sent the 2D data due to the patch-wise perceptual loss. Our
+method renders the entire image at once and the resulting
+geometry is aligned with the rendering (see Figs. 1 and 6).
+Recently, a new family of generative approaches us-
+ing diffusion models has been proposed to tackle condi-
+tional tasks including novel view synthesis [8, 58] and text-
+based 3D generation[63]. Most of these 3D-aware diffu-
+sion models combine a 3D inductive bias modeled via neu-
+ral field representations and a 2D image denoising objec-
+tive to learn 3D scene generation. While these models en-
+able unconditional 3D generation, they require multiview
+images [24, 55, 63] or 3D data, such as a point cloud [42].
+Score Distillation Sampling [47] may be used for distil-
+lation from a pre-trained 2D diffusion model when only
+monocular 2D data is available, but diffusion models incur
+significant computational costs due to their iterative nature
+and most of the existing methods require optimization per
+scene [9, 20, 33, 61, 66].
+2.2. Learning High-Fidelity Geometry
+Prior works on 3D GANs have typically represented the ge-
+ometry as a radiance field [38], which lacks a concrete defi-
+nition for where the surface geometry resides in the field, re-
+sulting in bumpy surfaces. A number of works [44, 62, 71]
+have proposed alternate representations based on implicit
+surfaces (such as signed distance functions, or SDFs) that
+can be used with neural volume rendering. In these works,
+the implicit surface is typically softened by a parameter for
+volume rendering.
+Other works [32, 64] improve on these implicit surface
+representations by leveraging feature grids for higher com-
+putational efficiency and resolution. Adaptive Shells [65]
+further improve on quality by making the softness parame-
+ter spatially-varying, as many objects have hard boundaries
+only in certain parts.
+We use an implicit surface repre-
+sentation based on VolSDF [72], and leverage a spatially-
+varying parameter similar to Adaptive Shells [65] to control
+the softness of the surface, as humans and animals benefit
+from both hard surfaces (e.g. skin, eyes) and soft, volumet-
+ric representations (e.g. hair). Although other works such
+as StyleSDF [45] have similarly leveraged implicit surfaces
+in a 3D GAN framework, the lack of spatial-variance and
+high-resolution rendering led to over-smoothed geometry
+not faithful to the rendered images.
+2.3. Accelerating Neural Volume Rendering
+As mentioned in Section 2.1, accelerating 3D GANs typi-
+cally relies on acceleration structures such as octrees [31,
+56, 73], which in generative settings [14, 50, 67] are lim-
+ited to be coarse or category-specific due to the difficulty
+of making them generalize per-scene.
+Instead, we look
+to a class of methods that do not rely on an acceleration
+structure. Some of these works learn a per-scene sampling
+prior on a per-ray basis using a binary classifier [41], a den-
+sity estimator [30, 46], a coarse proxy from a 3D cost vol-
+ume [34], or an interval length estimator [35] on discrete
+depth regions along the ray. Other works use importance
+sampling [21, 38] to sample additional points. We take in-
+spiration from works on density estimators [30] and propose
+to learn a scene-conditional proposal network that general-
+izes across scenes instead of being category-specific or op-
+timized per-scene.
+There are also other methods to accelerate rendering by
+utilizing more efficient representations, such as gaussian
+splats [29] and light field networks [52].
+More efficient
+feature grids [40, 57] based on hashing can also be used
+to accelerate rendering. However, mapping to these repre-
+sentations in a GAN framework is not straightforward. In
+contrast, our sampling strategy can be used for any NeRF
+representation.
+3. Background
+We begin with background on the methodology of the state-
+of-the-art 3D-aware GANs as our method relies on a simi-
+lar backbone for mapping to 3D representations. 3D GANs
+typically utilize a StyleGAN-like [27] architecture to map
+from a simple Gaussian prior to the conditioning of a NeRF,
+whether that be an MLP [19, 45], MPI [75], 3D feature
+grid [50], manifolds [14, 67] or triplane [7, 10, 53]. We in-
+herit the latter triplane conditioning for its high expressivity
+and efficiency, in which three axis-aligned 2D feature grids
+(fxy, fxz, fyz), provide NeRF conditioning by orthogonal
+projection and interpolation. As in the previous methods,
+the mapping and synthesis networks from StyleGAN2 can
+easily be adapted to create the 2D triplane representation
+from noise z ∈R512. Specifically, w = Mapping(z) con-
+ditions the creation of the triplane T(w) ∈R3×32×512×512
+from a Synthesis network, corresponding to three axis-
+3
+
+Figure 3. Here we show our proposed pipeline and its intermediate outputs. Beginning from the triplane T, we trace uniform samples to
+probe the scene, yielding low-resolution I128 and weights P128. These are fed to a CNN which produces high-resolution proposal weights
+ˆP512 (weights are visualized as uniform level sets). We perform robust sampling and volume render to get the final image I512 and the
+surface variance B.
+aligned 2D feature grids of spatial resolution 512×512 and
+feature size 32.
+To create high-fidelity geometry, our method builds upon
+VolSDF [72]: Instead of directly outputting the opacity σ of
+a point x ∈R3, an SDF value s is output and transformed
+to σ using a Laplacian CDF:
+σ = 1
+β
+
+
+
+1
+2 exp
+
+s
+β
+
+if s ≤0
+1 −1
+2 exp
+
+−s
+β
+
+if s > 0
+(1)
+where β is the variance of the Laplacian distribution govern-
+ing the “tightness” of the representation. One distinct bene-
+fit of an SDF-based representation is the ease of extracting
+the surface. StyleSDF [45] also utilizes this intermediate
+geometry representation without a triplane, enforcing the
+usual Eikonal constraint.
+Using the triplane conditioning and Eq. 1, we can as-
+sign each point in the volume with its opacity σ and radi-
+ance c using a lightweight MLP. For a given camera ray
+r(t) = o + td, we approximate the volumetric rendering
+integral C(r) [36] by sampling ray distances ti with their
+corresponding σi and ci before computing
+ˆC(r) =
+N
+X
+i=1
+wici where wi = Ti(1 −exp(−σiδi)),
+Ti = exp
+
+−
+i−1
+X
+j=1
+σjδj
+
+and δi = ti+1 −ti.
+(2)
+Here, Ti denotes the accumulated transmittance and δi is
+the distance between adjacent samples along the ray.
+It is possible to develop a more efficient estimator for
+this sum with fewer samples by using importance sampling
+techniques in computer graphics. Typically, one computes
+a piecewise constant probability distribution pj =
+ˆ
+wj
+P
+j ˆ
+wj ,
+where j refers to the jth bin or region, and ˆ
+wj is an estimate
+of wj for that region, for example obtained by explicitly
+tracing coarse samples. For a given t, we first find the region
+j(t) and then set p(t) = pj. From this, one can compute a
+(piecewise linear) cumulative distribution function or CDF
+Φ(t) which has a range from 0 to 1. We can then perform
+inverse CDF sampling to define the sample points,
+ti = Φ−1(ui),
+(3)
+where ui is a random number from 0 to 1 (sorted to be an
+increasing sequence).
+Discussion
+We improve on previous works such as
+NeRF [38] and EG3D [7] by stratifying2 the random num-
+bers ui during training; this leads to significantly lower ren-
+dering variance, especially at low sample counts N [39].
+We also develop a neural method to predict a good distribu-
+tion pj (and hence Φ) for importance sampling at high spa-
+tial resolution, without needing to exhaustively step through
+the ray.
+4. Method
+In this section, we describe our method beginning with
+our SDF-based NeRF parametrization (subsection 4.1). We
+then overview how we render at high-resolution in three
+stages: first, a low-resolution probe into the 3D scene (sub-
+section 4.2); second a high-resolution CNN proposal net-
+work (subsection 4.3); and third a robust sampling method
+for the resultant proposals (subsection 4.4). Next we de-
+scribe regularizations (subsection 4.5) for stable training,
+and finally our entire training pipeline (subsection 4.6).
+4.1. Mapping to a 3D Representation
+Beginning from a noise vector z, we synthesize the initial
+triplane T ′ with StyleGAN [25] layers as detailed in Sec. 3.
+In contrast to previous methods, we then generate more ex-
+pressive triplane features T with an extra synthesis block for
+each orthogonal plane: fij = SynthesisBlock(f ′
+ij) where
+ij ∈{xy, xz, yz} and f ′ are the features of T ′. This de-
+sign choice allows disentanglement between the intermedi-
+ate triplane features as plane-specific kernels can attend to
+the features in each separate plane.
+Given the triplane T (the left side of Fig. 3) and a point
+x ∈R3, we utilize an MLP to map to the SDF value s,
+variance β and geometry features fgeo:
+(s, β, fgeo) = MLPSDF(PosEnc(x), Tx)
+(4)
+2dividing the unit interval into bins and taking a sample from each bin.
+4
+
+where PosEnc is the positional encoding from NeRF [38]
+and Tx are the features corresponding to x gathered from T
+by projecting x to each of the axis-aligned planes and taking
+the Hadamard product of the three resultant vectors [16].
+We initialize the ReLU MLPSDF as in SAL [4] to ensure an
+approximately spherical SDF in the early part of training.
+Additionally note that β varies spatially in the volume un-
+like [45, 72], allowing us to regularize its values later on.
+Using Eq. 1, we transform s and β into opacity σ. We
+can now predict the radiance with a separate MLPc condi-
+tioned on the geometry features and viewing direction v as
+c = MLPc(PosEnc(v), fgeo).
+(5)
+Note that in contrast to most 3D GANs, we condition
+radiance on the viewing direction, allowing a more expres-
+sive generator. Thus, given a triplane, we can render any
+pixel by computing σ and c for points along the ray to ap-
+proximate the volumetric rendering integral as described in
+Sec. 3.
+4.2. High-Resolution Proposal Network
+We now have our mapping from a latent code z to a 3D
+NeRF representation.
+However, volumetric rendering of
+NeRFs at higher resolutions requires extremely large num-
+bers of samples, and thus both memory and time. Instead
+of naive dense sampling at a high resolution, we propose
+to leverage low-resolution renderings to cheaply probe the
+3D representation (visualized on the left of Fig. 3) for the
+creation of proposal distributions at high-resolution. Given
+a target camera and triplane T, we first trace 192 coarse
+samples at low-resolution (128 × 128) to compute a low-
+resolution RGB image I128 ∈R3×128×128 and a tensor
+of weights P128 ∈R192×128×128 (visualized after low-
+resolution rendering in Fig. 3). Each 192-dimensional vec-
+tor corresponds to a piecewise constant PDF with CDF Φ as
+seen in Eq. 3.
+Conditioned on the low-resolution probe, we predict a
+tensor of proposal volume rendering weights at the high-
+resolution (512 × 512):
+ˆP512 = Softmax(CNN(P128, I128)) ∈R192×512×512, (6)
+where CNN is a lightweight network that up-samples the
+low-resolution weights, Softmax produces discrete distribu-
+tions along each ray, and the ˆ denotes that this is an esti-
+mated quantity. This corresponds to the Proposal in Fig. 3
+and the yellow distribution in Fig. 4. Note that allocating
+192 samples at 128 × 128 is equivalent to allocating just 12
+at 512 × 512.
+4.3. Supervising the Proposal Network
+Having described the input and output of our high-
+resolution proposal network, we now show its supervision.
+From the target camera, we can also trace 192 coarse sam-
+ples at high resolution for a small 64 × 64 patch, giv-
+ing us a ground truth tensor of volume rendering weights
+Ppatch ∈R192×64×64. We then prepare this tensor for super-
+vision by computing:
+¯Ppatch = Normalize(Suppress(Blur(Ppatch)))
+(7)
+where Blur applies a 1D Gaussian kernel to the input dis-
+tributions, Suppress(x) = x if x ≥5e −3 and 0 other-
+wise, and Normalize is L1 normalization to create a valid
+distribution. This corresponds to the patch loss in Fig. 3
+and the purple distribution in Fig. 4. These operations cre-
+ate less noisy distributions to facilitate accurate learning of
+the high-frequency integrand which may be undersampled
+in the coarse pass.
+We can then compare the predicted and cleaned ground
+truth distributions with a cross-entropy loss:
+Lsampler = CrossEntropy( ¯Ppatch, ˆPpatch)
+(8)
+where ˆPpatch is the corresponding patch of weights in ˆP512
+and CrossEntropy denotes the average cross-entropy be-
+tween all pairs of pixelwise discrete distributions; for each
+pair (¯p, ˆp), we compute P −¯pj log ˆpj. Since we only need
+to compute this supervision for a small patch, the overhead
+of sampler training is not significant.
+4.4. Sampling from the Proposal Network
+Having shown how to train and predict high-resolution dis-
+tributions, we now overview how to sample the resultant
+proposals. As seen in Fig. 4, the proposals are often slightly
+off; this is due to the high frequency nature of the underly-
+ing integrand in blue.
+In order to utilize the information from the sampler,
+we propose to filter predicted PDFs for better estimation.
+Specifically, for each discrete predicted PDF ˆp, we com-
+pute the smallest set of bins whose probability exceeds a
+threshold τ = 0.98: We find the smallest subset I ⊆
+{1, 2, ..., 192} such that
+X
+i∈I
+ˆpi ≥τ.
+(9)
+This operation resembles nucleus sampling in NLP [23].
+We define our sampling PDF q with probability qi =
+1
+|I|
+if i ∈I and 0 otherwise (the green distribution in Fig. 4).
+For each PDF q, we compute its CDF Φ and perform
+stratified inverse transform sampling to create the samples
+(illustrated as adaptive sampling near the surface in Fig. 3).
+In practice, on top of the 12 samples from the coarse probe
+(for the high-resolution image), we take an additional 18
+samples per pixel adaptively based on the variance of the
+predicted distributions. The details are given in the supple-
+ment.
+4.5. Regularization for High-Resolution Training
+In order to render accurately under low sample budget per
+ray, we desire the surface to be tight, i.e., the set of points
+along the ray, which contribute to the accumulated radiance
+5
+
+Figure 4. We visualize the volume rendering PDFs for the green
+pixel in the images on the right along with sampling methods. The
+ground truth distribution in blue is bimodal due to the discontinu-
+ous depth. Without stratification, the samples from the predicted
+yellow PDF completely miss the second mode. Stratification re-
+duces the variance, yet also misses the second mode. Our robust
+stratified samples hit both modes despite the inaccurate predic-
+tions. The supervision PDF is visualized in purple as well.
+to be small. To accomplish this, we introduce a regular-
+ization for the spatially-varying β values. Replacing the ci
+with the intermediate βi in Eq. 2, we can volume render
+an image of scalars, B ∈R512×512 (seen on the right of
+Fig. 3). During training, we regularize B to be small so that
+the surface tightens:
+Lsurface =
+X
+hw
+(Bhw −Btarget)2,
+(10)
+where Btarget is a scalar quantity annealed towards ϵ > 0
+during optimization. Note that this results in significantly
+more pronounced and smooth geometry (see Fig. 7).
+During training with the proposal network, the rendering
+networks only receive gradients for points very near the sur-
+face (which have high density). We find that this can lead to
+undesirable density growing from the background into the
+foreground. In order to combat this, we leverage the low-
+resolution information from I128, which is computed for
+uniform samples along the ray, and thus not concentrated
+at the surface. Considering the SDF values intermediately
+computed for rendering, S = S128 ∈R192×128×128, we
+enforce the SDF decision boundary by minimizing the SDF
+likelihood under a Laplacian distribution similar to [45, 51]:
+Ldec =
+X
+zhw
+exp (−2|Szhw|).
+(11)
+4.6. The Training Pipeline
+In order to begin making use of the learned sampler for
+high-resolution rendering, we need a good NeRF represen-
+tation from which to train it. Concurrently, we also need a
+good sampler in order to allow NeRF to render at 512×512,
+the input resolution to the discriminator D.
+To solve this issue, in the early stages of training, we
+first learn a low-resolution (e.g., 64 × 64) 3D GAN through
+the standard NeRF sampling techniques. We bilinearly up-
+sample our low-resolution renderings to 512×512 and blur
+the real images to the same level. After converging at the
+lower resolution, we introduce the sampler training (sub-
+section 4.3). Concretely, we not only render low-resolution
+images with standard sampling, but also render sampler in-
+puts P128 and supervision patches Ppatch. This results in a
+good initialization for the sampler.
+Having learned an initial low-resolution 3D GAN and
+high-resolution sampler, we transition to rendering with the
+sampler predictions. The high-resolution proposals ˆP512 are
+downsampled to the current rendering resolution, which is
+progressively increased to the full 512×512 resolution dur-
+ing training. After introducing all losses, we optimize the
+parameters of the generator G to minimize the following:
+L = Ladv+λsamplerLsampler+λsurfaceLsurface+λdecLdec (12)
+where
+Ladv
+is
+the
+standard
+GAN
+loss
+[18]
+Softplus(−D(G(z)).
+Note that we do not enforce the
+Eikonal constraint as we did not see a benefit. The discrim-
+inator D is trained with R1 gradient regularization [37]
+whose weight is adapted as the resolution changes. Gener-
+ator and discriminator pose conditioning follow EG3D [7].
+The details of all hyperparameters and schedules are
+presented in the supplementary material.
+5. Results
+Datasets.
+We benchmark on two standard datasets for 3D
+GANs: FFHQ [25] and AFHQv2 Cats [11, 28] both at res-
+olution 512 × 512. We use the camera parameters extracted
+by EG3D [7] for conditioning and rendering. Our AFHQ
+model is finetuned from our FFHQ model using adaptive
+data augmentation [26]. For more results, please see the
+accompanying video.
+5.1. Comparisons
+Baselines.
+We compare our methods against state-of-
+the-art 3D GAN methods including those that use low-
+resolution neural rendering and 2D post-processing CNN
+super resolution:
+EG3D [7],
+MVCGAN [74],
+and
+StyleSDF [45]; and methods that operate entirely based on
+neural rendering: Mimic3D [10], Epigraf [53], GMPI [75],
+and GramHD [67].
+Qualitative results
+Fig. 5 shows the curated samples gen-
+erated by our method with FFHQ and AFHQ, demonstrat-
+ing photorealistic rendering as well as high-resolution de-
+tails that align with the 2D images. Fig 6 provides qual-
+itative comparisons to baselines. EG3D shows significant
+artifacts and cannot resolve high-resolution geometry since
+it performs neural rendering at only 128 × 128. Mimic3D
+and Epigraf render all pixels with neural rendering, but the
+patch-based nature of these methods harm the overall 3D
+6
+
+Figure 5. Curated samples on FFHQ and AFHQ. Our method can resolve high-fidelity geometry (e.g., eyeglasses) and fine-grained details
+(e.g., stubble hair and cat’s fur) as seen in the geometry and normal map.
+Figure 6. Qualitative comparisons on FFHQ with EG3D [7], Mimic3D [10] and Epigraf [53]. EG3D performs neural rendering at resolution
+128 × 128 and relies on 4× super resolution to generate images. On the right, Mimic3D and Epigraf directly generate the image via neural
+rendering. While all other baselines use up to 192 dense depth samples per ray, our method can operate at 30 samples per ray.
+Figure 7. Ablation study on the effect of beta regularization.
+geometry (e.g., distorted face and missing ear). Our method
+provides both high-fidelity 3D shape (e.g., well-defined ears
+and isolated clothing collar) and high-resolution details.
+Quantitative results.
+Tabs. 1 and 2 provide quantitative
+comparisons against baselines. We measure the image qual-
+ity with Fr´echet Inception Distance (FID) [22]. We assess
+the quality of the learned geometry with a face-specific Nor-
+mal FID (FID-N) [15].
+We render 10.79k normal maps
+from the NPHM [17] dataset by solving for the approxi-
+mate alignment between the average FFHQ 2D landmarks
+and the provided 3D landmarks.
+Examples are given in
+the supplement. For each mesh, we render two views with
+approximately 20 degrees of pitch variation relative to the
+front of the face. These views are processed to remove the
+background with facer [13]. For each baseline, we render
+10k normal maps and remove their background using the
+predicted mask from facer on the rendered image. We com-
+pute the FID between the two sets of images. Finally, we
+also evaluate the flatness of the learned representations with
+non-flatness score (NFS) [54].
+Our results show the state-of-the-art image quality
+7
+
+Method
+FID ↓FID-N↓NFS↑
+FFHQ-512
+w/o SR
+Epigraf [7]
+9.92†
+67.33
+33.95
+Mimic3D [10]
+5.37
+64.97
+16.76
+GRAM-HD [67] 12.2†∗
+-
+-
+Ours
+4.97
+60.76
+29.35
+w SR
+EG3D [7]
+4.70
+63.02
+17.54
+StyleSDF [45]
+11.19†
+87.42
+22.75
+MVCGAN [74]
+13.4†∗
+-
+-
+Table 1. Quantitative comparison with baselines with and without
+super resolution (SR) on the FFHQ dataset.
+† as reported in the
+previous works. * indicates FID evaluated on 20k images.
+Method
+FID ↓
+NFS↑
+AFHQ-512
+w/o SR
+GRAM-HD [67]
+7.67†
+-
+GMPI [45]
+7.79†
+-
+Mimic3D [10]
+4.29
+12.67
+Ours
+4.23
+21.89
+w SR
+EG3D [7]
+2.77
+14.14
+StyleSDF [45]
+7.91
+33.89
+Table 2. Quantitative results on AFHQv2 Cats. † as reported in the
+previous works.
+among the methods that operate only with neural rendering,
+while achieving FID comparable to the state-of-the-art SR-
+based method, EG3D. Our geometry quality outperforms all
+existing methods as indicated by our state-of-the-art FID-
+N. Additionally, our high NFS scores show the 3D aspect
+of our geometry. However, since NFS simply measures the
+variations of depth as a measure of non-flatness, it does not
+quantify the quality of geometry above a certain threshold.
+We also compare other methods’ ability to render with
+low sample count in Tab. 3. With just 20 samples, the ren-
+dering quality of our method drops by only .3 in FID, com-
+pared to the precipitous drop for other methods. This vali-
+dates our strategy to jointly learn a sampler and ensure tight
+SDF surface for operation under a limited sample budget.
+5.2. Ablation Study
+Without our surface tightness regularization (Eq. 10), the
+SDF surface may get fuzzy, resulting in a less clean surface
+(see Fig. 7) and worse geometry scores (see Tab. 4). With-
+out our sampler or stratification during sampling, the model
+cannot learn meaningful 3D geometry with limited depth
+budgets, creating degenerated 3D geometry as can be seen
+in Fig. 8 and significantly worse FID-N. Without our robust
+sampling strategy, the sampling becomes more susceptible
+to slight errors in the sampler due to the high-frequency na-
+ture of the PDF (see Fig. 4), resulting in a noticeable drop
+in FID and occasionally creating floater geometry artifacts
+(see Fig. 8), while geometry scores remain similar.
+Method
+FID (20)↓
+FID (50)↓
+FID (96)↓
+Mimic3D
+53.57
+13.31
+5.37
+EG3D
+193.75
+36.82
+4.70
+Ours
+5.28
+4.97
+4.97
+Table 3. FID comparison on FFHQ using various sample counts.
+The samples per pixel are given in the parentheses of the metric.
+Method
+FID ↓
+FID-N ↓
+NFS ↑
+- Learned Sampler
+38.29
+93.88
+30.95
+- Stratification
+5.60
+86.02
+5.97
+- Robust Sampling
+5.67
+60.78
+24.79
+- Beta Regularization
+5.27
+64.25
+28.88
+Ours
+4.97
+60.76
+29.35
+Table 4. Ablation study.
+Figure 8. Qualitative comparisons for ablation study.
+6. Discussion
+Limitations and future work.
+While our method demon-
+strates significant improvements in 3D geometry genera-
+tion, it may still exhibit artifacts such as dents in the pres-
+ence of specularities, and cannot handle transparent objects
+such as lenses well. Future work may incorporate more ad-
+vanced material formulations [5] and surface normal reg-
+ularization [60]. While 3D GANs can learn 3D represen-
+tations from single-view image collections such as FFHQ
+and AFHQ with casual camera labels [7], the frontal bias
+and inaccurate labels can result in geometry artifacts, espe-
+cially on the side of the faces. Fruitful future directions may
+include training 3D GANs with large-scale Internet data as
+well as incorporating a more advanced form of regulariza-
+tion [47] and auto-camera calibration [3] to extend the gen-
+erations to 360 degrees. Finally, our sampling-based accel-
+eration method may be applied to other NeRFs.
+Ethical considerations.
+While existing methods have
+demonstrated effective capabilities in detecting unseen
+GANs [12], our contribution may remove certain charac-
+teristics from generated images, potentially making the task
+of detection more challenging. Viable solutions include the
+authentication of synthetic media [1, 2, 48].
+8
+
+Conclusion.
+We proposed a sampler-based method to ac-
+celerate 3D GANs to resolve 3D representations at the
+native resolution of 2D data, creating strictly multi-view-
+consistent images as well as highly detailed 3D geometry
+learned from a collection of in-the-wild 2D images. We
+believe our work opens up new possibilities for generating
+high-quality 3D models and synthetic data that capture in-
+the-wild variations and for enabling new applications such
+as conditional view synthesis.

@@ -1,0 +1,1303 @@
+Quantifying Program Bias
+Aws Albarghouthi, Loris D’Antoni, and
+Samuel Drews
+University of Wisconsin–Madison
+Aditya Nori
+Microsoft Research
+Abstract
+With the range and sensitivity of algorithmic decisions expanding at a break-neck speed, it is imperative that we
+aggressively investigate whether programs are biased. We propose a novel probabilistic program analysis technique and
+apply it to quantifying bias in decision-making programs. Speciﬁcally, we (i) present a sound and complete automated
+veriﬁcation technique for proving quantitative properties of probabilistic programs; (ii) show that certain notions of
+bias, recently proposed in the fairness literature, can be phrased as quantitative correctness properties; and (iii) present
+FairSquare, the ﬁrst veriﬁcation tool for quantifying program bias, and evaluate it on a range of decision-making programs.
+1.
+Introduction
+A number of very interesting applications of program analysis have been explored in the probabilistic setting: reasoning
+about cyber-physical systems [66], proving differential privacy of complex algorithms [14], reasoning about approximate
+programs and hardware [23, 65], synthesizing control programs [25], amongst many others. In this paper, we turn our
+attention to the problem of quantifying program bias.
+Program bias Programs that make decisions can be biased. Consider, for instance, automatic grading of writing prompts
+for standardized tests [10]; some speech patterns may be characterized as poor writing style and result in lower scores.
+However, if such speech patterns are afﬁliated with a speciﬁc ethnic group, then the bias is a potential source of concern.
+Programs have become powerful arbitrators of a range of signiﬁcant decisions with far-reaching societal impact—
+hiring [50, 55], welfare allocation [40], prison sentencing [8], policing [19, 62], amongst many others. With the range and
+sensitivity of algorithmic decisions expanding by the day, the problem of understanding the nature of program bias is a
+pressing one: Indeed, the notion of algorithmic fairness has recently captured the attention of a broad spectrum of experts,
+within computer science and without [7, 8, 12, 22, 32, 37, 41, 67–69, 72].
+Fairness and justice have always been a ripe topic for philosophical debate [63], and, of course, there are no established
+rigorous deﬁnitions. Nonetheless, the rise of automated decision-making prompted the introduction of a number of formal
+deﬁnitions of fairness, and their utility within different contexts is being actively debated [37, 41, 43, 48, 64]. Notable
+formulations of fairness include individual fairness, which dictates that similar inputs must result in similar outputs, and
+group fairness, which dictates that a particular subset of inputs must have a similar aggregate output to the whole. In this
+paper, we view such notions of fairness as quantitative properties of decision-making programs.
+Bias as a probabilistic property We think of decision-making algorithms as probabilistic programs, in the sense that
+they are invoked on input drawn from a probability distribution, e.g., representing the demographics of some population.
+Quantifying program bias becomes a matter of reasoning about probabilities of program executions.
+Consider a hiring program P that takes as input a vector of arguments v representing a job applicant’s record. One of
+the arguments vs in the vector v states whether the person is a member of a protected minority or not, and similarly vq in v
+states whether the person is qualiﬁed or not. Evaluating P(v) returns a Boolean value indicating whether a person is hired.
+Our goal may be to prove a group fairness property that is augmented with a notion of qualiﬁcation—that the algorithm is
+just as likely to hire a qualiﬁed minority applicant as it is for other qualiﬁed non-minority applicants. Formally, we state
+this probabilistic condition as follows:
+Pr[P(v) = true | vs = true ∧vq = true]
+Pr[P(v) = true | vs = false ∧vq = true] > 1 −ϵ
+Here, ϵ is a small prespeciﬁed value. In other words, the probability of hiring a person v, conditioned on them being
+a qualiﬁed minority, is very close to (or greater than) the probability of hiring a person conditioned on them of being
+1
+2018/11/5
+arXiv:1702.05437v2  [cs.PL]  7 Mar 2017
+
+a qualiﬁed non-minority. The goal of this paper is to propose techniques for automatically proving whether a program
+satisﬁes this kind of probabilistic properties.
+Proving statements of the above form amounts to quantifying probabilities of return outcomes of the program. We
+propose an automated veriﬁcation technique that reduces the veriﬁcation problem to that of computing the weighted
+volume of the logical encoding of a program in real arithmetic. We then utilize a novel symbolic volume computation
+algorithm that exploits the power of SMT solvers to integrate probability density functions over real regions deﬁned by
+program encodings. We show that our algorithm is guaranteed to converge to the exact values in the limit, thus resulting in
+a sound and complete veriﬁcation procedure. To our knowledge, this is one of the ﬁrst probabilistic inference algorithms
+for SMT with this expressivity and guarantees. We implement our algorithm in a tool called FairSquare, which we evaluate
+on a number decision-making programs generated by a range of machine-learning algorithms from real-world data.
+Contributions This paper makes a number of conceptual, algorithmic, and practical contributions:
+– We present a veriﬁcation technique for probabilistic programs that reduces the problem to a set of weighted volume
+computation problems. We present a novel weighted-volume-computation algorithm, for formulas over real closed
+ﬁelds, that utilizes an SMT solver as a black box, and we prove that it converges to the exact volume in the limit. To
+our knowledge, this is one of the ﬁrst probabilistic inference algorithms for SMT with this generality and guarantees.
+(Sec. 4)
+– We present an automated veriﬁcation tool, FairSquare, and use it to quantify certain types of bias in a broad spectrum
+of programs representing machine-learning classiﬁers generated from real-world datasets. Our evaluation demonstrates
+the power of our technique and its ability to outperform state-of-the-art probabilistic program analyses. (Sec. 5)
+2.
+Overview and Illustration
+Our problem setting is as follows: First, we are given a decision-making program Pdec. Second, we have a probabilistic
+precondition deﬁning a probability distribution over inputs of Pdec. We deﬁne the probability distribution operationally as
+a probabilistic program Ppre, which we call the population model. Intuitively, the population model provides a probabilistic
+picture of the population from which the inputs of Pdec are drawn. Third, we are given a quantitative postcondition post
+that correlates the probabilities of various program outcomes. This postcondition can encode various properties relating to
+program bias; intuitively, our goal is to prove the following triple:
+{v ∼Ppre}
+r ←Pdec(v)
+{post}
+Let us consider various possible instantiations of post. Feldman et al. [41] introduced the following deﬁnition, inspired
+by Equality of Employment Opportunity Commission’s [6] recommendation in the US:
+Pr[r = true | min(v) = true]
+Pr[r = true | min(v) = false] > 1 −ϵ
+Assuming Pdec returns a Boolean value—indicating whether an applicant v is hired—this group fairness property states
+that the selection rate from a minority group, min(v) = true, is as good as the selection rate from the rest of the population.
+One can thus view this veriﬁcation problem as proving a probabilistic property involving two sets of program traces: one
+set where the input min(v) is true, and another where it is false. Alternatively, the above deﬁnition could be strengthened
+with a lower bound on the ratio, so as to ensure that the selection rate of the two groups is similar (statistical parity).
+Further, we could additionally condition on qualiﬁed applicants, e.g., if the job has some minimum qualiﬁcation, we
+do not want to characterize group fairness for arbitrary applicants, but only within the qualiﬁed subpopulation. Various
+comparable notions of group fairness have been proposed and used in the literature, e.g., [33, 41, 72].
+While the above deﬁnition is concerned with fairness at the level of subsets of the domain of the decision-making
+program, individual fairness [37] is concerned with similar outcomes for similar elements of the domain. In our hiring
+example, one potential formulation is as follows:
+Pr[r1 = r2 | v1 ∼v2] > 1 −ϵ
+In other words, we want to ensure that for any two individuals, if they are similar (∼), then we want them to receive similar
+outcomes (r1 = r2) with a high probability. This is a hyperproperty—as it considers two copies of Pdec—and can be
+encoded through self-composition [13]. This property is close in nature to differential privacy [36] and robustness [15, 24].
+Of course, various deﬁnitions of fairness have their merits and their shortcomings, and there is an ongoing discussion
+on this subject [7, 37, 41, 43, 48]. Our contribution is not to add to this debate, but to cast fairness as a quantitative property
+of programs, and therefore enable automated reasoning about fairness of decision-making programs.
+2
+2018/11/5
+
+A simple veriﬁcation problem Consider the two programs in Figure 1(a). The program popModel is a probabilistic program
+describing a simple model of the population. Here, a member of the population has three attributes, all of which are real-
+valued: (i) ethnicity; (ii) colRank, the ranking of the college the person attended (lower is better); and (iii) yExp, the years
+of work experience a person has. We consider a person is a member of a protected group if ethnicity > 10; we call this
+the sensitive condition. The population model can be viewed as a generative model of records of individuals—the more
+likely a combination is to occur in the population, the more likely it will be generated. For instance, the years of experience
+an individual has (line 4) follows a Gaussian (normal) distribution with mean 10 and standard deviation 5. Observe that
+our model speciﬁes that members of a protected minority will probably attend a lower-ranked college, as encoded in lines
+5-6.
+The program dec is a decision-making program that takes a job applicant’s college ranking and years of experience and
+decides whether they get hired (the fairness target). The program implements a decision tree, perhaps one generated by a
+machine-learning algorithm. A person is hired if they attended a top-5 college (colRank <= 5) or have lots of experience
+compared to their college’s ranking (expRank > -5). Observe that dec does not access an applicant’s ethnicity.
+Our goal is to establish whether the hiring algorithm dec discriminates against members of the protected minority.
+Concretely, we attempt to prove the following property:
+Pr[hire | min]
+Pr[hire | ¬min] > 1 −ϵ
+where min is shorthand for the sensitive condition ethnicity > 10, and ϵ is a small parameter set to 0.1 for illustration.
+Despite the potential shortcomings of this group fairness property [37], its simple formulation serves well as an illustration
+of our technique.
+We can rewrite the above statement to eliminate conditional probabilities as follows:
+Pr[hire ∧min] · Pr[¬min]
+Pr[hire ∧¬min] · Pr[min] > 1 −ϵ
+(1)
+Therefore, to prove the above statement, we need to compute a value for each of the probability terms: Pr[hire ∧min],
+Pr[min], and Pr[hire ∧¬min]. (Note that Pr[¬min] = 1 −Pr[min].)
+Notice that, to prove or disprove inequality 1, all we need are good enough bounds on the values of such probabilities
+and not their exact values.
+For the purposes of illustration, we shall focus our description on computing Pr[hire ∧¬min].
+Probabilistic veriﬁcation conditions To compute the probability Pr[hire∧¬min], we need to reason about the composition
+of the two programs, dec◦popModel. That is, we want to compute the probability that (i) popModel generates a non-minority
+applicant, and (ii) dec hires that applicant. To do so, we begin by encoding both programs as formulas in the linear real
+arithmetic theory of ﬁrst-order logic. The process is analogous to that of standard veriﬁcation condition (VC) generation
+for loop-free program fragments.
+First, we encode popModel as follows:
+ϕpop ≡ethnicity > 10 ⇒colRank1 = colRank + 5
+∧ethnicity ⩽10 ⇒colRank1 = colRank
+where subscripts are used to encode multiple occurrences of the same variable (i.e., SSA form). Note that assignments in
+which values are drawn from probability distributions do not appear in the encoding—we shall address them later.
+Second, we encode dec as follows (after simpliﬁcation):
+ϕdec ≡expRank = yExpi −colRanki
+∧hire ⇐⇒(colRanki ⩽5 ∨expRank > −5)
+where variables with the superscript i are the input arguments to dec. Now, to encode the composition dec ◦popModel, we
+simply conjoin the two formulas—ϕpop and ϕdec—and add equalities between returns of popModel and arguments of dec.
+ϕP ≡ϕpop ∧ϕdec ∧yExpi = yExp ∧colRanki = colRank1
+Our goal is to compute the probability that a non-minority applicant gets hired. Formally, we are asking, what is the
+probability that the following formula is satisﬁed?
+ϕ ≡∃Vd. ϕP ∧hire ∧ethnicity ⩽10
+3
+2018/11/5
+
+}
+}
+The decision-making program takes an
+applicant’s record and decides whether
+to hire them. A person is hired if they
+are from a top-5 college (colRank <= 5)
+or have lots of experience compared to
+their college rank (expRank > -5). Note
+that this program does not access an
+applicant’s ethnicity.
+1 define popModel()
+2
+ethnicity ~ gauss(0,10)
+3
+colRank ~ gauss(25,10)
+4
+yExp ~ gauss(10,5)
+5
+if (ethnicity > 10)
+6
+colRank  colRank + 5
+7
+return colRank, yExp
+1 define dec(colRank, yExp)
+2
+expRank  yExp - colRank
+3
+if (colRank <= 5)
+4
+hire  true
+5
+elif (expRank > -5)
+6
+hire  true
+7
+else
+8
+hire  false
+9
+return hire
+The population model deﬁnes a joint prob-
+ability distribution on attributes of mem-
+bers of a population: (i) the rank of the
+college a person attended (colRank), (ii) the
+years of work experience they have (yExp),
+and (iii) their ethnicity (ethnicity). Note
+that colRank is inﬂuenced by a persons’s
+ethnicity.
+(a)
+(b)
+(d)
+# of iterations of algorithm
+ratio upper/lower bound
+(e)
+# of iterations of algorithm
+ratio upper/lower bound
+colRank
+ethnicity
+yExp
+(c)
+Underapproximation of '
+as a union of hyperrectangles
+FairSquare ratio computation
+on modiﬁed dec (fair)
+FairSquare ratio computation
+on dec and popModel (unfair)
+Formula ' in R3
+(blue faces are unbounded)
+Figure 1. Simple illustrative example
+Vd is the set of variables that are not probabilistically assigned to, that is, all variables other than the three variables
+Vp = {ethnicity, colRank, yExp}. Intuitively, by projecting out all non-probabilistic variables, we get a formula ϕ whose
+models are the set of all probabilistic samplings that lead to a non-minority applicant being generated and hired.
+Weighted volume computation To compute the probability that ϕ is satisﬁed, we begin by noting that ϕ is, geometrically,
+a region in R3, because it has three free real-valued variables, Vp. The region ϕ is partially illustrated in Figure 1(b).
+Informally, the probability of satisfying ϕ is the probability of drawing values for the dimensions in Vp that end up falling
+in the region ϕ. Therefore, the probability of satisfying ϕ is its volume in R3, weighted by the probability density of each
+of the three variables. Formally:
+Pr[hire ∧¬min] =
+R
+ϕ pepypc dVp
+where, e.g., pe is the probability density function of the distribution gauss(0,10)—the distribution from which the
+value of ethnicity is drawn in line 2 of popModel. Speciﬁcally, pe is a function of ethnicity, namely, pe(ethnicity) =
+1
+10
+√
+2πe−ethnicity2
+200 .
+The primary difﬁculty here is that the region of integration is speciﬁed by an arbitrary SMT formula over an arithmetic
+theory. So, how do we compute a numerical value for this integral? We make two interdependent observations: (i) if
+4
+2018/11/5
+
+the formula represents a hyperrectangular region in Rn—i.e., a box—then integration is typically simple, due to the
+constant upper/lower bounds of all dimensions; (ii) we can symbolically decompose an SMT formula into an (inﬁnite) set
+of hyperrectangles.
+Speciﬁcally, given our formula ϕ, we construct a new formula, ϕ, where each model m |= ϕ corresponds to a
+hyperrectangle that underapproximates ϕ. Therefore, by systematically ﬁnding disjoint hyperrectangles inside of ϕ and
+computing their weighted volume, we iteratively improve a lower bound on the exact weighted volume of ϕ. Figure 1(c)
+shows a possible underapproximation of ϕ composed of four hyperrectangles. Sec. 4 formalizes this technique and proves
+its convergence for decidable arithmetic theories.
+Proofs of group fairness We demonstrated how our technique reduces the problem of computing probabilities to weighted
+volume computation. Figure 1(d) illustrates a run of our tool, FairSquare, on this example. FairSquare iteratively improves
+lower and upper bounds for the probabilities in the ratio, and, therefore, the ratio itself. Observe how the upper bound (red)
+of the ratio is decreasing and its lower bound (blue) is increasing. This example is not group fair for ϵ = 0.1, since the
+upper bound goes below 0.9.
+Recall that applicants of a protected minority tend to attend lower-ranked colleges, as deﬁned by popModel. Looking
+at dec, we can point out that the cause for unfairness is the importance of college ranking for hiring. Let us attempt to ﬁx
+this by modifying line 2 of dec to expRank ←5*yExp - colRank. In other words, we have made the hiring algorithm value
+an applicant’s job experience way more than college ranking. The run of FairSquare on the modiﬁed dec is illustrated in
+Figure 1(e), where the lower bound on the ratio exceeds 0.9, thus proving our fairness property.
+3.
+Probabilistic Programs and Veriﬁcation
+We formally deﬁne programs and present a general framework for stating and verifying probabilistic properties.
+3.1
+Program model and semantics
+Programs A program P is a sequence of statements S:
+S := V ←E
+assignment statement
+| V ∼D
+probabilistic assignment
+| if B then S else S
+conditional
+| SS
+sequence of statements
+where V is the set of real-valued variables that can appear in P, e ∈E is an arithmetic expression over variables in V ,
+and b ∈B is a Boolean expression over variables in V . A probabilistic assignment is made by sampling from a probability
+distribution p ∈D. A probability distribution can be, for example, a Gaussian distribution, denoted by gauss(µ, σ), where
+µ, σ ∈R are the mean and standard deviation of the Gaussian. We shall restrict distributions to be univariate and with
+constant parameters, e.g., mean and standard deviation of a Laplacian or Gaussian—that is, we assume independence of
+probabilistic assignments. Given a probabilistic assignment x ∼p, we shall treat p(x) as a probability density function
+(PDF) of the distribution from which the value assigned to x is drawn. For instance, if the distribution is gauss(0,1), then
+p(x) =
+1
+√
+2πe−x2
+2 .
+We use vi to denote a vector of input variables of P, and vo to denote a vector of output variables of P; these variables
+appear in V and denote the arguments and returns of P. We say that a program is closed if it has no inputs, i.e., vi is
+empty. We shall refer to the following subsets of V .
+– Vp ⊆V is the set of probabilistic variables: those that get assigned to in probabilistic assignments.
+– Vd = V \ Vp is the set of deterministic variables: those that do not appear in probabilistic assignments.
+This simple language can be used to describe decision-making programs typical machine-learning classiﬁers such as
+decision trees, support vector machines, Bayesian networks, neural networks, as well as loop-free probabilistic programs
+(loops with constant bounds can be unrolled).1 As demonstrated in Sec. 2, the same language is used to deﬁne probabilistic
+preconditions programmatically.
+Operational semantics Typically, the state s : V →R of the program is deﬁned as a valuation function from variables
+in V to values in R. In a probabilistic setting, however, we need to maintain an additional state that dictates values drawn
+from probability distributions. Following standard semantics of probabilistic programs [52], we assume a ﬁnite sequence
+of independent random variables. The semantics of an execution is thus deﬁned for a ﬁxed sequence of values ω of these
+variables. Informally, it is as if we performed all sampling before the program executes and stored the results in a sequence
+for use whenever we encounter a probabilistic assignment. For the full semantics, refer to Appendix A.
+1 Unbounded loops could be handled through iterative unrolling as in [66].
+5
+2018/11/5
+
+VC-ASN
+⟨x = JeK, ∅⟩ x ←e
+VC-PASN
+⟨true, {pi}⟩ xi ∼pi
+⟨ϕ1, D1⟩ S1
+⟨ϕ2, D2⟩ S2
+VC-SEQ
+⟨ϕ1 ∧ϕ2, D1 ∪D2⟩ S1S2
+⟨ϕ1, D1⟩ S1
+⟨ϕ2, D2⟩ S2
+VC-COND
+⟨ite(JbK, ϕ1, ϕ2), D1 ∪D2⟩ if b then S1 else S2
+Figure 2. Probabilistic veriﬁcation condition generation. Above, ite(a, b, c) ≜(a ⇒b) ∧(¬a ⇒c).
+3.2
+Programs and volume computation
+Following Chistikov et al. [27], we reduce the problem of computing the probability that the program terminates in a state
+satisfying ϕ to weighted volume computation (WVC) over formulas describing regions in Rn. In what follows, we begin
+by formalizing the WVC problem.
+Volume of a formula We will use LT to denote ﬁrst-order formulas in some real arithmetic theory T . Speciﬁcally, we
+consider two decidable theories: linear real arithmetic and the strictly richer real closed ﬁelds—Boolean combinations of
+polynomial inequalities. Given a formula ϕ ∈LT , a model m of ϕ, denoted by m |= ϕ, is a point in Rn, where n is the
+number of free variables of ϕ. Thus, we view ϕ as a region in Rn, i.e., ϕ ⊆Rn. We use Xϕ = {x1, . . . , xn} to denote the
+free variables of ϕ.
+The (unweighted) volume of a formula ϕ is
+R
+ϕ 1 dXϕ where dXϕ is short for dx1dx2 . . . dxn. For example, if ϕ is in
+R2, then
+R
+ϕ 1 dXϕ is the area of ϕ.
+Weighted volume of a formula We now deﬁne the weighted volume of a formula. We assume we are given a pair (ϕ, D),
+where ϕ ∈LT and D = {p1, . . . , pn} is a set of probability density functions such that each variable xi ∈Xϕ is associated
+with a density function pi(xi) of the probability distribution of its values. The weighted volume of ϕ with respect to D,
+denoted by VOL(ϕ, D), is deﬁned as follows:
+R
+ϕ
+Q
+xi∈Xϕ pi(xi) dXϕ
+Example 1. Consider the formula ϕ ≡x1 + x2 ⩾0, and let D = {p1, p2}, where p1 and p2 are the PDF of the Gaussian
+distribution with mean 0 and standard deviation 1. Then,
+VOL(ϕ, D) =
+R
+x1+x2⩾0 p1(x1)p2(x2) dx1dx2 = 0.5
+Intuitively, if we are to randomly draw two values for x1 and x2 from the Gaussian distribution, we will land in the region
+x1 + x2 ⩾0 with probability 0.5.
+■
+Probabilistic veriﬁcation conditions Recall that our goal is to compute the probability of some predicate ϕ at the end of a
+program execution, denoted Pr[ϕ]. We now show how to encode this problem as weighted volume computation. First, we
+encode program executions as a formula ϕP. The process is similar to standard veriﬁcation condition generation (as used
+by veriﬁcation [11] and bounded model checking tools [30]), with the difference that probabilistic assignments populate a
+set D of probability density functions.
+Figure 2 inductively deﬁnes the construction of a probabilistic veriﬁcation condition for a program P, denoted by a
+function PVC(P), which returns a pair ⟨ϕP, D⟩. Without loss of generality, to simplify our exposition, we assume programs
+are in static single assignment (SSA) form [31]. Given a Boolean expression b, the denotation JbK is the same expression
+interpreted as an LT formula. The same applies to arithmetic expressions e. For example, Jx + y > 0K ≜x + y > 0.
+Intuitively, the construction generates a formula ϕP that encodes program executions, treating probabilistic assignments
+as non-deterministic, and a set D of the PDFs of distributions in probabilistic assignments (rule VC-PASN).
+Now, suppose we are given a closed program P and a Boolean formula ϕ over its output variables. Then,
+Pr[ϕ] = VOL(∃Vd. ϕP ∧ϕ, D)
+That is, we project out all non-probabilistic variables from ϕP ∧ϕ and compute the weighted volume with respect to the
+densities pi ∈D. Intuitively, each model m of ∃Vd. ϕP ∧ϕ corresponds to a sequence of values drawn in probabilistic
+assignments in an execution of P. We note that our construction is closely related to that of Chistikov et al. [27], to which
+we refer the reader for a measure-theoretic formalization.
+6
+2018/11/5
+
+1: function VERIFY(Ppre, Pdec, post)
+2:
+⟨ϕpre, Dpre⟩←PVC(Ppre)
+3:
+⟨ϕdec, Ddec⟩←PVC(Pdec)
+4:
+⟨ϕP, D⟩←⟨ϕpre ∧ϕdec ∧vdec
+i
+= vpre
+o , Dpre ∪Ddec⟩
+5:
+Vd ←V pre
+d
+∪V dec
+d
+6:
+m ←∅
+7:
+for Pr[ϕ] ∈post do
+8:
+m ←m[Pr[ϕ] 7→VOL(∃Vd. ϕP ∧ϕ, D)]
+9:
+return m |= post
+Figure 3. Abstract veriﬁcation algorithm
+Example 2. Consider the following closed program P
+x ~ gauss(0,2); y ~ gauss(-1,1); z ←x + y
+where z is the return variable. Using the encoding in Figure 2, we compute the pair ⟨ϕP, D⟩ P, where ϕP ≜z = x + y
+and D = {px, py}, where px and py are the PDFs of the two distributions from which values of x and y are drawn.
+Suppose that we would like to compute the probability that z is positive when the program terminates: Pr[z ⩾0]. Then,
+we can compute the following weighted volume: VOL(∃z. ϕP ∧z ⩾0, D), which is equal to 0.32736.
+■
+3.3
+Probabilistic veriﬁcation problems
+We now deﬁne probabilistic veriﬁcation problems and present an abstract veriﬁcation algorithm that assumes the existence
+of an oracle for weighted volume computation.
+Veriﬁcation problems A veriﬁcation problem is a triple (Ppre, Pdec, post), where
+– Ppre, called the probabilistic precondition, is a closed program over variables V pre and output variables vpre
+o .
+– Pdec, called the decision-making program, is an open program over variables V dec; its input arguments are vdec
+i , with
+|vdec
+i | = |vpre
+o |; and its output variables are vdec
+o . (We assume that V pre ∩V dec = ∅.)
+– post is a probabilistic postcondition, which is a Boolean expression over probabilities of program outcomes. Speciﬁ-
+cally, post is deﬁned as follows:
+post ∈PExp := Prob > Prob | PExp ∨PExp
+| PExp ∧PExp | ¬PExp
+Prob := Pr[ϕ] | Pr[ϕ | ϕ] | c | Prob ⊙Prob
+⊙∈{+, −, ÷, ×}
+c ∈R
+where ϕ ∈LT are formulas over input and output variables of Pdec. For example, post might be of the form
+Pr[x > 0] > 0.5 ∧Pr[y + z > 7] > Pr[t > 5]
+The goal of veriﬁcation is to prove that post is true for the program Pdec ◦Ppre, i.e., the composition of the two programs
+where we ﬁrst run Ppre to generate an input for Pdec. Since Ppre is closed, the program Pdec ◦Ppre is also closed.
+Veriﬁcation algorithm We now describe an idealized veriﬁcation algorithm that assumes the existence of an oracle for
+weighted volume computation. The algorithm, VERIFY, shown in Figure 3, takes a veriﬁcation problem and returns whether
+the probabilistic postcondition holds.
+VERIFY begins by encoding the composition of the two programs, Pdec◦Ppre, as the pair ⟨ϕP, D⟩and adds the constraint
+vdec
+i
+= vpre
+o to connect the outputs of Ppre to the inputs of Pdec (recall the example from Sec. 2 for an illustration). For each
+term of the form Pr[ϕ] appearing in post, the algorithm computes its numerical value and maintains it in a map m. If m
+satisﬁes the post—i.e., by replacing all terms Pr[ϕ] with their values in m—then the postcondition holds.
+4.
+Symbolic Weighted Volume Computation
+In this section, we describe our weighted volume computation algorithm. Recall that, given a formula ϕ and a set D
+deﬁning the PDFs of the distributions of free variables, our goal is to evaluate the integral
+R
+ϕ
+Q
+xi∈Xϕ pi(xi) dXϕ.
+Existing techniques In general, there is no systematic technique for computing an exact value for such an integral.
+Moreover, even simpler linear versions of the volume computation problem, not involving probability distributions,
+are #P-hard [39]. Existing techniques suffer from one or more of the following: they (i) restrict ϕ to a conjunction of
+7
+2018/11/5
+
+HDECOMP
+vol ←0
+Ψ ←ϕ
+m |= Ψ
+HSAMPLE
+vol ←vol + VOL(Hm, D)
+Ψ ←Ψ ∧block(Hm)
+where block(Hm) ≡
+_
+x∈Xϕ
+ux < Hm
+l (x) ∨lx > Hm
+u (x)
+Figure 4. SYMVOL: weighted volume computation algorithm
+linear inequalities [34, 66], (ii) restrict integrands to polynomials or simple distributions [16, 17, 28, 34], (iii) compute
+approximate solutions with probabilistic guarantees [17, 27, 28, 70], (iv) restrict ϕ to bounded regions of Rn [27, 28], or
+(v) have no convergence guarantees, e.g., computer algebra tools that ﬁnd closed-form solutions [2, 3, 44]. (See Sec. 6 for
+details.)
+Symbolic weighted volume computation Our approach is novel in its generality and its algorithmic core. The following
+are the high-level properties of our algorithm:
+1. Our approach accepts formulas in the decidable yet rich theory of real closed ﬁelds: Boolean combinations of
+polynomial inequalities.
+2. Our approach imposes no restrictions on the form of the PDFs, only that we can evaluate the cumulative distribution
+functions2 (CDFs) associated with the PDFs in D.
+3. Our approach is guaranteed to converge to the exact value of the weighted volume in the limit, allowing us to produce
+a sound and complete veriﬁcation procedure.
+At the algorithmic level, our approach makes the following contributions:
+1. Our approach exploits the power of SMT solvers and uses them as a black box, allowing it to directly beneﬁt from future
+advances in solver technology.
+2. Our approach employs the idea of dividing the space into rectangular regions that are easy to integrate over. While this
+age-old idea has been employed in various guises in veriﬁcation [9, 21, 53, 66], we utilize it in a new symbolic way to
+enable volume computation over SMT formulas.
+3. Our approach introduces a novel technique for approximately encoding PDFs as formulas, and using them to guide the
+SMT solver towards making large leaps to the exact solution.
+4.1
+Weighted Volume Computation Algorithm
+To compute the integral over the region ϕ, we exploit the observation that if ϕ is a hyperrectangular region, i.e., an n-
+dimensional rectangle in Rn, then we can evaluate the integral, because each dimension has constant lower and upper
+bounds. For instance, consider the following formula representing a rectangle in R2:
+ϕ ≡0 ⩽x1 ⩽100 ∧4 ⩽x2 ⩽10
+The following holds:
+R
+ϕ p1(x1)p2(x2) dx1dx2
+=(
+R 100
+0
+p1(x1) dx1)(
+R 10
+4
+p2(x2) dx2)
+=(F1(10) −F1(4))(F2(100) −F2(0))
+where Fi is the CDF of pi(xi), which is Fi(x) =
+R x
+−∞pi(t) dt. That is, we independently compute the integral along each
+dimension of the rectangle, and take the product. This holds since we assume all variables are independently sampled.
+Our algorithm is primarily composed of two steps: First, the hyperrectangular decomposition phase represents the
+formula ϕ as a set of hyperrectangles. Note that this set is likely to be inﬁnite. Thus, we present a technique for deﬁning
+all hyperrectangles that lie in ϕ symbolically as a formula ϕ, where each model of ϕ corresponds to a hyperrectangle
+2 The cumulative distribution function of a real-valued random variable X is the function f : R →R, such that f(x) = Pr[X ⩽x].
+8
+2018/11/5
+
+Inﬁnitely many 
+rectangles are required to 
+cover this triangular 
+polytope
+high probability
+high probability
+Inﬁnitely many 
+rectangles in low 
+probability regions 
+have negligible 
+volume
+Point rectangles
+have no volume
+(a)
+(b)
+Figure 5. R2 view of (a) hyperrectangular decomposition and (b) hyperrectangle sampling, where density is concentrated in the top-left corner
+that lies inside the region ϕ. Second, after characterizing the set ϕ of all hyperrectangles in ϕ, we can iteratively sample
+hyperrectangles in ϕ, which can be done using an off-the-shelf SMT solver to ﬁnd models of ϕ. For each hyperrectangle
+we sample, we compute its weighted volume and add it to our current solution. Therefore, the current solution maintained
+by the algorithm is the weighted volume of an underapproximation of ϕ—that is, a lower bound on the exact weighted
+volume of ϕ.
+Hyperrectangular decomposition We begin by deﬁning hyperrectangles as special formulas.
+Deﬁnition 1 (Hyperrectangles and their weighted volume). A formula H ∈LT is a hyperrectangle if it can be written
+in the form V
+x∈XH cx ⩽x ⩽c′
+x where cx, c′
+x ∈R are the lower and upper bounds of dimension x. We use Hl(x) and
+Hu(x) to denote the lower and upper bounds of x in H.
+The weighted volume of H, given a set D, is as follows:
+VOL(H, D) = Q
+xi∈XH
+R Hu(xi)
+Hl(xi) pi(xi) dxi
+Ideally, we would take a formula ϕ and rewrite it as a disjunction of hyperrectangles W H, but this disjunction is
+most likely an inﬁnite one. To see why this is the case, consider the simple formula representing a triangular polytope in
+Figure 5(a). Here, there is no ﬁnite number of rectangles whose union is the full region in R2 enclosed by the triangle.
+While the number of hyperrectangles enclosed in ϕ is inﬁnite, we can characterize them symbolically using universal
+quantiﬁers, as shown by Li et al. [53]. Speciﬁcally, we deﬁne the hyperrectangular decomposition of ϕ as follows:
+Deﬁnition 2 (Hyperrectangular decomposition). Given a formula ϕ, its hyperrectangular decomposition ϕ is:
+ϕ ≡
+ ^
+x∈Xϕ
+lx ⩽ux
+
+∧∀Xϕ.
+ ^
+x∈Xϕ
+lx ⩽x ⩽ux
+
+⇒ϕ
+where lx, ux are fresh free variables introduced for each x ∈Xϕ, and ∀Xϕ is short for ∀x1, . . . , xn, for xi ∈Xϕ.
+Given a model m |= ϕ, we say that Hm is the hyperrectangle induced by m, as deﬁned below:
+Hm ≡
+^
+x∈Xϕ
+m(lx) ⩽x ⩽m(ux)
+Intuitively, ϕ characterizes every possible hyperrectangle that is subsumed by ϕ. The idea is that the hyperrectangle
+Hm induced by each model m of ϕ is subsumed by ϕ, that is, Hm ⇒ϕ. The following example illustrates this process.
+Example 3. Consider the formula ϕ ≡x ⩾y ∧y ⩾0, illustrated in Figure 6 as a gray, unbounded polyhedron. The
+formula ϕ, after eliminating the universal quantiﬁer, is:
+lx ⩽ux ∧ly ⩽uy ∧ly ⩾0 ∧lx ⩾uy
+Figure 6 shows two models m1, m2 |= ϕ and their graphical representation as rectangles Hm1, Hm2 in R2. Observe
+that both rectangles are subsumed by ϕ.
+■
+Hyperrectangle sampling Our symbolic weighted volume computation algorithm, SYMVOL, is shown in Figure 4 as two
+transition rules. Given a pair (ϕ, D), the algorithm maintains a state consisting of two variables: (i) vol, the current lower
+bound of the weighted volume, and (ii) Ψ, a constraint that encodes the remaining rectangles in the hyperrectangular
+decomposition of ϕ.
+9
+2018/11/5
+
+5
+7
+5
+7
+8
+10
+Hm1
+Hm2
+Two examples of models 
+inducing rectangles
+m2 |= ⌧'
+lx = 5
+ux = 7
+ly = 0
+uy = 5
+m1 |= ⌧'
+lx = 8
+ux = 10
+ly = 5
+uy = 7
+x
+y
+' ⌘x > y ^ y > 0
+Figure 6. Illustration of models of ϕ
+(a)
+(b)
+(c)
+Figure 7. Three ADFs (gray) of a Gaussian PDF (red) with mean 0 and a standard deviation 3. ADFs are: (a) ﬁne-grained; (b) coarse; (c) uniform.
+The algorithm is presented as guarded rules. Initially, using the rule HDECOMP, vol is set to 0 and Ψ is set to ϕ. The
+algorithm then proceeds by iteratively applying the rule HSAMPLE. Informally, the rule HSAMPLE is used to ﬁnd arbitrary
+hyperrectangles in ϕ and compute their weighted volume. Speciﬁcally, HSAMPLE ﬁnds a model m of Ψ, computes the
+weighted volume of the hyperrectangle Hm induced by m, and adds the result to vol.
+To maintain soundness, HSAMPLE ensures that it never samples two overlapping hyperrectangles, as otherwise we
+would overapproximate the volume. To do so, every time a hyperrectangle Hm is sampled, we conjoin an additional
+constraint to Ψ—denoted block(Hm) and deﬁned in Figure 4—that ensures that for all models m′ |= Ψ, Hm′ does not
+overlap with Hm, i.e., Hm′ ∧Hm is unsatisﬁable. Informally, the block(Hm) constraint speciﬁes that any newly sampled
+hyperrectangle should be to the left or right of Hm for at least one of the dimensions.
+Lower and upper bounds The following theorem states the soundness of SYMVOL: it maintains a lower bound on the
+exact weighted volume.
+Theorem 1 (Soundness of SYMVOL). The following is an invariant of SYMVOL(ϕ, D): vol ⩽VOL(ϕ, D).
+It follows from the above theorem that we can use SYMVOL to compute an upper bound on the exact volume.
+Speciﬁcally, because we are integrating over PDFs, we know that VOL(ϕ, D) + VOL(¬ϕ, D) = 1. Therefore, by using
+SYMVOL to compute the weighted volume of ¬ϕ, we get an upper bound on the exact volume of ϕ.
+Corollary 1 (Computing upper bounds). The following is an invariant of SYMVOL(¬ϕ, D): 1 −vol ⩾VOL(ϕ, D)
+4.2
+Density-directed Sampling
+While the SYMVOL algorithm is sound, it provides no progress guarantees. Consider, for example, a run that only samples
+unit hyperrectangles, i.e., points in Rn; the volume of a point is 0, therefore, we will never compute any volume.
+Alternatively, the algorithm might diverge by sampling hyperrectangles in ϕ that appear in very low probability density
+regions. These two scenarios are illustrated in Figure 5(b) on a triangular polytope in R2.
+Ideally, the rule HSAMPLE would always ﬁnd a model m yielding the hyperrectangle Hm with the largest weighted
+volume. Finding such a model amounts to solving the optimization problem:
+arg max
+m|=Ψ
+Q
+xi∈Xϕ
+R Hm
+u (xi)
+Hm
+l (xi) pi(xi) dxi
+From a practical perspective, there are no known tools or techniques for ﬁnding models of ﬁrst-order formulas that
+maximize such complex objective functions, with integrals over arbitrary probability density functions.
+However, we make the key observation that if p(x) is a step function—i.e., piecewise constant—then we can symboli-
+cally encode the integral
+R
+p(x) dx in linear arithmetic. As such, we propose to (i) approximate each density function p(x)
+with a step function step(x), (ii) encode the integrals
+R
+step(x) dx as linear arithmetic formulas, and (iii) direct sampling
+towards hyperrectangles that maximize these integrals, thus ﬁnding hyperrectangles of large volume.
+10
+2018/11/5
+
+HDECOMP
+vol ←0
+Ψ ←ϕ
+lb ←1
+m |= Ψ ∧
+^
+xi∈Xϕ
+∃δxi. stepφ
+i (xi) ∧δxi ⩾lb
+HSAMPLE
+vol ←vol + VOL(Hm, D)
+Ψ ←Ψ ∧block(Hm)
+DECAY
+lb ←λ ∗lb
+Figure 8. ADF-SYMVOL: ADF-directed volume computation
+Approximate density functions and linear encodings We begin by deﬁning approximate density functions (ADFs).
+Deﬁnition 3 (Approximate density functions). An approximate density function step(x) is of the following form:
+step(x) =
+(
+ci,
+x ∈[ai, bi) for 1 ⩽i ⩽n
+0,
+otherwise
+where ci, ai, bi ∈R, ci > 0, and all [ai, bi) are disjoint.
+We now show how to encode a formula stepφ(x) over the free variables δx, lx, ux, where for any model m |= stepφ(x),
+the value m(δx) is the area under step(x) between m(lx) and m(ux), i.e.: m(δx) =
+R m(ux)
+m(lx) step(x) dx. Intuitively, the
+value of this integral is the sum of the areas of each bar in step(x), restricted to[m(lx), m(ux)].
+Deﬁnition 4 (Encoding area under an ADF). Given an ADF step(x), we deﬁne stepφ(x) as follows:
+stepφ(x) ≡δx = Pn
+i=1 ci ·
+[ai, bi) ∩[lx, ux]
+
+The constraint stepφ(x) is directly expressible in linear arithmetic, since
+[ai, bi) ∩[lx, ux]
+ = max(min(bi, ux) −max(ai, lx), 0)
+The ﬁnite sum in stepφ(x) computes the size of the intersection of [lx, ux] with each interval [ai, bi) in step(x), and
+multiplies the intersection with ci, the value of the step in that interval.
+ADF-directed Volume Computation We now present the algorithm ADF-SYMVOL (Figure 8), an extension of our volume
+computation algorithm SYMVOL that uses ADFs to steer the sampling process. The ADFs are only used for guiding the
+rule HSAMPLE towards dense hyperrectangles, and thus do not affect soundness of the volume computation. For example,
+Figure 7 shows three approximations of a Gaussian; all three are valid approximations. In Section 5, we discuss the impact
+of different ADFs on performance.
+Formally, we create a set of ADFs A = {step1, . . . , stepn}, where, for each variable xi ∈Xϕ, we associate the ADF
+stepi(xi). The rule HSAMPLE now encodes stepφ
+i (xi) and attempts to ﬁnd a hyperrectangle such that for each dimension
+x, δx is greater than some lower bound lb, which is initialized to 1. Of course, we need to keep reducing the value lb as
+we run out of hyperrectangles of a given volume. Therefore, the rule DECAY is used to shrink lb using a ﬁxed decay rate
+λ ∈(0, 1) and can be applied when HSAMPLE fails to ﬁnd a sufﬁciently large hyperrectangle.
+Note that, ideally, we would look for a model m such that Q
+x∈Xϕ δx is maximized, thus, ﬁnding the hyperrectangle
+with the largest weighted volume with respect to the ADFs. However, this constraint is non-linear. To lower the complexity
+of the problem to that of linear arithmetic, we set a decaying lower bound and attempt to ﬁnd a model where each δx is
+greater than the lower bound.
+4.3
+Convergence of ADF-SYMVOL
+We now discuss the convergence properties of ADF-SYMVOL. Suppose we are given a formula ϕ, a set D, and a set A. Let
+R ⊂Rn be the region where all the ADFs in A are non-zero. We will show that ADF-SYMVOL converges, in the limit, to
+the exact weighted volume restricted to R; that is, ADF-SYMVOL converges to
+R
+ϕ∩R
+Q
+xi∈Xϕ pi(xi) dXϕ.
+Note the fascinating part here is that we do not impose any restrictions on the ADFs: they do not have to have any
+correspondence with the PDFs they approximate; they need only be step functions. Of course, in practice, the quality of the
+approximation dictates the rate of convergence, but we delay this discussion to Section 5.
+The following theorem states convergence of ADF-SYMVOL; it assumes that HSAMPLE is applied iteratively and DECAY
+is only applied when HSAMPLE cannot ﬁnd a model.
+11
+2018/11/5
+
+Theorem 2 (Convergence to R). Assume ADF-SYMVOL is run on (ϕ, D) and a set of ADFs A that are non-zero for
+R ⊂Rn. Let voli be the value of vol after i applications of HSAMPLE. Then, limi→∞voli =
+R
+ϕ∩R
+Q
+xi∈Xϕ pi(xi) dXϕ.
+Note that the above theorem directly gives us a way to approach the exact volume. Speciﬁcally, by performing runs
+of ADF-SYMVOL on subsets in an inﬁnite partition of Rn induced by the ADFs, we can ensure that the sum over the
+ADF-SYMVOL processes approaches the exact volume in the limit. For all i, let Ai be a set of ADFs corresponding to an
+ADF-SYMVOL process Pi, where Ri ⊂Rn is the non-zero region of Ai. We require an inﬁnite set of Pi to partition Rn:
+(i) for all i ̸= j, Ri ∩Rj = ∅, and (ii) S∞
+i=1 Ri = Rn. The following theorem formalizes the argument:
+Theorem 3 (Convergence). Let P1, P2, . . . be ADF-SYMVOL processes that partition Rn. Assume a fair serialization
+where each Pi performs HSAMPLE inﬁnitely often, and let voln be the total computed volume across all Pi after n
+successful calls to HSAMPLE. Then, limn→∞voln = VOL(ϕ, D).
+5.
+Implementation and Evaluation
+In this section, we present a case study on the bias of decision-making programs. In particular, we verify the group fairness
+property with qualiﬁcation, which requires that a program P satisﬁes the condition
+Pr[P(v) = true | min(v) = true ∧qual(v) = true]
+Pr[P(v) = true | min(v) = false ∧qual(v) = true] > 0.85
+We implement our algorithms in a tool called FairSquare and evaluate its ability to prove or disprove the property
+for an assortment of programs; furthermore, we evaluate the effect of various parameters on the performance of the
+implementation, and we compare the applicability of FairSquare to other probabilistic inference tools.
+5.1
+Implementation
+We implemented our presented algorithms in a new tool called FairSquare, which employs Z3 [35] for SMT solving and
+Redlog [4] for quantiﬁer elimination. To compute the group fairness ratio, we decompose the conditional probabilities
+into four joint probabilities: Pr[P(v) ∧min(v) ∧qual(v)], Pr[P(v) ∧¬min(v) ∧qual(v)], Pr[min(v) ∧qual(v)], and
+Pr[¬min(v) ∧qual(v)]. FairSquare computes lower bounds for eight quantities: the weighted volume of each of these
+probabilities and also their negations, since a lower bound on the negation provides an upper bound on the positive form.
+A round of sampling involves (i) obtaining a sample (hyperrectangle) for each of these eight quantities, (ii) computing
+these samples’ weighted volumes, (iii) updating the bounds on the group fairness ratio, and (iv) checking if bounds are
+precise enough to conclude fairness or unfairness. Rounds of sampling are performed until a proof is found or a timeout
+is reached.
+Sample maximization A key optimization is the maximization of hyperrectangles obtained during sampling. We use
+Z3’s optimization capability to maximize and minimize the ﬁnite bounds of all hyperrectangles, while still satisfying the
+formula Ψ (in Figures 4 and 8). This process is performed greedily by extending a hyperrectangle in one dimension at a
+time to ﬁnd a maximal hyperrectangle. If a dimension extends to inﬁnity, then we drop that bound, thus resulting in an
+unbounded hyperrectangle.
+5.2
+Benchmarks
+We trained a variety of machine-learning models on a popular income dataset [1] used in related research on algorithmic
+fairness [22, 41, 72] to predict whether a person has a low or high income; suppose, for example, these programs would be
+used to determine the salary of a new employee: high (> $50,000) or low. We would like to verify whether salary decisions
+are fair to qualiﬁed female employees. Using the Weka machine learning suite [5], we learned 11 different decision-making
+programs (see, e.g., Bishop’s textbook [20] for background) which are listed in Figure 9:
+– Four decision trees, named DTn, where n is the number of conditionals in the program. The number of variables and the
+depth of the tree each varies from 2 to 3.
+– Four support vector machines with linear kernels, named SVMn, where n is the number of variables in the linear
+separator.
+– Three neural networks using rectiﬁed linear units [60], named NNn,m, where n is the number of input variables, and m
+is the number of nodes in the single hidden layer.
+As we will show in the next section, some of these programs do not satisfy group fairness. We introduced modiﬁcations
+of DT16 and SVM4, called DTα
+16 and SVMα
+4 , that implement rudimentary forms of afﬁrmative action for female applicants.
+For DTα
+16, there is a 15% chance it will ﬂip a decision to give the low salary; for SVMα
+4 , the linear separator is moved to
+increase the likelihood of hiring.
+12
+2018/11/5
+
+Decision
+program
+Acc
+Population Model
+Independent
+Bayes Net 1
+Bayes Net 2
+Res
+#
+Vol
+QE
+Res
+#
+Vol
+QE
+Res
+#
+Vol
+QE
+DT4
+0.79
+
+10
+1.3
+0.5
+
+12
+2.2
+0.9
+
+18
+6.6
+2.2
+DT14
+0.71
+
+20
+4.2
+1.4
+
+38
+52.3
+11.4
+
+73
+130.9
+33.6
+DT16
+0.79
+
+21
+7.7
+2.0
+
+22
+15.3
+6.3
+
+22
+38.2
+14.3
+DTα
+16
+0.76
+
+18
+5.1
+3.0
+
+34
+32.0
+8.2
+
+40
+91.0
+19.4
+DT44
+0.82
+
+55
+63.5
+9.8
+
+113
+178.9
+94.3
+
+406
+484.0
+222.4
+SVM3
+0.79
+
+10
+2.6
+0.6
+
+10
+3.7
+1.7
+
+10
+10.8
+6.2
+SVM4
+0.79
+
+10
+2.7
+0.8
+
+18
+13.3
+3.1
+
+14
+33.7
+20.1
+SVMα
+4
+0.78
+
+10
+3.0
+0.8
+
+22
+15.7
+3.2
+
+14
+33.4
+63.2
+SVM5
+0.79
+
+10
+8.5
+1.3
+
+10
+12.2
+6.3
+TOq
+-
+-
+TO
+SVM6
+0.79
+0.02
+35.3
+634
+TO
+2.4
+0.09
+3.03
+434
+TO
+12.8
+TOq
+-
+-
+TO
+NN2,1
+0.65
+
+78
+21.6
+0.8
+
+466
+456.1
+3.4
+
+154
+132.9
+7.2
+NN2,2
+0.67
+
+62
+27.8
+2.0
+
+238
+236.5
+7.2
+
+174
+233.5
+18.2
+NN3,2
+0.74
+0.03
+674.7
+442
+TO
+10.0
+0.00
+5.24
+34
+TO
+55.9
+TOq
+-
+-
+TO
+Ind
+BN1
+BN2
+Ind
+BN1
+BN2
+Ind
+BN1
+BN2
+0
+2
+4
+6
+8
+10
+12
+FairSquare
+PSI [44]
+VC [66]
+DT
+SVM
+NN
+Figure 9. (Left) Results of FairSquare applied to 39 group fairness problems. Res indicates  for fair;  for unfair. Vol indicates the time (s) of the
+sampling procedure; # is the number of SMT calls. If sampling timed out (900s), Res denotes the latest bounds on the fairness ratio. QE indicates the time
+(s) of the quantiﬁer elimination procedure used prior to sampling; if this timed out (900s), we could not perform any sampling, denoted by a TOq for Res.
+Acc is the training set accuracy for each of the programs. (Right) Comparison of the number of benchmarks that FairSquare, PSI [44], and VC [66] were
+able to solve.
+Additionally, we used three different probabilistic population models, programs that deﬁne the probabilistic inputs, that
+were inferred from the same dataset: (i) a set of independently distributed variables, (ii) a Bayesian network using a simple
+graph structure, and (iii) the same Bayesian network, but with an integrity constraint in the form of an inequality between
+two of the variables. Note that the ﬁrst model is a trivial case: since there is there is no dependence between variables, all
+programs will be fair; this simplicity serves well as a baseline for our evaluation. The Bayesian models permit correlations
+between the variables, allowing for more subtle sources of fairness or unfairness. The benchmarks we use are derived from
+each combination of population models with decision-making programs (see Appendix C for an example).
+5.3
+Evaluation
+In this section, we discuss the ability of FairSquare to verify qualiﬁed group fairness or unfairness for 39 problems, as
+summarized in Figure 9. In these problems, min(v) = true when the applicant is female, and qual(v) = true in two
+different scenarios: ﬁrst, we consider the case when qual is tautologically true, and second, when the applicant is at least
+18 years of age. Figure 9 shows only the former case, as while the numbers are different for the two cases, the qualitative
+results are quite similar. See Appendix D for the full table of results. We ﬁx ϵ = 0.15. To guide volume computation, all
+Gaussian distributions with mean µ and variance σ2 use ADFs with 5 equal-width steps spanning (µ −3σ2, µ + 3σ2)—
+analogous to Figure 7(a). FairSquare was able to solve 32 of the 39 problems, proving 21 fair and 11 unfair, as shown in
+the left table of Figure 9.
+Consider the results for DT4: FairSquare proved it fair with respect to the independent population model after 0.5
+seconds of an initial quantiﬁer elimination procedure and 1.3 seconds of the actual volume computation algorithm, which
+required 14 SMT queries. The more sophisticated Bayesian network models took longer for sampling, but due to the
+correlations between variables, were proved unfair.
+In contrast, consider the results for DT44 under the Bayes Net 1 population model: FairSquare was unable to conclude
+fairness or unfairness after 900 seconds of volume computation (denoted by TO in the Vol column). The lower and upper
+bounds of the fairness ratio it had computed at that time are listed in the Res column: in this case, the value of the fairness
+ratio is within [0.70, 0.88], which is not precise enough for the ϵ = 0.15 requirement (but would be precise enough for ϵ
+outside of [0.12, 0.30]).
+In general, all conclusive results using the independent population model were proved to be fair, as expected, but many
+are unfair with respect to the clusters and Bayes net models because of the correlations they capture. This difference
+illustrates the sensitivity of fairness to the population model; in particular, none of the decision trees syntactically access
+sex, yet several are unfair.
+Figure 9 also shows that the modiﬁcations for afﬁrmative action in DTα
+16 and SVMα
+4 are sufﬁcient to make the programs
+fair with respect to all of our population models without making a substantial impact on the training set accuracy.
+In summary, FairSquare is powerful enough to reason about group fairness for many non-trivial programs.
+5.4
+Comparison to other tools
+We ran our benchmarks on the two other exact probabilistic inference tools that accept the same class of problems, and
+report these results in the right bar graph in Figure 9. First, we compare to Sankaranarayanan et al.’s tool [66] (VC), which
+13
+2018/11/5
+
+DT16
+SVM4
+fairness ratio without sample
+maximization
+0
+5
+10
+15
+20
+25
+30
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+DT16 nomax 5-step
+DT16 nomax uniform
+DT16 nomax none
+(a)
+0
+5
+10
+15
+20
+25
+30
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+SVM4 nomax 5-step
+SVM4 nomax uniform
+SVM4 nomax none
+(c)
+fairness ratio with sample
+maximization
+0
+5
+10
+15
+20
+25
+30
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+DT16 max 5-step
+DT16 max uniform
+DT16 max none
+(b)
+0
+5
+10
+15
+20
+25
+30
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+SVM4 max 5-step
+SVM4 max uniform
+SVM4 max none
+(d)
+Figure 10. Fairness ratio vs. rounds of sampling for DT16 and SVM4 (independent pop model) differing on ADFs and sample maximization. In (b) two
+runs end at the exact value. Outside the visible range are: (a)(c) upper and lower bounds of uniform and none; (d) upper bounds of none.
+is algorithmically similar to our tool: it ﬁnds bounds for probabilities on individual paths by approximating formulas with
+bounding and inscribed hyperrectangles. Second, we compare to PSI [44], which symbolically computes representations
+of the posterior distributions of variables. When closed form solutions to the CDFs exist, PSI is a great aid because
+these solutions can be evaluated to obtain exact values of probabilities instantly; however, the graph illustrates that our
+benchmarks are often too complex, resulting in integrals that do not have closed forms, or problems that PSI cannot solve
+within the timeout period.
+Tools were deemed to have failed on a benchmark when they timed out after a 900s period. Additionally, the bounds on
+probability quantities from VC were often not tight enough for a proof. See Appendix D for the full quantitative table of
+results.
+The ﬁgure illustrates some qualitative properties of the applicability of the tools. In general, all can solve most of the
+decision trees because the trees partition the decision space using a number of inequalities between a single variable and
+a constant. However, the presence of inequalities involving multiple variables can result in two phenomena: (i) the lack
+of closed form posterior CDFs, as reﬂected in the output of PSI, and (ii) angled boundaries in the decision space that are
+hard to approximate with hyperrectangles. These inequalities occur in the SVMs, neural networks, and the Bayes Net 2
+population model. Consequently, VC fails to produce good bounds in these cases; FairSquare performs better, but also fails
+on the largest SVM.
+5.5
+Effect of Parameters
+We now explore the effects of the approximate density functions (see Section 4.2) and of the sample maximization
+optimizations. These results are captured in Figures 10 and 11.
+There are three instances of ADFs in Figure 10 used to guide the sampling to high-probability regions: (i) none indicates
+that no ADF is used, i.e., we used SYMVOL instead of ADF-SYMVOL; (ii) uniform indicates that each gauss(µ, σ2) is
+approximated by a uniform function spanning (µ −3σ2, µ + 3σ2) (similar to Figure 7(c)); and (iii) 5-step indicates
+that each Gaussian is approximated by a step function of 5 equal-width regions spanning that same domain (similar to
+Figure 7(a)). Another variable, max or nomax, denotes whether the sample maximization optimization is enabled (as
+described in Section 5.1).
+Each combination of these techniques is run on two of our benchmarks: DT16 and SVM4 under the independent
+population model. Figure 10(a) and (c) show how convergence to the fairness ratio is improved by the choice of distribution
+approximation when sample maximization is not employed: in particular, the runs using uniform and none are not even
+visible, as the bounds never fall within [0.01, 4.0]. Plots (b) and (d) show that when sample maximization is employed, the
+choice between the uniform and 5-step approximations is not as substantial on these benchmarks, although (i) the better
+approximation gets better bounds faster, and (ii) using none results in substantially worse bounds.
+14
+2018/11/5
+
+DT16
+SVM4
+average weighted
+volume per sample
+5-step
+uniform
+none
+0
+0.05
+0.1
+0.15
+(a)
+DT16 max
+DT16 nomax
+5-step
+uniform
+none
+0
+0.05
+0.1
+0.15
+(c)
+SVM4 max
+SVM4 nomax
+average time per
+round
+5-step
+uniform
+none
+0
+0.5
+1
+1.5
+2
+(b)
+5-step
+uniform
+none
+0
+0.5
+1
+1.5
+2
+(d)
+Figure 11. Effect of optimizations on performance of FairSquare for DT16 and SVM4 (independent pop model). (a) and (c) show the average weighted
+volume per sample (averaged across all computed probabilities). (b) and (d) show the average time (s) per round of sampling.
+Figure 11 plot (a) and (c) show that employing ADFs and using sample maximization each increases the average
+weighted volume per sample, which allows volume computation to be done with fewer samples. Plots (b) and (d) illustrate
+the trade-off: the average time per round of sampling tends to be greater for more sophisticated optimizations.
+We present these results for two particular problems and observe the same results across our suite. In summary, we have
+found that ADFs and sample maximization are both necessary for adequate performance of FairSquare.
+6.
+Related Work
+Probabilistic program analysis We refer the reader to Gordon et al. for a thorough survey [47]. A number of works tackled
+analysis of probabilistic programs from an abstract interpretation perspective [29, 54, 57–59]. The comparison between
+our solution through volume computation and abstract interpretation is perhaps analogous to SMT solving and software
+model checking versus abstract interpretation. For example, techniques like Monniaux’s [57], sacriﬁce precision (through
+joins, abstraction, etc.) of the analysis for the beneﬁt of efﬁciency. Our approach, on the other hand, is aimed at eventually
+producing a proof, or iteratively improving probability bounds while guaranteeing convergence.
+A number of works have also addressed probabilistic analysis through symbolic execution [42, 45, 65, 66]. Filieri et
+al. [42] and Geldenhuys et al. [45] attempt to ﬁnd the probability a safety invariant is preserved. Both methods reduce
+to a weighted model counting approach and are thus effectively restricted to variables over ﬁnite domains. Note that our
+technique is more general than a model counting approach, as we can handle the discrete cases with a proper encoding of
+the variables into a continuous domain.
+A number of works rely on sampling to approximate the probability of a given program property. The Church [46]
+programming language, for instance, employs the Metropolis–Hastings algorithm [26], a Markov Chain Monte Carlo
+(MCMC) technique. Other techniques perform probabilistic inference by compiling programs or program paths to Bayesian
+networks [51] and applying belief propagation [56] or sampling [65] on the network.
+Volume computation The computation of weighted volume is known to be hard—even for a polytope, volume computation
+is #P-hard [49]. Two general approaches exist: approximate and exact solutions. Note that in general, any approximate
+technique at best can prove facts with high probability.
+Our volume computation algorithm is inspired by (i) Li et al.’s [53] formula decomposition procedure, where quantiﬁer
+elimination is used to under-approximate an LRA constraint as a Boolean combination of monadic predicates; and
+(ii) Sankaranarayanan et al.’s [66] technique for bounding the weighted volume of a polyhedron, which is the closest
+volume computation work to ours. (The general technique of approximating complex regions with unions of orthogonal
+polyhedra is well-studied in hybrid systems literature [21].)
+A number of factors differentiate our work from [66], which we compared with experimentally in Section 5. First, our
+approach is more general, in that it can operate on Boolean formulas over linear and polynomial inequalities, as opposed to
+just conjunctions of linear inequalities. Second, our approach employs approximate distributions to guide the sampling of
+hyperrectangles with large volume, which, as we have demonstrated experimentally, is a crucial feature of our approach.
+Third, we provide theoretical convergence guarantees.
+15
+2018/11/5
+
+LattE is a tool that performs exact integration of polynomial functions over polytopes [34]. Belle et al. [16, 18] compute
+the volume of a linear real arithmetic (LRA) formula by, effectively, decomposing it into DNF—a set of polyhedra—and
+using LattE to compute the volume of each polyhedron with respect to piece-wise polynomial densities. Our volume
+computation algorithm is more general in that it (i) handles formulas over real closed ﬁelds, which subsumes LRA, and
+(ii) handles arbitrary probability distributions.
+Chistikov et al. [27, 28] present a framework for approximate counting with probabilistic guarantees in SMT theories,
+which they specialize for bounded LRA. In contrast, our technique (i) handles unbounded formulas in LRA as well as real
+closed ﬁelds, (ii) handles arbitrary distributions, and (iii) provides converging lower-bound guarantees. It is important to
+note that there is a also a rich body of work investigating randomized polynomial algorithms for approximating the volume
+of a polytope, beginning with Dyer et al.’s seminal work [38] (see Vempala [70] for a survey).
+Algorithmic fairness Our work is inspired by recent concern in the fairness of modern decision-making programs [12, 71].
+A number of recent works have explored algorithmic fairness [22, 32, 33, 37, 41, 48, 61, 72]. For instance, Zemel et al. [72]
+and Feldman et al. [41] study fairness from a machine learning classiﬁcation perspective, e.g., automatically learning fair
+classiﬁers. Both works operate with a notion of fairness on a provided data set; in contrast, we prove fairness with respect
+to a given probabilistic model of the population (a data set can be viewed as a special case).
+Discrimination in black-box systems has been studied through the lens of statistical analysis [32, 33, 67]. Notably,
+Datta et al. [32] created an automated tool that analyzes online advertising: it operates dynamically by surveying the ads
+produced by Google. Our approach differs from the statistical analyses in that we require transparency of the decision
+procedure, instead of data on the results of the decision procedure.
+Future work We presented a new technique for veriﬁcation of probabilistic programs and applied to quantifying bias
+of decision-making programs. Our goals for future work include exploring the applicability of our technique to other
+notions of fairness properties (e.g., [37]); further reﬁnements to the use of ADFs, e.g. dynamically adapting them during
+ADF-SYMVOL; and improving the weighted volume computation algorithm for better scalability.

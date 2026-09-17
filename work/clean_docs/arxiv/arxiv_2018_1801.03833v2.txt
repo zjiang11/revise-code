@@ -1,0 +1,816 @@
+Experiments in Veriﬁcation of Linear Model Predictive
+Control: Automatic Generation and Formal Veriﬁcation
+of an Interior Point Method Algorithm∗
+Guillaume Davy12, Eric Feron3, Pierre-Loic Garoche1, and Didier Henrion2
+1 Onera - The French Aerospace Lab, Toulouse, FRANCE
+2 CNRS LAAS, Toulouse, FRANCE
+3 Georgia Institute of Technology, Atlanta GA, USA
+Abstract
+Classical control of cyber-physical systems used to rely on basic linear controllers.
+These controllers provided a safe and robust behavior but lack the ability to perform
+more complex controls such as aggressive maneuvering or performing fuel-eﬃcient controls.
+Another approach called optimal control is capable of computing such diﬃcult trajectories
+but lacks the ability to adapt to dynamic changes in the environment.
+In both cases,
+the control was designed oﬄine, relying on more or less complex algorithms to ﬁnd the
+appropriate parameters. More recent kinds of approaches such as Linear Model-Predictive
+Control (MPC) rely on the online use of convex optimization to compute the best control at
+each sample time. In these settings optimization algorithms are specialized for the speciﬁc
+control problem and embed on the device.
+This paper proposes to revisit the code generation of an interior point method (IPM)
+algorithm, an eﬃcient family of convex optimization, focusing on the proof of its imple-
+mentation at code level. Our approach relies on the code specialization phase to produce
+additional annotations formalizing the intented speciﬁcation of the algorithm. Deductive
+methods are then used to prove automatically the validity of these assertions. Since the
+algorithm is complex, additional lemmas are also produced, allowing the complete proof
+to be checked by SMT solvers only.
+This work is the ﬁrst to address the eﬀective formal proof of an IPM algorithm. The
+approach could also be generalized more systematically to code generation frameworks,
+producing proof certiﬁcate along the code, for numerical intensive software.
+1
+Model Predictive Control and Veriﬁcation Challenges
+When one wants to control the behavior of a physical device, one could rely on the use of
+a feedback controller, executed on a computer, to perform the necessary adjustements to the
+device to maintain its state or reach a given target.
+Classical means of this control theory
+amount to express the device behavior as a linear ordinary diﬀerencial equation (ODE) and
+deﬁne the feedback controller as a linear system; eg.
+a PID controller.
+The design phase
+searches for proper gains, ie. parametrization, of the controller to achieve the desired behavior.
+While this approach has been used for years with great success, eg. in aircraft control, some
+more challenging behaviors or complex devices need more sophisticated controllers. Assuming
+that the device behavior is known, one can predict its future states. A ﬁrst approach, Optimal
+Control with indirect-method, search for optimal solutions solving a complex mathematical
+problem, the Pontryagin Maximal Principle. This is typical used to compute rocket or satellite
+trajectories. However this approach, while theoretically optimal, requires complex computation
+∗This work was partially supported by ANR FEANICSES project.
+arXiv:1801.03833v2  [cs.LO]  28 Sep 2018
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+and cannot yet be performed online, in real-time. A second approach, Linear Model Predictive
+Control or direct method, amounts to solve online a convex optimization problem describing
+the current state, the target and the problem constraints, ie. limits on the thrust. A pregnant
+example of such trajectory computation is the landing of SpaceX orbital rockets [1].
+The use of a convex encoding of the problem guarantees the absence of saddle points (local
+minimums) and could be resolved eﬃciently with polynomial-time algorithms. Convex opti-
+mization covers a large set of convex-conic problems, from linear programming (LP: linear
+constraints, linear cost) to quadratic programming (QP: linear contraints, quadratic cost) or
+semi-deﬁnite programming (SDP: linear constraints over matrices, linear cost). While the fa-
+mous Simplex algorithm can eﬃciently address LP ones, the Interior Point Method (IPM) is
+the state-of-the art one when it comes to more advanced cones (eg. QP, SDP).
+Linear Model Predictive control can then be expressed as a bounded model-checking problem
+with an additional cost to ﬁnd the best solution, using convex optimization:
+Deﬁnition 1 (Example: LP encoding of MPC). Let U ⊆Ru and X ⊆Rs be constrained convex
+set for inputs and states of the controller. Let (uk ∈U)0≤k<N be an N-bounded sequence of
+control inputs for a linear system xk+1 = Axk + Buk with xk ∈X a vector of state variables,
+A ∈Rs×s and B ∈Rs×u. Let X0 the initial state and XN the target one. The objective is to
+compute an optimal trajectory, for example minimizing the required inputs ΣN
+i=1|ui| to reach the
+target point XN. Let us deﬁne the following LP problem:
+min ΣN
+i=1|ui| s.t.
+
+
+
+
+
+
+
+
+
+X0 = x0, XN = xn,
+x1 = A · x0 + B · u0,
+...
+xN = A · xN−1 + B · uN−1.
+(1)
+Let us remark that Eq. (1) relies on a linear and discrete description (through matrices
+A and B) of the original device behavior, typically a non linear ODE. This LP problem has
+(N −2) × s + N × u variables since x0, xN, A and B are known. Without loss of generality, one
+can express Eq. (1) over fresh deﬁnitions of A ∈Rm×n, b ∈Rm and c ∈Rn as the following
+LP:
+min c⊺· x
+s.t. A · x ≤b
+(2)
+with m constraints, and where x ∈Rn denotes here a larger state. Equality constraints x = e
+are deﬁned as x ≤e ∧−x ≤−e.
+This computation is embedded on the device, and, depending on the starting point X0,
+computes the sequence of N inputs to reach the ﬁnal point XN. Since most of the parameters
+are known a priori the usual approach is to instanciate an optimization algorithm to the speciﬁc
+problem rather than embed on the device a generic solver. For example SpaceX rockets rely
+on CVX [2] to produce custom code, compatible with embedded devices (eg.
+no dynamic
+allocation, reduced number of computations).
+While classical linear control only amounts to the computation of a linear update, these
+MPC approaches rely on more involved online computation: the convex optimization has to
+return a sound solution in ﬁnite time.
+The objective of this paper is to address the veriﬁcation of these IPM implementations to
+ensure the good behavior of MPC-based ccontrollers. A possible approach could have been to
+specify the algorithm in a proof assistant and extract a correct-by-construction code. Unfortu-
+nately code extraction from these proof assistants generates source code that hardly resembles
+classical critical embedded source code. We rather chose to synthesize the ﬁnal code while
+2
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+producing automatically code contracts and additional annotations and lemmas to support the
+automatic validation of the code. Our contributions are then following:
+1. We revisit the custom code generation, instanciating an IPM algorithm to the provided
+problem, producing both the code, its formal speciﬁcation [3, 4] and proof artifacts.
+2. We then rely on Frama-C [5] to prove the validity of generated Hoare triples using deduc-
+tive methods [6].
+3. Our proof process is automatic: instead of proving a generic version of the algorithm,
+which would require strong assumptions on the problem parameters, we perform an au-
+tomatic instance-speciﬁc proof, achieving a complete validation without any user input:
+all proofs are performed, at code level, using SMT-solvers only.
+4. The approach has been evaluated on a set of generated instances of various sizes, evalu-
+ating the scalability of the proof process. The generated code can then be embedded in
+actual devices.
+The considered setting is a primal IPM solving a LP problem. In the presented work, we
+focus only on the algorithmic part while dealing with the actual implementation, therefore
+numerical issues such as ﬂoating point computation are here neglected.
+This work is the ﬁrst approach addressing the formal veriﬁcation of an IPM convex algo-
+rithm, as used in MPC-based controllers.
+This paper is structured as follow. We introduce the reader to convex optimization and IPM
+in Sec. 2 and we describe the code and speciﬁcation generation in Sec. 3. Sec. 4 focuses on the
+proof process supporting the automatic proof of generated code speciﬁcation. Sec. 5 provides
+a feedback on our approach evaluation. Related works are then presented in Sec. 6.
+2
+Convex Optimization with the Interior Point Method
+Let us outline the key deﬁnition and principles behind the primal IPM we analyze. As mentioned
+above, these notions easily extend to more sophisticated cones. We chose a primal algorithm
+for its simplicity compared to primal/dual algorithms and we followed Nesterov’s proof [7].
+Deﬁnition 2 (LP solution). Let us consider the problem of Eq. (2) and assume that an optimal
+point x∗exists and is unique. We have then the following deﬁnitions:
+Ef ={x ∈Rn | Ax < b}
+(feasible set of P)
+(3)
+f(x) =⟨c, x⟩= C⊺· x
+(cost function)
+(4)
+x∗= arg min
+x∈Ef f
+(optimal point)
+(5)
+In order to ensure the existence of an optimal value, we assume the set Ef to be bounded.
+Barrier function and analytic center.
+One can describe the interior of the feasible set
+using a penalty function F : Ef →R. Figure 1 depicts such a logarithmic barrier function
+encoding a set of linear constraints, it diverges when x approaches the border of Ef.
+By
+construction, it admits a unique minimum, called the analytic center, in the interior of the
+feasible set.
+3
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+Figure 1: Barrier function.
+Central path
+A minimum of a function is obtain by
+analyzing the zeros of its gradients; for convex function
+this minimum is unique. In case of a cost function with
+constraints, IPM represents these constraints within
+the cost function using the function ˜f(x, t). The vari-
+able t balances the impact of the barrier: when t = 0,
+˜f(x, t) is independent from the objective while when
+t →+∞, the cost gains more weight.
+Deﬁnition 3 (Adjusted cost ˜f.). Let ˜f be a linear combina-
+tion of the previous objective function f and the barrier func-
+tion F.
+˜f(x, t) = t × f(x) + F(x) with t ∈R
+(6)
+Deﬁnition 4 (Central path: from analytic center to optimal
+solution.). The values of x minimizing ˜f when t varies from
+0 to +∞characterize a path, the central path (cf. Fig. 2).
+x∗: R+
+→Ef
+t
+7→arg min
+x∈Ef
+˜f(x, t)
+(7)
+Note that x∗(0) is the analytic center while
+lim
+t→+∞x∗(t) = x∗.
+Figure 2: Central path.
+IPM algorithm: a sequence of Newton steps following the central path.
+IPM algo-
+rithm performs a sequence of iterations, updating a point X that follows the central path and
+eventually reaches the optimal point. At the beginning of each loop iteration, there exists a
+real t such that X = x∗(t). Then t is increased by dt > 0 and x∗(t + dt) is the new point X.
+This translation dX is performed by a Newton step.
+Computing dX using Newton step.
+We recall that the Newton’s method computes an
+approximation of a root of a function G : Rk →Rl. It is a ﬁrst order method, ie. it relies on
+the gradient of the function and, from a point in the domain of the neighborhood of a root,
+performs a sequence of iterations, called Newton steps. A Newton step transforms a point Yn
+into Yn+1 as follows:
+Yn+1 −Yn = −
+ G′(Yn)
+−1G(Yn)
+(8)
+We apply the Newton step to the gradient of ˜f, computing its root which coincides with the
+minimum of ˜f. We obtain:
+dX = −
+ F ′′(X)
+−1((t + dt)c + F ′(X))
+(9)
+Computing dt: preserving the Approximate Centering Condition (ACC).
+The con-
+vergence of the Newton method is guaranteed only in the neighborhood to the function root.
+This neighborhood is called the region of quadratic convergence; this region evolves on each
+4
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+iteration since t varies. To guarantee that the iterate X remains in the region after each iter-
+ation, we require the barrier function to be self-concordant. Without providing the complete
+deﬁnition of self-condordance, let us focus on the implied properties: assuming that F is a
+self-concordant, then F ′′, its Hessian, is non-degenerate([7, Th4.1.3]) and we can deﬁne a local
+norm.
+Deﬁnition 5 (Local-norm).
+∥y∥∗
+x =
+q
+yT × F ′′(x)−1 × y
+(10)
+This local-norm allows one to deﬁne the Approximate Centering Condition (ACC), the
+crucial property which guarantees that X remains in the region of quadratic convergence:
+Deﬁnition 6 (ACC). Let x ∈Ef and t ∈R+, ACC(x, t, β) is a predicate deﬁned by
+∥˜f ′(x)∥∗
+x = ∥tc + F ′(x)∥∗
+x ≤β
+(11)
+In the following, as advised in [7], we choose a speciﬁc value for β, as deﬁned in (12).
+β < 3 −
+√
+5
+2
+(12)
+The only step remaining is the computation of the largest dt such that X remains in the
+region of quadratic convergence around x∗(t + dt), with γ a constant:
+dt =
+γ
+∥c∥∗x
+(13)
+Theorem 1 (ACC preserved). This choice maintains the ACC at each iteration([7, Th4.2.8]).
+When ACC(X, t, β) and γ ≤
+√β
+1+√β −β then ACC(X + dX, t + dt, β).
+Summary of IPM
+Thanks to an appropriate barrier function to describe the feasible set,
+IPM algorithm starts from the point X = x∗(0), the analytic center, and t = 0. Then its
+updates both variables using Eqs. (9) and (13), until the required precision is reached.
+Remark 1 (Choice of a barrier function.). For this work, we use the classic self-concordant
+barrier for linear programs:
+F(x) =
+m
+X
+i=0
+−log(bi −Ai × x)
+(14)
+with A1, Am the columns of A.
+Remark 2 (Computation of the analytic center.). x∗
+F is required to initiate the algorithm. In
+case of oﬄine use the value could be precomputed and validated. However in case of online use,
+its computation itself has to be proved. Fortunately this can be done by a similar algorithm with
+comparable proofs. In addition, in MPC-based controllers, the set of constraints can be fed with
+previously computed values, guaranteeing the existence of a non-empty interior and provding a
+feasible point to compute this new analytic center.
+5
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+3
+Generating Code and Formal Speciﬁcation
+Typical uses of MPC do not rely on a generic solver implementing an IPM algorithm with
+a large set of parameters but rather instanciate the algorithm to the provided instance. As
+mentioned in the introduction, a large subset of the problem is known beforehand and therefore
+lots of computation can be hard-coded. As an example, the computation of the local norm
+relies mainly on the computation of the Hessian of the barrier function and can be, in some
+cases, precomputed.
+The code generation is therefore very similar from one instance to the other. The main
+changes lie in the sizes of the various arrays representing the problem and the points along the
+central path.
+Figure 3: Autocoding toolchain: automatic gen-
+eration of both C code and annotations.
+Figure 3 sketches our fully automatic pro-
+cess which, when provided with a convex
+problem with some unknown values, gener-
+ates the code, the associated annotation and
+prove it automatically. We are not going to
+present all the process in this paper but con-
+centrate on how to write the embedded code,
+annotate it and automatize its proof. Early
+stages of the process reformulate the given
+instance in a canoncial form. Regarding the
+code generation, our approach is really simi-
+lar to the CVXGEN or CVXOPT tools.
+3.1
+Code structure: Newton steps in a For-Loop
+The generated code follows strictly the algorithm presented in the previous section for each
+iteration steps. However, usual implementations perform the iterations in a while-loop until
+a condition tk > tstop(ϵ) is satisﬁed, where tk represents the position on the central path at
+iteration k.
+In order to guarantee termination, we rely on the convergence proof and complexity analysis
+of [7, Th 4.2.9] and compute, a priori, the required number of iterations klast(ϵ) to reach
+a given optimality ϵ. The termination proof relies on the characterization of a a geometric
+progression Lower(k) such that each increment dt is suﬃcient to achieve some progress towards
+termination: at k-th iteration, we have
+tk ≥Lower(k)
+(15)
+In terms of practical impact the code becomes a for loop with a provided number of iterations
+while the Lower progression only appears in the formal speciﬁcation part and is used for proof
+purposes.
+3.2
+Domain-speciﬁc axiomatics
+We rely on the tool Frama-C [5] to perform the proofs at code level and on ACSL [8], its
+annotation language, to formally express the speciﬁcation. While extensible, ACSL does not
+provide high level constructs regarding linear algebra or optimzation related properties. We ﬁrst
+deﬁned new ACSL axiomatics: speciﬁc sets of types, operators and axioms to express these.
+Similar approaches were already proposed [9] for matrices but were too speciﬁc to ellipsoid
+6
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+axiomatic matrix
+{
+type LMat;
+// Getters
+logic integer getM(LMat A);
+logic integer getN(LMat A);
+logic real mat_get(LMat A, integer i, integer j);
+// Constructors
+logic LMat MatVar(double* ar, integer m, integer n) reads
+ar[0..(m*n)];
+logic LMat MatCst_1_1(real x0);
+logic LMat MatCst_2_3(real x0, real x1, real x2, real x3,
+real x4, real x5);
+// Operators
+logic LMat mat_add(LMat A, LMat B);
+logic LMat mat_mult(LMat A, LMat B);
+logic LMat transpose(LMat A);
+logic LMat inv(LMat A);
+...
+// Example of axioms
+axiom getM_add: \forall LMat A, B; getM(mat_add(A, B))
+==getM(A);
+axiom mat_eq_def:
+\forall LMat A, B;
+(getM(A)==getM(B))==> (getN(A)==getN(B))==>
+(\forall integer i, j; 0<=i<getM(A) ==> 0<=j<getN(A) ==>
+mat_get(A,i,j)==(mat_get(B,i,j))==>
+A == B;
+...
+}
+axiomatic Optim
+{
+logic LMat hess(LMat A, LMat b, LMat X);
+logic LMat grad(LMat A, LMat b, LMat X);
+logic real sol(LMat A, LMat b, LMat c);
+logic real sol(LMat A, LMat b, LMat c);
+axiom sol_min: \forall LMat A, b, c;
+\forall LMat y; mat_gt(mat_mult(A, y), b) ==>
+dot(c, y) >= sol(A, b, c);
+axiom sol_greater: \forall LMat A, b, c;
+\forall Real y;
+(\forall LMat x; mat_gt(mat_mult(A, x), b) ==> dot(c, x)
+>= y) ==>
+sol(A, b, c) >= y;
+logic real norm(LMat A, LMat b, LMat x, LMat X) =
+\sqrt(mat_get(mat_mult(transpose(x), mat_mult(inv(hess(A,
+b, X)), x)), (0), (0)));
+logic boolean acc(LMat A, LMat b, LMat c, real t, LMat X,
+real beta) =
+((norm(A, b, mat_add(grad(A, b, X), mat_scal(c, t)), X))
+<=(beta));
+...
+}
+Figure 4: ACSL Axiomatics: Matrix and Optim
+problems. We give here an overview of the deﬁnitions of both the Matrix and Optim ACSL
+axiomatics, both presented in Fig. 4. Note that these deﬁnition are not instance-speciﬁc and
+are shared among all uses of our framework.
+Axiomatic are deﬁned as algebraic speciﬁcations. Logical opererators manipulating the local
+types can either be deﬁned as functions or as uninterpreted functions ﬁtted with axioms.
+Matrix axiomatic.
+The new ACSL type LMat, ie. Logic Matrix, is introduced and ﬁtted
+with getters and constructors. Constructors such as MatVar allow to bind fresh LMat value. This
+one reads a C array while others create constant values. Operators such as matrix addition or
+inverse are deﬁned axiomatically: the operator is deﬁned and ﬁtted with axioms.
+Optimization axiomatic.
+Besides generic matrix operators, we also need some operators
+speciﬁc to our algorithm. The Newton step deﬁned in Eq. (9) as well as the local norm of
+Eq. (10) are both based on the gradient and the Hessian of the barrier function (Eq. (14))
+encoding the feasible set.
+These functions are parametrized by the matrix A, the vector b
+and the local point X. However Hessian and gradient are hard to deﬁne without real analysis
+which is well beyond the scope of this article. Therefore we decided to directly axiomatize some
+theorems relying on their deﬁnition like [7, Th4.1.14].
+Another important notion is the optimal solution x∗of the convex problem. We can char-
+acterize axiomatically the equations (3) – (5) of Deﬁnition 2 using the uninterpreted function
+sol:
+∀y ∈Ef, cT y ≥sol
+∀y ∈R, ∀x ∈Ef, cT x ≥y =⇒sol ≥y
+(16)
+Last we deﬁned some operators representing deﬁnitions 5, 6 and Lower(15).
+7
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+
+void set_dX()
+{
+dX[0] = -cholesky[0];
+dX[1] = -cholesky[1];
+}
+Simple case of dx %= -cholesky encapsulated in a function for dx and cholesky of size 2 × 1.
+The ﬁrst ensures statement speciﬁes, using our own encoding of matrices in ACSL, that, after
+the execution of the function body, the relationship dX = −1 ∗cholesky holds where both dX
+and cholesky are interpreted as matrices. The second annotation assigns is used for the alias
+analysis and expresses that the only modiﬁed values are dX[0], dX[1]. This property is also
+automatically generated and has to be proved by the solver. It is of great help to support the
+proof of relationships between arrays. Note that all variables are global here.
+Figure 5: Example of ACSL-speciﬁed matrix operation.
+3.3
+Functions and contracts
+Multiple functions to support proof and local contrats.
+Proving large functions is
+usually hard with SMT-based reasoning since the generated goals are too complex to be dis-
+charged automatically. A more eﬃcient approach is to associate small pieces of code with local
+contracts; these intermediate annotations acting as cut-rules in the proof processes.
+Let A = B[C] be a piece of code containing C. Replacing C by a call to f() { C } requires
+either to inline the call or to write a new contract {P} f() {Q}, characterizing two smaller
+goals instead of a larger one. Speciﬁcally in the proof of a B[f()], C has been replaced by P
+and Q which is simpler than an automatically computed weakest precondition.
+Therefore instead of having one large function, our code is structured into several functions.
+As an example, each basic matrix operation is performed in a dedicated function. The associated
+contract provides a high level interpretation of the function behavior expressed over matrices
+abstract datatypes. This modular encoding supports the generation of simpler goals for the
+SMT solver, while keeping the code structure clearer.
+Fig. 5 illustrates a very simple generated code and contract while Fig. 6 presents the hier-
+archy of function calls.
+Speciﬁcation of pathfollowing.
+A sound algorithm must produce a point in the feasible
+set such that its cost is ϵ-close to sol. This represents the functional speciﬁcation that we expect
+from the code and is asserted by two post-conditions. In addition, two preconditions state that
+X is feasible and close enough to the analytic center.
+
+*/
+void pathfollowing() {
+...
+
+for (int l = 0; l < NBR;l++) { ... }
+...
+}
+Figure 7: Pathfollowing ACSL contract and
+loop annotations.
+Thanks to our two new theories Matrix
+and Optim, writing and reading this contract
+is straightforward and can be checked by any-
+one familiar with linear programming. Our
+contribution focuses on the expression on in-
+termediate annotations, spread over the code,
+to support the overall proof of speciﬁcations.
+A loop needs to be annotated by an in-
+variant to have its Weakest precondition com-
+puted. We need three invariants for our path-
+following algorithm.
+The ﬁrst one guaran-
+tees the feasibility of X while the second one
+8
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+• compute ﬁll X with the the analytic
+center and call pathfollowing.
+• pathfollowing contains the main loop which
+udpate dX and dt.
+• compute_pre computes Hessian and gradiant of
+F which are required for dt and dX.
+• udpate_dX and udpate_dt call the associated subfunction and
+update the corresponding value.
+• compute_dt performs (13), it requires to call Cholesky to compute
+the local norm of c.
+• compute_dX performs (9), Cholesky is used to inverse the Hessian matrix.
+Figure 6: Call tree of the implementation (colored boxes are matrix computation)
+states the conservation of the ACC (cf. Def. 6) The third invariant assert that t is increasing
+enough on each iteration, more speciﬁcally that it is greater than a geometric progression(15).
+Proving the initialization is straightforward, thanks to the main preconditions. We wrote
+one ACSL lemma for each invariant. Whenever it is possible we try to follow [7], for example
+by translating [7, Th4.1.5] and Theorem 1. The last two loop invariants are combined to prove
+the second post-condition of pathfollowing thanks to Theorem 2. NBR is computed from klast.
+Theorem 2. [7, Th4.2.7] Let t ≥0, and X such that ACC(X, t, β) then
+cT X −cT X∗< 1
+t × (1 + (β + 1)β
+1 −β
+)
+(17)
+Fig. 7 presents the speciﬁcation in ACSL: the main function contract and the loop invariants.
+
+acc(A, b, c, t, MatVar(X, N, 1), BETA + GAMMA);
+
+void update_t();
+Figure 8: update_t ACSL contract
+Loop body.
+Each iteration of the IPM re-
+lies on three function calls: update_pre com-
+puting some common values, update_t and
+update_x (cf Fig. 6). Theorem 1 is then split
+into several properties and the corresponding
+post-conditions. For example, the contract of
+update_t is described in Fig. 8.
+The ﬁrst post-condition is an intermediary results stating that:
+ACC(X, t + dt, β + γ)
+(18)
+This result is used as precondition for update_x. The second ensures corresponds to the
+product of t by the common ratio of the geometric progression Lower, cf. Eq. (15) which will
+9
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+be used to prove the second invariant of the loop. The ﬁrst precondition is a post-condition
+from update_pre and the second one is the ﬁrst loop invariant.
+4
+Automatic Veriﬁcation: Proof Reﬁnement through Lemma
+Deﬁnitions and Local Contracts.
+Our framework produces both the code and its annotations, as well as a set of axioms related
+to our newly deﬁned axiomatics (cf. Fig. 4). However most of the contracts cannot be proved
+automatically by an SMT solver. After a ﬁrst phase in which we tried to perform these proofs
+with Coq, we searched for more generic means to automatize the proof.
+4.1
+Reﬁning the proofs.
+We performed the following steps in order to identify the appropriate set of additional assertions,
+local contracts or lemma to be introduce:
+• we took a fully deﬁned custom code for a linear problem and study means to prove its
+validity: a feasible, optimal solution, while guarantying the convergence of the algorithm.
+• these proofs were then manually generalized through the introduction of numerous in-
+termediate lemmas as annotations in the code. These additional annotations enable the
+automatic proof of the algorithm using an oﬀ-the-shelf SMT solver Alt-Ergo [10].
+• the custom code generation was extended to produce both the actual code and these
+annotations and function contracts, enabling both the generation of the embedded code
+and its proof of functional soundness.
+Another approach is to reﬁne the code into smaller components, as presented in Fig. 6. The
+encoding hides low-level operations to the rest of the code, leading to two kinds of goals:
+• Low level operation (memory and basic matrix operation).
+• High level operation (mathematics on matrices).
+4.2
+Simplifying the code: addressing memory-related issues.
+One of the diﬃculties when analyzing C code are memory related issues. Two diﬀerent pointers
+can alias and reference the same part of the stack. A ﬁne and complex modeling of the memory
+in the predicate encoding, such as separation logic[11] could address these issues.
+Another
+more pragmatic approach amounts to substitute all local variables and function arguments
+with global static variables. Two static arrays cannot overlap since their memory is allocated
+at compile time.
+Since we are targeting embedded system, static variables will also permit to compute and
+reduce memory footprints. However there are two major drawbacks: the code is less readable
+and variables are accessible from any function. These two points usually lead the programmer
+to mistakes but could be accepted in case of code generation. In order to support this we also
+tagged all variables with the function they belong to by preﬁxing each variable with its function
+name.
+10
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+assert getM(MatVar(dX,2,1)) == 2;
+assert getN(MatVar(dX,2,1)) == 1;
+assert getM(MatVar(cholesky,2,1)) == 2;
+assert getN(MatVar(cholesky,2,1)) == 1;
+assert mat_get(MatVar(dX,2,1),0,0) == mat_get(\old(mat_scal(MatVar(cholesky,2,1),-1.0)),0,0);
+assert mat_get(MatVar(dX, 2, 1),1,0) == mat_get(\old(mat_scal(MatVar(cholesky,2,1),-1.0)),1,0);
+Figure 9: Assertion appended to the function of Figure 5
+4.3
+Low-level goals: Proving Matrix operations.
+As explained in previous Section, the matrix computation are encapsulated into smaller func-
+tions. Their contract states the equality between the resulting matrix and the operation com-
+puted.
+The extensionality axiom (mat_eq_def) is required to prove this kind of contract.
+Extensionality means that if two objects have the same external properties then they are equal.
+This axiom belong to the matrix axiomatic but is too general to be used therefore lemmas
+speciﬁc to the matrices size are added for each matrix aﬀectation. This lemma can be proven
+with the previous axioms and therefore does not introduce more assumption.
+The proof remains diﬃcult or hardly automatic for SMT solvers therefore we append addi-
+tional assertions, as sketched in Figure 9, at the end of function stating all the hypothesis of
+the extensionality lemma. Proving these post-conditions is straightforward and smaller goals
+need now to be proven.
+Further split of functions into smaller functions is performed when functions become larger.
+As an example, for operations on matrices of size m2, there is m2 lines of C code manipulating
+arrays and logic. To avoid large goals involving array accesses for SMT solvers when m be-
+comes greater than 10, each operation is encapsulated as a separate function annotated by the
+operation on a single element:
+mat_get(MatVar(dX,2,1),0,0) == mat_get(\old(mat_scal(MatVar(cholesky,2,1),-1.0)),0,0);
+These generated goals are small enough for SMT. The post-condition of the matrix operation
+remains large but the array accesses are abstracted away by all the function call and therefore
+becomes provable by SMT solvers.
+4.4
+High-level goals: IPM speciﬁc properties.
+Proving sophisticated lemmas with non trivial proof is hardly feasible for an SMT solver. To
+support them, we introduced many intermediate lemmas.
+At each proof step (variable ex-
+pansion, commutation, factorization, lemma instantiation, ...) a new lemma is automatically
+introduced. With this method, SMT solvers manage to handle each small step which eventually
+lead to the proof of the initial lemma.
+For example, the post-condition (18) of update_t is not provable by Alt-Ergo. In order
+to prove it, we introduce the lemma (update_t_ensures1) where P1 is ACC(X, t, β), the
+precondition, and P2 is dt =
+γ
+∥c∥∗x the performed update.
+∀x, t, dt; P1 ⇒P2 ⇒ACC(X, t + dt, β + γ)
+(update_t_ensures1)
+Proving the post-condition with SMT solvers is straightforward given the previous lemma
+but again proving the lemma itself is beyond their capabilities. However with the additional
+lemma (update_t_ensures1_l0) the proof becomes obvious to the SMT solver. Indeed the
+11
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+Figure 10: Proof tree for (18) (In green, proven goal, in white, axioms)
+lemma is just the expansion of the ACC deﬁnition.
+∀x, t, dt; P1 ⇒P2 ⇒∥F ′(X) + c(t + dt)∥∗
+x ≤β + γ
+(update_t_ensures1_l0)
+Step by step, we introduce new lemmas to prove the previous ones: e.g. to prove the goal
+(update_t_ensures1_l0) we introduce the following three lemmas:
+∀x, t, dt; P2 ⇒∥c × dt∥∗
+x = γ
+(update_t_ensures1_l3)
+∀x, t, dt; P1 ⇒∥F ′(X) + c × t∥∗
+x ≤β
+(update_t_ensures1_l2)
+∀x, t, dt; P1 ⇒P2 ⇒∥F ′(X) + c(t + dt)∥∗
+x ≤∥F ′(X) + c × t)∥∗
+x + ∥c × dt∥∗
+x
+(update_t_ensures1_l1)
+Each lemma depends on other lemmas, and so do contracts, all this logic results shapes a
+proof tree. The one for the ﬁrst ensures of update_t is presented in Fig. 10.
+These small steps are usually bigger than the application of a tactic in a proof assistant. SMT
+solvers are also more resilient to a change in the source code. For these two reasons we decided
+not to write proofs directly within a proof assistant but to use SMT solvers. Moreover, all these
+intermediate lemmas are eventually automatically generated by the autocoding framework.
+5
+Experimentations
+We implemented the presented approach: considering a provided LP problem, a source ﬁle
+is generated as well as a considerable amount of function contracts and additional lemmas –
+all expressed in ACSL [8], the annotation language of the Frama-C veriﬁcation platform. The
+function contracts specify the functional requirements of this custom-code and instance-speciﬁc
+solver: it computes a feasible and optimal solution in a predictable – and known – number of
+iterations.
+Now, this speciﬁc code has to be validated before being used on the embedded device. We
+rely on Frama-C to perform the formal veriﬁcation process. Each generated annotation becomes
+a proof objective and is submitted to an SMT solver, Alt-Ergo [10], for veriﬁcation. Thanks to
+our introduction of all these intermediate lemmas, each local lemma is proved as well as the
+global function contracts.
+12
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+Note that the generated code is a direct implementation of the chosen primal IPM for LP.
+The main concern here is the proof. We present here our experimentations. First, we address
+issues with respect to the provers (Frama-C and Alt-Ergo) and how we tuned the code and
+proof generation to ease the proofs. Second, we present the results in terms of goals proved or
+not-yet-proved and the time required to perform the proofs.
+5.1
+Limitation of the approach: Asserted lemmas.
+The veriﬁcation is performed thanks to two sets of axioms we developed, supporting (1) the
+deﬁnition of matrices in ACSL or (2) properties of operators in linear programming. While the
+ﬁrst set describing matrices commutation or norm positivity could be proved, it is an additional
+work outside of the scope of our contribution. The second set is more challenging to prove and
+corresponds to the axiomatization of some theorems from [7]. Their deﬁnition as axioms was
+carefully addressed and the number of such axioms minimized.
+We deliberately choose to ignore:
+• the proof of soundness of the Cholesky resolution;
+• the validation of the gradient or Hessian computations;
+• some vector and matrix related properties: eg.
+matrix multiplication associativity or
+norm positivity (scalar product);
+• more involved optimization related theorems used within the proof of optimality, and
+developed in [12].
+All these axioms are potential ﬂaws for the veriﬁcation. One solution could be to translate
+them within a Theorem prover such as Coq [13] and proving them instead of assuming them.
+Translating matrices to a theorem prover would also have the advantage to check the matrix
+axiomatic we wrote. This could be done by providing a bijection between the translation of our
+matrices and matrices deﬁned in Coq libraries like SSReﬂect [14].
+Last, the analytic center has to be provided, at least within the β-neighborhood, which is
+performed automatically through a dedicated algorithm in our experiments. While its existence
+cannot be guaranted in theory, its computation in MPC context can be eased (cf. Remark 2).
+5.2
+Results: Scalability of proof process
+While the custom-code itself ought to be executed on an embedded system with limited compu-
+tation power, the veriﬁcation of its soundness can be performed on a regular desktop computer.
+While all contracts and lemmas were proved, except the set of axioms we assumed (cf.
+previous Section), the time and therefore the scalability of the proof process largely depend on
+the problem size.
+We provide here some ﬁgures regarding the total time required to perform the proofs. The
+veriﬁcation has been performed on 2.6GHz computer running Linux with 4GB of RAM. Alt-
+Ergo does not parallelize computations.
+Total computation time.
+The total proof time directly depends on the size of the input
+problem. This is expected since a n×m problem will manipulate arrays of that size and express
+properties over that many variables.
+We used our framework on a large set of LP problems of various sizes. The boundedness
+constraint of the feasible set (cf. Sec. 2) has been artiﬁcially enforced by adding a hypercube
+13
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+constraint. Therefore problems over n variables have at least 2 × n constraints. In practice, we
+generated about 100 random instances for each pair (n, m) ∈[2, 4] × [3 × n, 5 × n[ and perform
+the proofs with both a 1 second and 10 seconds timeouts, for each goal.
+An interesting outcome is the relative independence of the proof time with respect to the
+actual numerical values of the constraints. Since we recorded the computation time for each
+instance of a (n, m) pair, we compare the experimental results. As an example, for problems
+of size (3, 9), the total computation time ranges in [124s, 127s]. Note that sparse constraints
+will generate more optimized code, minimizing the number of computations, but are likely to
+generate harder problem for the solvers.
+The number of generated goals is impressive: for a problem of size (n, m), we generate
+automatically 129 + 18 × n + 3 × m + 9 × n2 goals. We can see that both the number of proofs
+is linear in m but quadratic in n. Let us now have a closer look at the proof costs depending
+on the category of proof.
+Scalability of proofs.
+In order to precisely keep track of the proof time of each function,
+we stored them in separate ﬁles and recorded the associated proof time. Figure 11 presents
+such results. Files and their proof time have been packaged by clusters depending on their
+ability to scale, as identiﬁed by timeouts. For example one can identify the following clusters:
+lemma denoting the set of ACSL lemmas, atomic denoting local atomic manipulations of matrix
+elements, matrix denoting matrix level operation and atom to mat denoting an intermediary
+results between the last two. We isolate one of the ﬁle from the last cluster : atom to mat*
+since it was longer to prove than the others. Other categories correspond to individual ﬁles im-
+plementing higher level functions of the IPM: update_dt, update_dx, compute_dt, compute_dx
+and compute.
+As expected, some properties are diﬃcult to prove automatically. These scalability issues
+mainly occur in compute_dt, compute_dx and the set_ and set_in clusters. However, the
+associated proofs are not mathematically challenging and the main limitation seems to be caused
+by the Frama-C encoding of goals as SMT proof objectives. The future versions of Frama-C
+may have better memory model, identifying unmodiﬁed variables in predicates, leading to better
+proof times of our generated instances.
+An annotated code, automatically generated by our framework, is accessible at https://
+github.com/davyg/proved_primal, annotations can be found in the header build_primalTest/
+code/primalTest.h which itself includes primalTest_contracts.h the ﬁle containing all the
+function contracts.
+6
+Related work
+Related works include ﬁrst activities related to the validation of numerical intensive control
+algorithms. This article is an extension of Wang et al [15] which was presenting annotations for
+a convex optimization algorithm, namely IMP, but the process was both manual and theoretical:
+the code annotated within Matlab and without machine checked proofs. An other work from the
+same authors [9] presented a similar method than ours but limited to simple control algorithms,
+linear controllers. The required theories in ACSL were both diﬀerent and less general than the
+ones we are proposing here.
+Concerning soundness of convex optimization, Cimini and Bemporad [16] presents a ter-
+mination proof for a quadratic program but without any concerns for the proof of the imple-
+mentation itself. A similar criticism applies to Tøndel, Johansen and Bemporad [17] where
+another possible approach to online linear programming is proposed, moreover it is unclear
+14
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+Each cluster is described by its average time and the timeout(red lines) setting of the SMT
+solver i.e. an upper bound on the maximum time for each goal. As an example, the analyzed
+instance of size 5 × 33 produces 195 goals, all proved. It requires less than one second for the
+goals of categories lemma, atomic, update_t, update_x and compute; less than 10 seconds for
+the category matrix and 50s for the category atom to mat. Both compute_dt and compute_dx
+are proved with a timeout of 150s. The isolated ﬁle atom to mat* requires a higher timeout of
+500s to achieve all proofs. Note that the average proof time of goals in cluster compute_dt is
+about 40s so only a subset (2 out of 6) of the goals require 150s to be proved.
+Figure 11: Proof-Time required per proof or ﬁle category.
+how this could scale and how to extend it to other convex programs. Roux et al [18, 19] also
+presented a way to certify convex optimization algorithm, namely SDP and its sum-of-Squares
+(SOS) extension, but the certiﬁcation is done a posteriori which is incompatible with online
+optimization.
+A last set of works, e.g. the work of Boldo et al [20], concerns the formal proof of complex
+numerical algorithms, relying only on theorem provers. Although code can be extracted from
+the proof, the code is usually not directly suitable for embedded system: it is too slow and
+requires diﬀerent compilation steps which should also be proven to have the same guarantee
+than our proposed method.
+7
+Conclusion and future works
+This article focuses on the proof a Interior Point Method (IPM) convex optimization algorithm
+as used in state-of-the-art linear Model Predictive Control (MPC). The current setting is the
+simplest one: a primal IPM for Linear Programming problems.
+In these MPC approaches convex optimzation engines are autocoded from an instance spec-
+iﬁcation and embed on the cyber-physical system. Our approach relies on the autocoding frem-
+work to generate, along the code, the speciﬁcation and the required proof artifacrs. Once both
+the code and these elements are generated, the proof is achieved automatically by Frama-C,
+using deductive methods (weakest precondition) and SMT solvers (Alt-Ergo).
+15
+
+Veriﬁcation of an IPM for linear MPC
+Davy, Feron, Garoche, Henrion
+This is the ﬁrst proof, at code level, of an IPM algorithm. Still the proposed approach is
+a proof-of-concept and has some identiﬁed limitations. First, we worked with real variables to
+concentrate on runtime errors, termination and functional speciﬁcation and left ﬂoating points
+errors for a future work. Then, some mathematical lemmas were asserted since our goal was to
+focus on the algorithm itself rather than proving that a norm ought to be positive. The set of
+asserted lemmas is still limited and reasonable. Last the setting is simple: a primal algorithm for
+LP. The proposed approach is a ﬁrst step and can naturally be extended to more sophisticated
+Interior Point Methods (IPM): considering primal-dual algorithms, or quadratic constraints.
+The limitation is to restrict to IPM algorithms that guaranty the computation of a feasible
+solution. For example this does not include homogenized versions [21, §11, Bibliography] of
+IPM that do not compute iterates within the feasible set.
+Another outcome is the general approach to deal with the proof of complex numerical algo-
+rithms which are autocoded from an instance description. Code generation is now widespread
+for embedded devices, especially in control, and could be ﬁtted with formal speciﬁcation and
+proof artifacts, to automatize the proof at code level. This would require further developments
+to axiomatize the associated mathematical theories.

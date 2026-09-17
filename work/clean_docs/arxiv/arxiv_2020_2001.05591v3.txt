@@ -1,0 +1,1091 @@
+Distributed, partially collapsed MCMC for Bayesian nonparametrics
+Avinava Dubey∗
+Michael M. Zhang∗
+Eric P. Xing
+Sinead A. Williamson
+Carnegie Mellon Univ.
+Princeton University
+Carnegie Mellon Univ.
+Univ. of Texas Austin
+Abstract
+Bayesian nonparametric (BNP) models pro-
+vide elegant methods for discovering under-
+lying latent features within a data set, but
+inference in such models can be slow. We ex-
+ploit the fact that completely random mea-
+sures, which commonly-used models like the
+Dirichlet process and the beta-Bernoulli pro-
+cess can be expressed using, are decompos-
+able into independent sub-measures.
+We
+use this decomposition to partition the la-
+tent measure into a ﬁnite measure contain-
+ing only instantiated components, and an
+inﬁnite measure containing all other com-
+ponents.
+We then select diﬀerent inference
+algorithms for the two components: uncol-
+lapsed samplers mix well on the ﬁnite mea-
+sure, while collapsed samplers mix well on the
+inﬁnite, sparsely occupied tail. The resulting
+hybrid algorithm can be applied to a wide
+class of models, and can be easily distributed
+to allow scalable inference without sacriﬁcing
+asymptotic convergence guarantees.
+1
+INTRODUCTION
+Bayesian nonparametric (BNP) models are a ﬂexi-
+ble class of models whose complexity adapts to the
+data under consideration.
+BNP models place priors
+on inﬁnite-dimensional objects, such as partitions with
+inﬁnitely many blocks; matrices with inﬁnitely many
+columns; or discrete measures with inﬁnitely many
+atoms. A ﬁnite set of observations is assumed to be
+generated from a ﬁnite—but random—subset of these
+components, allowing ﬂexibility in the underlying di-
+mensionality and providing the ability to incorporate
+∗denotes equal contribution
+Proceedings of the 23rdInternational Conference on Artiﬁ-
+cial Intelligence and Statistics (AISTATS) 2020, Palermo,
+Italy.
+PMLR: Volume 108.
+Copyright 2020 by the au-
+thor(s).
+previously unseen properties as our dataset grows.
+While the ﬂexibility of these models is a good ﬁt for
+large, complex data sets, distributing existing infer-
+ence algorithms across multiple machines is challeng-
+ing. If we explicitly represent subsets of the underlying
+inﬁnite-dimensional object—for example, using a slice
+sampler—we can face high memory requirements and
+slow convergence. Conversely, if we integrate out the
+inﬁnite-dimensional object, we run into problems due
+to induced global dependencies.
+Moreover, a key goal of distributed algorithms is to
+minimize communication between agents. This can be
+achieved by breaking the algorithm into independent
+sub-algorithms, which can be run independently on
+diﬀerent agents. In practice, we usually cannot split
+an MCMC sampler on a Bayesian hierarchical model
+into entirely independent sub-algorithms since there
+are typically some global dependencies implied by the
+hierarchy. Instead, we make use of conditional inde-
+pendencies to temporarily partition our algorithm.
+Contributions:
+In this paper, we propose a dis-
+tributable sampler for models derived from completely
+random measures, which uniﬁes exact parallel infer-
+ence for a wide class of Bayesian nonparametric priors,
+including the popularly used Dirichlet process (Fergu-
+son, 1973) and the beta-Bernoulli process (Griﬃths
+and Ghahramani, 2011). After reviewing the appro-
+priate background material, we ﬁrst introduce general
+recipes for (non-distributed) partially collapsed sam-
+plers appropriate for a wide range of BNP models, fo-
+cusing on the beta-Bernoulli process and the Dirichlet
+process as exemplars. We then demonstrate that these
+methods can be easily extended to a distributed set-
+ting. Finally we provide experimental results for our
+hybrid and distributed sampler on DP and BB infer-
+ence.
+2
+RELATED WORK
+Completely random measures (CRMs, Kingman, 1967)
+are random measures that assign independent masses
+to disjoint subsets of a space. For example, the gamma
+process assigns a gamma-distributed mass to each sub-
+arXiv:2001.05591v3  [stat.ML]  4 Mar 2020
+
+Distributed, partially collapsed MCMC for Bayesian nonparametrics
+Table 1: Comparison of various parallel and distributed inference algorithm proposed for BNPs. Other CRMs
+include gamma-Poisson process, beta-negative binomial process etc.
+Methods
+Data
+Exact
+Parallel
+Distributed
+BN Processes
+Size
+Beta-Bernoulli
+Other
+DP
+HDP
+Pitman-Yor
+Millions
+Process
+CRMs
+Process
+Smyth et al. 2009
+1M
+
+✓
+✓
+
+
+✓
+✓
+
+Doshi-Velez and Ghahramani 2009
+.01M
+✓
+
+
+✓
+
+
+
+
+Doshi-Velez et al. 2009b
+.1M
+
+✓
+✓
+✓
+
+
+
+
+Williamson et al. 2013
+1M
+✓
+✓
+
+
+
+✓
+✓
+
+Chang and Fisher 2013
+0.3M
+✓
+✓
+
+
+
+✓
+✓
+
+Dubey et al. 2014
+10M
+✓
+✓
+
+
+
+
+
+✓
+Ge et al. 2015
+0.1M
+✓
+✓
+✓
+
+
+✓
+✓
+
+Yerebakan and Dundar 2017
+0.05M
+✓
+✓
+✓
+
+
+✓
+
+
+This paper
+1M
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+set. Other examples include the beta process (Hjort,
+1990) and the Poisson process. The distribution of a
+CRM is completely determined by its Lévy measure,
+which controls the size and location of atoms.
+Many nonparametric distributions can be expressed
+in terms of CRMs. For example, if we sample B =
+P∞
+i=1 µiδθi from a (homogeneous) beta process, and
+generate a sequence of subsets Zi where θk ∈Zi w.p.
+µk, then we obtain an exchangeable distribution over
+sequences of subsets known as the beta-Bernoulli pro-
+cess (Thibaux and Jordan, 2007), which is related to
+the Indian buﬀet process (IBP, Ghahramani and Grif-
+ﬁths, 2005). If we sample G from a gamma process on
+Ωwith base measure αH, then D(·) = G(·)/G(Ω) is
+distributed according to a Dirichlet process with con-
+centration parameter α and base measure H.
+Inference in such models tend to fall into three cat-
+egories: uncollapsed samplers that alternate between
+sampling the latent measure and the assignments (Ish-
+waran and Zarepour, 2002; Paisley and Carin, 2009;
+Zhou et al., 2009; Walker, 2007; Teh et al., 2007);
+collapsed samplers where the latent measure is inte-
+grated out (Ishwaran and James, 2011; Neal, 2000;
+Ghahramani and Griﬃths, 2005); and optimization-
+based methods that work with approximating distri-
+butions where the parameters are assumed to have a
+mean-ﬁeld distribution (Blei and Jordan, 2006; Doshi-
+Velez et al., 2009a).
+Collapsed methods often mix slowly due to the de-
+pendency between assignments, while blocked updates
+mean uncollapsed methods typically have good mix-
+ing properties at convergence (Ishwaran and James,
+2011). Uncollapsed methods are often slow to incor-
+porate new components, since they typically rely on
+sampling unoccupied components from the prior. In
+high dimensions, such components are unlikely to be
+close to the data. Conversely, collapsed methods can
+make use of the data when introducing new points,
+which tends to lead to faster convergence (Neal, 2000).
+Other methods incorporate both uncollapsed and col-
+lapsed sampling, resulting in a “hybrid”, partially col-
+lapsed sampler, although such approaches have been
+restricted to speciﬁc models. Doshi-Velez and Ghahra-
+mani (2009) introduced a linear time accelerated Gibbs
+sampler for conjugate IBPs that eﬀectively marginal-
+ized over the latent factors, while more recently Yere-
+bakan and Dundar (2017) developed a sampler by par-
+tially marginalizing latent random measure for DPs.
+These methods can be seen as special cases of our hy-
+brid framework (Section 3), but do not generalize to
+the distributed setting.
+Several inference algorithms allow computation to be
+distributed across multiple machines—although again,
+such algorithms are speciﬁc to a single model. The ap-
+proximate collapsed algorithm of Smyth et al. (2009)
+is only developed for Dirichlet process-based models,
+and lacks asymptotic convergence guarantees.
+Dis-
+tributed split-merge methods have been developed
+for Dirichlet process-based models, but not extended
+to more general nonparametric models (Chang and
+Fisher, 2013, 2014). Partition-based algorithms based
+on properties of CRMs have been developed for Dirich-
+let process- and Pitman-Yor process-based models
+(Williamson et al., 2013; Dubey et al., 2014), but it
+is unclear how to extend to other model families. A
+low-communication, distributed-memory slice sampler
+has been developed for the Dirichlet process, but since
+it is based on an uncollapsed method it will tend to
+perform poorly in high dimensions (Ge et al., 2015).
+Doshi-Velez et al. (2009b) developed an approximate
+distributed inference algorithm for the Indian buﬀet
+process which is superﬁcially similar to our distributed
+beta-Bernoulli sampler. However, their approach al-
+lows all processors to add new features, which will lead
+to overestimating the number of features. We contrast
+
+Avinava Dubey, Michael Zhang, Eric P. Xing, Sinead A. Williamson
+these methods in Table 1.
+3
+HYBRID INFERENCE FOR
+CRM-BASED MODELS
+By deﬁnition, completely random measures can be de-
+composed into independent random measures. If the
+CRM has been transformed in some manner we can
+often still decompose the resulting random measure
+into independent random measures – for example, a
+normalized random measure can be decomposed as a
+mixture of normalized random measures. Such repre-
+sentations allow us to decompose our inference algo-
+rithms, and use diﬀerent inference techniques on the
+constituent measures.
+As discussed in Section 2, collapsed and uncollapsed
+methods both have advantages and disadvantages.
+Loosely, collapsed methods are good at adding new
+components and exploring the tail of the distribution,
+while uncollapsed methods oﬀer better mixing in es-
+tablished clusters and easy parallelization. We make
+use of the decomposition properties of CRMs to parti-
+tion our model into two components: One containing
+(ﬁnitely many) components currently associated with
+multiple observations, and one containing the inﬁnite
+tail of components.
+3.1
+Models Constructed Directly From
+CRMs
+Consider a generic hierarchical model,
+M :=
+∞
+X
+k=1
+µkδθk ∼CRM(ν(dµ)H(dθ))
+Zi,k ∼f(µk),
+Xi =
+∞
+X
+k=1
+g(Zi,k, θk) + ϵi
+(1)
+where ν is a measure on R+; H is a measure on the
+space of parameters Θ; g(·, ·) is some deterministic
+transformation such that g(0, θ) = 0 for all θ ∈Θ;
+ϵi is a noise term; and f(·) is a likelihood that forms a
+conjugate pair with M, i.e. the posterior distribution
+P(M ∗|Z) is a CRM in the same family. The indices
+i = 1, . . . , n refer to the observations and the indices
+k = 1, 2, . . . refer to the features. This framework in-
+cludes exchangeable feature allocation models such as
+the beta-Bernoulli process (Ghahramani and Griﬃths,
+2005; Thibaux and Jordan, 2007), the inﬁnite gamma-
+Poisson feature model (Titsias, 2008), and the beta
+negative binomial process (Zhou et al., 2012; Broder-
+ick et al., 2014). We assume, as is the case in these ex-
+amples, that both collapsed and uncollapsed posterior
+inference algorithms can be described. We also assume
+for simplicity that the prior contains no ﬁxed-location
+atoms, although this assumption could be relaxed (see
+Algorithm 1 Hybrid Beta-Bernoulli Sampler
+1: while not converged do
+2:
+Select J
+3:
+Sample µk ∼Beta(mk, n −mk + c), ∀k ≤J
+4:
+Sample θk ∼p(θk|H, Z, X), ∀k ≤J
+5:
+for i = 1, . . . , N do
+6:
+Sample {Zi,k}n
+i=1,k≤J according to Eq. 4
+7:
+Sample {Zi,k}n
+i=1,k>J according to Eq. 5
+8:
+Metropolis-Hastings sample Zi,k′ for k′ ∈
+{k : Zi,k = 1, P
+j̸=i Zj,k = 0}.
+9:
+end for
+10: end while
+Broderick et al., 2018).
+Lemma
+1
+(Broderick
+et
+al.
+2018).
+If
+M
+∼
+CRM(ν(dµ)H(dθ)) and Zi,k ∼f(µk) for i = 1, . . . , n,
+and if M and f form a conjugate pair, then the
+posterior P(M ∗|{Zi}) can be decomposed into two
+CRMs, each with known distribution.
+If K is the
+number of features for which P
+i Zi,k > 0, the ﬁrst,
+M ∗
+≤K = PK
+k=1 µ∗
+kδθk, is a ﬁnite measure with ﬁxed-
+location atoms at locations θk : P
+i Zi,k > 0.
+The
+distribution over the corresponding weights is propor-
+tional to ν(dµ) Qn
+i=1 f(Zi,k|µ). The second, with in-
+ﬁnitely many random-location atoms, has Lévy mea-
+sure ν(dµ)H(dθ) (f(0|µ))n.
+Based on Lemma 1, we partition M ∗into a ﬁnite CRM
+M ∗
+≤J = PJ
+k=1 µ∗
+kδθk for some J ≤K, that contains all,
+or a subset of, the ﬁxed-location atoms; and an inﬁnite
+CRM M ∗
+>J that contains the remaining atoms.
+We
+use an uncollapsed sampler to sample M ∗
+≤J|{Zi,k}k≤K,
+and then sample {Zi,k}k≤K|X, M ∗
+ﬁxed. Then, we use a
+collapsed sampler to sample the allocations Zi,k : k >
+J. The size J should be changed periodically to make
+sure J ≤K to avoid explicitly instantiating atoms that
+are not associated with data. In our experiments, we
+set J = K at the beginning of each iteration.
+Example 1: Beta-Bernoulli Process. As a spe-
+ciﬁc example, consider the beta-Bernoulli process. Let
+B := P∞
+k=1 µkδθk ∼BetaP(α, c, H) be a homoge-
+neous beta process (Thibaux and Jordan, 2007), and
+let Zi,k ∼Bernoulli(µk). The posterior is given by
+B∗|Z ∼BetaP
+cα + P
+k mk
+c + n
+, c + n, cαH + P
+k mkδθk
+cα + P
+k mk
+
+where mk = PN
+i=1 Zi,k.
+In this case the following
+lemma helps us in decomposing the posterior distri-
+bution:
+Lemma 2 (Thibaux and Jordan 2007). If K is the
+number of features where P
+i Zi,k > 0 and J ≤K,
+we can decompose the posterior distribution of beta-
+
+Distributed, partially collapsed MCMC for Bayesian nonparametrics
+Bernoulli process as as B∗= B∗
+≤J + B∗
+>J where
+B∗
+≤J ∼BetaP
+ PJ
+k=1 mk
+c + n
+, c + n,
+P
+k mkδθk
+PJ
+k=1 mk
+!
+B∗
+>J ∼BetaP
+
+cα
+c + n, c + n,
+cαH + P
+k>J mkδθk
+cα + P
+k>J mk
+
+(2)
+We note that the atom sizes of B∗
+≤J are Beta(mk, n −
+mk + c) random variables.
+This allows us to split
+the beta-Bernoulli process into two independent fea-
+ture selection mechanisms: one with a ﬁnite number
+of currently instantiated features, and one with an un-
+bounded number of features.
+The likelihood of a given data point, given the latent
+variables and other data points (written as P(Xi|−)
+for space reasons), can be written as
+p(Xi|−) =
+Z
+p(Xi|Zi, θ1, . . . , θJ, . . . , θK)
+p(θJ+1, . . . , θK|Z−i, X−i)dθJ+1 · · · dθK.
+(3)
+When working with conjugate likelihoods, we can typ-
+ically evaluate the integral term in Equation 3 ana-
+lytically (see Ghahramani and Griﬃths (2005) for the
+case of Gaussian prior and linear Gaussian likelihood
+for J = 0). If this is not possible, we can sample θk
+for J ≥k ≥K as auxiliary variables (Doshi-Velez and
+Ghahramani, 2009).
+This formulation of the likelihood, combined with
+the partitioning of the Bernoulli process described in
+Equation 2, gives us the hybrid sampler, which we
+summarize in Algorithm 1. For each data point Xi,
+we sample Zi,k in a three step manner. For k ≤J,
+P(Zi,k = z|−) ∝
+(
+µkp(Xi|Zi,k = 1, −)
+z = 1
+(1 −µk)p(Xi|Zi,k = 0, −)
+z = 0.
+(4)
+where p(Xi|Zi,k = 1, −) is given by Equation 3 with
+Zi,k set to 1. For k > J and mk > 0, we have
+P(Zi,k = z|Z−(i,k), Xi) ∝
+(
+mkp(Xi|Zi,k = 1, −)
+z = 1
+(n −mk)p(Xi|Zi,k = 0, −)
+z = 0.
+(5)
+where p(Xi|Zi,k = 1, −) is given by Equation 3 with
+Zi,k set to 0. Finally, we propose adding Poisson(α/n)
+new features, accepting using a Metropolis-Hastings
+step. Once we have sampled the Zi,k, for every instan-
+tiated feature k ≤J, we sample µk ∼Beta(mk, n −
+mk + c) and its corresponding parameters θk
+∼
+p(θk|H, Z, X).
+We note that similar algorithms can be easily derived
+for other nonparmetric latent feature models such as
+those based on the inﬁnite gamma-Poisson process
+(Thibaux and Jordan, 2007) and the beta-negative Bi-
+Algorithm 2 Hybrid DPMM Sampler
+1: while not converged do
+2:
+Select J
+3:
+Sample B∗∼Beta(˜n, n −˜n + α)
+4:
+Sample (π1, . . . , πJ) ∼Dir(m1, . . . , mJ)
+5:
+For k ≤J, sample θk ∼p(θk|H, {Xi : Zi = k})
+6:
+Sample Zi, ∀i = 1, . . . , n, using Equation 7
+7: end while
+nomial process (Zhou et al., 2012; Broderick et al.,
+2018).
+3.2
+Models Based on Transformations of
+Random Measures
+While applying transformations to CRMs means the
+posterior is no longer directly decomposable, in some
+cases we can still apply the above general ideas.
+Example 2: Dirichlet Process. As noted in Sec-
+tion 2, the Dirichlet process with concentration pa-
+rameter α and base measure H can be constructed by
+normalizing a gamma process with base measure αH.
+If the Dirichlet process is used as the prior in a mix-
+ture model (DPMM), the posterior distribution condi-
+tioned on the cluster allocations Z1, . . . , Zn, having K
+unique clusters is again a Dirichlet process:
+D∗|Z1, . . . Zn ∼DP(α + n, αH + P
+k<K mkδθk
+n + α
+) (6)
+where mk = P
+i δ(Zi, k) and K is the number of clus-
+ters with mk > 0. In this case also the following lemma
+helps us in decomposing the posterior.
+Lemma 3. Assuming J ≤K, and ˜n = P
+k≤J mk, we
+can decompose the posterior of DP as
+D∗|Z1, . . . , Zn = B∗D∗
+≤J + (1 −B∗)D∗
+>J
+where
+D∗
+≤J|Z1, . . . , Zn ∼DP(˜n,
+P
+k≤J mkδθk
+˜n
+)
+D∗
+>J|Z1, . . . , Zn ∼DP(α + n −˜n,
+αH + P
+k>J mkδθK
+α + n −˜n
+)
+B∗∼Beta(˜n, n −˜n + α)
+Proof. This is a direct extension of the fact that the
+Dirichlet process has Dirichlet-distributed marginals
+(Ferguson, 1973).
+See Chapter 3 of Ghosh and Ra-
+mamoorthi (2003) for a detailed analysis.
+We note that the posterior atom weights (π1, . . . , πJ)
+for the ﬁnite component are distributed according
+to Dirichlet(m1, . . . , mJ), and can easily be sampled
+as part of an uncollapsed sampler.
+Conditioned on
+{πk, θk : k ≤J} and B∗we can sample the cluster
+
+Avinava Dubey, Michael Zhang, Eric P. Xing, Sinead A. Williamson
+allocation, Zi of point Xi as
+P(Zi = k|−) ∝
+
+
+
+
+
+
+
+
+
+B∗πkf(xn; θk)
+k ≤J
+(1−B∗)mk
+P
+j>K mj+αfk(xn)
+J < k ≤K
+(1−B∗)α
+P
+j>K mj+αfH(xn)
+k = K + 1
+(7)
+where f(Xi; θk) is the likelihood for each mixing
+component; fk(Xi) =
+R
+Θ f(Xi; θ)p(θ|{Xj
+: Zj
+=
+k, j ̸= i})dθ is the conditional probability of xi given
+other members of the kth cluster; and fH(xi) =
+R
+Θ f(xi; θ)H(dθ). This procedure is summarized in Al-
+gorithm 2.
+Example 3: Pitman-Yor processes The Pitman-
+Yor process (Perman et al., 1992; Pitman and Yor,
+1997) is a distribution over probability measures, pa-
+rameterized by 0 ≤σ < 1 and α > −σ, that is ob-
+tained from a σ-stable CRM via a change of mea-
+sure and normalization. Provided α > 0, it can also
+be represented as a Dirichlet process mixture of nor-
+malized σ-stable CRMs (Lemma 22, Pitman and Yor,
+1997).
+This representation allows us to decompose
+the posterior distribution into a beta mixture of a
+ﬁnite-dimensional Pitman-Yor process and an inﬁnite-
+dimensional Pitman-Yor process. We provide more de-
+tails in the supplementary section A.
+Example 4:
+Hierarchical Dirichlet processes
+We can decompose the hierarchical Dirichlet process
+(HDP, Teh et al., 2006) in a manner comparable to
+the Dirichlet process, allowing our hybrid sampler to
+be used on the HDP. For space reasons, we defer dis-
+cussion to the supplementary section B.
+4
+DISTRIBUTED INFERENCE FOR
+CRM-BASED MODELS
+The sampling algorithms in Section 3 can easily be
+adapted to a distributed setting, where data are parti-
+tioned across several P machines and communication
+is limited.
+In this setting, we set J = K (i.e. the
+number of currently instantiated features) after every
+communication step. We instantiate the ﬁnite mea-
+sure (M ∗
+≤J in the case of CRMs, D∗
+>J for DPMMs),
+with globally shared atom sizes and locations, on all
+processors.
+We then randomly select one out of P processors by
+sampling P ∗∼Uniform(1, . . . , P).
+On the remain-
+ing P −1 processors, we sample the allocations Zi us-
+ing restricted Gibbs sampling (Neal, 2000), enforcing
+Zi,k = 0 for k > J. When working with DPMMs, this
+means that we only need to calculate cluster probabil-
+ities that depend on the instantiated measure D∗
+≤J. In
+the CRM case, it means that we avoid the integral in
+Equation 3, and hence avoid any dependence on Z−i
+or X−i when conditioning on M ∗
+≤J. In both cases, this
+Algorithm 3 Distributed Beta Bernoulli Sampler
+1: procedure Local({Xi, Zi}, P)
+▷Global variables J, P ∗, {θk, µk}J
+k=1, n
+2:
+for k ≤J do
+3:
+Sample {Zi,k} according to (4)
+4:
+end for
+5:
+if P = P ∗then
+6:
+For k > J, sample Zi,k according to (5)
+7:
+Sample Poisson(α/n) new features
+8:
+end if
+9: end procedure
+10: procedure Global({Xi, Zi})
+11:
+Gather feature counts mk and parameter suﬃ-
+cient statistics Ψk from all processors.
+12:
+Let J be the number of instantiated features.
+13:
+For k : mk > 0, sample
+µk ∼Beta(mk, n −mk + c)
+θk ∼p(θk|Ψk, H)
+14:
+Sample P ∗∼Uniform(1, . . . , P)
+15: end procedure
+means that we do not need knowledge of the feature
+allocations on other processors, and can sample the Zi
+independent of each other.
+On the remaining processor P ∗, we sample the Zi us-
+ing unrestricted Gibbs sampling. Let P∗be the set of
+indices of data points on processor P ∗. Since we know
+that Zj,k = 0 for all j ̸∈P∗, then we can calculate
+the full suﬃcient statistics for features k > J without
+knowledge of data or latent features on other proces-
+sors. While P(Zi|−) does depend on {Zj, Xj : j ∈P},
+it is independent of {Zj, Xj : j ̸∈P} conditioned on
+D∗
+≤J (or M ∗
+≤J) plus the fact that Zj,k = 0 for all
+j ̸∈P∗, so can be calculated without further infor-
+mation from the other processors.
+At each global step, we gather the suﬃcient statistics
+from all instantiated clusters – from both the ﬁnite
+component M ∗
+≤J / D∗
+≤J and the inﬁnite component
+M ∗
+>J / D∗
+>J – and sample parameters for those clus-
+ters. We then create a new partition, redeﬁning J as
+the current number of instantiated component param-
+eters.
+In the case of the DPMM, we also resample
+B ∼Beta(N, α). We summarize the distributed algo-
+rithm for the special cases of the beta-Bernoulli pro-
+cess and the DPMM in Algorithms 3 and 4 and for
+PYMM in algorithm 6 in supplementary.
+4.1
+Warm-start Heuristics
+In our distributed approach, only 1/P of the data
+points eligible to start a new cluster or feature, mean-
+
+Distributed, partially collapsed MCMC for Bayesian nonparametrics
+Algorithm 4 Distributed DPMM Sampler
+1: procedure Local({Xi, Zi})
+▷Global variables J, P ∗, {θk, πk}J
+k=1, B∗
+2:
+if P = P ∗then
+3:
+Sample Zi according to (7)
+4:
+else
+5:
+P(Zi = k) ∝πkf(Xi; θk)
+6:
+end if
+7: end procedure
+8: procedure Global({Xi, Zi})
+9:
+Gather cluster counts mk and parameter suﬃ-
+cient statistics Ψk from all processors.
+10:
+Sample B∗∼Beta(n, α)
+11:
+Let J be the number of instantiated clusters.
+12:
+Sample (π1, . . . , πJ) ∼Dir(m1, . . . , mJ)
+13:
+For k : mk > 0, sample θk ∼p(θk|Ψk, H).
+14:
+Sample P ∗∼Uniform(1, . . . , P)
+15: end procedure
+ing that the rate at which new clusters/features are
+added will decrease with the number of processors.
+This can lead to slow convergence if we start with too
+few clusters. To avoid this problem, we initialize our
+algorithm by allowing all processors to instantiate new
+clusters. At each global step, we decrease the number
+of randomly selected processors eligible to instantiate
+new clusters, until we end up with a single proces-
+sor. This approach tend to over-estimate the number
+of clusters. However, the procedure acts in a manner
+similar to simulated annealing, by encouraging large
+moves early in the algorithm but gradually decreas-
+ing the excess stochasticity until we are sampling from
+the correct algorithm. We note that a sampler with
+multiple processors instantiating new clusters is not a
+correct sampler until we revert to a single processor
+proposing new features, because correct MCMC sam-
+plers are invariant to its starting position.
+5
+EXPERIMENTAL EVALUATION
+While our primary contribution is in the development
+of distributed algorithms, we ﬁrst consider, in Sec-
+tion 5.1, the performance of the hybrid algorithms de-
+veloped in Section 3 in a non-distributed setting. We
+show that this performance extends to the distributed
+setting, and oﬀers impressive scaling, in Section 5.2.
+5.1
+Evaluating the Hybrid Sampler
+We begin by considering the performance of the hybrid
+samplers introduced in Section 3 in a non-distributed
+setting. For this, we focus on the Dirichlet process,
+since there exist a number of collapsed and uncollapsed
+inference algorithms; we expect similar results under
+Figure 1: Synthetic data experiments. Comparison of
+F1 scores over iteration for the collapsed, uncollapsed
+and hybrid samplers for growing dimensions.
+other models.
+We compare the hybrid sampler of Algorithm 2 with
+a standard collapsed Gibbs sampler and an uncol-
+lapsed sampler based on Algorithm 8 of Neal (2000).
+Algorithm 8 collapses occupied clusters and instanti-
+ates a subset of unoccupied clusters; we modify this
+to instantiate the atoms associated with unoccupied
+clusters.
+Concretely, at each iteration, we sample
+weights for the K instantiated clusters plus U unin-
+stantiated clusters as (π1, . . . , πK, πK+1, . . . , πK+U) ∼
+Dir
+ m1, . . . , mK, α
+J , . . . , α
+J
+
+, and sample locations for
+the uninstantiated clusters from the base measure H.
+Note that this method can be distributed easily.
+Figure 1 shows convergence plots for the three algo-
+rithms. The data set is a D dimensional synthetic data
+set consisting of 100 observations of Gaussian mixtures
+with 2 true mixture components centered at 5 × {1}D
+and −5 × {1}D with an identity covariance matrix.
+While the three algorithms perform comparably on
+low-dimensional data, as the dimension increases the
+performance of the uncollapsed sampler degrades
+much more than the collapsed sampler.
+This is be-
+cause in high dimensions, it is unlikely that a proposed
+parameter will be near our data, so the associated like-
+lihood of any given data point will be low. This is in
+contrast to the collapsed setting, where we integrate
+over all possible locations. While the hybrid method
+performs worse in high dimensions than the collapsed
+method, it outperforms the uncollapsed method.
+The synthetic data in Figure 1 has fairly low-
+dimensional structure, so we do not see negative eﬀects
+due to the poor mixing of the collapsed sampler. Next,
+we evaluate the algorithms on the CIFAR-100 dataset
+(Krizhevsky, 2009). We used PCA to reduce the di-
+mension of the data to between 8 and 64, and plot
+the test set log likelihood over time in Figure 2. Each
+marker represents a single iteration. We see that the
+uncollapsed sampler requires more iterations to con-
+
+Avinava Dubey, Michael Zhang, Eric P. Xing, Sinead A. Williamson
+101
+102
+103
+Time (s)
+21.0
+20.8
+20.6
+20.4
+Test log-likelihood
+dimensions = 8
+hybrid
+collapsed
+uncollapsed
+101
+102
+103
+Time (s)
+35.5
+35.0
+34.5
+34.0
+Test log-likelihood
+dimensions = 16
+101
+102
+103
+Time (s)
+57
+56
+55
+54
+Test log-likelihood
+dimensions = 32
+101
+102
+103
+Time (s)
+88
+86
+84
+82
+80
+Test log-likelihood
+dimensions = 64
+Figure 2: Test log-likelihood with time on CIFAR-100 dataset as the dimensionality increases from 8 to 64.
+verge than the collapsed sampler; however since each
+iteration takes less time, in some cases the wall time
+to convergence is slower. The hybrid method has com-
+parable iteration time to the collapsed, but, in gen-
+eral, converges faster. We see that, even without tak-
+ing advantage of parallelization, the hybrid method is
+a compelling competitor to pure-collapsed and pure-
+uncollapsed algorithms.
+5.2
+Evaluating the Distributed Samplers
+Here, we show that the distributed inference algo-
+rithms introduced in Section 4 allow inference in BNP
+models to be scaled to large datasets, without sac-
+riﬁcing accuracy. We focus on two cases: the beta-
+Bernoulli process (Algorithm 3) and the Dirichlet pro-
+cess (Algorithm 4)1.
+5.2.1
+Beta-Bernoulli Process
+We evaluate the beta-Bernoulli sampler on synthetic
+data based on the “Cambridge” dataset, used in the
+original IBP paper (Griﬃths and Ghahramani, 2011),
+where each datapoint is the superposition of a ran-
+domly selected subset of four binary features of di-
+mension 36, plus Gaussian noise with standard devia-
+tion 0.5.2
+We model this data using a linear Gaus-
+sian likelihood, with Z ∼Beta-Bern(α, 1), Ak ∼
+Normal(0, σ2
+AI), Xn ∼Normal
+ P
+k znkAk, σ2
+XI
+
+We initialized to a single feature, and ran the hybrid
+sampler for 1,000 total observations with a synchro-
+nization step every 5 iterations, distributing over 1, 4,
+8, 16, 32, 64 and 128 processors.
+We ﬁrst evaluate the hybrid algorithm under a “cold
+start”, where only one processor is allowed to introduce
+new features for the entire duration of the sampler.
+In the top left plot of Figure 3, we see that the cold
+start results in slow convergence of in the test set log
+likelihood for large numbers of processors. We can see
+in the bottom left plot of Figure 3 that the number of
+1Our
+code
+is
+available
+online
+at
+https://github.com/michaelzhang01/hybridBNP
+2See Figure 6 in the supplement for more details
+features grows very slowly, as only 1/P processors are
+allowed to propose new features in the exact setting.
+Next, we explore warm-start initialization, as de-
+scribed in Section 4.1. For the ﬁrst one-eighth of the
+total number of MCMC iterations, all processors can
+propose new features; after this we revert to the stan-
+dard algorithm. The top central plot of Figure 3 shows
+predictive log likelihood over time, and the bottom
+central plot shows number of features. We see that
+convergence is signiﬁcantly improved relative to the
+cold-start experiments. Since we revert to the asymp-
+totically correct sampler, the ﬁnal number of features
+is generally close to the true number of features, 4.3
+Additionally, we see that convergence rate increases
+monotonically in the number of processors.
+Next, we allowed all processors to propose new features
+for the entire duration (“always-hot”).
+This setting
+approximately replicates the behavior of the parallel
+IBP sampler of Doshi-Velez et al. (2009b). In the top
+right plot of Figure 3, we can see that all experiments
+roughly converge to the same test log likelihood. How-
+ever, the number of features introduced (bottom right
+plot) is much greater than the warm start experiment,
+grows with the number of processors. Moreover, the
+diﬀerence in convergence rates between processors is
+not as dramatic as in the warm-start trials.
+Next, we demonstrate the scalability of our distributed
+algorithm on a massive synthetic example, showing
+it can be used for large-scale latent feature models.
+We generate one million “Cambridge” synthetic data
+points, as described for the previous experiments, and
+distribute the data over 256 processors. This experi-
+ment represents the largest experiment ran for a beta-
+Bernoulli process algorithm (the next largest being
+100,000 data points, in Doshi-Velez et al. 2009b). We
+limited the sampler to run for one day and completed
+860 MCMC iterations. In Figure 4, we see in the test
+set log likelihood traceplot that we can converge to a
+local mode fairly quickly under a massive distributed
+3Note that BNP models are not guaranteed to ﬁnd the
+correct number of features in the posterior; see Miller and
+Harrison (2013)
+
+Distributed, partially collapsed MCMC for Bayesian nonparametrics
+Figure 3: Top row left to right: Test set log likelihood (y-axis) on synthetic data without warm-start ini-
+tialization, with warm start, and with all processors on. The x-axis represents CPU wall time in seconds, on
+a log scale. Bottom row left to right number of features over iteration with cold-start, warm-start, and all
+processors introducing features. Y-axis represents number of instantiated features.
+Figure 4: Test set log likelihood trace plot for a million
+observation “Cambridge” data set.
+setting.
+5.2.2
+Dirichlet Process
+Our distributed inference framework can also speed up
+inference in a DP mixture of Gaussians, using the ver-
+sion described in Algorithm 4. We used a dataset con-
+taining the top 64 principle components of the CIFAR-
+100 dataset, as described in Section 5.1. We compared
+against two existing distributed inference algorithms
+for the Dirichlet process mixture model, chosen to rep-
+resent models based on both uncollapsed and collapsed
+samplers: 1) A DP variant of the asynchronous sam-
+pler of Smyth et al. (2009), an approximate collapsed
+method; and 2) the distributed slice sampler of Ge
+et al. (2015), an uncollapsed method.
+Figure 5 shows, when distributed over eight processors,
+our algorithm converges faster than the two compar-
+ison methods, showing that the high quality perfor-
+mance seen in Section 5.1 extends to the distributed
+setting.
+Further, in Figure 5 we see roughly linear
+speed-up in convergence as we increase the number of
+processors from 1 to 8.
+100
+101
+102
+103
+Time (s)
+90
+88
+86
+84
+82
+80
+Test log-likelihood
+Hybrid P=8
+Async P=8
+Slice P=8
+100
+101
+102
+103
+Time (s)
+88
+86
+84
+82
+80
+Test log-likelihood
+P=1
+P=2
+P=4
+P=8
+Figure
+5:
+Comparison
+of
+CIFAR-100
+test
+log-
+likelihood with time, with baseline methods (left) and
+with varying number of processor (right)
+6
+Conclusion
+We have proposed a general inference framework for
+a wide variety of BNP models.
+We use the inher-
+ent decomposability of the underlying completely ran-
+dom measures to partition the latent random measures
+into a ﬁnite-dimensional component that represents
+the majority of the data, and an inﬁnite-dimensional
+component that represents mostly uninstantiated tail.
+This allows us to take advantage of the inherent par-
+allelizability of the uncollapsed sampler on the ﬁnite
+partition and the better performance of the collapsed
+sampler for proposing new components.
+Thus the
+proposed hybrid inference method can be easily dis-
+tributed over multiple machines, providing provably
+correct inference for many BNP models. Experiments
+show that, for both the DP and the beta-Bernoulli
+process, our proposed distributed hybrid sampler con-
+verges faster than the comparison methods.
+
+Avinava Dubey, Michael Zhang, Eric P. Xing, Sinead A. Williamson

@@ -1,0 +1,979 @@
+Automatic Tuning of Interactive Perception Applications
+Qian Zhu
+The Ohio State University
+
+Branislav Kveton
+Intel Labs Santa Clara
+
+Lily Mummert
+Intel Labs Pittsburgh
+
+Padmanabhan Pillai
+Intel Labs Pittsburgh
+
+Abstract
+Interactive applications incorporating high-data
+rate sensing and computer vision are becoming
+possible due to novel runtime systems and the
+use of parallel computation resources. To allow
+interactive use, such applications require care-
+ful tuning of multiple application parameters to
+meet required ﬁdelity and latency bounds. This
+is a nontrivial task, often requiring expert knowl-
+edge, which becomes intractable as resources
+and application load characteristics change. This
+paper describes a method for automatic perfor-
+mance tuning that learns application character-
+istics and effects of tunable parameters online,
+and constructs models that are used to maximize
+ﬁdelity for a given latency constraint. The pa-
+per shows that accurate latency models can be
+learned online, knowledge of application struc-
+ture can be used to reduce the complexity of the
+learning task, and operating points can be found
+that achieve 90% of the optimal ﬁdelity by ex-
+ploring the parameter space only 3% of the time.
+1
+Introduction
+Digital acquisition of video has become commonplace due
+to the availability of low-cost, digital cameras and record-
+ing hardware. Until recently, applications making use of
+video data have largely been limited to recording, com-
+pression, streaming, and playback for human consumption.
+Computer applications that can directly make use of video
+streams, for example as a medium for sensing the environ-
+ment, detecting activities, or as a mode of input from hu-
+man users, are now becoming areas of active research and
+development. In particular, a class of interactive percep-
+tion applications that uses video and other high-data rate
+sensing for interactive gaming, natural gesture-based inter-
+faces, and visually controlled robotic actuation is becoming
+increasingly important.
+A great challenge in these applications is dealing with the
+tremendous computational costs involved, even for very
+rudimentary video analytics or computer vision algorithms,
+and the very low latencies needed for effective interac-
+tion, often limited to 50–100 ms.
+Current processors
+are not fast enough to deal with such applications. Two
+broad approaches are being used to achieve the required
+speeds. The ﬁrst attempts to parallelize the execution of
+these applications on clusters of machines by transform-
+ing the applications into a pipeline or data ﬂow graph of
+connected processing stages (Ramachandran et al., 2003;
+Allard et al., 2004; Pillai et al., 2009). The effectiveness of
+this approach depends greatly on the extent to which par-
+ticular steps are parallelized. The second approach trades
+off result quality, or ﬁdelity, with computation cost (Satya-
+narayanan and Narayanan, 2001). The algorithms used in
+interactive perception applications typically have many pa-
+rameters that can have a signiﬁcant effect on both ﬁdelity
+and latency. For example, a feature extraction stage may
+have a tunable threshold of detection, a maximum itera-
+tions parameter, or a even switch to select from a set of al-
+ternative algorithms. The success of this approach depends
+on the tuning parameters available in the application. If
+dynamically adjustable, both degree of parallelism and al-
+gorithmic parameters provide an opportunity to control la-
+tency.
+Given an application and a set of computing resources,
+which parameter settings yield the best combination of la-
+tency and ﬁdelity? Application performance depends on a
+potentially large number of parameters that may have non-
+linear effects and complex interactions. In addition, it also
+depends on the content of the input data and environmental
+conditions (e.g., processor conﬁguration, external loads).
+Furthermore, dynamic parameter adjustments may require
+time to take effect, or have long settling times. The in-
+formation needed to model application performance is un-
+likely to be known a priori, is difﬁcult to reason about an-
+alytically, and is not static.
+In this paper, we investigate a machine learning approach
+to modeling the effects of application tuning parameters on
+
+Source 
+Display 
+Copy 
+Scaler 
+Tiler 
+Feature merger 
+Descaler 
+Feature spli5er 
+Match joiner 
+Cluster spli5er 
+Cluster joiner 
+RANSAC 
+SIFT SIFT SIFT SIFT SIFT 
+Model matcher 
+Model matcher 
+Model matcher 
+Clustering 
+Clustering 
+scale 
+feature limit 
+# workers 
+(Dles) 
+# workers 
+# workers 
+Figure 1: Data ﬂow for pose detection application.
+performance. First, we demonstrate how to predict the la-
+tency of workloads from streams of incoming data using
+state-of-the-art techniques for online convex programming
+(Zinkevich, 2003). We investigate both structured and un-
+structured approaches to the problem, and compare their
+accuracy and computational costs. Second, we build a sys-
+tem that learns how to predict the latency of workloads
+and also optimizes their ﬁdelity. This problem is formu-
+lated as an online constrained optimization problem (Man-
+nor and Tsitsiklis, 2006) with unknown latency constraints.
+We use ε-greedy strategies to explore the space of latency
+constraints, and show that an appropriate mixture of ex-
+ploration and exploitation leads to a practical system for
+solving our problem. This is the ﬁrst application of online
+learning with constraints to a structured real-world problem
+whose cost function is unknown.
+2
+Modeling application performance
+We consider parallel interactive perception applications
+that are structured as data ﬂow graphs. The vertices of the
+graph are coarse-grained sequential processing steps called
+stages, and the edges are connectors which reﬂect data de-
+pendencies between stages. Stages interact only through
+connectors, and share no state otherwise. Source stages
+provide the input data to the application, for example as a
+stream of video from a camera. This data ﬂows through and
+is transformed by multiple processing stages, which, for
+example, may implement a computer vision algorithm to
+detect when the user performs a particular gesture. Finally,
+Figure 2: Pose detection output.
+the processed data is consumed by sink stages, which then
+control some actuator or display information to the user.
+In the data ﬂow model, concurrency is explicit – stages
+within an application can execute in parallel, constrained
+only by data dependencies and available processors. We
+use an application-independent runtime system (Pillai et
+al., 2009) to distribute and execute applications in parallel
+on a compute cluster. The system provides mechanisms to
+export and dynamically set tunable parameters, including
+both algorithmic parameters and controls for degree of par-
+allelism (e.g., number of data-parallel operators). This sys-
+tem also monitors application performance, and provides
+interfaces for extracting latency data at the stage level.
+2.1
+Case studies
+We study two applications in this paper. The ﬁrst is an
+implementation of an algorithm for object instance recog-
+nition and pose registration used in robotics (Collet et al.,
+2009). As shown in the data ﬂow of Figure 1, each image
+(frame from a single camera) ﬁrst passes through a propor-
+tional down-scaler. SIFT features (Lowe, 2004) are then
+extracted from the image, and matched against a set of pre-
+viously constructed 3D models for the objects of interest.
+The features for each object are then clustered by position
+to separate distinct instances. A random sample consen-
+sus (RANSAC) algorithm with a non-linear optimization is
+used to recognize each instance and estimate its 6D pose.
+Figure 2 shows the poses of two recognized objects. The
+implementation includes ﬁve tuning parameters: the degree
+of image scaling, a threshold on the number of features pro-
+duced, and the degree of data parallelism used for feature
+extraction, model matching, and clustering. The details of
+such parameters are presented in Table 1. The listed de-
+fault values of the parameters maximize application ﬁdelity
+without regard to latency. To reduce the application latency,
+
+Figure 3: Viewer gesturing “channel up”.
+Source 
+Display 
+Copy 
+Scaler 
+Tiler 
+Feature merger 
+Descaler 
+Copy 
+Classify 
+Pair generator 
+SIFT SIFT SIFT SIFT 
+mo9onSIFT 
+scale 
+detec9on 
+quality 
+# workers 
+(9les) 
+Scaler 
+Tiler 
+Face merger 
+Descaler 
+SIFT SIFT SIFT 
+Face detect 
+Copy 
+TV control 
+scale 
+# workers 
+  (9les) 
+Figure 4: Data ﬂow for gesture-based TV control.
+we can use a higher degree of data parallelism for each
+of those three stages. Extracting fewer features or scaling
+down the image will also accelerate the application. How-
+ever, this leads to a degradation in application ﬁdelity. As
+this application is intended for visual servoing of a robot
+arm, it requires very tight end-to-end latencies; our goal is
+a 50 ms latency bound.
+The second application provides an interface to control a
+television via gestures (Chen et al., 2010). A camera po-
+sitioned near the television observes a viewer as shown in
+Figure 3. Each video frame is sent to two separate tasks,
+face detection and motion extraction, shown in Figure 4.
+The latter accumulates frame pairs, and then extracts SIFT-
+like features that encode optical ﬂow in addition to appear-
+ance. These features, ﬁltered by the positions of detected
+faces, are aggregated over a window of frames using a
+previously-generated codebook to create a histogram of oc-
+currence frequencies. The histogram is treated as an input
+vector to a set of support vector machines trained for the
+control gestures. The application exports ﬁve tuning pa-
+rameters: the degree of scaling for each branch, the quality
+of face detection, and the degree of data parallelism for fea-
+ture extraction and face detection. We describe the details
+of these parameters in Table 2. As above, the default val-
+ues of the parameters are those that maximize application
+ﬁdelity. Application latency can be reduced by invoking
+more instances of the features extraction and face detec-
+tion stages. We can also scale down the frame size used
+by each branch to decrease the latency. However, using
+a higher degree of scaling or reducing the quality of face
+detection will degrade the application ﬁdelity. For this ap-
+plication, low latency, on the order of 100 ms, is needed to
+achieve a responsive user interface. We note that in both of
+these applications, processing time of the vision algorithms
+are the primary contributers to latency, and dominate other
+sources, such as network transfer overheads.
+2.2
+Fidelity and latency models
+Application ﬁdelity varies as a function of the parameter
+settings. However, different parameters affect ﬁdelity in
+different ways. For example, the degree of parallelism for
+a data parallel operation generally does not affect ﬁdelity
+if the data items are independent. By contrast, a parame-
+ter that changes the content of the input data, such as by
+reducing the resolution of an image, can signiﬁcantly af-
+fect ﬁdelity. Fidelity is often difﬁcult to quantify, especially
+when it relates to vague notions of perceptual quality. Even
+for speciﬁc measures like the accuracy of a detection algo-
+rithm, the true effect cannot be quantiﬁed without ground
+truth for a particular input. In the absence of a model based
+on ground truth, ﬁdelity can be approximated relative to the
+“best” parameter settings, which are usually known.
+Since stages can encompass arbitrary code, it is not practi-
+cal to assume that application performance characteristics
+or the effects of tuning parameters on performance will be
+known a priori (e.g., via analytical modeling), particularly
+on varying hardware platforms. Nor is it practical to expect
+application programmers to supply even a subset of this in-
+formation. The space of tuning parameters is large, and
+the settings may have non-linear effects and interactions.
+Finally, application performance may be data-dependent,
+and for this reason may change over time. Therefore, the
+application stages must be treated as a black box, with per-
+formance models learned online.
+
+Variable
+Type
+Range
+Default
+Description
+K1
+continuous
+[1, 10]
+1
+The degree of image scaling
+K2
+continuous
+[1, 231]
+231
+A threshold on the number of produced features
+K3
+discrete
+[1, 96]
+1
+The degree of data parallelism for feature extraction
+K4
+discrete
+[1, 10]
+1
+The degree of data parallelism for model matching
+K5
+discrete
+[1, 10]
+1
+The degree of data parallelism for clustering
+Table 1: Tuning parameters for pose detection application.
+Variable
+Type
+Range
+Default
+Description
+K1
+continuous
+[1, 10]
+1
+The degree of image scaling for the left branch
+K2
+continuous
+[1, 10]
+1
+The degree of image scaling for the right branch
+K3
+discrete
+[0, 1]
+0
+The quality of face detection
+K4
+discrete
+[1, 96]
+1
+The degree of data parallelism for feature extraction
+K5
+discrete
+[1, 96]
+1
+The degree of data parallelism for face detection
+Table 2: Tuning parameters for gesture-based TV control application.
+2.3
+Reducing problem size
+One can attempt to directly learn a model for the end-to-end
+application latency. However, because of the potentially
+large space of tuning parameters, and the need for fast and
+efﬁcient learning, it is important to reduce the size of the
+learning task. Application structure, as given by the data
+ﬂow graph, provides a natural way to partition the prob-
+lem. A single stage may be affected by only a subset of the
+tuning parameters. For example, tuning parameters tend to
+inﬂuence localized sections of an application graph, and do
+not affect stages that are upstream or on parallel branches.
+In addition, some stages contribute little to total latency, or
+vary little, and may be modeled very simply (e.g., with an
+average). The end-to-end latency can then be obtained by
+combining the predictions of the stage models according to
+the critical path through the data ﬂow graph. For exam-
+ple, in Figure 4, the end-to-end latency is sum of the laten-
+cies of the source, copy, classify, and sink stages, and the
+maximum of the latencies of the face detection and motion
+extraction subgraphs, computed similarly. The total com-
+plexity of learning all of the individual stage models with
+a few parameters for each can be signiﬁcantly lower than
+learning a single model based on all parameters.
+We reduce the automatic tuning problem as follows. We
+ﬁrst use a few observations of stage latencies to identify a
+set of critical stages, based on their contribution to end-to-
+end latency. A dependency analysis is performed to iden-
+tify the parameters that affect each critical stage. Specif-
+ically, a parameter is associated with a critical stage if
+the correlation between the value of the parameter and the
+stage latency exceeds a threshold (0.9 in this work). Then,
+with additional periodic observations, we explore the pa-
+rameter space and learn a predictor as a function of the rel-
+evant tuning parameters for each critical stage. Non-critical
+stages are modeled with a moving average. End-to-end la-
+tency is predicted using the stage models by computing the
+critical path through the data ﬂow graph. A solver is used
+to search for operating points that maximize ﬁdelity for a
+given latency constraint. Changes in parameter settings are
+then applied to the running application.
+3
+Problem formulation
+An application is deﬁned as a tuple (G, K, L), where G is a
+data ﬂow graph (Section 2), K=K1 × · · · × Km is a space
+of dynamically tunable parameters K1, . . . , Km, and L is a
+latency bound. Speciﬁcally, G = (V, E) is a directed graph
+consisting of n computation stages V = {v1, . . . , vn} and
+connectors E = {eij| stage j requires data from stage i}.
+Nodes of the graph G are weighted by computation latency.
+The weight wi of node vi is the latency of a single execution
+of stage i. The latency of the application is the length of the
+critical path C through G, which is given by c=P
+i:i∈C wi.
+For simplicity, we omit inter-stage communication latency
+from this formulation, which can be incorporated by adding
+edge weights that represent communication costs.
+3.1
+Online learning with constraints
+Let kt =(kt1, . . . , ktm) be values of the tunable parameters
+K1, . . . , Km at time t, xt ∈X be the data gathered at time
+t; and r(xt, kt) and c(xt, kt) be the corresponding ﬁdelity
+and latency, respectively. Then the problem of maximizing
+ﬁdelity subject to latency constraints can be formulated as:
+max
+k1,...,kT
+T
+X
+t=1
+r(xt, kt)
+(1)
+s.t.
+c(xt, kt) ≤L.
+The challenge in solving our problem online is that neither
+c nor r are usually known in advance. Under these assump-
+
+tions, it is hard to solve the problem online (Mannor and
+Tsitsiklis, 2006). In fact, the optimal ofﬂine solution may
+not be attainable in the online setting.
+If both c and r are known, the optimal action at time t is:
+k∗
+t = arg max
+k
+r(xt, k)1{c(xt, k) ≤L} .
+(2)
+In the rest of the paper, we assume that the reward function
+r is known and focus on learning of the cost function c. The
+learning step is alternated with solving Equation 2 using an
+ε-greedy policy (Sutton and Barto, 1998), and the result
+is a practical solution to our problem. How to choose ε is
+discussed in Section 4.
+For simplicity, we assume that the cost function c does not
+change in time. If c is represented in a tabular form, then
+we can learn an ε-close approximation to c with probabil-
+ity 1 −δ in polynomial time in |K| and |X| (Brafman and
+Tennenholtz, 2003). Unfortunately, learning this represen-
+tation may not be practical or even possible. For instance,
+if all K1, . . . , Km are discrete, then |K| is exponential in
+m. Note that each of the problems in Figures 1 and 4 have
+5 tunable parameters, and some of the parameters are con-
+tinuous (Tables 1 and 2).
+3.2
+Learning of the cost function
+To take the structure of our problem into account and speed
+up learning, we learn a regressor f of the cost function.
+The regression problem can be formulated as (Smola and
+Sch¨olkopf, 2004):
+min
+f∈HK
+1
+T
+T
+X
+t=1
+Vε(f, (xt, kt), c(xt, kt)) + γ ∥f∥2
+K ,
+(3)
+where:
+Vε(f, (x, k), y) = max{|f(x, k) −y| −ε, 0}
+(4)
+denotes the ε-insensitive loss, c(xt, kt) is the cost at time t,
+f is a function from some reproducing kernel Hilbert space
+(RKHS) HK, and ∥·∥K is the norm that measures the com-
+plexity of f. The tradeoff between the minimization of the
+losses Vε(f, (xt, kt), c(xt, kt)) and the regularization of f
+is controlled by the parameter γ. In all of our experiments,
+γ = 0.01.
+Unfortunately, the optimal solution to our regression prob-
+lem minimizes the expected error Ex,k[|f(x, k) −c(x, k)|]
+rather than the max-norm error ∥f(·, ·) −c(·, ·)∥∞, which
+would be more suitable for our task.
+On the other
+hand, note that the two errors can be related though the
+Lipschitz factors of c and f. In particular, if both c and f
+are smooth, the minimization of the average error leads to
+minimizing the max-norm error. These trends are shown in
+Section 4.
+3.3
+Online learning of the cost function
+Online learning of the regressor (3) can be formulated as
+an online convex programming problem. Online convex
+programming (Zinkevich, 2003) involves a convex feasible
+set F ⊂Rn and a sequence of convex functions ℓt : F →
+R. At each time step t, a decision maker chooses some
+action ft ∈F based on the past functions ℓ1, . . . , ℓt−1 and
+actions f1, . . . , ft−1. The goal is to minimize the regret:
+T
+X
+t=1
+ℓt(ft) −min
+f∈F
+T
+X
+t=1
+ℓt(f).
+(5)
+Intuitively, we want to choose online a sequence of actions
+f1, . . . , fT such that their costs are close to the optimal ac-
+tion arg minf∈F
+PT
+t=1 ℓt(f) in hindsight.
+The above regret is minimized on the order of O(
+√
+T) by
+the gradient update:
+ft+1 = P(ft + η∇ℓt(ft)),
+(6)
+where η =
+√
+T is a learning rate, ∇ℓt(ft) is the gradient of
+the function ℓt at ft, and P(·) is a projection to the feasible
+set F. To minimize the SVM regression objective (3), the
+cost function ℓt is chosen as:
+ℓt(f) = Vε(f, (xt, kt), c(xt, kt)) + γ ∥f∥2
+K .
+(7)
+For linear SVMs, the cost function further simpliﬁes as:
+ℓt(f) = Vε(f, (xt, kt), c(xt, kt)) + γ ∥f∥2
+2 .
+(8)
+Online learning of non-linear regressors can be done in two
+ways. First, we can directly solve the kernelized version of
+the problem (Kivinen, Smola, and Williamson, 2004). The
+main problem with this approach is that we have to main-
+tain a compact representation of the kernel matrix. The
+second option is to expand the original feature space by
+non-linear features and learn a linear regressor in the new
+space. This technique is suitable for quadratic and cubic
+kernels, for instance. In the experimental section, we use
+cubic kernels and adopt the latter approach.
+Unfortunately, the cubic expansion of the feature space can
+be costly. To make our approach applicable to larger prob-
+lems, we take advantage of how the critical path c of a data
+ﬂow graph decomposes based on the structure of the graph
+(Section 2.3). For instance, note that the cost regressor for
+the problem in Figure 4 can be rewritten as:
+f(xt, kt) = max{fL(xt, kt), fR(xt, kt)},
+(9)
+where fL(xt, kt) and fR(xt, kt) correspond to the left and
+right subgraphs, and are deﬁned on the subspaces of X and
+K. To solve this problem in a structured manner, we learn a
+regressor for each of the subspaces, and then combine them
+by a deterministic function, such as max for parallel stages,
+and sum for sequential structures.
+
+0
+0.2
+0.4
+0.6
+0.8
+0
+0.1
+0.2
+0.3
+Pose detection
+Average cost [s]
+Average reward
+0
+0.2
+0.4
+0
+0.2
+0.4
+0.6
+Motion SIFT
+Average cost [s]
+Figure 5: Average rewards and costs of 30 action conﬁgura-
+tions from our action space (gray crosses). The convex hull
+represents payoffs, which are feasible by playing a random-
+ized strategy over the 30 action conﬁguration.
+4
+Evaluation
+In this section, we evaluate our approach in three ways.
+First, we compare the accuracy of latency predictors
+learned online with those learned ofﬂine. Second, we study
+the effect of using application structure by comparing the
+accuracy of a single predictor for the application with pre-
+dictors learned for individual stages and combined as de-
+scribed in Section 3.3. Finally, we examine the tradeoffs
+between exploration (learning) and exploitation (optimiza-
+tion) to determine high-ﬁdelity operating points for a given
+latency bound.
+4.1
+Methodology
+We conducted our experiments using the system and ap-
+plications described in Section 2. For each application we
+used as input a video sequence annotated with ground truth.
+For the pose detection application, the video consists of a
+series of objects in different positions and orientations, and
+the ground truth is the object label with its measured trans-
+lation and rotation in each frame. For the gesture-based
+TV control application, referred to henceforth as “Motion
+SIFT” after the low-level feature it uses to represent mo-
+tion, the video consists of a single user performing control
+gestures (as shown in Figure 3), and the ground truth is the
+label of the gesture occurring in the frame, if any.
+For greater experimental control and the repeatability of re-
+sults, our experiments are done on a set of execution traces.
+These were collected on a cluster of 15 servers connected
+with a 1 Gbps Ethernet switch. Each server has two Intel R
+⃝
+2.83 GHz Xeon R
+⃝E5440 processors (8 cores total) and
+8 GB of memory, and runs Ubuntu Linux 8.04. For each ap-
+plication, we created 30 conﬁgurations by selecting random
+valid values for the tunable parameters in Figures 1 and 4.
+We ran each of these static conﬁgurations on a sequence of
+1000 frames, collected performance logs from the runtime,
+and extracted latency measures for each frame. We use the
+set of conﬁgurations as a point-based approximation of the
+total space, and use the traces as predeﬁned alternative fu-
+tures between which the simulated system switches as our
+algorithm executes.
+To quantify ﬁdelity, for each application, we used ground
+truth to deﬁne the function r from Equation 1. For pose
+detection, r measures recognition correctness and pose ac-
+curacy:
+r(xt, kt) = 1
+n
+n
+X
+i=1
+Rite−(wτ τit+wθθit)
+(10)
+where n is the number of objects in the scene, R = {0, 1}
+indicates whether an object is recognized, τ is the transla-
+tion error, and θ is the rotation error. Weights wτ and wθ
+were set to 0.7 and 0.3, respectively. For Motion SIFT, r is
+the F1-measure for classiﬁcation performance:
+r(xt, kt) = 2 PtRt
+Pt + Rt
+(11)
+where P is precision and R is recall. Figure 5 shows the av-
+erage latency (cost) and average ﬁdelity (reward) for each
+application and conﬁguration (action).
+4.2
+Predicting latency
+In the ﬁrst experiment (Figure 6), we study how the quality
+of latency predictors depends on their complexity. The pre-
+dictors are learned online using linear, quadratic, and cubic
+kernels. In particular, at each time step, we randomly sam-
+ple an action and then update the predictors as described in
+Section 3.3.
+Figure 6 shows that the errors of our predictors tend to de-
+crease over time. The increase in the pose detection dataset
+at frame 600 corresponds to a change in the scene, in which
+a notebook (Figure 2) appeared. This increased the number
+of SIFT features in the scene and consequently the compu-
+tational requirements to process a single frame. In general,
+cubic predictors yield the smallest errors, and all predictors
+are almost as good as their ofﬂine counterparts. In addition,
+note that the max-norm errors of our latency predictors also
+decrease over time. This observation is consistent with our
+expectation that the minimization of the average error leads
+to minimizing the max-norm error if both the cost function
+and its regressor are smooth (Section 3.2).
+4.3
+Effect of structure
+In the second experiment (Figure 7), we compare structured
+and unstructured approaches to learning latency predictors.
+The predictors are cubic and learned online as described in
+Section 4.2.
+Figure 7 shows that the expected errors of unstructured and
+structured latency predictors are almost identical. The main
+advantage in using the structured predictors is that their cu-
+bic feature space expansion is smaller. For instance, on the
+
+1
+333
+666
+1000
+0
+0.02
+0.04
+0.06
+0.08
+Pose detection
+Expected error [s]
+1
+333
+666
+1000
+0
+0.2
+0.4
+0.6
+Frame
+Max−norm error [s]
+1
+333
+666
+1000
+0
+0.02
+0.04
+0.06
+0.08
+Motion SIFT
+1
+333
+666
+1000
+0
+0.2
+0.4
+0.6
+Frame
+Figure 6: Comparison of linear (light gray lines), quadratic
+(dark gray lines), and cubic (black lines) latency predictors.
+The predictors are learned online and compared by the cu-
+mulative average of their expected and max-norm errors up
+to each frame. The errors of the corresponding ofﬂine pre-
+dictors are shown as dashed lines.
+motion SIFT dataset, it takes 30 and 56 features to describe
+the structured and unstructured spaces, respectively. Thus,
+updating of the structured predictor should be twice as fast
+in practice. If our problems involved hundreds of variables,
+the speedup would likely be much more signiﬁcant.
+Finally, note that the max-norm errors of structured latency
+predictors can be signiﬁcantly smaller than the errors of the
+unstructured predictors. One way of explaining this results
+is that the expected and max-norm errors are coupled more
+tightly on the subspaces of the problems. In turn, the mini-
+mization of the expected error on the subspaces results in a
+smaller total max-norm error.
+4.4
+Online learning with constraints
+In the last experiment (Figure 8), we use our latency predic-
+tors to build a control policy that maximizes ﬁdelity subject
+to latency constraints. The resulting controller is simply an
+ε-greedy policy, where ε deﬁnes the amount of exploration.
+To ﬁnd the optimal exploration rate, we vary ε and measure
+the corresponding average ﬁdelity and constraint violation,
+which is given by Ext,kt[max{c(xt, kt) −L, 0}]. Our re-
+sults are compared to the payoff of randomized strategies in
+our action space (Figure 5). Intuitively, we want to achieve
+close-to-zero constraint violation and maximize the ﬁdelity
+at this operating point.
+Figure 8 illustrates the performance of our policies for var-
+ious exploration rates ε and latency bounds L. As ε varies,
+the policies usually follow a U-shaped curve. In particular,
+when ε is too small, the estimate of the latency function is
+uncertain, which results in policies that signiﬁcantly violate
+the latency bound L. On the other hand, when ε is close to
+1
+333
+666
+1000
+0.01
+0.02
+0.03
+0.04
+0.05
+Pose detection
+Expected error [s]
+1
+333
+666
+1000
+0.1
+0.2
+0.3
+0.4
+0.5
+Frame
+Max−norm error [s]
+1
+333
+666
+1000
+0.01
+0.02
+0.03
+0.04
+0.05
+Motion SIFT
+1
+333
+666
+1000
+0.1
+0.2
+0.3
+0.4
+0.5
+Frame
+Figure 7: Comparison of unstructured (dark gray lines) and
+structured (black lines) latency predictors. The predictors
+are learned online and compared by the cumulative average
+of their expected and max-norm errors up to each frame.
+one, we mostly explore and perform poorly with respect to
+the main objective, which is the maximization of ﬁdelity.
+An ideal exploration rate ε guarantees that we both explore
+enough to learn the cost function and exploit enough to op-
+timize our main objective. One of the reasonable choices is
+ε = 1/
+√
+T, which yields ε = 0.03 when T = 1, 000. For
+this setting, the regret (5) is sublinear in T, and the propor-
+tion of exploitation to exploration (T −
+√
+T)/
+√
+T increases
+polynomially with T. Thus, the performance of our system
+should improve over time.
+The diamonds in Figure 8 mark the operating points of the
+(1/
+√
+T)-greedy policies. In all experiments, these policies
+yield high rewards and low constraint violations. In partic-
+ular, note that our rewards are always within 90 percent of
+the optimum. Moreover, the average constraint violation in
+all experiments is about 0.03 second and never exceeds 0.1
+second. When measured relatively to the latency bound L,
+the average and worst-case constraint violations are 23 and
+50 percent, respectively.
+5
+Related work
+Machine learning has been used in several contexts to
+predict and tune interactive and parallel applications. In
+the domain of mobile devices, Narayanan and Satya-
+narayanan (Narayanan and Satyanarayanan, 2003) have
+modeled the latency and battery consumption of interac-
+tive mobile applications as a function of tunable ﬁdelity set-
+tings. Initially, random sampling is used ofﬂine to train lin-
+ear predictors on user-supplied terms, followed by online
+reﬁnement of model coefﬁcients. In contrast, our approach
+automatically learns performance and ﬁdelity relationships
+online.
+
+0
+0.2
+0.4
+0.6
+0.8
+0
+0.1
+0.2
+0.3
+Pose detection (L = 0.05)
+Average reward
+0
+0.2
+0.4
+0.6
+0.8
+0
+0.1
+0.2
+0.3
+Pose detection (L = 0.10)
+0
+0.2
+0.4
+0.6
+0.8
+0
+0.1
+0.2
+0.3
+Pose detection (L = 0.15)
+0
+0.2
+0.4
+0.6
+0.8
+0
+0.1
+0.2
+0.3
+Pose detection (L = 0.20)
+0
+0.2
+0.4
+0
+0.2
+0.4
+0.6
+Motion SIFT (L = 0.05)
+Average violation [s]
+Average reward
+0
+0.2
+0.4
+0
+0.2
+0.4
+0.6
+Motion SIFT (L = 0.10)
+Average violation [s]
+0
+0.2
+0.4
+0
+0.2
+0.4
+0.6
+Motion SIFT (L = 0.15)
+Average violation [s]
+0
+0.2
+0.4
+0
+0.2
+0.4
+0.6
+Motion SIFT (L = 0.20)
+Average violation [s]
+Figure 8: Average rewards and constraint violations of our polices (black lines) for various exploration rates ε. The policies
+are compared with respect to the payoff of randomized strategies over our action space (gray regions). The operating points
+ε = 1/
+√
+T are marked by diamonds.
+For scientiﬁc computing workﬂows,
+the NIMO sys-
+tem (Shivam, Babu, and Chase, 2006) employs active
+learning to estimate completion times of applications on
+particular datasets with heterogeneous processing and stor-
+age resources.
+It employs multivariate linear regression
+and a design of experiments approach to exploring trade-
+offs and interactions between attributes, since each exper-
+iment can take hours or days to complete. In our system,
+tunable parameters can be changed dynamically during ex-
+ecution, facilitating rapid online exploration, although this
+must be balanced with the need to avoid large perturba-
+tions to the system. Also in this domain, Artiﬁcial Neu-
+ral Networks (ANNs) have been used to construct perfor-
+mance models of partitioned parallel worksets (Li et al.,
+2009), and have been shown as effective as polynomial re-
+gression approaches in modeling scientiﬁc computing ap-
+plications (Lee et al., 2007), but with less domain-speciﬁc
+knowledge required for model formulation. Active learning
+was used to reduce ANN-based model error by selecting
+samples that generated the highest CoV from an model en-
+semble (Singh et al., 2007). Finally, reinforcement learning
+was used to select a representation format for sparse matri-
+ces based on the characteristics of the data (e.g., number of
+nonzero elements) to minimize execution time for a ﬁxed
+set of multiplications (Armstrong and Rendell, 2008).
+For web applications, Xi et al. (Xi et al., 2004) model
+server performance as a black-box function of parameters,
+and employ a smart hill climbing algorithm with weighted
+Latin hypercube sampling to ﬁnd high performance conﬁg-
+urations ofﬂine. This method requires advance planning or
+careful tracking of all prior samples. Reinforcement learn-
+ing has been used for online tuning of conﬁguration param-
+eters for a multi-tiered web application (Chen et al., 2009)
+to optimize a combination of throughput and response time.
+In contrast to these, our work focuses on the tuning of in-
+teractive parallel applications, with a focus on ﬁdelity and
+latency. We use an online learning algorithm (Zinkevich,
+2003) with strong theoretical guarantees to learn the la-
+tency function, and take advantage of application structure
+to reduce the complexity of the learning task.
+6
+Conclusion
+This paper has shown a practical application of online
+learning to estimate performance and dynamically adjust
+tunable parameters in real-world interactive perception ap-
+plications. The approach outlined can readily model la-
+tency characteristics of a complex application. It uses ap-
+plication structure to both reduce the learning task com-
+plexity and improve expected and max-norm prediction er-
+ror. Finally, it trades off exploration and exploitation to ﬁnd
+high-ﬁdelity operating points for a given latency bound.
+This work enables a critical new capability in the emerg-
+ing class of interactive perception applications: the ability
+to automatically adapt to the particulars of a distributed set
+of parallel computing resources and dynamically changing
+workload characteristics. This work can be seen as a gen-
+eral template for practical application of machine learning
+techniques to important real-world problems. Among the
+areas of future work, we plan to incorporate models for net-
+work latency, and study exploration strategies that take into
+account the cost of changing parameter settings and the ex-
+pected improvement in ﬁdelity.

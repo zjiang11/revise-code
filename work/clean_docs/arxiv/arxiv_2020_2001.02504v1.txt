@@ -1,0 +1,1016 @@
+High Performance Depthwise and Pointwise Convolutions on Mobile Devices
+Pengfei Zhang, Eric Lo, Baotong Lu
+The Chinese University of Hong Kong
+
+Abstract
+Lightweight
+convolutional
+neural
+networks
+(e.g.,
+Mo-
+bileNets) are speciﬁcally designed to carry out inference di-
+rectly on mobile devices. Among the various lightweight
+models, depthwise convolution (DWConv) and pointwise
+convolution (PWConv) are their key operations. In this pa-
+per, we observe that the existing implementations of DW-
+Conv and PWConv are not well utilizing the ARM processors
+in the mobile devices, and exhibit lots of cache misses under
+multi-core and poor data reuse at register level. We propose
+techniques to re-optimize the implementations of DWConv
+and PWConv based on ARM architecture. Experimental re-
+sults show that our implementation can respectively achieve
+a speedup of up to 5.5× and 2.1× against TVM (Chen et al.
+2018) on DWConv and PWConv.
+Introduction
+Recently, there is an increasing trend to carry out con-
+volutional neural network (CNN) inference on mobile de-
+vices directly because of both privacy and real-time latency
+(user experience) requirements. (Loc, Lee, and Balan 2017;
+Han et al. 2016; Howard et al. 2017; Sandler et al. 2018).
+However, since mobile devices are subjected to both com-
+putational and energy constraints, recent research therefore
+puts effort on designing more lightweight “mobile models”
+that are composed of fewer layers and/or using less compu-
+tational expensive operations.
+In terms of CNN, examples of such lightweight mo-
+bile models include Xception (Chollet 2016), MobileNetV1
+(Howard et al. 2017), MobileNetV2 (Sandler et al. 2018),
+MnasNet (Tan et al. 2018), EfﬁcientNet (Tan and Le 2019),
+to name a few.
+When optimizing the performance of a program with
+respect to a type of processors, developers often use the
+rooﬂine model (Williams, Waterman, and Patterson 2009)
+to guide their implementation. Figure 1 shows the rooﬂine
+model of quad-core ARM Cortex-A57. The rooﬂine (the
+dashed line) indicates the maximum achievable performance
+of any program under that processor.
+Copyright c⃝2020, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+2
+4
+8
+16
+32
+64
+128
+256
+1
+1/8
+1/4
+1/2
+1
+2
+4
+8
+16
+32
+TF-Lite
+Operational Intensity (Flops/Byte)
+GFlops
+Theoretical floating-point performance
+Peak memory bandwidth
+Unoptimized
+Loop blocking
+Multi-threading
+Loop unrolling
+SIMD
+Ours
+Figure 1: Rooﬂine model for ARM Cortex-A57 with respect
+to MobileNetV1 inference
+Given the rooﬂine model of a processor, one can check
+whether her implementation has fully utilized that proces-
+sor or not. In Figure 1, the point ‘Unoptimized’ represents
+a naive C implementation of MobileNetV1 written by us.
+The point ‘TF-Lite’ represents the popular TensorFlow Lite
+binary compiled with math optimization, auto vectorization
+and linking to Eigen (Guennebaud, Jacob, and others 2010)
+BLAS library. Since TF-Lite is open source, it is known that
+it has already optimized using all the optimization tricks sug-
+gested in the rooﬂine article (e.g., using SIMD intrinsics).
+Unfortunately, even the popular TensorFlow Lite (TF-Lite)
+is not fully utilizing the processor. So, what is missing?
+ARM processors get the lion’s share of the mobile de-
+vice processor industry (SoftBank Group 2017); and DW-
+Conv and PWConv are the two most dominating operations
+in state-of-the-art mobile models and they take up 90+% of
+total inference time (Howard et al. 2017; Sandler et al. 2018;
+Tan and Le 2019). Therefore, the goal of this paper is to op-
+timize depthwise convolution (DWConv) and pointwise con-
+volution (PWConv) on ARM processors. We observe there
+are two major issues that hurt the performance of DWConv
+and PWConv on ARM processors.
+First, we point out that the existing DWConv and PW-
+Conv implementations are poor in core scalability, which
+is against the trend of getting more cores in ARM proces-
+sors (e.g., Huawei’s latest mobile phone SoC chipset, Kirin
+980, has eight ARM cores). Second, we point out that the
+optimization tricks suggested in the rooﬂine article are
+necessary but insufﬁcient for ARM processors. Speciﬁ-
+arXiv:2001.02504v1  [cs.DC]  3 Jan 2020
+
+cally, while both ARM and x86 processors can carry out 2
+FMA (fused-multiply-add) instructions per cycle, ARM pro-
+cessors can only load 1 register (from the cache) per cycle
+whereas x86 processors can load 4 registers per cycle. In
+other words, while optimizing the cache miss and increasing
+parallelism could eliminate the major bottleneck on x86 pro-
+cessors, on ARM processors those tricks could only shift the
+bottleneck to the trafﬁc between the register and the cache.
+Based on the above observations, we therefore develop high
+performance version of DWConv and PWConv for mobile
+devices. Using techniques like loop rescheduling (Markatos
+and LeBlanc 1992) and register tiling (Jim´enez, Llaber´ıa,
+and Fern´andez 2002), our implementations are able to re-
+duce the trafﬁc between the cache and the memory as well
+as the trafﬁc between the register and the cache. Experimen-
+tal results show that our implementation can respectively
+achieve a speedup of up to 5.5× and 2.1× against TVM
+(Chen et al. 2018) on DWConv and PWConv, which leads
+to a 46GFlops on ARM Cortex-A57 in terms of overall Mo-
+bileNetV1 inference.
+Preliminaries
+ARM processors dominate the mobile device market. Lat-
+est ARM processors all support a 64-bit architecture, named
+“AArch64”. AArch64 is a load-store architecture where data
+has to be loaded into the registers before the operations take
+place. AArch64 supports SIMD instruction and each core
+has 32 SIMD registers. Each SIMD register is 128-bit, which
+means each SIMD instruction can operate on 4 single preci-
+sion numbers simultaneously. The predominate instruction
+used in model inference is the FMA (fused-multiply-add)
+SIMD instruction. An FMA instruction requires 3 SIMD
+registers to fully operate. Each FMA instruction carries out
+a 4-way SIMD multiplication, followed by a 4-way SIMD
+addition.
+Depthwise Convolution
+Depthwise convolution (DWConv) is a key operation in mo-
+bile models. It takes three inputs: (i) a 3d array I (the input
+feature map) of size Hi × Wi × C, (ii) a 3d array F (the
+ﬁlter) of size Hf × Wf × C, (iii) the stride s. It produces a
+3d array (the output feature map) O of size Ho × Wo × C.
+In the above, H and W are the spatial height and width, C
+is the number of channels. The subscripts i, f and o refers to
+the input feature map, the ﬁlter, and the output feature map
+respectively.
+Algorithm 1: Unoptimized Depthwise Convolution
+Input: Input feature map I, Filter F, stride s;
+Output: Output feature map O;
+1 for l = 0 to Ho −1 do
+2
+for k = 0 to Wo −1 do
+3
+for i = 0 to Ci −1 do
+4
+for n = 0 to Hf −1 do
+5
+for m = 0 to Wf −1 do
+6
+Ol,k,i += Il×s+n,k×s+m,i × Fn,m,i
+Input Feature Map
+Output Feature Map
+Filter
+m
+n
+l
+k
+i
+i
+i
+1
+1 1
+Figure 2: Depthwise convolution
+Figure 2 illustrates the concept of depthwise convolution.
+Algorithm 1 is its plain implementation, which consists of
+5 tightly-nested loops around a multiply-accumulate (MAC)
+statement (Line 6). Referring to Figure 2, the implementa-
+tion iteratively applies the ﬁlter (lines 4 and 5) per channel
+(Line 3), and then repeats the task by moving the ﬁlter from
+left to right (Line 2) and then from top to bottom (Line 1).
+Algorithm 2: Depthwise Convolution (TF-Lite)
+Input: Input feature map I, Filter F, stride s;
+Output: Output feature map O;
+1 for l = 0 to Ho −1 in parallel do
+2
+for k′ = 0 to Wo/Wo,b −1 do
+3
+for n = 0 to Hf −1 do
+4
+for kk = 0 to Wo,b −1 do
+5
+for m = 0 to Wf −1 do
+6
+for i′ = 0 to C/4 do
+// Loop unrolling here.
+7
+k = k′ × Wo,b + kk
+8
+VI=SIMD Load(
+Il×s+n,k×s+m,i′×4∼i′×4+3)
+9
+VF =SIMD Load(
+Fn,m,i′×4∼i′×4+3)
+10
+VO=SIMD Load(
+Ol,k,i′×4∼i′×4+3)
+11
+VO=SIMD FMA(VI, VF , VO)
+12
+SIMD Store(Ol,k,i′×4∼i′×4+3,
+VO)
+Algorithm 2 shows the implementation of DWConv in
+TF-Lite. It mainly applies 4 tricks to improve its efﬁciency.
+1. Loop rescheduling and SIMD. Any permutation of the
+ordering (scheduling) of the loops would yield the same
+correct result but with different efﬁciency. Furthermore,
+each channel of the ﬁlter can apply to corresponding chan-
+nel of the input independently and thus in parallel. Con-
+sequently, Algorithm 2 reschedules the innermost loop to
+process the MAC across 4 channels using SIMD (lines
+6–12).
+2. Loop Unrolling. The innermost loop actually possesses
+loop independence, meaning one iteration does not de-
+pend on its previous iteration. In other words, the loop
+can be run in parallel. Consequently, the actual imple-
+mentation of the innermost loop is unrolled (or called as
+ﬂattened) (Dongarra and Hinds 1979). Loop unrolling not
+only improves ILP (instruction-level parallelism), but also
+reduces branch mis-prediction incurred by the test condi-
+
+tion of each iteration. Algorithm 2 however does not ex-
+plicitly show the unrolled loop for brevity.
+3. Loop Blocking. When involving matrix/tensor, loop
+blocking is often used to reduce cache misses (Xue 2000).
+In TF-Lite, loop blocking is applied to the k loop (Algo-
+rithm 1; Line 2) and it becomes the k′ loop in (Algorithm
+2; Line 2) and the kk loop in (Algorithm 2; Line 4). By
+doing so, the data loaded in the k′ loop (Algorithm 2; Line
+2) could stay in the cache and get re-used again and again
+by the inner n loop.
+4. Multi-threading. As real-time inference is getting more
+important, TF-Lite also uses multiple cores to parallel the
+outermost loop (Line 1). In other words, the blocks across
+the l direction in Figure 2 are generated by multiple cores.
+Pointwise Convolution
+Algorithm 3: PWConv Implementation by MM
+Input: Input feature map I, Filter F;
+Output: Output feature map O;
+1 Mat A = I.reshape([G, Ci])
+2 Mat B = F.reshape([Ci, Co])
+3 Mat D = A × B
+4 O = D.reshape([Ho, Wo, Co])
+Another key component in mobile models is the point-
+wise convolution (PWConv). PWConv is a simple 1 × 1
+convolution. It takes as inputs: (1) a 3d input feature map
+I of size (Hi × Wi × Ci), and (2) a 4d ﬁlter F of size
+(1 × 1 × Ci × Co), and produces a 3d output feature map O
+of size (Ho × Wo × Co), where Ho = Hi and Wo = Wi.
+Algorithm 3 shows the implementation of PWConv in
+TF-Lite. It essentially transforms the problem into a matrix-
+matrix (MM) multiplication problem D = A × B, where
+the 2d matrix A is ﬂatten from the 3d input I, so that A is
+a G × Ci matrix, where G = Hi × Wi (Line 1); and B is a
+matrix of size Ci × Co ﬂatten from F (Line 2) since the ﬁrst
+two dimensions are of size 1.
+Since MM multiplication is a classic problem that has
+been well studied, TF-Lite simply calls the high perfor-
+mance MM routine in a BLAS library (Dongarra et al.
+1990). MM multiplication implementations in BLAS are
+highly optimized with all the tricks (e.g., SIMD, loop
+rescheduling) mentioned above. Recently, Google released
+an experimental matrix multiplication library named Ruy
+(Google 2019). Ruy achieves good performance on small
+matrices (e.g., 100×100) but its the performance on large
+matrices is poorer than BLAS. Since Ruy’s code is still im-
+mature and ﬂux, we do not analyze it here but include that
+in our experiments.
+High Performance DWConv and PWConv
+In this section, we present techniques to optimize the imple-
+mentations of DWConv and PWConv on ARM processors.
+We will explain in detail why the existing “well-optimized”
+implementations are not efﬁcient on ARM processors and
+propose our solutions. One of the key elements there is about
+the notions of operational intensity in the rooﬂine model
+(Williams, Waterman, and Patterson 2009) and the notion
+of arithmetic intensity (Harris 2005).
+Algorithm 4: High Performance Depthwise Convolution
+Input: Input feature map I, Filter F, stride s;
+Output: Output feature map O;
+1 for i′ = 0 to C/4 −1 in parallel do
+2
+for l′ = 0 to Ho/Ho,b −1 do
+3
+for k′ = 0 to Wo/Wo,b −1 do
+4
+Kernel(i′, l′, k′, s)
+5 Function Kernel(i′, l′, k′, s):
+6
+α = 0
+7
+if l′ == 0 && k′ == 0 then
+8
+for n = 0 to Hf −1 do
+9
+for m = 0 to Wf −1 do
+10
+V [α] = SIMD Load(Fn,m,i′×4∼i′×4+3)
+11
+α += 1
+12
+else
+13
+α = Wf × Hf
+14
+for ll = 0 to Ho,b −1 do
+15
+for kk = 0 to Wo,b −1 do
+16
+l = l′ × Ho,b + ll
+17
+k = k′ × Wo,b + kk
+18
+V [α] = SIMD Load(Ol,k,i′×4∼i′×4+3)
+19
+α += 1
+20
+for ll = 0 to Ho,b −1 do
+21
+for kk = 0 to Wo,b −1 do
+22
+l = l′ × Ho,b + ll
+23
+k = k′ × Wo,b + kk
+24
+for n = 0 to Hf −1 do
+25
+for m = 0 to Wf −1 do
+26
+V [α] = SIMD Load(
+Il×s+n,k×s+m,i′×4∼i′×4+3)
+27
+V[Hf × Wf + ll × Wo,b + kk] =
+SIMD FMA(V [α],V [n × Wf + m],
+V [Hf × Wf + ll × Wo,b + kk])
+28
+α = Wf × Hf
+29
+for ll = 0 to Ho,b −1 do
+30
+for kk = 0 to Wo,b −1 do
+31
+l = l′ × Ho,b + ll
+32
+k = k′ × Wo,b + kk
+33
+SIMD Store(Ol,k,i′×4∼i′×4+3, V [α])
+34
+α += 1
+Rooﬂine Model
+The rooﬂine model (Williams, Waterman,
+and Patterson 2009) is often used to understand the es-
+timated performance of a given compute kernel running
+on a type of processor by showing the inherent hardware
+limitations, and potential beneﬁt and priority of optimiza-
+tions (e.g., locality, bandwidth, and different paralleliza-
+tion tricks). The rooﬂine model, however, focuses on cache
+misses. In other words, it focuses on the trafﬁc between the
+cache and the memory and assumes if the program is well
+optimized with little cache miss, the program could fully uti-
+
+lize the hardware. The key metric inside the rooﬂine model
+is “operational intensity” (OI), which measures the average
+number of ﬂoating-point operations that can be carried out
+per byte of memory loaded from the memory.
+Arithmetic Intensity
+“Arithmetic Intensity” (AI) (Harris
+2005) measures the average number of ﬂoating-point oper-
+ations that can be carried out per byte of memory loaded
+from the cache to the register.1 This is exactly what we want
+to go after if the memory bottleneck can be removed. Let W
+be the number of arithmetic operations carried out, β be the
+number of bytes transferred between cache and registers, the
+arithmetic intensity T is W
+β .
+Given a particular layer of convolution (e.g., DWConv),
+W is a constant as it is dedicated by the problem deﬁnition
+and algorithm, a larger T means the implementation is more
+efﬁcient because there are fewer data transferred between
+the cache and the registers, which implies the implementa-
+tion is doing a good job in keeping the data in the register as
+long as it is necessary.
+Depthwise Convolution
+Core Inscalability
+Existing implementations of DWConv
+have poor scalability on the number of cores. Take TF-Lite
+implementation as an example (Algorithm 2), it picks the Ho
+dimension as the outer-most loop to apply thread parallelism
+(Line 1). In other words, given p cores, each core is assigned
+with a chunk of output feature map in size of Ho/p×Wo×C
+to compute.
+Since the chunk spans over all the output channels, each
+core has to copy the whole ﬁlter F of size Hf × Wf × C
+into its tiny L1 cache. In other words, when the input feature
+map, the ﬁlter, and the output feature map cannot all ﬁt into
+the L1 cache, the number of L1 cache misses will ﬂy high.
+Furthermore, the situation exacerbates with the number of
+layers because the ﬁlters are getting larger when they appear
+deeper in the model.
+Poor AI
+Although the implementation of DWConv in TF-
+Lite has good performance from the perspective of OI (and
+thus in terms of cache misses when we do not use more
+cores), its performance is next limited by its poor arithmetic
+intensity. This is not an issue on x86 processors. However,
+this is a big issue on ARM processor because ARM proces-
+sors can only load 1 register per cycle while it can process
+2 SIMD FMA instructions per cycle. In other words, if we
+do not optimize the pipeline well, the FMA instructions are
+always waiting for data to be loaded to the registers.
+To be speciﬁc, we ﬁrst analyze the AI of TF-Lite imple-
+mentation (Algorithm 2). Its inner-most loop is able to pro-
+cess 4 output elements in parallel by SIMD (Line 10). In
+order to do so, however, it has to carry out 3 SIMD load
+1We remark that there is a misconception online (e.g.,
+Wikipedia) that OI is equivalent to AI. That misconception comes
+from the fact that cache miss is the major bottleneck on x86 proces-
+sors and thus the trafﬁc between the registers and the cache is im-
+material after the cache bottleneck is resolved. However, for ARM
+processors, it is not the case.
+instructions (Lines 7–9) to retrieve the ﬁlter, input and out-
+put respectively from cache to registers, and 1 SIMD store
+instruction to write back the updated output elements to L1
+cache (Line 11). Thus, the arithmetic intensity of this imple-
+mentation is T DW
+tf
+=
+1×2×4 ops
+4×16 bytes = 1
+8. If the width Wf of
+the ﬁlter and the number of channels C are small, compilers
+may keep Wf × C elements of the ﬁlter in the register for
+the kk loop (Line 4). To give TF-Lite such beneﬁt of doubt,
+we assume this happens and thus its arithmetic intensity can
+become T DW
+tf
+=
+1×2×4 ops
+(3+
+1
+Wo,b )×16 bytes =
+1
+(3+
+1
+Wo,b )×2 <
+1
+6.
+Nonetheless, it is still a very poor number.
+Our implementation
+Algorithm 4 is our proposed imple-
+mentation. To address the core inscalability problem, we re-
+schedule the loop order and picks the C dimension as the
+outer-most loop to apply thread parallelism (Line 1). This
+way, each core is assigned with a chunk of output feature
+map in size Ho × Wo × C
+p to compute. Under such paral-
+lelism, since a chunk only spans C/p output channels, each
+core needs to retrieve Hf × Wf × C/p elements of the ﬁl-
+ter F to its L1 cache. Compared with TF-Lite implementa-
+tion that retrieves Hf × Wf × C elements of the ﬁlter F
+to the L1 cache, we fetch only 1/p of those in cache, which
+signiﬁcantly reduce the cache misses and improve the core
+scalability.
+To improve the arithmetic intensity, we exploit different
+techniques to increase the reuse of the data in the register as
+much as we can. The ﬁrst technique we applied is register
+tiling (Jim´enez, Llaber´ıa, and Fern´andez 2002) (Lines 2 and
+3). It splits the ﬁlter F into tiles of size Hf × Wf × 4. By
+doing so, a tile can be kept in the registers as long as possi-
+ble. The kernel is used to compute the convolution results of
+a small output block of size Ho,b × Wo,b × 4. Ho,b and Wo,b
+are set to ensure the output block stay in the registers across
+the Kernel. The kernel is skillfully tuned to increase its AI
+by reducing the trafﬁc between the registers and the cache.
+Speciﬁcally, lines 7 to 11 in the kernel aim to load the ﬁlter
+into the registers. However, this load process is only done
+when l′ = 0 and k′ = 0 (Line 7), meaning for the nested
+loops in lines 2 and 3, the ﬁlter is only loaded once and stays
+in the registers for long. Lines 14 to 19 in the kernel aim to
+load a speciﬁc output block of size Ho,b × Wo,b × 4 into the
+registers. Notice that this speciﬁc output block is only loaded
+once and would never get re-loaded again. Similarly, Lines
+29 to 34 in the kernel aim to store the updated output block
+back to the cache. Again this speciﬁc output block is only
+stored once, as it would never get re-loaded for any further
+processing after it carries out the FMA in lines 20-27.
+We now analyze the AI of our implementation. That
+would help us to see why it outperforms the existing imple-
+mentations. It is easy to know the arithmetic operations are
+all inlined within the Kernel. In the Kernel, the num-
+ber of arithmetic FMA operations all lies in lines 18–25,
+which has 4 for loops. So, the FMA operation is carried
+out W = Ho,b × Wo,b × Hf × Wf times. Thus, the num-
+ber of ﬂoating-point operations is 8 × W, which will be the
+numerator in the AI.
+The denominator of AI captures the number of bytes
+
+transferred between cache and registers. For our implemen-
+tation, it involves:
+1. Loading the ﬁlter block once (Lines 7-11) across the
+nested two loops l′ and k′ (Lines 2 and 3) and reused
+Ho/Ho,b × Wo/Wo,b times. Thus, Kernel incurs an av-
+erage of
+Hf ×Wf
+Wo/Wo,b×Ho/Ho,b × 16 bytes trafﬁc between the
+registers and cache.
+2. Loading the output block once (Lines 14-19) and storing
+once (Lines 29-34) in the kernel. So, the trafﬁc for output
+block in Kernel is Ho,b × Wo,b × 2 × 16 bytes.
+3. Loading one SIMD register data of I in the inner-most
+loop (Lines 20-27). Thus, the trafﬁc for I is 16 × Ho,b ×
+Wo,b × Hf × Wf = 16 × W bytes.
+Putting it all together, the AI of our implementation is:
+T DW =
+8 · W
+16(
+Hf ·Wf
+Wo/Wo,b·Ho/Ho,b + Ho,b · Wo,b · 2 + W)
+(1)
+Since the size of the ﬁlter is either 3 × 3 or 5 × 5, and
+the block sizes Ho,b and Wo,b are empirically set as 1 or
+2 (they are set with the objective of saving some registers
+because we indeed apply loop unrolling to the 4 tightly-
+nested loops in Lines 18-25). So, the term
+Hf ×Wf
+Wo/Wo,b×Ho/Ho,b
+is negligible. Therefore, we rewrite equation (1) as T DW =
+(Hf ×Wf )
+(2+Hf ×Wf )×2 ≥
+9
+22, which is obviously way larger than
+T DW
+tf
+.
+Pointwise Convolution Implementation
+Core Inscalability
+TF-Lite’s PWConv implementation by
+default calls the MM multiplication rountine in Eigen
+(Guennebaud, Jacob, and others 2010). However, it is known
+that OpenBLAS (OpenBLAS 2015) has the best perfor-
+mance and thus we set TF-Lite to use OpenBLAS instead.
+Nonetheless, it is known that current matrix-multiplication
+implementations including OpenBLAS cannot scale well
+on multiple cores for deep learning workload (Zhang,
+Franchetti, and Low 2018; Zhang et al. 2018; Rajbhandari
+et al. 2017).
+Algorithm 5: Matrix Multiplication in BLAS Libraries
+Input: Matrix A of size (G × Ci), Matrix B of size (Ci × Co);
+Output: Matrix D of size (G × Co);
+1 for i′ = 0 to Ci/Ci,b do
+2
+for g′ = 0 to G/Gb in parallel do
+3
+for j′ = 0 to Co/Co,b do
+4
+RTRA(i′, g′, j′)
+Poor AI
+Algorithm 5 is the implementation of a BLAS
+MM routine (e.g., SGEMM in OpenBLAS). It has applied
+loop blocking to increase data reuse in the memory hierar-
+chy. Its kernel is the function RTRA (Line 4), which stands
+for Register Tiling Reuse block A. The logical view of RTRA
+is depicted in Figure 3 (left). It ﬁrst SIMD loads a block
+of matrix A, which is represented as A , into the registers
+(Line 2). A is of size Gb × Ci,b. The elements of A stay
+in the registers across the j’ loop (Line 3 in Algorithm 5) and
+are reused Co/Co,b times.
+Inside the function RTRA (Figure 3), Line 3 aims to
+stream a block of matrix B and a block of matrix D into
+the registers. D is of size (Gb, Co,b) and B is of size
+(Ci,b, Co,b). A matrix multiplication between A and B is
+performed to update D (Line 4), and it costs Gb×Ci,b×Co,b
+4
+FMA operations and the number of ﬂoating-point operations
+is 2 × Gb × Ci,b × Co,b. Finally, the updated D has to be
+stored to the cache.
+The AI of BLAS MM implementation is as follows. The
+arithmetic operations are all inlined in the kernel RTRA. In
+routine RTRA, its AI is:
+T P W
+RT RA =
+2 × Gb × Ci,b × Co,b ops
+(Gb × Co,b × 2 + Ci,b × Co,b +
+Gb×Ci,b
+Co/Co,b ) × 4 bytes
+Since AArch64 has 32 128-bit SIMD registers, in order to
+fully allocate the registers, Gb, Ci,b and Co,b are usually set
+as 8, 8 and 4 in the BLAS Libraries (e.g., OpenBLAS). Then,
+we can get T P W
+RT RA =
+4
+3+ 8
+Co . Note that the RTRA kernel has
+a poor AI because D has to be transferred twice between
+the cache and the registers (one load and one store).
+Algorithm 6: High Performance Matrix Multiplication
+Input: Matrix A of size (G × Ci), Matrix B of size (Ci × Co);
+Output: Matrix D of size (G × Co);
+1 for g′ = 0 to G/Gb in parallel do
+2
+for j′ = 0 to Co/Co,b do
+3
+for i′ = 0 to Ci/Ci,b do
+4
+RTRD(i′, g′, j′)
+Our Implementation
+We propose another loop blocking
+method with better AI (Algorithm 6). It calls another ker-
+nel RTRD (Register Tiling Reuse block D), whose concept
+is listed in Figure 3 (right). RTRD ﬁrst loads block D into
+the registers. The elements of D stay in the registers across
+the i’ loop (Line 3; Algorithm 6) and are reused. After that, it
+streams blocks A and B into the registers and then eval-
+uates a small matrix multiplication to update D (Line 4).
+Differ from RTRA, RTRD only stores the block D to the
+cache in the last iteration of loop i′. Though this way is
+inefﬁcient on x86 processor (Smith et al. 2014), it is very
+efﬁcient for ARM processors because ARM processors is
+sensitive to AI. The arithmetic intensity of RTRD for MM
+multiplication is:
+T P W
+RT RD =
+2 × Gb × Ci,b × Co,b ops
+(Gb × Ci,b + Ci,b × Co,b +
+Gb×Co,b×2
+Ci/Ci,b
+) × 4 bytes
+To fully allocate the registers, we can set Gb = 8, Co,b =
+8 and Ci,b = 4. Thus, T P W
+RT RD =
+2
+1+ 8
+Ci
+it is about 1.5×
+
+Algorithm RTRA( i’, g’, j’ )
+if j’ == 0:
+Load
+into registers
+Load
+into registers
+and
+Store
+to cache
+Algorithm RTRD( i’, g’, j’ )
+if i’ == 0:
+Load
+into registers
+D
+D
+D
+D
+Load
+into registers
+A
+B
+and
+A
+A
+B
+A
+A
+B
+D
++=
+B
+Store
+to cache
+if i’ >= Ci/Ci,b:
+(g’ x Gb, i’ x Ci,b)  
+Gb
+Ci,b
+Co,b
+(g’ x Gb, j’ x Co,b)  
+Gb
+Co,b
+(i’ x Ci,b, j’ x Co,b)  
+Ci,b
+B
+D
++=
+D
+×
+×
+1
+2
+3
+4
+5
+1
+2
+3
+4
+5
+6
+Figure 3: RTRA vs RTRD
+larger than T P W
+RT RA, since Co and Ci are often much larger
+than 8. Of course, our actual implementation also includes
+all the optimization tricks such as software prefetching, loop
+rolling etc. But we do not repeat them here.
+Experimental Evaluation
+In this section, we present performance results of our high
+performance depthwise and pointwise convolution on mo-
+bile devices. We run our experiments on a 2.0GHz quad-
+core ARM Cortex-A57. Each core has 48KB L1 instruction
+cache and 32KB L1 data cache. All cores share 2MB uni-
+ﬁed L2 cache. We compare performance of our DWConv
+and PWConv implementations with two versions of TF-Lite,
+one links to OpenBLAS (OpenBLAS 2015) and the other
+one links to Ruy (Google 2019). In addition, we compare the
+performance with TVM (Chen et al. 2018). TVM implemen-
+tations suppose to deliver performance as good as the perfor-
+mance offered by manually optimizing the implementation
+for a speciﬁc hardware. The DWConvs and PWConvs opera-
+tions in this study are extracted from MobileNetV1(Howard
+et al. 2017), MobileNetV2(Sandler et al. 2018) and Mnas-
+Net (Tan et al. 2018). They are different in input size, output
+size and ﬁlter size.
+Performance
+Figure 4 to Figure 6 show the speedup of
+our implementations (and TVM) with respect to TF-Lite,
+on different DWConv and PWConv extracted from Mo-
+bileNetV1, MobileNetV2, and MnasNet-A1, respectively.
+For example, in Figure 4, D1 to D9 refer to nine differ-
+ent DWConvs found in MobileNetV1. Results show that our
+DWConv implementation outperforms TF-Lite at least by
+2.9× and up to 9.0×. In addition, our DWConv implemen-
+tation outperforms TVM generated binaries by at least 1.4×
+and up to 5.5×, showing that TVM is not able to reach the
+level of optimizations that we can achieve.
+Our PWConv implementation achieves 1.3× to 5.1×
+speedup over TF-Lite(OpenBLAS), which is essentially
+calling the OpenBLAS library for MM multiplication. Our
+PWConv implementation also achieves up to 2.1× speedup
+over TF-Lite(Ruy), which uses the aggressively tuned li-
+brary Ruy to implement PWConv. In addition, our PW-
+Conv implementation achieves 1.05× to 2.11× speedup
+over TVM, which once again shows TVM is not able to
+reach the level of optimizations that we can achieve.
+Scalability
+In Figure 7, we compare the scalability of our
+DWConv and PWConv performances with respect to the
+number of cores. We include TF-Lite (which uses Open-
+BLAS to implement PWConv) there for comparisons.2
+For space reasons, we only include the results from Mo-
+bileNetV1 as results from MobileNetV2 and Mnasnet-A1
+are largely similar.
+From Figure 7, we see that our implementations scale bet-
+ter than TF-Lite. We almost achieve perfect speedup when
+using 2 threads, which is very promising because every par-
+allel program has its serial part based on Amdahl’s law.
+When using 4 threads, the core instability of TF-Lite im-
+mediately manifest – TF-Lite has only around 2× speedup
+on DWConv and 1.8× to 2.7× on PWConv. In contrast, our
+implementations achieve 2.2× to 3.9× speedup on DWConv
+and 3.2× to 3.9× speedup on PWConv.
+Related Work
+Most works on optimizing deep learning operations focus
+only on conventional convolutions (Zhang, Franchetti, and
+Low 2018; Cho and Brand 2017; Georganas et al. 2018;
+Rajbhandari et al. 2017) but not depthwise and pointwise
+convolutions appeared in mobile models. To our best knowl-
+edge, this paper is the ﬁrst to discuss the optimization of
+depthwise and pointwise convolutions on mobile processors.
+In (Qin et al. 2018), there are treatments to improve the per-
+formance of DWConv, but they focus on training and GPU,
+whereas our focus is on inference and ARM. TVM (Chen et
+al. 2018) is a compiler stack for generating highly efﬁcient
+binaries for deep network. It supports CPU, GPU, ARM, and
+specialised accelerators. Our experimental results show that
+binaries optimized by TVM not yet fully utilize the power
+of mobile processors. BLAS libraries (Smith et al. 2014;
+OpenBLAS 2015; Guennebaud, Jacob, and others 2010) of-
+fer highly efﬁcient implementations for PWConv. However,
+we are able to show that they are still lacking on mobile de-
+vices.
+Conclusions and Future Work
+In this paper, we show that existing implementations of
+depthwise convolution and pointwise convolution are not
+efﬁcient enough on mobile devices. The major reason is
+that those implementations have not considered the fact that
+ARM processors are getting more cores as well as the la-
+tency gap between the load and FMA instructions in ARM
+processors.
+To this end, we re-optimize the implementations of DW-
+Conv and PWConv speciﬁcally for ARM. That is because
+ARM processors are dominating the mobile device market
+and there is an increasing demand to carry out inference
+directly on the mobile devices. Experimental results show
+that our implementations can outperform industry-strength
+implementations from TF-Lite as well as optimized bina-
+ries generated from TVM. Using MobileNetV1 as an ex-
+ample, our optimized implementation can carry out infer-
+2We do not include TVM here because TVM generates different
+binaries for different number of threads, making things incompara-
+ble.
+
+0
+2
+4
+6
+8
+D1
+D2
+D3
+D4
+D5
+D6
+D7
+D8
+D9
+Speedup
+TFLite
+TVM
+Ours
+(a) DWConv: Speedup over TFLite
+(b) PWConv: Speedup over TFLite (OpenBLAS)
+0
+1
+2
+3
+4
+P1
+P2
+P3
+P4
+P5
+P6
+P7
+P8
+P9
+Speedup
+TFLite(OpenBLAS)
+TVM
+TFLite(Ruy)
+Ours
+Figure 4: MobileNetV1 (4/4 cores/threads)
+0
+2
+4
+6
+8
+D1
+D2
+D3
+D4
+D5
+D6
+D7
+D8
+D9
+D10
+D11
+Speedup
+TFLite
+TVM
+Ours
+0
+1
+2
+3
+4
+P1
+P2
+P3
+P4
+P5
+P6
+P7
+P8
+P9
+P10
+P11
+P12
+P13
+P14
+P15
+P16
+P17
+P18
+P19
+Speedup
+TF-Lite(OpenBLAS)
+TVM
+TF-Lite(Ruy)
+Ours
+(b) PWConv: Speedup over TFLite (OpenBLAS)
+(a) DWConv: Speedup over TFLite
+Figure 5: MobileNetV2 (4/4 cores/threads)
+0
+2
+4
+6
+8
+D1
+D2
+D3
+D4
+D5
+D6
+D7
+D8
+D9
+D10
+D11
+D12
+Speedup
+TFLite
+TVM
+Ours
+0
+1
+2
+3
+4
+P1
+P2
+P3
+P4
+P5
+P6
+P7
+P8
+P9
+P10
+P11
+P12
+P13
+P14
+P15
+P16
+P17
+P18
+P19
+P20
+Speedup
+TF-Lite(OpenBlas)
+TVM
+TF-Lite(Ruy)
+Ours
+(a) DWConv: Speedup over TFLite
+(b) PWConv: Speedup over TFLite (OpenBLAS)
+Figure 6: MnasNet-A1 (4/4 cores/threads)
+0
+1
+2
+3
+4
+D1
+D2
+D3
+D4
+D5
+D6
+D7
+D8
+D9
+Speedup
+TFLite-2T
+Ours-2T
+TFLite-4T
+Ours-4T
+0
+1
+2
+3
+4
+P1
+P2
+P3
+P4
+P5
+P6
+P7
+P8
+P9
+Speedup
+TFLite-2T
+Ours-2T
+TFLite-4T
+Ours-4T
+DWConv: normalized speedup to one thread
+PWConv: normalized speedup to one thread
+Figure 7: Scaling behavior with increasing number of threads
+
+ence at 46GFlops, a performance that is almost hitting the
+rooﬂine of ARM processors. The encouraging result also re-
+veals one important future work for us. Since TVM is a com-
+piler framework for deep learning models, our results indi-
+cate that we incorporate our techniques (e.g., register tiling)
+into TVM so to make it generate highly efﬁcient binaries for
+mobile models on mobile devices.
+Acknowledgment
+This work is supported by Hong Kong General Re-
+search Fund (14200817, 15200715, 15204116), Hong
+Kong AoE/P-404/18, Innovation and Technology Fund
+ITS/310/18.

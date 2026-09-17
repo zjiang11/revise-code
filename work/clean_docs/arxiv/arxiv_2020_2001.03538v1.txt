@@ -1,0 +1,560 @@
+Convolutional-Recurrent Neural Networks on
+Low-Power Wearable Platforms for Cardiac
+Arrhythmia Detection
+Antonino Faraone
+ETH, Z¨urich, Switzerland
+
+Ricard Delgado-Gonzalo
+CSEM, Neuchˆatel, Switzerland
+
+Abstract—Low-power sensing technologies, such as wearables,
+have emerged in the healthcare domain since they enable continu-
+ous and non-invasive monitoring of physiological signals. In order
+to endow such devices with clinical value, classical signal process-
+ing has encountered numerous challenges. However, data-driven
+methods, such as machine learning, offer attractive accuracies
+at the expense of being resource and memory demanding. In
+this paper, we focus on the inference of neural networks running
+in microcontrollers and low-power processors which wearable
+sensors and devices are generally equipped with. In particular,
+we adapted an existing convolutional-recurrent neural network,
+designed to detect and classify cardiac arrhythmias from a single-
+lead electrocardiogram, to the low-power embedded System-on-
+Chip nRF52 from Nordic Semiconductor with an ARM’s Cortex-
+M4 processing core. We show our implementation in ﬁxed-
+point precision, using the CMSIS-NN libraries, yields a drop of
+F1 score from 0.8 to 0.784, from the original implementation,
+with a memory footprint of 195.6 KB, and a throughput of
+33.98 MOps/s.
+I. INTRODUCTION
+The recent developments in the ﬁeld of Deep Learning (DL)
+gave an important boost to the ﬁeld of healthcare and biomed-
+ical engineering [1]. The unprecedented accuracy enabled by
+Deep Neural Networks is progressively overwhelming algo-
+rithms based on classical signal processing for many applica-
+tion scenarios due to the availability of large datasets and raw
+computational power. On another side, wearable devices are
+showing a high potential in the healthcare domain [2] as they
+enable continuous and non-invasive monitoring of vital param-
+eters, prompt detection of disorders and diseases, and an early
+detection of emergencies. Wearable devices have achieved
+great success both for personal healthcare management (e.g.,
+wristbands [3], smart-vests [4]) and for support to clinical
+treatments [5]. The beneﬁt coming from the implementation
+of DL techniques in such wearables would be a game-changer
+for the whole sector [6], but it is systematically hindered
+by the hardware limitations of such devices, namely limited
+computational power, memory, and battery life [7].
+For these reasons, wearable applications that want to exploit
+neural networks generally ofﬂoad such computations to a re-
+mote cloud server that collects data produced by the resource-
+limited sensors, process them on high performance hardware,
+and return back the results to the user or, potentially, to a
+medical doctor and emergency services [8]. This workaround
+requires a reliable connection to the cloud server, introduces
+latency issues on real-time applications, and raises privacy
+concerns [9]. Moreover, transmitting signals at a high sampling
+rate from sensors to edge devices is extremely demand-
+ing in terms of energy. This becomes unsustainable in the
+case of battery-powered devices for continuous monitoring of
+electrocardiograms (ECG) or electroencephalograms (EEG).
+To overcome the above obstacles, a suitable and emerging
+solution is to bring data processing as close as possible to the
+devices that produced it. This means, for instance, to perform
+expensive computations on edge devices like single-board
+computers [10], [11], mobile GPUs, dedicated hardware [12],
+[13], and smartphones [14].
+In this paper, we focus on the inference of neural networks
+running on microcontrollers and low-power processors, which
+wearable sensors and devices are generally equipped with. We
+chose as use case the detection and classiﬁcation of cardiac
+arrhythmias. Arrhythmias are cardiac irregularities of heart
+beats that can lead to severe health complications [15]. There
+are several categories of Arrhythmias whose detection and
+diagnosis is generally performed by specialists in cardiology
+via analysis of ECGs. We extend the work of Van Zaen et
+al. [16], a convolutional-recurrent neural network architecture
+for atrial ﬁbrillation detection, trained on the dataset provided
+for the 2017 Computation in Cardiology Challenge [17]. This
+network achieves an F1 score of 0.81 for detection of atrial
+ﬁbrillation, and has been validated on ECG acquired with
+sensors from a smart vest [18]. This network serves as a
+baseline for our work. Our work focuses on the trade-offs
+between model complexity and performance drops. Major
+attention is paid on architectural changes to reduce memory
+footprint and operations count of the model.
+The paper is structured as follows. In Section II, we intro-
+duce the software libraries, hardware, and data employed to
+train and evaluate our embedded neural network. In Section III,
+we present the optimized NN architecture as well as the steps
+performed to optimize it for the deployment on the target SoC.
+Then, in Section IV, we analyze our proposed NN in terms of
+memory footprint, execution time, and overall operation count
+and throughput when running into the target SoC. Finally,
+we conclude by outlining the beneﬁts and limitations of our
+approach and setting the direction for further work.
+arXiv:2001.03538v1  [eess.SP]  8 Jan 2020
+
+II. MATERIALS AND METHODS
+In this section, we ﬁrst present and discuss the main soft-
+ware tools that we leverage in our implementation. Then, we
+present the target hardware platform and provide an overview
+of its technical speciﬁcations and limitations. Finally, we
+introduce the dataset that was used during training.
+A. Software Tools
+CMSIS1 is a software library that provides a hardware
+abstraction layer for ARM Cortex-based processors. It includes
+a DSP library and, from version v5, a set of routines to
+deploy neural networks on Cortex microcontrollers named
+CMSIS-NN [19]. It supports a basic range of layer typologies,
+namely convolutional layers, dense layers, and pooling layers,
+various activation functions, including tanh and sigmoid, and
+a modiﬁed version of Softmax that works with power of 2
+instead of e. In order to reduce memory footprint and speedup
+computations, CMSIS-NN employs ﬁxed-point quantization,
+consisting in representing weights and activations as 8 or 16 bit
+signed integers in Qn.m format, where n and m are respec-
+tively the number of bits allocated for the integer and fractional
+part. the Q-format for each weight and activation must be
+chosen a-priori by analyzing their range of values. If B is the
+number of bits allocated for a variable v, excluding the sign
+bit, to convert it to the corresponding Qn.m representation,
+the following steps are performed:
+v = round(v · 2m)
+v = clip(v, [−2B, 2B −1])
+(1)
+The advantage of such representation in terms of computa-
+tion complexity is that the computations do not require the
+Floating Point Unit (FPU), as all numbers are actually treated
+as as integers. Furthermore, Cortex-M4 and M7 processors
+support SIMD Instructions (Single Instruction Multiple Data)
+capable of operating simultaneously on multiple 16 bit integer
+operands.
+For each layer, two more parameters have to be ﬁxed,
+namely the shifts for the bias and the output. If weights
+are in Qx.y format, and inputs are in Qa.b format, the
+product between those two tensors will have Q(x+a).(b+y)
+format. Therefore, if the format of the biases does not match
+it, it is necessary to apply a shift to them, that must be
+calculated a-priori during the network implementation. Finally,
+the output must be shifted to match the format of the input
+of the following layer. CMSIS-NN provides fast versions of
+convolutional layers that employ further optimization tricks but
+that impose the constraint of having input channels multiple
+of 4 and output channels multiple of 2.
+B. Hardware Platform
+Our target hardware platform is the nRF52832 SoC from
+Nordic Semiconductor. It is powered by an ARM Cortex-M4
+MPU clocked at 64 MHz, equipped with 64 KB of RAM and
+512 KB of FLASH memory. It targets low-power Bluetooth
+applications like Internet-of-Things (IoT) and medical wear-
+able devices. The advertised supply current is 3.7 mA (running
+from FLASH, using internal DC/DC, 3 V supply voltage),
+while this ﬁgure drop to just 0.3 µA in OFF mode without
+RAM retention. The platform includes an FPU and supports
+SIMD instructions, which are heavily used in CMSIS-NN to
+speedup matrix multiplications and convolutions.
+C. Dataset
+The chosen dataset consists of 8,528 samples of single-
+lead ECG signals, used as reference dataset for the Computing
+in Cardiology 2017 Challenge. The raw signals are sampled
+at 300 Hz and have a variable duration between 9 and 60
+seconds [17]. Each sample is labeled over four classes: Normal
+Rhythm, Atrial Fibrillation, Noise, and Other Rhythm. Classes
+are unbalanced (with strong predominance of normal rhythms)
+and weakly labeled, meaning that each label is associated
+to the whole recording, thus we have no information about
+the exact samples range where arrhythmia occurs. Since the
+ofﬁcial test set used for the competition has not been released,
+we used instead a subset of 1,528 signals extracted from the
+dataset, striving to keep the same proportion between classes.
+The remaining 7,000 samples have been used for training.
+Several pre-processing steps are applied to the dataset as
+described in [16]. First, it is ﬁltered using a Butterworth band-
+pass ﬁlter with passband between 0.5 and 40 Hz. Then, we
+resample each signal at 107 Hz in order to reduce the workload
+in the ﬁnal implementation and match the sampling frequency
+of the acquisition device used for internal demonstrations.
+The records are normalized and, before feeding them to the
+network, they are split into windows of 256 samples with 50%
+overlap. If signals have a number of samples not divisible by
+256, a number of samples are discarded from the beginning
+and the end of the sequence by applying a random offset to
+the ﬁrst window.
+III. NEURAL NETWORK
+In this section, we describe the modiﬁcations that we
+implemented in the NN from [16] in order to be able to run
+into our target platform.
+A. Architecture
+The NN can be decomposed in two parts. Each window is
+ﬁrst processed through a sequence of 7 convolutional layers of
+size 5, each followed by an average pooling layer with size and
+stride equal to 2. The number of channels is kept multiple of
+8 in order to exploit the speedup from the optimized convolu-
+tional kernels of CMSIS-NN. A global averaging pooling layer
+is applied after the last layer. The output of the convolutional
+part is a set of 128-dimensional tensors, one for each window,
+which is then fed into a Gate Recurrent Unit (GRU) with 64
+hidden units. Moreover, dropout with 50% of probability is
+applied to the internal gates. Training was performed using
+Keras2 with TensorFlow3 backend, categorical cross-entropy
+as loss function and Adam as optimizer.
+Table I summarizes the structure of the NN and gives an
+overview of the parameter count for each layer. Here Nw, is
+the number of windows extracted from the input signal, and it
+
+TABLE I: Architecture of the NN and parameter count
+Layer
+Output shape
+Parameter count
+Input
+(Nw, 256, 1)
+-
+Conv1
+(Nw, 128, 8)
+48
+Conv2
+(Nw, 64, 16)
+656
+Conv3
+(Nw, 32, 32)
+2592
+Conv4
+(Nw, 16, 64)
+10,304
+Conv5
+(Nw, 8, 64)
+20,544
+Conv6
+(Nw, 4, 128)
+41,088
+Conv7
+(Nw, 2, 128)
+82,048
+Global Average Pooling
+(Nw, 128)
+0
+GRU
+(64)
+37,056
+Dense+Softmax
+(4)
+260
+depends on its length. Overall, the full network counts 194,596
+parameters. If all the weights are represented as 8-bits ﬁxed
+point numbers, the total space occupied in memory is slightly
+less than 200 KB, which is far below the size of the on-chip
+FLASH memory of the target platform. In summary, compared
+to the original network, we reduced the input window size
+from 512 to 256 samples, reduced the depth of last three layers,
+and replaced of the LSTM with a less complex GRU.
+B. Quantization
+We quantized inputs, weights, and intermediate activations
+as 8-bits ﬁxed point numbers in order to minimize the memory
+footprint and to maximize the speedup coming from SIMD
+instructions. Once the number of bits is ﬁxed, we also require
+to determine the most appropriate quantization scheme. The
+naive approach is to allocate as many bits for the integer part
+as necessary to cover the whole range [min, max], where min
+and max are respectively the minimum and maximum element
+in the set of weights. If, on the one hand, this prevents from
+cutting out too large or too small weights, on the other it
+might lead to allocate most of the bits for the integer part, thus
+losing resolution on the fractional part. If only few weights
+have values close to the border of the interval, it might be
+unnecessary to pay such a price [20].
+Our approach is to calculate mean and standard deviations
+of all weights, and then select the number of bits to allocate
+for the integer part in such a way that it could be possible to
+represent all values in the range [µ+3σ, µ−3σ], where µ and σ
+are respectively mean and standard deviation. Following this
+approach, we have opted for 2 integer bits and 5 fractional
+bits (Q2.5 notation). To verify that performance drops after
+quantization is acceptable, we ﬁrst applied the transformations
+described in (1), then again divided by 25. Thus, the resulting
+weights are ﬁxed point numbers inside the representable range
+and with a granularity of 2−5 = 0.03125. To simulate the
+effect of quantization on intermediate activations, we inserted
+quantization layers after each pair convolution-pooling and at
+the output of the GRU. GRU’s internal gates are quantized as
+16-bits numbers in Q2.13 format. For that reason, we neglected
+the effect of the quantization on the aforementioned gates and
+internal states.
+IV. RESULTS AND DISCUSSION
+In this section, we evaluate our approach in two steps.
+First, we assess the impact on the accuracy due to the
+modiﬁed architecture and quantization. Then, we evaluate the
+performance in terms of memory footprint, execution time,
+and overall operation count and throughput directly on the
+nRF52832. For all the experiments on the SoC, we built the
+ﬁrmware with the GNU Arm Embedded Toolchain 4 with level
+3 optimization (−O3 ﬂag on compilation command). In order
+to measure the execution time, we used the readout of the
+CYCCNT register.
+A. Accuracy
+After training for 250 epochs, the accuracy of the full
+precision network was 89.3% on the training set and 86.1%
+on the test set. The ﬁxed point (FP) implementation achieved
+an accuracy of 85.7%. Moreover, in Table II, we report
+the sensitivity (ratio of positives that are correctly detected),
+speciﬁcity (ratio of correctly detected negatives), and F1 score
+(harmonic mean between precision and recall) for each class
+and for the overall network.
+TABLE II: Accuracy metrics of the neural networks
+Class
+Metric
+Training
+set
+Test
+set
+Test set
+FP precision
+Normal rhythm
+Sensitivity
+0.959
+0.931
+0.923
+Speciﬁcity
+0.870
+0.865
+0.867
+F1 score
+0.936
+0.920
+0.916
+Atrial ﬁbrillation
+Sensitivity
+0.864
+0.841
+0.848
+Speciﬁcity
+0.982
+0.969
+0.965
+F1 score
+0.841
+0.776
+0.765
+Other rhythm
+Sensitivity
+0.795
+0.741
+0.745
+Speciﬁcity
+0.953
+0.932
+0.922
+F1 score
+0.832
+0.777
+0.770
+Noise
+Sensitivity
+0.627
+0.706
+0.588
+Speciﬁcity
+0.995
+0.991
+0.996
+F1 score
+0.707
+0.727
+0.670
+Overall
+Sensitivity
+0.811
+0.805
+0.776
+Speciﬁcity
+0.950
+0.939
+0.938
+F1 Score
+0.829
+0.800
+0.780
+Accuracy
+0.893
+0.861
+0.854
+The last column of Table II summarizes the performance
+ﬁgures obtained with the modiﬁcations described in section
+III-B to simulate quantization. Sensitivity to noise is the most
+penalized, but except from that, performance metrics are not
+remarkably impacted by the ﬁxed-point quantization, and in
+some case it even shows a slight improvement (e.g., Atrial
+Fibrillation sensitivity).
+B. Memory Footprint
+The output binary is around 210 KB, which include weights
+and biases, the routines of CMSIS-DSP and CMSIS-NN
+necessary to run the network, and few other lines of code
+for setup and conﬁguration of the board. By looking at the
+.map ﬁle generated by the toolchain, we found that the
+
+0
+2
+4
+6
+8
+10
+2
+0
+2
+4
+6
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+2
+4
+6
+8
+10
+1
+0
+1
+2
+3
+4
+5
+0.0
+0.2
+0.4
+0.6
+0.8
+0
+2
+4
+6
+8
+10
+10
+5
+0
+5
+10
+0.0
+0.2
+0.4
+0.6
+0.8
+noise normal
+rhythm
+other
+rhythm
+Probability
+Probability
+Probability
+Amplitude(mV)
+Amplitude(mV)
+Amplitude(mV)
+atrial
+fibrillation
+Time [s]
+Fig. 1: ECG signals in the test set (left) and their corresponding
+class probabilities (right) estimated by the quantized NN.
+(top) normal, (middle) atrial ﬁbrillation, (bottom) noise.
+memory allocated for hard-coded data (namely weights, biases
+and lookup tables for trigonometric functions) is 195.6 KB.
+Data allocated in RAM consists mainly in GRU gates and
+hidden states (0.8 KB), buffers for convolutions (4 KB), and
+convolutions activations (two arrays of 2 KB).
+C. Timing
+In order to estimate the execution time, we fed the network
+4 windows of data (640 ECG samples), which corresponds to
+4 inferences of the NN. Then, we calculated the difference
+between the value stored into the CYCCNT register before and
+after the execution of the network. By dividing the obtained
+number by 4, we obtain the estimated average execution time.
+With the above conﬁguration, we obtained an interval of
+379.2 ms, which translates into an average processing time per
+window of 94.8 ms. The largest part of this interval, around
+91 ms, is spent during the convolutional part of the network,
+3.8 ms are spent during the execution of the GRU, and 28 µs
+are spent in the fully connected layer.
+D. Operation Count and Throughput
+We based our estimations on the following assumptions in
+order to obtain an estimation of the number of operations that
+the network performs to process one window:
+• For 1D convolutional layers, we assume 2∗K∗C∗N∗L+
+L∗N operations, where K is the kernel size, C the input
+channels, N the output channels, and L the length of the
+output of the layer. The second addend is the contribution
+from the biases.
+• Averaging pooling layers with kernel dimension of 2 and
+stride 2 amount L ∗C/2 operations.
+• Fully connected layers amount to 2 ∗M ∗N + N
+operations, where M and N are the dimension of the
+input and the output tensor respectively.
+• We neglect the contributions of activation functions since
+in CMSIS these transformations are implemented as
+lookup tables or bitwise operations.
+The total number of operations of the network under these
+assumptions is summarized in Table III. Finally, we calculate
+the throughput of our implementation as
+Throughput =
+OpsCount
+ExecutionTime = 33.98 MOps/s,
+where the operation count and the execution time are con-
+strained to the execution of a single window. Moreover, since
+the clock frequency of our SoC is 64 MHz, this translates into
+an average of 0.531 Ops/Cycle.
+TABLE III: Estimated operation counts of the network
+Layer
+Parameter count
+Operation count
+Convolutional block
+157,280
+3.147 MOps
+GRU
+37,056
+73,728 KOps
+Dense layer
+260
+516 Ops
+Total
+194,596
+3.221 MOps
+E. Power and Efﬁciency
+We calculated the current consumption of the system by
+measuring the voltage drop on the 33 Ωresistor in series to
+the supply line. The board is powered with 5V, the DC/DC
+converter is enabled, and the processor executes the network
+continuously in a loop. We measured a voltage drop of
+136.25 mV, which translates into an input current of 4.13 mA
+and a power of 20.65 mW. We ﬁnally, calculated power
+efﬁciency as
+Throughput
+Power
+= 33.98 MOps/s
+20.65 mW
+= 1.64 GOps/s/W.
+In a ﬁnal implementation, SoC is idle for most of the time, thus
+the RMS must be calculated according to the duty cycle. We
+replicated the same measurements using TensorFlow Lite for
+Microcontrollers as inference engine. With 8-bits quantization,
+for the only convolutional part (RNNs are currently not
+supported) the efﬁciency is just Throughput
+Power
+= 3.0 MOps/s
+24.14 mW =
+0.124 GOps/s/W.
+V. CONCLUSION
+We presented a NN for arrhythmia detection that, in terms of
+size and computational complexity, is suitable for deployment
+to a resource-constrained microcontroller. To achieve so, we
+expressed weights and activations as 8-bits integers in Q
+format. We then implemented such network on our target
+platform using CMSIS-NN and benchmarked it (memory
+footprint, execution time, and throughput). In future works, we
+will perform a detailed comparison between different inference
+libraries, including TensorFlow Lite for Microcontrollers and
+different hardware platforms and accelerators like the GAP8
+from GreenWaves Technologies 5. The best performing solu-
+tion will eventually be integrated in a wearable device that
+acquires and processes ECG signals in real-time.

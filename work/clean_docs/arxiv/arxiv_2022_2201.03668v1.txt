@@ -1,0 +1,971 @@
+Towards Group Robustness in the presence of
+Partial Group Labels
+Vishnu Suresh Lokhande∗1, Kihyuk Sohn3, Jinsung Yoon3, Madeleine Udell†2,
+Chen-Yu Lee3 and Tomas Pﬁster3
+1University of Wisconsin-Madison, 2Cornell University, 3Google Cloud AI Research
+Abstract
+Learning invariant representations is an important requirement when training ma-
+chine learning models that are driven by spurious correlations in the datasets. These
+spurious correlations, between input samples and the target labels, wrongly direct
+the neural network predictions resulting in poor performance on certain groups,
+especially the minority groups. Robust training against these spurious correlations
+requires the knowledge of group membership for every sample. Such a requirement
+is impractical in situations where the data labelling efforts for minority or rare
+groups is signiﬁcantly laborious or where the individuals comprising the dataset
+choose to conceal sensitive information. On the other hand, the presence of such
+data collection efforts result in datasets that contain partially labelled group infor-
+mation. Recent works have tackled the fully unsupervised scenario where no labels
+for groups are available. Thus, we aim to ﬁll the missing gap in the literature by
+tackling a more realistic setting that can leverage partially available sensitive or
+group information during training. First, we construct a constraint set and derive a
+high probability bound for the group assignment to belong to the set. Second, we
+propose an algorithm that optimizes for the worst-off group assignments from the
+constraint set. Through experiments on image and tabular datasets, we show im-
+provements in the minority group’s performance while preserving overall aggregate
+accuracy across groups.
+1
+Introduction
+Neural networks being overly biased to certain groups of the data is an increasing concern within the
+machine learning community [1]. A primary cause for bias against speciﬁc groups is the presence of
+extraneous attributes in the datasets that wrongly direct the model responses [43]. Such extraneous
+attributes are features that need to be controlled for. For example, in computer vision tasks such as
+image classiﬁcation or object detection, an extraneous attribute could correspond to the background
+in an image or a co-occurring object irrelevant to the task, e.g. a person making a speech in a football
+ﬁeld could be predicted as playing football [6]. The presence of such extraneous attributes warrant a
+model to derive the predictions by making spurious correlations to extraneous features in an image
+rather than an actual object of interest. An inevitable consequence of such correlations to extraneous
+attributes is disparities in performance across different groups within the dataset. Speciﬁcally, if
+certain groups form a minority, a model can simply cheat by having a high overall aggregate accuracy
+but poor minority group accuracy [28].
+Existing works for this problem [2, 35] operate in the regime where the number of groups, likely
+to be adversely impacted through spurious correlations, are known apriori. Further, they assume a
+complete knowledge of the group membership of individual samples in the training dataset. While
+∗Work done as a research intern at Google.
+†Work done as a visiting researcher at Google.
+Preprint.
+arXiv:2201.03668v1  [cs.LG]  10 Jan 2022
+
+: class 1, group 0
+: class 0, group 0
+(i) Un-labeled
+(ii) Fully-labeled
+(iii) Partially-labeled 
+: class 0, group ?
+: class 0, group 1
+: class 1, group 1
+: class 1, group ?
+(a) Problem settings.
+(b) Find the worst-case group assignment with the
+marginal distribution constraint.
+Figure 1: (a) We introduce Worst-off DRO, an invariant learning algorithm for partial group labeled data (as
+shown in (iii)). This is in contrast with other settings, such as (unsupervised) DRO [14] where (i) no group labels
+are available at train time, or Group DRO [35] when (ii) group labels for all training examples are required. (b)
+Worst-off DRO ﬁnds the worst-case group assignment for unlabelled data using marginal distribution constraints,
+which may be given as side information, or estimated from labeled counterparts. The constraint set deﬁned
+by the marginal distribution includes the ground-truth group labels with high probability, ensuring the training
+objective is an upper bound of that of the Group DRO objective.
+these methods have been proven effective, it is not realistic to assume access to the group labels
+for every sample. Consider the scenario where the minority / majority groups could be deﬁned by
+demographic information such as gender or race. An individual can simply choose not to reveal
+this information due to privacy considerations [16]. Alternatively, in medical image settings a label
+class could contain unrecognized subgroups that demand signiﬁcant burden on the data labelling
+efforts [38]. An example of such unrecognized subgroups could be a lung cancer detection problem,
+where the class label could comprise of groups such as solid/subsolid tumors and central/peripheral
+neoplasms [28], with many of these groups naturally forming a minority in the dataset. In this work,
+we consider a setting where a signiﬁcant portion of the training data is devoid of group labels. We
+choose to ﬁll a missing gap in the literature where several works bifurcate into methods that either
+are fully supervised or fully unsupervised in terms of the groups labels. Knowledge on the number of
+groups in the data makes it convenient to obtain group labels for a tiny portion of the data or take
+advantage of an existing labelled samples if available. Hence, we address the following research
+question: Can we train a model that is invariant to group membership when partially labelled data is
+available?
+We answer the question using a framework of distributionally robust optimization (DRO) [37, 27].
+DRO allows for a training routine that optimizes for the worst-case training loss over predeﬁned set
+of groups closely connected to the Rawlsian fairness measure [32]. When the group membership is
+fully known, the method simply upweights/downweights average training loss of different groups
+through the course of training [35]. The application of DRO to the partial group label setting poses
+signiﬁcant challenges: (1) the lack of group label makes it infeasible to compute the worst-off group
+loss; (2) optimizing only for the high-loss samples, by considering them as a worst-off group, discards
+considerable portion of the training data adversely impacting the overall accuracy; and (3) inferring
+missing group labels with pseudo-label based methods is a cause for ethical concerns especially when
+group labels are characteristic of sensitive information.
+The third challenge above alludes a straightforward way of handling partially labelled setting where
+we directly estimate the group label for each sample with pseudo-label based methods. However, this
+approach could be harmful in the context of fairness problems because the estimated labels could be
+misused by a wrongdoer. For example, when the groups are indicative of sensitive information such
+as age or gender, an incorrect group estimation would wrongly designate the demographics of an
+individual. Moreover, when it’s desirable and intended to conceal such sensitive information, a direct
+estimation of groups would be a violation of privacy. Thus we cautiously avoid building of utilizing
+pseudo-label based methods in this paper.
+In light of all these challenges, we make the following contributions. We propose a method that
+deﬁnes a constraint set of group assignments and optimizes over all possibles conﬁgurations of the
+assignments within the set. Such a constraint set can encompass the group labels of the unlabeled
+portion of the data with high probability. We observe that optimizing for the a worst-off soft group
+assignment from the constraint set upper bounds the DRO objective with true group membership.
+Since worst-off assignments do not directly estimate the ground-truth assignments, our approach is
+theoretically safe and does not violate privacy. As we shall see in the paper, our method assigns high
+loss samples to groups with a higher weight and lower marginal probability improving the worst-off
+2
+
+group accuracies. Further, the low loss samples are not discarded thus preserving the aggregate
+accuracy across groups. We show experiments on three imaging datasets and one tabular dataset and
+contrast the performance against several baselines.
+2
+Related work
+Distributionally robust optimization [4, 27, 11] has been studied as a way to train robust ML models
+across multiple groups and environments.
+Group Robust Optimization. Methods in the literature handling robustness to extraneous attributes
+can be broadly categorized into two classes. The ﬁrst class, domain generalization methods [2, 23, 26],
+aim at learning representations invariant to a predeﬁned set of extraneous attributes or groups. The
+goal is to be able to generalize to unseen domains or environments in the testing phase. On the
+other hand, the second class of methods, called as the group robust methods [28, 35, 21], seek to
+improve the worst-off or the minority group performance within the set of pre-deﬁned groups. Here
+the training and testing phases share the same set of groups. Our approach falls into the second class
+of methods.
+Robust Optimization with Demographics. When group information is known at train time, Group
+DRO [15, 29, 35, 25, 45] or Invariant Risk Minimization (IRM) [2] could be employed to improve
+the performance over multiple groups. Speciﬁcally, Group DRO proceeds by minimizing the loss of
+the group with the largest loss, while IRM enforces a shared predictor across multiple environments
+to be optimal in the form of a Lagrangian multiplier.
+Robust Optimization without Demographics. As the group information may not be always avail-
+able reliably, several studies have been focusing on developing methods that remove or reduce their
+dependence on the group information. [14] has developed a method based on the distributionally
+robust optimization that minimizes the loss of the samples with losses larger than a certain threshold.
+[18] has proposed to reweight the samples in an adversarial way so that the high loss sample could
+receive more weight over the course of training. Moreover, [21] has proposed a simple yet effective
+two-stage approach called Just-Train-Twice (JTT) that trains a model by upweighting samples with
+high losses from the initial ERM model.
+Two-stage methods. Recent methods, like JTT [21] and EIIL [7], which do not require group or
+demographic information adopt a two-stage pipeline for training. While the two-stage methods may
+attain better accuracy measures, they bear a few drawbacks in relation to a single-stage method.
+Firstly, two-stage methods introduce additional set of hyper-parameters that need to be tuned. For
+example, it’s crucial for JTT to tune for the number of epochs to convergence in its ﬁrst (identiﬁcation)
+stage. Similarly, EIIL requires a pre-trained reference model and optimization of the EI objective that
+introduce several hyper-parameters. While certain parameters like learning rate, weight-decay and
+architecture could be shared across stages, such choice still need to be empirically veriﬁed on every
+new dataset. Secondly, in a two-stage model, a failed ﬁrst stage leads to an unsuccessful second stage
+as errors from the ﬁrst stage are propagated to the later stages. A ﬁrst stage model could fail due to the
+model overﬁtting to the training data in the JTT method [21], and similarly in EIIL inaccurate group
+inference may block second-stage invariant learning besides raising ethical issues on pseudo-label
+misuse. In summary, efforts to reduce a two-stage model to a single-stage method are beneﬁcial and,
+as we shall see shortly, our proposal beneﬁts from being a single stage method.
+3
+Methodology
+We introduce our robust optimization framework, Worst-off DRO, with partial group information.
+We revisit the GroupDRO in Section 3.1 and detail our method in Section 3.2 and 3.3. In Section 3.4,
+we describe a practical method for optimization.
+3.1
+Preliminary: Group DRO
+Let x ∈X ⊂Rd be data descriptors, y ∈Y ⊂{0, 1} be target labels, and g ∈G ⊂{1, ..., M} be group
+labels.We assume training a neural network parameterized by the weights w that corresponds to
+a per-sample loss l(x, y; w). Given data triplets {(xi, yi, gi)}N
+i=1, we seek to optimize w for the
+Rawlsian criterion [32, 44, 14], which minimizes the loss of the worst-off group, as follows:
+min
+w max
+g∈G E
+
+l(x, y; w)|g
+
+.
+(1)
+3
+
+Sagawa et al. [35] proposed a practical algorithm to solve (1), called Group DRO. This method
+optimizes a weighted expected loss across all groups. These weights over the groups, denoted by q,
+are drawn from a simplex ∆M. The objective function is as described below,
+LGDRO = min
+w
+max
+q∈∆M
+M
+X
+j=1
+Group
+Weights
+qj
+hPN
+i=1
+Indicator function
+1{gi = j} l(xi, yi, w)
+PN
+i=1 1{gi = j}
+i
+Per-group average loss
+(2)
+3.2
+Worst-off DRO
+In this work, we are interested in training a distributionally robust neural network when group
+labels are only partially available in the entire dataset. That is, our training dataset constitutes of
+the fully-labeled dataset {(xi, yi, g⋆
+i )}K
+i=1 and the task-labeled dataset {(xi, yi, −)}N
+i=K+1, where −
+indicates the missing group labels.
+As noted in (2), the Group DRO requires group labels of entire dataset. When some of them are
+missing, we propose to optimize for the following objective:
+LWDRO(C) = min
+w
+max
+q∈∆M max
+{ˆg}∈C
+M
+X
+j=1
+qj
+hPN
+i=1 1{ˆgi = j}l(xi, yi, w)
+PN
+i=1 1{ˆgi = j}
+i
+(3)
+where C is a set of group assignments {ˆgi}N
+i=1 satisfying ˆgi = g⋆
+i , ∀i ≤K. We call the objective in
+(3) a Worst-off DRO as it optimizes neural network parameters with respect to the worst-off group
+assignment in a certain constraint set C (more details on the design of C soon).
+Note that the Worst-off DRO objective forms an upper bound to the Group DRO objective evaluated
+at the ground-truth group labels if {g⋆
+i }N
+i=1 ∈C. Under identical parameters w and q, this is rather
+a straightforward consequence from the fact that the ground-truth group assignment {g⋆
+i }N
+i=1 falls
+within the constraint set C. However, the following lemma generalizes the upper bound relationship
+between Worst-off DRO and Group DRO objectives for all w and q.
+Lemma 1. Denote LGDRO at a given w and q parameters as LGDRO(w,q). Similarly LWDRO(C) at
+a ﬁxed w and q as LWDRO(w,q)(C). When the ground-truth group assignment {g⋆
+i }N
+i=1 ∈C, we have
+min
+w
+max
+q∈∆M LGDRO(w,q) ≤min
+w
+max
+q∈∆M LWDRO(w,q)(C)
+(4)
+The proof is in Appendix A.1. For safety-critical applications, such as learning a fair classiﬁer, it
+is important that the optimal objective (i.e., Group DRO with a ground-truth group assignment) is
+bounded by the objective used in optimization as in Lemma 1. This is simply because optimizing the
+proposed learning objective guarantees that the corresponding lower bound of ground-truth Group
+DRO is also optimized. Conversely, objectives of methods such as EIIL [7] or GEORGE [38], which
+optimize the Group DRO or IRM objectives using pseudo group labels, would not be comparable
+with LGDRO as they depend on a heuristic to obtain a single set of pseudo group labels.
+3.3
+Reducing Constraint Set with Marginal Distribution Constraint
+It is clear that the constraint set C plays an important role that connects Worst-off DRO to Group
+DRO. Speciﬁcally, the Worst-off DRO objective can be made a tighter bound to that of Group DRO
+by further constraining C so long as it contains the ground-truth group assignment {g⋆
+i }N
+i=1. In the
+subsequent paragraph, we describe how we reduce the constraint set while retaining the ground-truth
+group assignment using a marginal distribution constraint. These constraints may be given as a side
+information or could be estimated from the small set of partial group labels under certain conditions.
+Let Cp,ϵ is a subset of C whose elements {gi}N
+i=1 satisfy the following condition:
+gi = g⋆
+i , ∀i ≤K,
+(5)
+| 1
+N
+XN
+i=1 1{gi = j} −pj| ≤ϵ, ∀j ≤M,
+(6)
+where (5) implies that the true group labels are assigned whenever available, and (6) implies that the
+data marginal distribution should be close to the marginal distribution p. Then, for any marginal
+4
+
+Algorithm 1 Worst-off DRO Algorithm
+1: Input: Fully-labelled dataset {(xi, yi, g⋆
+i )}K
+i=1, task-labeled dataset {(xi, yi, −)}N
+i=K+1
+2: Initialization: learning rates ηw and ηq, Marginal distribution ¯p, ϵ
+3: Parameters: Group Weights qj, Worst-off DRO group assignments ˆg,
+Neural network parameter w
+4: for t = 0, 1, 2, ..., T do
+5:
+{ˆgt} ←max{ˆg}∈C¯p,ϵ
+PM
+j=1 qt
+j
+P
+i ˆgijl(xi,yi;wt)
+P
+i ˆgij
+where, C¯p,ϵ as deﬁned in (10).
+6:
+Gradient descent on w:
+wt+1 ←wt −ηw∇w
+PM
+j=1 qt
+j
+P
+i ˆgt
+ijl(xi,yi;w)
+P
+i ˆgt
+ij
+7:
+Exponential ascent on q:
+qt+1 ←qt exp (ηq∇q
+PM
+j=1 qj
+P
+i ˆgt
+ijl(xi,yi;wt+1)
+P
+i ˆgt
+ij
+)
+8: end for
+9: Output: Trained neural network parameters wT
+distribution p and ϵ > 0, it is easy to show LWDRO(Cp,ϵ) ≤LWDRO(C) as Cp,ϵ ⊂C. Moreover, we
+will see in Lemma 2 that, with high probability, the constraint set Cp⋆,ϵ with the true marginal
+distribution p⋆contains the true group assignment {g⋆}.
+Lemma 2. The constraint set Cp⋆,ϵ contains the true group labels {g⋆
+i }N
+i=1 with high probability:
+P({g⋆
+i }N
+i=1 ∈Cp⋆,ϵ) ≥1 −2e−2Nϵ2
+(7)
+The proof is in Appendix A.1. As in (7), the probability of the constraint set containing the true group
+labels gets closer to 1 by allowing a larger variance (ϵ) from the true marginal distribution. For ﬁxed
+ϵ > 0, the probability gets closer to 1 as we increase the number of unlabeled data (N).
+Finally, this implies that LWDRO(Cp⋆,ϵ) is an upper bound to that of Group DRO:
+LGDRO ≤
+w.h.p LWDRO(Cp⋆,ϵ) ≤LWDRO(C)
+In practice, however, the true marginal distribution p⋆may not be available. For our setting where
+group labels are partially available, with an assumption that group labels are missing completely at
+random (MCAR) [34], the true marginal distribution could be estimated from the subset of data with
+group labels. This again allows us to formulate a constraint set that contains the ground-truth group
+assignment with high probability.
+To be more speciﬁc, let ¯p be the estimate of the marginal distribution from {(xi, yi, g⋆
+i )}K
+i=1.
+Lemma 3. The constraint set C¯p,δ+ϵ contains the true group labels {g⋆
+i }N
+i=1 with high probability:
+P({g⋆
+i }N
+i=1 ∈C¯p,δ+ϵ) ≥1 −2e−2Nϵ2 −2e−2Kδ2
+(8)
+We provide a proof in Appendix A.1. Here, δ is introduced to take into account the estimation error
+of the true marginal distribution p⋆. When K, the number of labeled data, is large, the bound in (8)
+is close to 1.
+Under MCAR, for large K: LGDRO ≤
+w.h.p LWDRO(C¯p,δ+ϵ)
+3.4
+A Practical Optimization Algorithm
+We are interested in solving the optimization problem LWDRO(Cp,ϵ). Unfortunately, the inner
+maximization problem with respect to the group assignments {ˆg} in (3) is challenging as variables
+are discrete and the objective cannot be decomposed due to the marginal distribution constraint. In
+this section, we describe an optimization recipe with a few approximations.
+5
+
+First, we propose to use a soft group assignments. This not only converts the problem into continuous
+optimization problem, but also accommodates inherent uncertainties in group assignment for data
+with unlabelled group labels. Speciﬁcally, for each sample, we retain a soft group assignment
+ˆgi ∈∆M, and optimize the Worst-off DRO objective over the constraint set C¯p,ϵ as deﬁned below:
+min
+w
+max
+q∈∆M
+max
+{ˆg}∈Cp,ϵ
+M
+X
+j=1
+qj
+hPN
+i=1 ˆgijl(xi, yi, w)
+PN
+i=1 ˆgij
+i
+(9)
+where the constraint set is deﬁned as:
+C¯p,ϵ =
+(
+{ˆgi}N
+i=1
+
+ˆgi ∈∆M, ∀i ≤N,
+ˆgi(g⋆
+i ) = 1, ∀i ≤K,
+| 1
+N
+PN
+i=1 ˆgij −¯pj| ≤ϵ, ∀j ≤M
+)
+(10)
+The ﬁrst condition ensures assignments in the probability simplex, second one ensures assignments
+are consistent with ground-truth for labeled data, and the third one validates the data marginal
+distribution follows the provided distribution. The third constraint also provides for a mitigation
+strategy when ¯p is misspeciﬁed (likely when data is not MCAR). The ϵ in the third constraint is a
+hyper-parameter. Increasing ϵ provides more ﬂexibility with the choice of assignments (more details
+in Appendix A.9).
+We alternate optimization over w, q and {ˆg} as shown in Algorithm 1. That is, we ﬁrst solve inner
+maximization over {ˆg}, and conduct gradient descent on w and the exponential gradient ascent on
+q, and iterate. An exponential ascent on q achieves smaller losses for linear predictors (like q) [17].
+The inner maximization over {ˆg} is solved using off-the-shelf CVXPY solver [8] (more details in
+Appendix A.2).
+Next, let us see how the worst-off assignments computed by the algorithm look to be. For simplicity,
+consider the case ϵ = 0 and K = 0, (i.e., no labelled groups). Denoting
+qj
+PN
+i ˆgij = Nqj
+¯pj in (9) as θj
+and l(xi, yi, w) as li, we can re-write the maximization over {ˆgij} as,
+max
+{ˆgij}∈Cp,ϵ=0
+N,M
+X
+i=1,j=1
+ˆgij × θj × li
+(11)
+The constraints ensure that PN
+i=1 ˆgij = N¯pj and PM
+i=j ˆgij = 1, ˆgij ≥0 for all i ≤N and j ≤M
+respectively. The linear program (11) sets the highest mass on ˆgij for i and j that maximize θj and
+sample loss li. A large θj represents groups with a high group weight qj and low marginal probability
+¯pj, characteristic of a worst-off group. In summary, we ﬁnd that high loss samples are assigned to
+groups with high group weights and low marginal probabilities. We provide a detailed example of
+this observation in the Appendix A.3 and discuss the case where marginal constraints are ignored.
+4
+Experiments
+We test the efﬁcacy of our method on image and tabular datasets, each of which consists of samples
+from mutually exclusive groups or environments. These groups are indicative of the background or
+an RGB identiﬁcation for image datasets, and attributes such as gender or race for tabular datasets.
+As discussed in Section 1, one or more of the available groups form a minority in terms of the sample
+size and demographics. The presence of minority groups results in a possible scenario where the
+aggregate performance is (falsely) remarkable, because evaluations are dominated by larger groups,
+even though the performance on the minority groups is poor. In our experiments we assume group
+numbers to be known but group labels are missing completely at random at a ﬁxed rate at train time.
+In Section 4.1, we outline our baselines for comparison, our metrics of evaluation and the model
+selection strategy. In Section 4.2, we describe each dataset in detail and highlight the differences
+across the groups within the dataset. All the quantitative results are available in Table 2 and per-group
+summary statistics are present in Table 1. More analysis of our method is provided in Section 4.3.
+4.1
+Experimental Settings
+Baselines. We contrast the performance of our method with respect to a few well-known baselines.
+6
+
+Dataset
+# Labeled
+# UnLabeled
+Total samples
+# Groups
+# Minority Samples
+# Majority Samples
+Waterbirds
+508
+4287
+4795
+4
+5
+113
+CMNIST
+3983
+35657
+39640
+3
+276
+2138
+Adult
+1308
+11635
+12943
+4
+63
+823
+CelebA
+8030
+154740
+162770
+4
+62
+3547
+Table 1: Dataset description. We show sample counts in labelled and unlabelled training sets, as well as
+counts for majority and minority groups. The number of labelled samples are about 10% of total samples.
+1.
+ERM: Empirical Risk Minimization that optimizes aggregate average loss over all the
+samples in the training dataset.
+2.
+Unsup DRO [14]: Samples with losses exceeding a threshold η are considered as a group
+whose average loss is optimized. Since the method doesn’t require group labels, it is an
+unsupervised algorithm. The method Unsup DRO, similar to CVaR DRO [20], requires a
+wider hyper-parameter search relative to the other baselines. More details in Appendix A.4.
+3.
+Group DRO [35]: A method that optimizes the Rawlsian criterion by assigning simplex
+weights to the groups. The group labels for individual samples are assumed to be available,
+hence this method is fully-supervised in terms of the group label.
+4.
+Group DRO (Partial): We consider another variant of Group DRO that only uses samples
+with group labels at train time. We call the method Group DRO (Partial), to contrast with
+the above baseline, Group DRO (Oracle).
+We compare above methods with our proposal, Worst-off DRO. Note that our approach requires
+marginal probabilities as an input to the algorithm, which are computed from the training dataset in
+our experiments. All our baselines for experiments are single-stage approaches similar to our method
+Worst-off DRO. We provide a comparison to two-stage methods in Section 2. For baselines and
+Worst-off DRO implementations, samples are drawn randomly for every batch ensuring an unbiased
+comparison to the ERM baseline. This is unlike [35] who adopt a weighted sampling procedure
+which could be noisy when group labels are uncertain or missing as in our problem. 3
+Evaluation Metrics. We set aside a test set whose group labels are fully available. Since all of our
+datasets characterize a classiﬁcation task, we evaluate overall accuracies and per-group accuracies in
+our experiments. Speciﬁcally, we highlight the accuracy of the minority group (min) together with
+the overall (avg) accuracy where individual samples are equally weighted regardless of their group.
+Model Selection. Model selection plays a crucial role when distributional differences are observed
+in a dataset [13]. In our problem setting, individual groups may differ from each other in the joint
+distribution over the data and the label space, however, the testing set resembles the training set.
+That is, there are no out of distribution samples and the focus is to improve robustness over a
+predeﬁned set of groups common to both training and testing datasets. Consequently, among the
+recommendations made in [13], a training domain validation set is a feasible strategy for our problem.
+In our algorithm, learning rate and weight decay are important hyper-parameters. Prior works [35, 36]
+noted that ERM fails to optimize for the minority group’s performance under high regularization
+regime thus necessitating an alternative. Hence, we compare our methods in this regime. We also
+tune for algorithmic speciﬁc hyper-parameters for each baseline. These hyper-parameters are the loss
+threshold in Unsup DRO (ηUDRO) and the step size for the group weights in Group DRO (ηGDRO) and
+in Worst-off DRO (ηWDRO). A list of all hyper-parameter choices used in the experiments is provided
+in the Appendix A.6. All the numbers reported in the paper were averaged over three random seeds.
+We adopt NVP (novel validation procedure) [9] in our experiments. In this procedure, we ﬁrst
+search for hyper-parameters with the best overall accuracy. Then, from the top ﬁve best performing
+hyper-parameters, we select the model that achieves the highest minority group accuracy. Such a
+procedure offers robustness to hyper-parameters in the reported numbers.
+4.2
+Quantitative Results
+We describe key results on four datasets4, Waterbirds [35], Group CMNIST [2], Group Adult [10],
+and CelebA [22].
+3Minor differences, in the accuracies of the Group DRO baseline to those reported in [35], are due to the
+random sampling scheme of samples during batch-wise updates.
+4CMNIST and Adult datasets differ from their previous instantiations in [7]. These datasets are used to assess
+group robustness (see Sec 2), hence same set of pre-deﬁned groups are used in the training and testing phases.
+7
+
+Waterbirds
+CMNIST
+Adult
+CelebA
+min
+avg
+min
+avg
+min
+avg
+min
+avg
+Group DRO (Oracle)
+83
+92
+50
+75
+82
+88
+80
+94
+ERM
+60
+87
+13
+79
+68
+92
+45
+95
+Unsup DRO
+65
+88
+10
+80
+68
+92
+39
+96
+Group DRO (Partial)
+44
+81
+36
+76
+67
+90
+40
+95
+Worst-off DRO
+65
+89
+39
+77
+71
+91
+49
+95
+Table 2: Quantitative Results. For baselines, we consider an ERM, Unsup DRO [14], Group DRO (Partial)
+for partly labelled Group DRO [35] method, Group DRO (Oracle) for the fully supervised model. Our method
+Worst-off DRO improves the minority group’s accuracy (min) while maintaining a similar overall accuracy (avg)
+relative to baselines. The accuracies are computed on the test set and are an average over three random runs. The
+standard deviations are provided in the Appendix Table 5.
+4.2.1
+Waterbirds Dataset
+The dateset, used in [35], comprises of 4795 images of birds from the CUB dataset [42] and the
+backgrounds taken from the Places dataset [47]. Each image in the dataset has a background of
+land or water. The target labels are either “landbirds” or “waterbirds”. The authors in [35] create
+four groups with each target label and a background class considered as a group. In this dataset
+the groups “landbirds” on water and “waterbirds” on land form a minority. Our results in Table 2
+ﬁrstly shows that the ERM method attains a small minority group accuracy of 60%. All the invariant
+learning baselines, except for Group DRO (Partial), improve the minority group’s accuracy. Next,
+we observe that in comparison to Group DRO (Partial), our proposed Worst-off DRO improves the
+minority group’s performance by a signiﬁcant margin of 21%. Due to this improvement, the all-group
+accuracy also improves by 8%. Minority group’s performance on fully-supervised method Group
+DRO (Oracle) is at 83% accuracy with a window of 18% difference from Worst-off DRO. Lastly,
+Appendix A.9 describes experiments where the constraint set size is gradually increased by varying
+the ϵ parameter of C¯p,ϵ. Increasing ϵ parameter accommodates for the setting where ¯p is misspeciﬁed.
+4.2.2
+Group CMNIST Dataset
+CMNIST, derived from an MNIST [19], is a digit recognition dataset where each image is colored
+either red or green. Digits < 5/ ≥5 are considered as label 0/1. We consider three groups in our
+experiments. In the ﬁrst two groups, label 0 images are predominantly colored red and vice versa.
+In the third group, which forms a minority, we switch coloring such that the label 1 images are
+predominantly colored red. Speciﬁcally, for the ﬁrst two groups, the color id is sampled by ﬂipping
+the target label with probabilities 0.2 and 0.1 respectively, while the third group with probability
+0.9. Both training and testing sets contain three groups. The overall setup for generating a given
+group is similar to [2]. We show the results on CMNIST in Table 2. Similar to the Waterbirds dataset,
+Worst-off DRO improves the minority group’s accuracy compared to the ERM method. Relative
+to Group DRO (Partial), Worst-off DRO improves the accuracy of the minority group by 4% and
+1% in the overall accuracy. The margin between Worst-off DRO and Group DRO (Oracle) is 11%.
+Among all the baseline, Unsup DRO attains lowest minority group accuracy of 10%. A large trade-off
+between the minority group accuracy and the all-group accuracy was seen for Unsup DRO in this
+dataset.
+4.2.3
+Group Adult Dataset
+We use a semi-synthetic version of the Adult dataset [10] for this experiment. Similar to [18], we
+consider race and sex as the four demographic groups. The target label is income > 50K$ and is
+treated as label 1. Similar to the CMNIST dataset, each group has a different correlation strength to
+the target label. For the purposes of the experiment, we exaggerate these spurious correlations caused
+by group membership close to [7]. Particularly, for samples with group label as Aﬁcan-American,
+we undersample examples with probability P(y = 1 | group) = 0.06 whereas for the non African-
+American group labels, we oversample examples with probability P(y = 1 | group) = 0.94. Table 2
+indicates a 5% improvement in the minority group’s accuracy while maintaining the similar overall
+accuracy of 90% compared to Group DRO (Partial). The Group DRO (Oracle) method reaches an
+accuracy of 82% for the minority group compared to Worst-off DRO which achieves 71%. Evidently,
+ERM underperforms in terms of the minority group’s accuracy and attains about 68% accuracy.
+8
+
+4.2.4
+CelebA Dataset
+CelebA [22] is a dataset containing about 200k celebrity faces curated from the internet. There are 40
+labels available in this dataset which are annotated by a group of paid adult participants [5]. Similar
+to [35], we aim to predict the target attribute Blond Hair that is spuriously correlated to the Gender
+attribute. Speciﬁcally, having blond hair correlates with the female attribute. The minority group in
+this dataset are the images with attributes (blond, male). The proportion of samples in the minority
+and the majority group is show in Table 1. The quantiative results in Table 2 indicate an improvement
+of 9% over the Group DRO (Partial) method for the proposed Worst-off DRO algorithm. The Group
+DRO (Oracle) method achieves the highest minority group accuracy of 80%. The minority group
+performance for the ERM method, with an accuracy of 45%, is comparable to Group DRO (Partial).
+All the methods are similar in terms of the average group accuracy with values > 90%.
+4.3
+Ablation Studies
+In this section, we discuss different components of our algorithm that inﬂuences it’s performance.
+4.3.1
+Increasing the labelled samples.
+Recall that for the quantitative results in Table 2, the number of labelled samples were around 10%
+of the total training samples. In this section, we investigate the effects of increasing the number of
+labelled samples provided to the training algorithm. Although obtaining annotations for groups is
+an arduous task [18], having more labelled groups provides two beneﬁts for the algorithm. Firstly,
+the standard deviation of errors in estimating the marginal probabilities from the labelled portion
+of the data reduces [41] ( ≈√# samples rate). Secondly, labelled groups reinforce an accurate
+evaluation of the Rawlsian objective in (2) and appropriate weight updates for the groups. The results
+shown in Figure 2 depict the minority group accuracy at different labelled percent thresholds. The
+corresponding plots for average group accuracies are provided in the Appendix Figure 5. Worst-off
+DRO method is compared with Group DRO (Partial). It is observed that for both the methods, the
+minority group’s accuracy increases with more labelled data. Furthermore, the accuracy values for
+Worst-off DRO method are better than Group DRO at several thresholds. The methods converge at a
+threshold speciﬁc to the datasets. Increasing the labelled counts beyond such a threshold saturates
+the Worst-off DRO performance, however, Group DRO (Partial) consistently improves until Oracle
+performance is attained.
+4.3.2
+Minority Group vs. Overall Accuracy.
+As discussed in Section 1, several groups in the training dataset, especially the minority groups,
+could be distributionally different from the majority group samples. Consequently, a mild tradeoff
+surfaces between the minority group accuracy values and the aggregate accuracies. Addressing this
+issue, recall that we leverage a robust model selection criterion such as NVP (see Section 4, model
+selection paragraph) that balances both the minority and aggregate group accuracies. We extend the
+results in this section, by plotting evaluations at different hyper-parameter choices for our algorithm.
+Figure 3 contrasts minority group and overall accuracy across all the datasets. Evidently, the top-right
+corners are desirable regions for the models to be present with maximum performance across both
+the metrics. The Adult dataset in Figure 3 shows a clear envelope on the Worst-off DRO models that
+surpass the corresponding Group DRO models. Similar trend exists on the remaining datasets with
+more Worst-off DRO models concentrated in the top-right corner.
+4.3.3
+Progression of Group Weights
+Our algorithm 1, proceeds by assigning weights, the q−value’s, to every group. These q−values
+are updated through exponential ascent similar to [35]. Noticeably, the updates on q depend on the
+worstoff group assignments determined from the constraint set C¯p,δ+ϵ. In this section, we investigate
+on how these group weights evolve through the several iteration of the proposed algorithm. Figure 4
+plots this evolution across different datasets with the number of curves in a given plot matching the
+group count of that dataset. Since the q−weights are initialized uniformly at random, the curves
+begin at the same value. As the training progresses, it is observed that the weights on the minority
+groups gradually increase and those on the majority groups reduce. The plots indicate a high q−
+value on the minority groups towards the end of training. This is desirable because the empirical risk
+on the minority groups getting upweighted relative to the majority groups.
+9
+
+5
+10
+15
+30
+60
+Label percent
+30
+40
+50
+60
+70
+80
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(a) Waterbirds
+2
+5
+10
+15
+20
+Label percent
+32
+34
+36
+38
+40
+42
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(b) CMNIST
+2
+5
+10
+15
+20
+Label percent
+40
+45
+50
+55
+60
+65
+70
+75
+80
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(c) Adult
+0.5
+1
+2
+5
+10
+Label percent
+15
+20
+25
+30
+35
+40
+45
+50
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(d) CelebA
+Figure 2: Increasing the labelled samples. Minority group accuracies are plotted at different counts
+of the labelled samples in the training dataset. Both, Group DRO (Partial) and Worst-off DRO
+algorithms improve the minority group accuracies with more training labels. Also, the Worst-off
+DRO method has higher accuracy values than Group DRO method. The aggregate group accuracies
+are shown in the Appendix Figure 5.
+0.6
+0.7
+0.8
+0.9
+Avg. Accuracy
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(a) Waterbirds
+0.68
+0.70
+0.72
+0.74
+0.76
+0.78
+Avg. Accuracy
+0.20
+0.25
+0.30
+0.35
+0.40
+0.45
+0.50
+0.55
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(b) CMNIST
+0.86
+0.87
+0.88
+0.89
+0.90
+0.91
+Avg. Accuracy
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(c) Adult
+0.88
+0.90
+0.92
+0.94
+Avg. Accuracy
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+Min. Accuracy
+Worst-off DRO
+Group DRO
+(d) CelebA
+Figure 3: Minority Group vs. Average Accuracy. Evaluations for different hyper-parameter choices
+are plotted for Worst-off DRO and Group DRO (Partial) methods. Models from Worst-off DRO
+training are concentrated in the top-right corner of the plots. This is desirable indicating a high
+accuracies across the two metrics. For model selection from among the possible choices, we adopt
+the NVP procedure (see Section 4).
+0
+2500
+5000
+7500
+10000
+Train Step
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+q - values
+q0
+q1
+q *
+2
+q3
+(a) Waterbirds
+0
+100
+200
+300
+400
+500
+Train Step
+0.330
+0.332
+0.334
+0.336
+0.338
+q - values
+q0
+q1
+q *
+2
+(b) CMNIST
+0
+5000
+10000
+15000
+20000
+Train Step
+0.15
+0.20
+0.25
+0.30
+0.35
+0.40
+q - values
+q0
+q1
+q *
+2
+q3
+(c) Adult
+0
+20000
+40000
+60000
+Train Step
+0.0
+0.2
+0.4
+0.6
+0.8
+q - values
+q0
+q1
+q2
+q *
+3
+(d) CelebA
+Figure 4: Progression of group weights. The evolution of q−values (see Algorithm 1) is plotted for
+each group. The q−values for the minority groups increases gradually while those of the majority
+groups reduce. A high q−value indicates that the corresponding group receives a higher weight
+relative to other groups. In the plots, minority group is indicate by a ∗on q.
+5
+Conclusion
+We present Worst-off DRO, an invariant learning method across groups when partial group labels
+are available. The formulation of Worst-off DRO extends that of Group DRO by optimizing the loss
+against the worst-off group assignments in the constraint set. By reducing the constraint set with the
+marginal distribution, we reduce the optimization parameter space while keeping the objective to be
+an upper bound to that of the Group DRO with true group assignments with high probability. By
+harnessing both labeled and unlabeled data in terms of group, we demonstrate in experiments that
+the Worst-off DRO outperforms both ERM, UnsupDRO, which do not make use of available group
+labels, as well as the Group DRO (Partial), which does not use unlabeled data.
+10
+
+One future direction, when marginal distribution is not available, is to relax our missing completely at
+random assumption and bring in different but more realistic modeling assumptions on the missingness
+of group labels, such as missing at random (MAR), where missing values depend on other observed
+attributes [12]. In addition, it would be valuable to design a reduced constraint set containing the true
+group assignment to reduce the performance gap to the Group DRO (Oracle).
+Ethics Statement
+Machine Learning (ML) models that perform poorly on a minority group or environment have raised
+a lot of concerns within the AI community and broader society in recent years. To democratize ML
+in real world, learning ML models that perform robustly across groups or environments has become
+an important venue of research. The proposed Worst-off DRO is a versatile method that could be
+employed to train an invariant classiﬁer across groups even when the group information is available
+only for the portion of the data. This is a rather practical scenario as the group information could
+be missing for various reasons during the data collection. We further emphasize the importance of
+theoretical result showing the objective of Worst-off DRO being an upper bound to that of Group
+DRO with complete group information for safety-critical ML applications.
+Reproducibility
+We write our experimental code from scratch using PyTorch library [30]. Due to its similarity, our
+implementation may closely follow that of Group DRO [35].5 One of the key differentiation of Worst-
+off DRO is the inner maximization solver for the worst-off group assignments {ˆg}, which we elaborate
+the exact code using CVXPY solver [8] in Algorithm 2 of Appendix. Additional implementation
+details, including the neural network architectures, as well as value for hyperparameters including the
+learning rate, weight decay, batch size, number of training epochs, and algorithm-speciﬁc parameters
+are summarized in Table 3 of Appendix and Section A.6 and A.8.

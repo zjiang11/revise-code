@@ -1,0 +1,1184 @@
+Hyperparameter-Free Approach for Faster Minimum Bayes Risk Decoding
+Yuu Jinnai and Kaito Ariu
+CyberAgent
+
+Abstract
+Minimum Bayes-Risk (MBR) decoding is
+shown to be a powerful alternative to beam
+search decoding for a wide range of text gen-
+eration tasks. However, MBR requires a huge
+amount of time for inference to compute the
+MBR objective, which makes the method infea-
+sible in many situations where response time
+is critical. Confidence-based pruning (CBP)
+(Cheng and Vlachos, 2023) has recently been
+proposed to reduce the inference time in ma-
+chine translation tasks. Although it is shown to
+significantly reduce the amount of computation,
+it requires hyperparameter tuning using a devel-
+opment set to be effective. To this end, we pro-
+pose Adaptive Minimum Bayes-Risk (AMBR)
+decoding, a hyperparameter-free method to run
+MBR decoding efficiently. AMBR is derived
+from the observation that the problem of com-
+puting the sample-based MBR objective is the
+medoid identification problem. AMBR uses
+the Correlated Sequential Halving (CSH) algo-
+rithm (Baharav and Tse, 2019), the algorithm
+with the best performance guarantee to date for
+the medoid identification problem, to compute
+the sample-based MBR objective. We evaluate
+AMBR on machine translation, text summariza-
+tion, and image captioning tasks. The results
+show that AMBR achieves on par with CBP,
+with CBP selecting hyperparameters through
+an Oracle for each given computation bud-
+get. Our code is available at https://github.
+com/CyberAgentAILab/adaptive-mbr.
+1
+Introduction
+The goal of natural language generation is to gen-
+erate text representing structured information that
+is both fluent and contains the appropriate infor-
+mation. One of the key design decisions in text
+generation is the choice of decoding strategy. The
+decoding strategy is the decision rule used to gener-
+ate sequences from a probabilistic language model.
+Beam search has been widely used in many close-
+ended sequence generation tasks including machine
+translation (Wu et al., 2016; Ott et al., 2019; Wolf
+et al., 2020), text summarization (Rush et al., 2015;
+Narayan et al., 2018), and image captioning (Ander-
+son et al., 2017). However, beam search is known
+to have several degeneration problems. For exam-
+ple, Welleck et al. (2020) reports that beam search
+can yield infinite-length outputs that the model as-
+signs zero probability to.
+Minimum Bayes-Risk (MBR) decoding has
+recently gained attention as a decoding strategy
+with the potential to overcome the problems of
+beam search (Goodman, 1996; Kumar and Byrne,
+2004; Eikema and Aziz, 2020, 2022; Freitag et al.,
+2022; Bertsch et al., 2023). Unlike beam search
+which seeks to find the most probable output, MBR
+decoding seeks to find the output that maximizes
+the expected utility. MBR decoding involves two
+steps. It first samples outputs from the probabilis-
+tic model and then computes the utility between
+each pair of outputs to find the hypothesis with the
+highest expected utility.
+One of the most important shortcomings of MBR
+decoding is its speed. The computational complex-
+ity of MBR decoding is O(N · G + N2 · U), where
+N is the number of samples to be used, G is the
+time to generate a sample, and U is the time to
+evaluate the utility function. As the utility function
+is typically a time-consuming neural metric such
+as BLEURT and COMET (Sellam et al., 2020; Pu
+et al., 2021; Rei et al., 2020, 2022), O(N2·U) is the
+dominant factor of the computational complexity.
+Confidence-based pruning (CBP) has recently
+proposed to reduce the number of evaluations of the
+utility function (Cheng and Vlachos, 2023). CBP is
+shown to be effective in machine translation tasks,
+significantly reducing the required computation us-
+ing both lexical and neural utility functions with a
+negligible drop in the quality.
+Although CBP is shown to be efficient, the per-
+formance of CBP is significantly influenced by the
+choice of hyperparameters. As such, CBP requires
+arXiv:2401.02749v2  [cs.AI]  12 Jun 2024
+
+a development set for the tuning of these hyper-
+parameters. Additionally, CBP cannot dictate the
+speed at which it completes tasks. The hyperpa-
+rameters of CBP only offer indirect control over
+the number of evaluations.
+To this end, we propose Adaptive Minimum
+Bayes-Risk (AMBR) decoding, a hyperparameter-
+free algorithm to compute the sample-based MBR
+objective efficiently. AMBR reformulates the MBR
+objective as the medoid identification problem
+(Rdusseeun and Kaufman, 1987) and solves it us-
+ing the Correlated Sequential Halving (CSH) al-
+gorithm, the best algorithm to date to solve the
+medoid identification problem (Baharav and Tse,
+2019). The strength of AMBR is that it is free
+from hyperparameters. Unlike CBP where it needs
+to tune the hyperparameters to empirically deter-
+mine the best set of hyperparameters to achieve the
+desired trade-off between the speed and the qual-
+ity, AMBR determines the best resource allocation
+automatically from the computational budget spec-
+ified by the user.
+We evaluate the performance of AMBR in ma-
+chine translation, text summarization, and image
+captioning tasks. The empirical results show that
+AMBR is on par with CBP with Oracle hyperpa-
+rameters. They are roughly 4 to 8 times faster than
+MBR with a marginal drop in the output quality.
+The result indicates that using AMBR, MBR decod-
+ing can be run efficiently for a given computation
+budget specified on the fly without hyperparameter
+tuning on a development set.
+2
+Background
+Conditional text generation is the task of gener-
+ating an output sequence h given an input se-
+quence x. Probabilistic text generators define a
+probability distribution Pmodel(h|x) over an out-
+put space of hypotheses Y. In this paper, we denote
+Pmodel(h|x) by Pmodel(h) for brevity. The goal of
+decoding is to find the highest-scoring hypothesis
+for a given input.
+One of the most common decision rules is
+maximum-a-posteriori (MAP) decoding. MAP de-
+coding finds the most probable output under the
+model:
+hMAP = arg max
+h∈Y
+Pmodel(h).
+(1)
+Although it seems intuitive to solve this MAP objec-
+tive, prior work has pointed out two critical prob-
+lems with this strategy. First, since the size of
+hypotheses set |Y| is extremely large, solving it
+exactly is intractable. Second, the MAP objective
+often leads to low-quality outputs (Stahlberg and
+Byrne, 2019; Holtzman et al., 2020; Meister et al.,
+2020). In fact, Stahlberg and Byrne (2019) shows
+that hMAP is often the empty sequence in their
+experiment setting.
+As such, beam search is commonly used as a
+heuristic algorithm to solve decoding problems
+(Graves, 2012; Sutskever et al., 2014). Beam search
+is known to generate higher-quality sequences than
+MAP decoding in a wide range of tasks. Still,
+prior work has reported the degeneration issues of
+beam search such as repetitions and infinite-length
+outputs (Cohen and Beck, 2019; Holtzman et al.,
+2020).
+2.1
+Minimum Bayes-Risk (MBR) Decoding
+Unlike MAP decoding which searches for the
+most probable output, MBR decoding seeks to
+find the output that maximizes the expected util-
+ity, thus minimizing the risk equivalently (Kumar
+and Byrne, 2002, 2004). The procedure is made
+of two components: a machine translation model
+and a utility metric. The model Pmodel(y|x) esti-
+mates the probability of an output y given an input
+sentence x. The utility metric u(y, y′) estimates
+the quality of a candidate translation y given a
+reference translation y′. Given a set of candidate
+hypotheses H ⊆Y, we select the best hypothesis
+according to its expected utility with respect to the
+distribution of human references Phuman.
+hhuman = arg max
+h∈H
+E
+y∼Phuman
+[u(h, y)].
+(2)
+Because Phuman is unknown, MBR instead uses the
+model probability Pmodel to approximate Phuman:
+hmodel = arg max
+h∈H
+E
+y∼Pmodel
+[u(h, y)].
+(3)
+For the rest of the paper, we denote Pmodel as P
+for simplicity if not confusing. As integration over
+Y is computationally intractable, Eq. (3) is approx-
+imated by a Monte Carlo estimate (Eikema and
+Aziz, 2022; Farinhas et al., 2023) using a pool of
+references R sampled from P:
+hMC = arg max
+h∈H
+1
+|R|
+X
+y∈R
+u(h, y).
+(4)
+In this paper, we investigate algorithms to compute
+hMC efficiently.
+
+2.2
+Computational Complexity of MBR
+Decoding
+The shortcoming of the MBR is that it requires
+a huge amount of computation at inference time.
+The computational complexity of MBR is O(|H ∪
+R| · G + |H||R| · U) where G is the upper bound
+of the time to generate a hypothesis, and U is the
+upper bound of the time to evaluate the utility func-
+tion for a pair of hypotheses (Eikema and Aziz,
+2022). Sample-based MBR typically uses the same
+set of hypotheses for the candidate set H and the
+reference pool R (H = R). In this way the compu-
+tational complexity is O(N · G + N2 · U), where
+N = |H| = |R|. Thus, The bottleneck of the com-
+putation is typically the evaluation of the utility
+function.
+Several approaches have been proposed to im-
+prove the efficiency of MBR decoding before
+confidence-based pruning (Eikema and Aziz, 2022;
+Freitag et al., 2022).
+N-by-S (NbyS) seeks to
+reduce the total number of evaluations by reduc-
+ing the reference pool (Eikema and Aziz, 2022).
+Eikema and Aziz (2022) provides empirical ev-
+idence showing that increasing the number of
+candidates is more effective than increasing the
+number of references. The computational com-
+plexity of N-by-S with S′(< N) references is
+O(N · G + NS′ · U). Coarse-to-Fine (C2F) re-
+duces the size of the candidate and reference hy-
+potheses using a coarse utility function (Eikema
+and Aziz, 2022). It first runs coarse evaluation us-
+ing a faster utility function (e.g. non-neural lexical
+scoring function). It then selects the top-scoring
+hypotheses as a pruned candidate set and reference
+set. Finally, it runs the MBR decoding with the
+finer utility function using the pruned candidate
+and reference set to output the best hypothesis. In
+this way, the total computation required by C2F is
+O(N · G + N2 · U′ + N′S′ · U) where U′ is the
+computational cost of the coarse utility function,
+N′, S′(≤N) are the size of the pruned candidate
+and reference set.
+Reference Aggregation (RA) computes the
+MBR score against aggregated reference represen-
+tations to reduce the computational complexity to
+O(N · G + N · UA), where UA is the upper bound
+on the complexity of evaluating the aggregated util-
+ity function (Vamvas and Sennrich, 2024). The
+shortcoming of RA is that it is not applicable to
+non-aggregatable utility functions. For example,
+MetricX-23 (Juraska et al., 2023) is a transformer-
+based metric where the input is a sequence of em-
+beddings of the tokens instead of the embedding
+of the whole sentence, making it non-aggregatable.
+Another example is where the utility function in-
+volves a reward function. See Appendix A for
+details.
+3
+Confidence-Based Pruning (CBP)
+Confidence-based pruning (CBP) is recently pro-
+posed by Cheng and Vlachos (2023) to significantly
+reduce the number of evaluations of the utility func-
+tion. The idea is to iteratively evaluate the hypothe-
+ses with a subset of the reference set to prune the
+hypotheses not promising enough.
+CBP keeps a current candidate set Hi and a cur-
+rent reference set Ri during the run. The candidate
+set starts from the whole candidates (H0 = H)
+and the reference set starts empty (R0 = ∅). At
+every iteration i, it draws samples and adds them to
+the reference set until the size of the reference set
+reaches the limit ri, where {ri} are hyperparame-
+ters. Then it computes the incumbent best solution
+h∗
+i at i-th iteration:
+h∗
+i = arg max
+h∈Hi
+1
+|Ri|
+X
+y∈Ri
+u(h, y).
+(5)
+Then it generates a series of bootstrap reference
+sets ˆRb
+i which is a with-replacement size-|R| re-
+sample of Ri. Using a series of bootstrap reference
+sets, it computes the estimated win ratio of each
+hypothesis against h∗
+i in Hi:
+w(h) = 1
+B
+B
+X
+b=1
+1[
+X
+y∈ˆ
+Rb
+i
+u(h, y) ≥
+X
+y∈ˆ
+Rb
+i
+u(h∗
+i , y)],
+(6)
+where B is the number of bootstrap reference sets.
+Then, it prunes all candidates from the candidate
+set with the win ratio lower than 1 −α, where α is
+a hyperparameter. It repeats the process until the
+size of the candidate set reaches 1 or the sample
+size scheduler terminates.
+Although CBP is shown to be significantly more
+efficient than the standard MBR, there are several
+shortcomings. First, it requires a hyperparameter
+tuning using the development set. The sample size
+scheduler ri and the confidence threshold α need to
+be tuned to optimize the performance. The number
+of bootstrap reference sets B is also a hyperparam-
+eter that needs to be tuned according to the quality
+and the speed trade-off. Note that the optimal set
+
+Algorithm 1: Adaptive MBR (AMBR)
+(Correlated Sequential Halving for MBR)
+Input: a set of candidates H, references R, and a
+budget T
+Output: a hypothesis hAMBR
+1: H0 ←H
+2: R0 ←∅
+3: N = max(|H|, |R|)
+4: for i = 0 to ⌈log N⌉−1 do
+5:
+ti = min(max(⌊
+T
+|Hi|⌈log n⌉⌋, 1), n)
+6:
+Let Ji be a set of ti −|Ri| references sam-
+pled from R \ Ri without replacement
+7:
+Ri+1 = Ji ∪Ri
+8:
+for h ∈Hi do
+9:
+ˆU(h) ←
+1
+|Ri+1|
+P
+y∈Ri+1 u(h, y)
+10:
+end for
+11:
+if ti = n then
+12:
+return arg maxh∈Hi ˆU(h)
+13:
+else
+14:
+Let Hi+1 be the set of ⌈|Hi|/2⌉candi-
+dates in Hi with the largest ˆU(h)
+15:
+end if
+16: end for
+17: return arg maxh∈Hi ˆU(h)
+of hyperparameters is influenced by the desired
+speed-up. If one wants to choose 2x speed-up and
+4x speed-up according to the situation, one needs
+to search for two sets of hyperparameters for each
+budget constraint. Additionally, CBP cannot give a
+budget constraint and optimize under that. Because
+the hyperparameters of CBP only indirectly control
+the number of evaluations it needs to finish, a user
+has no direct control over the desired speed-up.
+4
+Adaptive Minimum Bayes Risk
+(AMBR) Decoding
+We propose Adaptive Minimum Bayes-Risk
+(AMBR) decoding, a variant of MBR that can effi-
+ciently compute the MBR objective under a budget
+on the maximum number of evaluations that a user
+can specify. The advantages of AMBR over CBP
+are twofold. First, AMBR has no hyperparame-
+ter. The schedules of the number of references
+and the candidates are automatically determined
+by the algorithm. Second, a user can enforce the
+upper bound of the computation budget to AMBR.
+AMBR enforces the budget constraint and the al-
+gorithm automatically schedules how to use the
+limited resource accordingly.
+AMBR is derived from the observation that
+MBR decoding is the medoid identification prob-
+lem (Kaufman and Rousseeuw, 1990): the problem
+of computing hMC (Eq 4) is tantamount to deter-
+mining the medoid of H. The medoid, denoted
+as y∗, is defined as the point in a dataset Y that
+minimizes the sum of distances to all other points:1
+x = arg min
+x∈X
+X
+y∈Y
+d(x, y).
+(7)
+Let d = −u, X = H, and Y = R. Then, the
+problem can be translated into the following:
+y∗= arg max
+y∈H
+X
+y′∈R
+u(y, y′).
+(8)
+This is exactly the objective defined in Eq. (4).
+Our approach is to use the best algorithm pro-
+posed so far for solving the medoid identification
+problem and repurpose it for MBR decoding. The
+algorithm with the best performance guarantee to
+date for solving the medoid identification is the
+Correlated Sequential Halving (CSH) algorithm
+(Baharav and Tse, 2019). We describe the proce-
+dure of AMBR in Algorithm 1. AMBR keeps a
+current candidate set Hi which starts with H and a
+current reference set Ri which starts as an empty
+set. First, it picks ti hypotheses from R and adds
+them to the current reference set Ri+1 where ti is
+automatically determined by the number of candi-
+dates and the budget. Then it computes u(h, y) for
+all h in the current candidate set Hi and for all y in
+the current reference set Ri+1. The average utility
+of h ∈Hi over the current reference set is stored in
+ˆU(h). Then, it runs the halving operation, pruning
+the lower half of the candidates according to the
+current estimate ˆU. Ties are broken arbitrarily. It
+repeats this process for up to ⌈log N⌉−1 times
+and returns the candidate with the best estimate in
+Hi at that point.
+The procedure of Algorithm 1 is identical to
+the procedure of CSH with modification to the no-
+tations to place it in the context of the decoding
+problem. Our contribution is the reinvention of
+CSH which is proposed as a solution to the medoid
+identification problem as a tool to compute the
+MBR objective adaptively by converting the sum
+of distances to the expected utility.
+1The formulation of Eq. (7) represents the same class of
+problem as the standard formulation of medoid identification
+problem where it assumes X = Y . See Appendix B for the
+details.
+
+4.1
+Analytical Result
+CSH has a theoretical guarantee of the probability
+of choosing the hypothesis with the highest utility
+in its original form (Baharav and Tse, 2019). The
+original form of CSH is recovered by replacing
+Line 7 of Algorithm 1 with the following equation:
+Ri+1 = Ji.
+(9)
+AMBR using Eq (9) (AMBR-Replace) inherits the
+theoretical guarantee of CSH:
+Lemma 1. Assuming T ≥N log N, AMBR re-
+placing Line 7 with Eq. (9) (AMBR-Replace) cor-
+rectly identifies hMC with probability at least
+1 −log N exp(−
+T
+log N C) where C is an instance
+dependent variable determined by u and H.
+See Theorem 2.1. of Baharav and Tse (2019)
+for proof and a detailed description of the instance-
+dependent variable C.
+Note that the theoretical guarantee is proven for
+AMBR-Replace (AMBR using Eq. 9). However,
+it has not been proven for Algorithm 1 (AMBR).
+Still, we remain optimistic that a similar guarantee
+holds for AMBR. To the best of our knowledge, no
+counterexamples exist to disprove this. The theo-
+retical guarantee is thus proven to AMBR-Replace
+which is an inferior version of AMBR. The inferi-
+ority of AMBR-Replace stems from its process of
+discarding samples at every iteration, leading us to
+expect a less accurate estimate of the candidates’
+value. Therefore, we anticipate that the proposed
+algorithm outperforms the algorithm with a theo-
+retical guarantee. In this way, although we lack a
+formal guarantee for AMBR, we do have a guaran-
+tee for a less effective version of it. This provides
+an informal justification for the effectiveness of
+AMBR. This derivation is noted in Remark 1 in
+Baharav and Tse (2019).
+5
+Experiments
+We evaluate the performance of the efficient MBR
+decoding algorithms on machine translation, text
+summarization, and image captioning tasks. We
+evaluate the performance of the MBR decoding al-
+gorithms under a budget constraint on the number
+of evaluations. We evaluate with a budget size of
+1/32, 1/16, 1/8, 1/4, 1/2 of N(N −1), the num-
+ber of evaluations of the standard N × N MBR
+with N samples.2 We use epsilon sampling with
+ϵ = 0.02 as a sampling algorithm (Hewitt et al.,
+2We assume u(h, h) is a constant for all h ∈H.
+2022; Freitag et al., 2023). Temperature is fixed
+to 1.0. We use the same set of samples for all the
+algorithms.
+We compare the performance of (Standard)
+MBR, N-by-S (NbyS), Coarse-to-fine (C2F),
+confidence-based pruning (CBP), and AMBR. Stan-
+dard MBR refers to the implementation of MBR
+which uses the same set of samples for the candi-
+date and reference set. We run standard MBR with
+the number of samples N′ ∈{1...N}. The number
+of evaluations for standard MBR is N′(N′ −1).
+We implement N-by-S in a way that uses all the
+samples H as the candidate set and reduces the
+size of references according to the budget. That
+is, it randomly subsamples S′ hypotheses from H
+to be the reference set so that S′ is the smallest
+integer such that (N −1)S′ ≥T. For C2F, we
+set S′ = N and N′ to be the smallest integer
+such that N′(N −1) ≥T. We run a hyperpa-
+rameter sweep for CBP to find the best hyperpa-
+rameters. We search over r0 ∈{1, 2, 4, 8} and
+α ∈{0.8, 0.9, 0.99}. Following Cheng and Vla-
+chos (2023), we set the schedule of the size of the
+references ri to double each step: ri = 2ir0. The
+number of bootstrap reference sets is 500. We en-
+force the budget constraint to CBP by terminating
+the iteration once the number of evaluations reaches
+T. We run CBP with each set of hyperparameters
+on the test set to find the best hyperparameters. The
+result of the hyperparameter search is described in
+Appendix D. We observe that the best set of hyper-
+parameters of CBP is dependent on the size of the
+budget. As such, we report the Oracle score, the
+best score over all combinations of hyperparame-
+ters for each budget. AMBR is implemented as in
+Algorithm 1 without using Eq. (9). Thus, Lemma 1
+does not apply to the algorithm we evaluate in this
+section. We run NbyS, CBP, and AMBR five times
+for each budget size and report the average, mini-
+mum, and maximum scores over the runs.
+We use Huggingface’s Transformers library for
+running all the experiments (Wolf et al., 2020).
+All the experiments are conducted using publicly
+available pretrained models and datasets for repro-
+ducibility. Due to limitations in computational re-
+sources, we evaluate the first 1000 entries of each
+dataset.
+5.1
+Machine Translation
+We evaluate the performance on machine trans-
+lation tasks using WMT’21 test dataset. We use
+German-English (De-En) and Russian-English (Ru-
+
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+59
+60
+61
+62
+63
+64
+65
+COMET
+wmt21.de-en (128 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(a) COMET-20 ↑(De-En, N = 128)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+59
+60
+61
+62
+63
+64
+COMET
+wmt21.ru-en (128 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(b) COMET-20 ↑(Ru-En, N = 128)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+48
+50
+52
+54
+56
+58
+60
+62
+64
+COMET
+wmt21.de-en (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(c) COMET-20 ↑(De-En, N = 64)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+48
+50
+52
+54
+56
+58
+60
+62
+64
+COMET
+wmt21.ru-en (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(d) COMET-20 ↑(Ru-En, N = 64)
+Figure 1: COMET-20 score on WMT’21 De-En and Ru-En using the WMT 21 X-En model. The shaded regions
+show the minimum and the maximum values over five runs. The horizontal axis shows the reduction in the number
+of evaluations compared to the standard MBR with all samples.
+En) language pairs. We use the WMT 21 X-En
+model and M2M100 418M model to sample se-
+quences for both language pairs (Tran et al., 2021;
+Fan et al., 2021). We load the WMT 21 X-En
+model in 4-bit precision to reduce the GPU mem-
+ory consumption. We use COMET-20 as the utility
+function and the evaluation metric (Rei et al., 2020).
+We use the BLEU score as a coarse utility function
+of C2F. As a reference, the COMET-20 scores of
+the greedy MAP decoding are 56.84 for De-En and
+54.71 for Ru-En.
+AMBR is on par with Oracle CBP.
+Figure 1
+shows the results with varying evaluation budgets
+with a fixed number of samples (N = 64, 128) us-
+ing the WMT 21 X-En model. We observe that
+AMBR achieves the best COMET score and the
+error rate compared to the others. The error rate
+is the ratio of selecting a hypothesis different from
+the standard MBR using all 128 (64) samples. It
+achieves almost the same score as the standard
+MBR with all samples within 1/4−1/8 number of
+evaluations, resulting in 4 −8 times speed up com-
+pared to standard MBR. We observe qualitatively
+the same result on the M2M100 model (see Ap-
+pendix E.3). Additional evaluations on WMT’21
+En-De and En-Ru are described in Appendix E.2.
+AMBR scales with the number of samples given
+enough budget.
+To evaluate the scalability of
+AMBR on the number of samples, we evaluate the
+COMET scores with varying numbers of samples
+with a fixed amount of evaluation budgets using
+the M2M100 418M model. Figure 2 shows the
+COMET scores with varying numbers of samples
+with a fixed amount of evaluation budgets on De-
+En. The COMET score of AMBR scales with the
+number of samples if and only if the number of
+evaluations is large enough. This is to be expected
+as Lemma 1 only holds when the budget is large
+enough. The same trend is observed on Ru-En
+(Appendix E.4).
+5.2
+Text Summarization
+We evaluate the performance of AMBR on text
+summarization tasks using SAMSum (Gliwa et al.,
+2019) and XSum dataset (Narayan et al., 2018).
+We use BART models fine-tuned on each dataset
+(Lewis et al., 2020). We use InfoLM (Colombo
+et al., 2022) with the Fisher-Rao distance (Rao,
+1987) as a utility function as it is shown to have
+a high correlation with human judgment on text
+
+50
+60
+70
+80
+90
+100
+110
+120
+Number of samples
+30
+32
+34
+36
+38
+40
+42
+44
+COMET
+wmt21.de-en (200 evaluations)
+NbyS
+C2F
+AMBR
+(a) COMET-20 ↑(De-En, 200 evalua-
+tions)
+50
+60
+70
+80
+90
+100
+110
+120
+Number of samples
+38
+40
+42
+44
+46
+COMET
+wmt21.de-en (500 evaluations)
+NbyS
+C2F
+AMBR
+(b) COMET-20 ↑(De-En, 500 evalua-
+tions)
+50
+60
+70
+80
+90
+100
+110
+120
+Number of samples
+41
+42
+43
+44
+45
+46
+COMET
+wmt21.de-en (1000 evaluations)
+NbyS
+C2F
+AMBR
+(c) COMET-20 ↑(De-En, 1000 evalua-
+tions)
+50
+60
+70
+80
+90
+100
+110
+120
+Number of samples
+43.0
+43.5
+44.0
+44.5
+45.0
+45.5
+46.0
+46.5
+COMET
+wmt21.de-en (2000 evaluations)
+NbyS
+C2F
+AMBR
+(d) COMET-20 ↑(De-En, 2000 evalua-
+tions)
+70
+80
+90
+100
+110
+120
+Number of samples
+45.0
+45.2
+45.4
+45.6
+45.8
+46.0
+46.2
+46.4
+COMET
+wmt21.de-en (4000 evaluations)
+NbyS
+C2F
+AMBR
+(e) COMET-20 ↑(De-En, 4000 evalua-
+tions)
+Figure 2: Evaluation of AMBR with a varying number of samples with a fixed evaluation budget on WMT’21
+De-En with COMET-20 score using the M2M100 418M model. The shaded regions show the minimum and the
+maximum values over five runs.
+summarization tasks. We generate N = 64 sam-
+ples as a candidate set for each input. Following
+Eikema and Aziz (2022), we use the F1 score of
+the unigram as a coarse utility function of C2F.
+The results are summarized in Figure 3. Despite
+AMBR reduces the error rate significantly (Figure
+3c and 3f), it only slightly improves upon standard
+MBR with respect to InfoLM and ROUGE-L score
+(Figure 3a, 3b, 3d, and 3e). We speculate that
+this is because many of the top-scoring samples
+are similar in quality measured by InfoLM and
+ROUGE-L.
+C2F can surpass the score of standard MBR
+under conditions
+Interestingly, we observe that
+C2F surpasses the performance of standard MBR
+with all samples on ROUGE-L for XSum dataset.
+We speculate that C2F may improve upon MBR
+because it effectively ensembles two utility func-
+tions. Because the F1 score of the unigram may be
+more aligned to ROUGE-L score than InfoLM is,
+it can pick sentences favored by ROUGE-L metric.
+As such, C2F can not only speed up the compu-
+tation of the MBR objective but also improve the
+alignment to the target metric.
+5.3
+Image Captioning
+We evaluate the performance of AMBR on im-
+age captioning task using MS COCO dataset (Lin
+et al., 2014). We use BLIP-2 (Li et al., 2023a)
+with Flan T5-xl (Chung et al., 2022) fine-tuned for
+MS COCO loaded in 4-bit precision. We use a
+cosine similarity of the textual CLIP embeddings
+as the utility function (Radford et al., 2021; Hessel
+et al., 2021). We use RefCLIPScore and BLEU as
+an evaluation metric (Hessel et al., 2021; Papineni
+et al., 2002). We generate N = 64 samples for
+each image. We use the F1 score of the unigram as
+a coarse utility function of C2F.
+The empirical result is shown in Figure 3.
+AMBR achieves roughly 4 to 8 times speed-up
+compared to MBR with a marginal drop in Ref-
+CLIPScore and BLEU score (Figure 3g and 3h).
+We observe C2F to improve upon standard MBR
+with respect to BLEU score (Figure 3h). As in text
+summarization (Section 5.2), We speculate that this
+is because the F1 score has a better alignment with
+the BLEU score than the CLIP embeddings so that
+the coarse utility function is effectively serving as
+another utility function.
+6
+Related Work
+MBR has been investigated in many NLP tasks in-
+cluding parsing (Goodman, 1996), speech recogni-
+tion (Goel and Byrne, 2000), bilingual word align-
+ment (Kumar and Byrne, 2002), and machine trans-
+lation (Kumar and Byrne, 2004). MBR has recently
+
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+1.800
+1.825
+1.850
+1.875
+1.900
+1.925
+1.950
+1.975
+InfoLM
+samsum (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(a) InfoLM ↓(SAMSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+29.5
+30.0
+30.5
+31.0
+31.5
+ROUGE-L
+samsum (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(b) ROUGE-L ↑(SAMSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+0.2
+0.4
+0.6
+0.8
+1.0
+Error ratio
+samsum (64 samples)
+Standard
+NbyS
+C2F
+CBP
+AMBR
+(c) Error Rate ↓(SAMSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+1.875
+1.900
+1.925
+1.950
+1.975
+2.000
+2.025
+2.050
+InfoLM
+xsum (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(d) InfoLM ↓(XSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+30
+31
+32
+33
+34
+35
+ROUGE-L
+xsum (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(e) ROUGE-L ↑(XSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+0.2
+0.4
+0.6
+0.8
+1.0
+Error ratio
+xsum (64 samples)
+Standard
+NbyS
+C2F
+CBP
+AMBR
+(f) Error Rate ↓(XSum)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+0.3825
+0.3850
+0.3875
+0.3900
+0.3925
+0.3950
+0.3975
+RefCLIPScore
+mscoco (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(g) RefCLIPScore ↑(MS COCO)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+24
+26
+28
+30
+32
+BLEU
+mscoco (64 samples)
+Standard
+Standard (all samples)
+NbyS
+C2F
+CBP
+AMBR
+(h) BLEU ↑(MS COCO)
+1/321/16
+1/8
+1/4
+1/2
+Number of evaluations
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Error ratio
+mscoco (64 samples)
+Standard
+NbyS
+C2F
+CBP
+AMBR
+(i) Error Rate ↓(MS COCO)
+Figure 3: (a) InfoLM score, (b) ROUGE-L score, and (c) error rate on SAMSum dataset. (d) InfoLM score, (e)
+ROUGE-L score, and (f) error rate on XSum dataset. (g) RefCLIPScore, (h) BLEU score, and (i) error rate on MS
+COCO dataset. The shaded regions show the minimum and the maximum values over five runs. The error rate is
+defined as the ratio of selecting a hypothesis different from the one selected by standard MBR using all the samples
+(N = 64).
+gained attention in machine translation as a deci-
+sion rule as a method to overcome some of the
+biases of MAP decoding in NMT (Eikema and
+Aziz, 2020; Müller and Sennrich, 2021; Eikema
+and Aziz, 2022).
+Freitag et al. (2022) and Fernandes et al. (2022)
+show that using neural-based utility functions such
+as BLEURT (Sellam et al., 2020; Pu et al., 2021)
+and COMET (Rei et al., 2020, 2022) rather than lex-
+ical overlap metrics (e.g. BLEU) further improves
+MBR.
+CSH (Baharav and Tse, 2019) is not the only
+algorithm proposed to solve the medoid identifica-
+tion problem. There are several other algorithms
+to solve the medoid identification (Eppstein and
+Wang, 2006; Okamoto et al., 2008; Bagaria et al.,
+2018). We pick to use CSH as it has the best theo-
+retical performance.
+Algorithms to solve the problem of identifying
+the best option out of the candidates with a bud-
+get constraint (fixed-budget best-arm identification
+problems) are known to be highly sensitive to the
+choice of the hyperparameters if they have ones
+(Carpentier and Locatelli, 2016; Kaufmann et al.,
+2016). In fact, we observe that the effectiveness of
+CBP hinges on the appropriate selection of hyper-
+parameters, given each budget constraint.
+7
+Conclusions
+We propose Adaptive Minimum Bayes-Risk
+(AMBR) decoding, a hyperparameter-free algo-
+rithm for efficient MBR decoding. AMBR consid-
+ers the problem of computing the MBR objective
+as the medoid identification problem and uses the
+known best algorithm to solve it. The strength of
+the AMBR is that it doesn’t need a development
+set to tune the set of hyperparameters. AMBR au-
+
+tomatically computes the strategy on the fly given
+the budget specified by the user.
+Experimental result shows that the performance
+of AMBR is on par with CBP with hyperparameters
+picked by an Oracle on machine translation tasks.
+AMBR outperforms CBP on text summarization
+and image captioning tasks, using the same set of
+hyperparameters as in machine translation tasks for
+CBP. We speculate that CBP requires a different
+set of hyperparameters for each task to perform on
+par with AMBR.
+We believe that AMBR will be a practical choice
+for future MBR decoding because of its applicabil-
+ity and significant performance improvements.
+8
+Limitations
+Even with the improvement, AMBR is still many
+times more costly to run than beam search.
+Using Eq. (9), the computational complexity of
+the evaluation of the utility function of AMBR is
+O(N log N · U) to achieve the theoretical guar-
+antee. This is still larger than the complexity of
+generation which is O(N · G). Therefore, the eval-
+uation procedure is still the bottleneck of MBR to
+scale with the number of samples.
+Although our focus is on reducing the computa-
+tion of the utility function of MBR decoding, it is
+not the only way to speed up the text generation.
+Finkelstein and Freitag (2024) shows that by self-
+training a machine translation model by its own
+MBR-decoded output, it can improve the perfor-
+mance of more efficient decoding methods such as
+beam search. Yang et al. (2023) proposes the use
+of Direct Preference Optimization (Rafailov et al.,
+2023) to train the model to learn the ranking of the
+sequences according to the MBR objective. Foks
+(2023) shows that by training a model to predict
+the Monte Carlo estimate of the Bayes risk, we can
+directly estimate the Bayes risk using the trained
+model without running Monte Carlo estimation,
+resulting in O(N · G + N · U′) where U′ is the
+inference time of the trained model.
+We measure the number of evaluations of the
+utility function as a metric of efficiency. Practi-
+cally, the computation of the utility function is not
+linear to the number of calls. One can optimize
+the implementation by batching and caching the
+computation effectively. For example, the sentence
+embeddings of embedding-based utility functions
+such as COMET can be cached to significantly
+speed up the computation of the utility (Amrhein
+and Sennrich, 2022; Cheng and Vlachos, 2023).
+The paper focuses on how to effectively use the
+given budget and lacks a discussion on what to set
+the budget to. Baharav and Tse (2019) suggests
+the doubling trick (Besson and Kaufmann, 2018)
+to find the appropriate budget size. That is, we run
+the algorithm with a certain budget T, and then
+double the budget to 2T and rerun the algorithm.
+If the two answers are the same, then we output it.
+Because the probability of selecting the same incor-
+rect answer twice in a row is very low, it is likely to
+be the best hypothesis. Empirical evaluation of the
+strategies to decide the budget size is future work.
+The other question is on what to set the number
+of samples to. Figure 2 shows that having too many
+samples is not necessarily beneficial when the eval-
+uation budget is too small. Finding the optimal
+number of samples given a budget on computation
+is an open question.
+We consider the Monte Carlo estimate hMC as
+the target objective function to compute. Evalua-
+tion of AMBR using other objective functions such
+as model-based estimate (Jinnai et al., 2024) is fu-
+ture work.
+Although AMBR is based on the best algorithm
+known to solve the medoid identification problem,
+it does not use any task-dependent knowledge to
+speed up the algorithm. One may exploit the do-
+main knowledge of the task to further improve upon
+it (e.g. reference aggregation; Vamvas and Sen-
+nrich, 2024).

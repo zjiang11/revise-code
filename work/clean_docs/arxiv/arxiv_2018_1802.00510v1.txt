@@ -1,0 +1,946 @@
+Adaptive Memory Networks
+Daniel Li 1 Asim Kadav 2
+Abstract
+We present Adaptive Memory Networks (AMN)
+that processes input-question pairs to dynamically
+construct a network architecture optimized for
+lower inference times for Question Answering
+(QA) tasks. AMN processes the input story to
+extract entities and stores them in memory banks.
+Starting from a single bank, as the number of in-
+put entities increases, AMN learns to create new
+banks as the entropy in a single bank becomes too
+high. Hence, after processing an input-question(s)
+pair, the resulting network represents a hierarchi-
+cal structure where entities are stored in different
+banks, distanced by question relevance. At in-
+ference, one or few banks are used, creating a
+tradeoff between accuracy and performance.
+AMN is enabled by dynamic networks that allow
+input dependent network creation and efﬁciency
+in dynamic mini-batching as well as our novel
+bank controller that allows learning discrete deci-
+sion making with high accuracy. In our results, we
+demonstrate that AMN learns to create variable
+depth networks depending on task complexity and
+reduces inference times for QA tasks.
+1. Introduction
+Question Answering (QA) tasks are gaining signiﬁcance
+due to their widespread applicability to recent commercial
+applications such as chatbots, voice assistants and even med-
+ical diagnosis (Goodwin & Harabagiu, 2016). Furthermore,
+many existing natural language tasks can also be re-phrased
+as QA tasks. Providing faster inference times for QA tasks
+is crucial. Consumer device based question-answer services
+have hard timeouts for answering questions. For example,
+Amazon Alexa, a popular QA voice assistant, allows devel-
+opers to extend the QA capabilities by adding new “Skills”
+as remote services (Amazon, 2017). However, these service
+1University of California-Berkeley, Berkeley, USA, Work done
+as a NEC Labs Intern. 2NEC Laboratories America, Princeton,
+
+APIs are wrapped around hard-timeouts of 8 seconds which
+includes the time to transliterate the question to text on Ama-
+zon’s servers and the round-trip transfer time of question
+and the answer from the remote service, and sending the
+response back to the device. Furthermore, developers are en-
+couraged to provide a list of questions (“utterances”) apriori
+at each processing step to assist QA processing (Amazon,
+2017). We propose that apart from helping transliteration
+these questions can also provide hints for reducing inference
+times for QA tasks based on large knowledge bases.
+Modeling QA tasks with LSTMs can be computationally
+expensive which is undesirable during inference. Memory
+networks, a class of deep networks with explicit addressable
+memory, have recently been used to achieve state of the
+art results on many QA tasks. Unlike LSTMs, where the
+number of parameters grows exponentially with the size
+of memory, memory networks are comparably parameter
+efﬁcient and can learn over longer input sequences. How-
+ever, they often require accessing all intermediate memory
+to answer a question. Furthermore, using focus of attention
+over the intermediate state using a list of questions does
+not address this problem. Soft attention based models com-
+pute a softmax over all states and hard attention models are
+not differentiable and can be difﬁcult to train over a large
+state space. Previous work on improving inference over
+memory networks has focused on using unsupervised clus-
+tering methods to reduce the search space (Chandar et al.,
+2016; Rae et al., 2016). Here, the memory importance is
+not learned and the performance of nearest-neighbor style
+algorithms is often comparable to a softmax operation over
+memories.
+To provide faster inference for long sequence-based inputs,
+we present Adaptive Memory Networks (AMN), that con-
+structs a memory network on-the-ﬂy based on the input.
+Like past approaches to addressing external memory, AMN
+constructs the memory entity nodes dynamically. However,
+distinct from past approaches, AMN stores the entities from
+the input story in variable number of memory banks. The
+entities represent the hidden state of each word in the story
+while a memory bank is a collection of entities that are
+similar w.r.t the question. As the number of entities grow,
+and the entropy within a single bank becomes too high, our
+network learns to construct new memory banks and copies
+entities that are more relevant towards a single bank. Hence,
+arXiv:1802.00510v1  [cs.AI]  1 Feb 2018
+
+Adaptive Memory Networks
+by limiting the decoding step to a dynamic number of rele-
+vant memory banks, AMN achieves lower inference times.
+AMN is an end-to-end trained model with dynamic learned
+parameters for memory bank creation and movement of
+entities.
+Figure 1 demonstrates a simple QA task where AMN con-
+structs two memory banks based on the input. During in-
+ference only the entities in the left bank are considered
+reducing inference times. To realize its goals, AMN intro-
+duces a novel bank controller that uses reparameterization
+trick to make discrete decisions with high accuracy while
+maintaining differentiability. Finally, AMN also models
+sentence structures on-the-ﬂy and propagates update infor-
+mation for all entities that allows it to solve all 20 bAbI
+tasks.
+2. Related Work
+Memory Networks:
+Memory networks store the entire
+input sequence in memory and perform a softmax over hid-
+den states to update the controller (Weston et al., 2014;
+Sukhbaatar et al., 2015). DMN+ connects memory to input
+tokens and updates them sequentially (Xiong et al., 2016).
+For inputs that consist of large number of tokens or en-
+tities, these methods can be expensive during inference.
+AMN stores entities with tied weights in different mem-
+ory banks. By controlling the number of memory banks,
+AMN achieves low inference times with reasonable accu-
+racy. Nearest neighbor methods have also been explored
+over memory networks. For example, Hierarchical Memory
+Networks separates the input memory into groups using
+the MIPS algorithm (Chandar et al., 2016). However, us-
+ing MIPS is as slow as a softmax operation, so the authors
+propose using an approximate MIPS that gives inferior per-
+formance. In contrast, AMN is end to end differentiable,
+and reasons which entities are important and constructs a
+network with dynamic depth.
+Neural Turing Machine (NTM) consists of a memory bank
+and a differentiable controller that learns to read and write to
+speciﬁc locations (Graves et al., 2014). In contrast to NTMs,
+AMN memory bank controller is more coarse grained and
+the network learns to store entities in memory banks instead
+of speciﬁc locations. AMN uses a discrete bank controller
+that gives improved performance for bank controller actions
+over NTM’s mechanisms. However, our design is consistent
+with the modeling studies of working memory by (Hazy
+et al., 2006) where the brain performs robust memory main-
+tenance and may maintain multiple working representations
+for individual working tasks. Sparse access memory uses
+approximate nearest neighbors (ANN) to reduce memory
+usage in NTMs (Rae et al., 2016). However, ANNs are
+not differentiable. AMN, uses a input speciﬁc memory
+organization that does not create sparse structures. This
+limits access during inference to speciﬁc entities reducing
+inference times.
+Graph-based networks, (GG-NNs (Li et al., 2015) and GGT-
+NNs (Johnson, 2017)) use nodes with tied weights that are
+updated based on gated-graph state updates with shared
+weights over edges. However, unlike AMN, they require
+strong supervision over the input and teacher forcing to
+learn the graph structure. Furthermore, the cost of building
+and training these models is expensive and if every edge is
+considered at every time-step the amount of computation
+grows at the order of O(N 3) where N represents the num-
+ber of nodes/entities. AMN does not use strong supervision
+but can solve tasks that require transitive logic by model-
+ing sentence walks on the ﬂy. EntNet constructs dynamic
+networks based on entities with tied weights for each en-
+tity (Henaff et al., 2017). A key-value update system allows
+it to update relevant (learned) entities. However, Entnet uses
+soft-attention during inference to attend to all entities that
+incur high inference costs. To summarize, majority of the
+past work on memory networks uses softmax over memory
+nodes, where each node may represent input or an entity.
+In contrast, AMN learns to organize memory into various
+memory banks and performs decode over fewer entities
+reducing inference times.
+Conditional
+Computation
+&
+Efﬁcient
+Inference:
+AMN is also related to the work on conditional computation
+which allows part of networks to be active during inference
+improving computational efﬁciency (Bengio et al., 2015).
+Recently, this has been often accomplished using a gated
+mixture of experts (Eigen et al., 2013; Shazeer et al., 2017).
+AMN conditionally attends to entities in initial banks during
+inference improving performance.
+For faster inference
+using CNNs, pruning (Le Cun et al., 1989; Han et al., 2016),
+low rank approximations (Denton et al., 2014), quantization
+and binarization (Rastegari et al., 2016) and other tricks
+to improve GEMM performance (Vanhoucke et al., 2011)
+have been explored. For sequence based inputs, pruning
+and compression has been explored (Giles & Omlin, 1994;
+See et al., 2016). However, compression results in irregular
+sparsity that reduces memory costs but may not reduce
+computation costs. Adaptive computation time (Graves,
+2016) learns the number of steps required for inferring
+the output and this can also be used to reduce inference
+times (Figurnov et al., 2016). AMN uses memory networks
+with dynamic number of banks to reduce computation costs.
+Dynamic networks:
+Dynamic neural networks that
+change structure during inference have recently been possi-
+ble due to newer frameworks such as Dynet and PyTorch.
+Existing work on pruning can be implemented using these
+frameworks to reduce inference times dynamically like dy-
+namic deep network demonstrates (Liu & Deng, 2017).
+
+Adaptive Memory Networks
+Mary moved to the bathroom.
+John went to the hallway.
+Daniel went back to the hallway.
+Sandra moved to the garden.
+John moved to the office.
+Sandra journeyed to the bathroom.
+Mary moved to the hallway.
+Daniel travelled to the office.
+John went back to the garden.
+John moved to the bedroom.
+Where is Sandra?
+Bank Controller
+Sandra
+Memory Bank 1
+Memory Bank 2
+State of entities
+List of 
+questions
+Strength GRU
+Entities 
+from the 
+story
+Figure 1. Overview of Adaptive memory networks. Multiple memory banks are created based on the story and input entities are
+moved in them based on their relevance to the question. Inference is performed on a single (or less than all) banks most relevant
+to the question(s).
+AMN utilizes the dynamic architecture abilities to construct
+an input dependent memory network of variable memory
+bank depth and the dynamic batching feature to process a
+variable number of entities. Furthermore, unlike past work
+that requires an apriori number of ﬁxed memory slots, AMN
+constructs them on-the-ﬂy based on the input. The learn-
+able discrete decision-making process can be extended to
+other dynamic networks which often rely on REINFORCE
+to make such decisions (Liu & Deng, 2017).
+Neuroscience:
+Our network construction is inspired by
+work on working memory representations. There is suf-
+ﬁcient evidence for multiple, working memory represen-
+tations in the human brain (Hazy et al., 2006). Semantic
+memory (Tulving et al., 1972), describes a hierarchical or-
+ganization starting with relevant facts at the lowest level and
+progressively more complex and distant concepts at higher
+levels. AMN constructs entities from the input stories and
+stores the most relevant entities based on the question in the
+lowest level memory bank. Progressively higher level mem-
+ory banks represent distant concepts (and not necessarily
+higher level concepts for AMN). Other work demonstrates
+organization of human memory in terms of “priority struc-
+ture” where attention is a gate-keeper of working memory-
+guided by executive control’s goals, plans, and intentions as
+in (Watzl, 2017), similar in spirit to AMN’s question guided
+network construction.
+3. Differentiable adaptive memory module
+In this section, we describe the design process and motiva-
+tion of our memory module. Our memory network architec-
+ture is created during inference time for every story. The
+architecture consists of different memory banks and each
+memory bank stores entities from the input story. Hence,
+a memory entity represents the hidden state of each entity
+(each word in our case) from the input story while a memory
+bank is a collection of entities. Intuitively, each memory
+bank stores entities that have a similar distance score from
+the question.
+At a high level, entities are gradually and recurrently copied
+through memory banks to ﬁlter out irrelevant nodes such
+that in the ﬁnal inference stage, fewer entities are considered
+by the decoder. Note that the word ﬁlter implies a discrete
+decision and that recurrence implies time. If we were to
+perform a strict cut off and remove entities that appear to
+be irrelevant at each time step, learning the reasoning logic
+that requires previous entities that were cut off would not
+be possible. Thus, smoothed discretization is required.
+We design ﬁltering to be a two-stage pseudo-continuous
+process to simulate discrete cut offs (Πmove, Πnew), while
+keeping reference history. The overall memory (M) consists
+of multiple memory banks. A memory bank is a collection
+or group of entities (m0...l), where m0 denotes the initial
+and most general bank and ml denotes the most relevant
+bank. Note that |l| is input dependent and learned. First,
+entities are moved from m0 gradually towards ml based off
+of their individual relevance to the question and second, if
+ml becomes too saturated, ml+1 is created. Operations in
+the external memory allowing for such dynamic restructur-
+ing and entity updates are described below. Note that these
+operations still maintain end to end differentiability.
+1. Memory bank creation (Πnew), which creates a new
+memory bank depending on the current states of en-
+tities mi. If the entropy, or information contained
+(explained below), of mi is too high, Πnew(mi) will
+learn to create a new memory bank mi+1 to reduce
+entropy.
+2. Moving entities across banks (Πmove), which deter-
+mines which entities are relevant to the current question
+and move such entities to further (higher importance)
+memory banks.
+
+Adaptive Memory Networks
+3. Adding/Updating entities in a bank (Πau), which adds
+entities that are not yet encountered to the ﬁrst memory
+bank m0 or if the entity is already in m0, the operation
+updates the entity state.
+4. Propagating changes across entities (Πprop), which up-
+dates the entity states in memory banks based on node
+current states Πprop(M) and their semantic relation-
+ships. This is to communicate transitive logic.
+Both Πnew, Πmove require a discrete decision (refer to sec-
+tion 4.2.1.), and in particular, for Πnew we introduce the no-
+tion of entropy. That is to say if mi contains too many nodes
+(the entropy becomes too high), the memory module will
+learn to create a new bank mi+1 and move nodes to mi+1
+to reduce entropy. By creating more memory banks, the
+model spreads out the concentration of information which
+in turn better discretizes nodes according to relevance.
+4. Adaptive Memory Networks
+A high-level overview is shown in Figure 2, followed by
+a mathematical detail of the model’s modules. Our model
+adopts the encoder-decoder framework with an augmented
+adaptive memory module. For an overview of the algorithm,
+refer to Section A.4.
+Notation and Problem Statement:
+Given a story rep-
+resented by N input sentences (or statements), i.e.,
+(l1, · · · , lN), and a question q, our goal is to generate an an-
+swer a. Each sentence l is a sequence of N words, denoted
+as (w1, · · · , wNs), and a question is a sequence of Nq words
+denoted as (w1, · · · , wNq). Throughout the model we refer
+to entities; these can be interpreted as a 3-tuple of ew =
+(word ID wi, hidden state w, question relevance strength s).
+Scalars, vectors, matrices, and dot products are denoted by
+lower-case letters, boldface lower-case letters and boldface
+capital letters, and angled brackets respectively.
+4.1. Encoder
+The input to the model, starting with the encoder, are story-
+question input pairs. On a macro level, sentences l1...N are
+processed. On a micro level, words w1...Ns are processed
+within sentences.
+For each wi ∈li, the encoder maps wi to a hidden represen-
+tation and a question relevance strength ∈[0, 1]. The word
+ID of wi is passed through a standard embedding layer and
+then encoded through an accumulation GRU. The accumula-
+tion GRU captures the entity states through time by adding
+the output of each GRU time step to its respective word,
+stored in a lookup matrix. The initial states of ew are set to
+this GRU output. Meanwhile, the question is also embedded
+and encoded in the same manner sans accumulation.
+In the following, the subscripts i, j are used to iterate
+through the total number of words in a statement and ques-
+tion respectively, D stores the accumulation GRU output,
+and wi is a GRU encoding output. The last output of the
+GRU will be referred to as wN, wNq for statements and
+questions.
+ui, uj = EMBED(wii), EMBED(wij)
+(1)
+wi = GRU(ui, wi−1)
+(2)
+D[i] += wi
+(3)
+wj = GRU(uj, wj−1)
+(4)
+To compute the question relevance strength s ∈[0, 1] for
+each word, the model uses GRU-like equations. The node
+strengths are ﬁrst initialized to Xavier normal and the inputs
+are the current word states win, the question state wNq,
+and when applicable, the previous strength. Sentences are
+processed each time step t.
+zt = σ(Uzwin + WzwNq + Xzst−1)
+(5)
+rt = 1 −σ(Ur⟨st−1, wNq⟩)
+(6)
+est = σ(Whwin + Uh(rt ⊙st−1))
+(7)
+st = zt ⊙st−1 + (1 −zt) ⊙est
+(8)
+In particular, equation (6) shows where the model learns to
+lower the strengths of nodes that are not related the question.
+First, a dot product between the current word states and
+question state are computed for similarity (high correlation),
+then it is subtracted from a 1 to obtain the dissimilarity.
+We refer to these operations as SGRU (Strength GRU) in
+Algorithm 1.
+4.2. Adaptive Memory Module
+The adaptive memory module recurrently restructures enti-
+ties in a question relevant manner so the decoder can then
+consider fewer entities (namely, the question relevant enti-
+ties) to generate an answer. The following operations are
+performed once per sentence.
+4.2.1. MEMORY BANK CONTROLLER
+As mentioned earlier, discrete decisions are difﬁcult for
+neural networks to learn so we designed a speciﬁc mem-
+ory bank controller Πctrl for binary decision making. The
+model takes ideas from the reparameterization trick and uses
+custom backpropagation to maintain differentiability.
+In particular, the adaptive memory module needs to make
+two discrete decisions on a {0, 1} basis, one in Πnew to
+create a new memory bank and the other in Πmove to move
+nodes to a different memory bank. The model uses a scalar
+p ∈{0, 1} to parameterize a Bernoulli distribution where
+the realization H, is the decision the model makes. How-
+ever, backpropagation through a random node is intractable,
+
+Adaptive Memory Networks
+GRU
+GRU
+GRU
+GRU
+Bank Controller
+Attention
+Answer
+Memory Banks
+Story
+Encoder
+Semantic memory module
+Decoder
+Question
+Strength 
+GRU
+Figure 2. Adaptive memory networks.
+so the model detaches H from the computation graph and
+introduces H as a new node. Finally, H is used as a mask to
+zero out entities in the discrete decision. Meanwhile, p is
+kept in the computation graph and has a special computed
+loss (Section 4.4). The operations below will be denoted as
+Πctrl and has two instances: one for memory bank creation
+Πnew and one for moving entities across banks Πmove. In
+equation 9, depending on what Πctrl is used for, q is a poly-
+morphic function and will take on a different operation and
+∗will be a different input. Examples of such are given in
+their respective sections (4.2.2.1, 4.2.2.2).
+p = q(∗)
+(9)
+H = Bernoulli(p)
+(10)
+4.2.2. MEMORY BANK OPERATIONS
+1. Memory bank creation Πnew: To determine when a
+new memory bank is created, in other words, if the cur-
+rent memory bank becomes too saturated, the memory
+bank controller (4.2.1.) will make a discrete decision
+to create a new memory bank. Here, q (eq 9) is a
+fully connected layer and the input is the concatena-
+tion of all the current memory bank mi’s entity states
+[w0...wi] ∈R1,n|ew|. Intuitively, q will learn a contin-
+uous decision that is later discretized by eq 10 based
+on entity states and the number of entities. Note this is
+only performed for the last memory bank.
+Πnew([w0...wi]) =
+(
+M.new()
+if 1(Πctrl([w0...wi])) else
+pass
+(11)
+2. Moving entities through memory banks: Similar to
+Πnew, individual entities’ relevance scores are passed
+into the bank controller to determine H as the input.
+The relevance score is computed by multiplying an
+entity state by its respective relevance ∈Rn,|ew|. Here,
+q has a slight modiﬁcation and is the identity function.
+Note that this operation can only be performed if there
+is a memory bank to move nodes to, namely if mi+1
+exists. Additionally, each bank has a set property where
+it cannot contain duplicate nodes, but the same node
+can exist in two different memory banks.
+Πmove(si ∗wi) = m.add(1(Πctrl(si ∗wi)))
+∀i ∈m
+(12)
+3. Adding/Updating entities in a bank: Recall that en-
+tities are initially set to the output of D. However, as
+additional sentences are processed, new entities and
+their hidden states are observed. In the case of a new
+entity ew, the entity is added to the ﬁrst memory bank
+m0. If the entity already exists in m0, then ew’s corre-
+sponding hidden state is updated through a GRU. This
+procedure is done for all memory banks.
+Πau([w0...wi]) =
+(
+m0.add(ei
+w)
+if ei
+w ̸∈m0 else
+wt+1
+i
+= GRU(wN, wt
+i)
+∀m ∈M
+(13)
+4. Propagating updates to related entities: So far, en-
+tities exist as a bag of words model and the sentence
+structure is not maintained. This can make it difﬁcult
+to solve tasks that require transitive reasoning over
+multiple entities. To track sentence structure informa-
+tion, we model semantic relationships as a directed
+graph stored in adjacency matrix A. As sentences are
+processed word by word, a directed graph is drawn
+progressively from w0...wi...wN. If sentence lk’s path
+contains nodes already in the current directed graph, lk
+will include said nodes in its path. After lk is added to
+A, the model propagates the new update hidden state
+information ai among all node states using a GRU. ai
+for each node i is equal to the sum of the incoming
+edges’ node hidden states.
+Additionally, we add a particular emphasis on lk to
+simulate recency. At face value, one propagation step
+of A will only have a reachability of its immediate
+neighbor, so to reach all nodes, A is raised to a consec-
+utive power r to reach and update each intermediate
+
+Adaptive Memory Networks
+node. r can be either the longest path in A or a set
+parameter. Again, this is done within a memory bank
+for all memory banks. For entities that have migrated
+to another bank, the update for these entities is a no-op
+but propagation information as per the sentence struc-
+ture is maintained. A single iteration is shown below:
+a = (Ar)T [w0...wi] (14)
+wt = GRU(a, wt−1) (15)
+When nodes are transferred across banks, A is still
+preserved. If intermediate nodes are removed from a
+path, a transitive closure is drawn if possible.
+After these steps are ﬁnished at the end of a sentence,
+namely, the memory unit has reasoned through how large
+(number of memory banks) the memory should be and
+which entities are relevant at the current point in the story, all
+entities are passed through the strength modiﬁed GRU (4.1,
+eq 5-8) to recompute their question relevance (relevance
+score).
+4.3. Decode
+After all sentences l1...N are ingested, the decode portion of
+the network learns to interpret the results from the memory
+banks. The network iterates through the memory banks
+using a standard attention mechanism. To force the network
+to understand the question importance weighting, the model
+uses an exponential function d to weight important memory
+banks higher. Cm are the hidden states contained in memory
+m, sm are the relevance strengths of memory bank m, wNq
+is the question hidden state, ps is the attention score, r, h are
+learned weight masks, g are the accumulated states, and l is
+the ﬁnal logits prediction. During inference, fewer memory
+banks are considered.
+Cm = sm · [w0, ...wi]
+∀i ∈m
+(16)
+ps = Softmax(⟨Cm, wNq⟩)
+(17)
+g += d(⟨Cm, ps⟩)
+(18)
+ˆL = r(PReLU(h(g) + wNq)
+if m is last
+(19)
+4.4. Loss
+Loss is comprised of two parts, answer loss, which is com-
+puted from the given annotations, and secondary loss (from
+Πnew, Πmove), which is computed from sentence and story
+features at each sentence time step l0...N. Answer loss is
+standard cross entropy at the end of the story after lN is
+processed.
+Lp(ˆL) = CrossEntropy(ˆL, L)
+After each sentence li, the node relevance sli is enforced by
+computing the expected relevance E[sli]. E[s] is determined
+by nodes that are connected to the answer node a in a di-
+rected graph; words that are connected to a are relevant to
+a. They are then weighted with a deterministic function of
+distance from a.
+Ls(s) = DKL(sli||E[sli])
+Additionally, bank creation is kept in check by constraining
+pli w.r.t. the expected number of memory banks. The
+expected number of memory banks can be thought of as
+a geometric distribution ∼Geometric(ˆpli) parameterized
+by ˆpli, a hyperparameter. Typically, at each sentence step
+ˆp is raised to the inverse power of the current sentence step
+to reﬂect the amount of information ingested. Intuitively,
+this loss ensures banks are created when a memory bank
+contains too many nodes. On the other hand, the learned
+mask q (eq. 9) enables the model to weight certain nodes a
+higher entropy to prompt bank creation. Through these two
+dependencies, the model is able to simulate bank creation
+as a function of the number of nodes and the type of nodes
+in a given memory bank.
+Lb(pli) = DKL(pli||ˆp
+1
+β|li| )
+All components combined, the ﬁnal loss is given in the
+following equation
+Ltotal = Lp(ˆL) +
+|ln|
+X
+i=1
+(Li
+s(s) + Li
+b(p))
+5. Evaluation
+In this section, we evaluate AMN accuracy and inference
+times on the bAbI dataset (Weston et al., 2015) and extended
+bAbI tasks dataset. We compare our performance with Ent-
+net (Henaff et al., 2017), which recently achieved state of
+the art results on the bAbi dataset. For accuracy measure-
+ments, we also compare with DMN+ and encoder-decoder
+methods. Finally we discuss the time trade offs between
+AMN and current SOTA methods. The portion regarding
+inference times are not inclusive of story ingestion. We
+summarize our experiments results as follows:
+• We are able to solve all bAbi tasks using AMN. Fur-
+thermore, AMN is able to reason important entities and
+propagate them to the ﬁnal memory bank allowing for
+48% fewer entities examined during inference.
+• We construct extended bAbI tasks to evaluate AMN
+behavior. First, we extend Task 1 for multiple questions
+in order to gauge performance in a more robust manner.
+For example, if a reasonable set of questions are asked
+(where reasonable means that collectively they do not
+require all entities to answer implying entities can be
+ﬁltered out), will the model still sufﬁciently reason
+
+Adaptive Memory Networks
+through entities. We ﬁnd that our network is able to
+reason useful entities for both tasks and store them in
+the ﬁnal memory bank. Furthermore, we also scale
+bAbI for a large number of entities and ﬁnd that AMN
+provides additional beneﬁts at scale since only relevant
+entities are stored in the ﬁnal memory bank.
+5.1. Experiment settings
+We implement our network in PyTorch (Paszke et al., 2017).
+We initialize our model using Xavier initialization, and the
+word embeddings utilize random uniform initialization rang-
+ing from −
+√
+3 to
+√
+3. The learning rate is set as 0.001
+initially and updated with a learning rate scheduler. E[s]
+contains nodes in the connected components of A containing
+the answer node a which has relevance scores sampled from
+a Gaussian distribution centered at 0.75 with a variance of
+0.05 (capped at 1). Nodes that are not in the connected
+component containing a are similarly sampled from a Gaus-
+sian centered from 0.3 with a variance of 0.1 (capped at
+0). ˆpli is initially set to 0.8 and β varies depending on the
+story length from 0.1 ≤β ≤0.25. Note that for transitive
+tasks, ˆpli is set to 0.2. We train our models using the Adam
+optimizer (Kingma & Ba, 2014).
+5.2. bAbi dataset
+The bAbI task suite consists of 20 reasoning tasks that in-
+clude deduction, induction, path ﬁnding etc. Results are
+from the following parameters: ≤200 epochs, best of 10
+runs. Table 1 shows the accuracy and Table 4 shows the
+inference performance in terms of the number of entities
+examined. A task is considered passed if the error rate is
+less than 5%.
+We ﬁnd that AMN creates 1 −6 memory banks for different
+tasks. We also ﬁnd that 8 tasks can be solved by looking at
+just one memory bank and 14 tasks can be solved with half
+the total number of memory banks. Lastly, all tasks can be
+solved by examining less than or equal the total number of
+entities (e ∈M ≤|V | + ϵ)1. Tasks that cannot be solved in
+fewer than half the memory banks either require additional
+entities due to transitive logic or have multiple questions.
+For transitive logic, additional banks could be required as an
+relevant nodes may be in a further bank. However, this still
+avoids scanning all banks. In the case of multiple questions,
+all nodes may become necessary to construct all answers.
+We provide additional evaluation in Appendix to examine
+memory bank behavior for certain tasks.
+1The entities used to construct an answer and pass the task
+are examined as the sum of all entities across the M which is
+usually O(|V |). However, this is within an error margin of 6%
+more entities on some experiments, and thus we included an ϵ
+term.
+Inference performance
+Table 4 shows the number of
+banks created and required to solve a task, as well as the
+ratio of entities examined to solve the task. Table 3 shows
+the complexity of AMN and other SOTA models. Entnet
+uses an empirically selected parameter, typically set to the
+number of vocabulary words. GGT-NN uses the number
+of vocabulary words and creates new k new nodes intermit-
+tently per sentence step.
+For tasks where nodes are easily separable where nodes are
+clearly irrelevant to the question(s), AMN is able to suc-
+cessfully reduce the number of nodes examined. However
+for tasks that require more information, such as counting
+(Task 7), the model is still able to obtain the correct answer
+without using all entities. Lastly, transitive logic tasks where
+information is difﬁcult to separate due to dependencies of
+entities, the model creates very few banks (1 or 2) and uses
+all nodes to correctly generate an answer. We note that in
+the instance where the model only creates one bank, it is
+very sparse, containing only one or two entities.
+Because variations in computation times in text are minute,
+the number of entities required to construct an answer are
+of more interest as they directly correspond to the num-
+ber of computations required. Additionally, due to various
+implementations of current models, their run times can sig-
+niﬁcantly vary. However, for the comparison of inference
+times, AMN’s decoder and EntNet’s decoder are highly sim-
+ilar and contain roughly the same number of operations. We
+provide inference wall-clock time performance and memory
+bank behavior in supplementary behavior for representative
+tasks.
+5.3. Extended bAbi tasks
+We extend the bAbI tasks by adding additional entities and
+sentences and adding multiple questions for a single story,
+for Task 1.
+Scaled Task 1:
+We increase the the number of entities to
+100 entities in the task generation system instead of existing
+38. We also extend the story length to 90 to ensure new
+entities are referenced. We ﬁnd that AMN creates 6 memory
+banks and the ratio of entities in the ﬁnal banks versus the
+overall entities drops to 0.13 given the excess entities that
+are not referenced in the questions.
+Multiple questions:
+We also augment the tasks with mul-
+tiple questions to understand if AMN can handle when a
+story has multiple questions associated with it. We extend
+our model to handle multiple questions at once to limit re-
+generating the network for every question. To do so, we
+modify bAbi to generate several questions per story for tasks
+that do not currently have multiple questions. For single
+supporting fact (Task 1), the model creates 3 banks and
+
+Adaptive Memory Networks
+Task
+AMN
+Entnet
+DMN+
+MemN2N
+EncDec
+1 - Single Supporting Fact
+0.0
+0.0
+0.0
+0.0
+52.0
+2 - Two Supporting Facts
+2.1
+0.1
+0.3
+0.3
+66.1
+3 - Three Supporting Facts
+4.7
+4.1
+1.1
+2.1
+71.9
+4 - Two Arg. Relations
+0.0
+0.0
+0.0
+0.0
+29.2
+5 - Three Arg. Relations
+2.7
+0.3
+0.5
+0.8
+14.3
+6 - Yes/No Questions
+3.1
+0.2
+0.0
+0.1
+31.0
+7 - Counting
+0.0
+0.0
+2.4
+2.0
+21.8
+8 - Lists/Sets
+0.0
+0.5
+0.0
+0.9
+27.6
+9 - Simple Negation
+1.3
+0.1
+0.0
+0.3
+36.4
+10 - Indeﬁnite Knowledge
+1.2
+0.6
+0.0
+0.0
+36.4
+11 - Basic Coreference
+2.7
+0.3
+0.0
+0.1
+31.7
+12 - Conjunction
+2.2
+0.0
+0.0
+0.0
+35.0
+13 - Compound Coref.
+4.6
+1.3
+0.0
+0.0
+6.80
+14 - Time Reasoning
+2.1
+0.0
+0.2
+0.1
+67.2
+15 - Basic Deduction
+1.8
+0.0
+0.0
+0.0
+62.2
+16 - Basic Induction
+4.2
+0.0
+45.3
+51.8
+54.0
+17 - Positional Reasoning
+4.3
+0.5
+4.2
+18.6
+43.1
+18 - Size Reasoning
+2.0
+0.3
+2.1
+5.3
+6.60
+19 - Path Finding
+2.4
+2.3
+0.0
+2.3
+89.6
+20 - Agents Motivations
+0.0
+0.0
+0.0
+0.0
+2.30
+No. of failed tasks (>5%)
+0
+0
+5
+6
+20
+Table 1. Performance comparison of various models in terms of test error rate (%) and the number of failed tasks on the bAbI dataset. The
+bold task scores are where AMN can solve the task using only 1 memory bank.
+Task
+Created Banks (Rounded Average)
+Required Banks
+Ratio ( e∈M
+|V | )
+1 - Single Supporting Fact
+3
+1
+0.22
+2 - Two Supporting Facts
+5
+1
+0.41
+4 - Two Arg. Relations
+2
+1
+0.70
+7 - Counting
+5
+2
+0.81
+10 - Indeﬁnite Knowledge
+1
+1
+1.00
+11 - Basic Coreference
+3
+1
+0.43
+12 - Conjunction
+2
+1
+0.37
+14 - Time Reasoning
+3
+1
+0.60
+15 - Basic Deduction
+1
+1
+1.00
+16 - Basic Induction
+2
+2
+1.06
+17 - Positional Reasoning
+1
+1
+1.00
+18 - Size Reasoning
+3
+2
+0.82
+19 - Path Finding
+2
+2
+1.05
+20 - Agents Motivations
+2
+1
+0.26
+Extended bAbi
+1 - Single Supporting Fact, 100 Entities
+6
+1
+.13
+1 - Single Supporting, Multiple Questions
+3
+1
+.38
+Table 2. Memory bank analysis of indicative tasks.
+requires 1 bank to successfully pass the task. Furthermore,
+the ratio of entities required to pass the task only increases
+by 0.16 for a total of 0.38.
+6. Conclusion and Future Work
+In this paper, we present Adaptive Memory Network that
+learns to adaptively organize the memory to answer ques-
+tions with lower inference times. Unlike NTMs which learn
+to read and write at individual memory locations, Adaptive
+Memory Network demonstrates a novel design where the
+learned memory management is coarse-grained that is eas-
+ier to train.Through our experiments, we demonstrate that
+AMN can learn to reason, construct, and sort memory banks
+based on relevance over the question set.
+AMN presents a new design paradigm in memory networks.
+Unlike NTMs, where the network learns where to read/write
+to ﬁne-grained address information, AMN only learns to
+write input entities to coarse-grained banks. As a result,
+AMN is easier to train (e.g. does not require curriculum
+learning like NTMs) and does not require a separate spar-
+siﬁcation mechanism like approximate nearest neighbors
+for inference efﬁciency. Apart from saving inference times,
+AMN can learn to reason which speciﬁc entities contribute
+towards the ﬁnal answer improving interpretability.

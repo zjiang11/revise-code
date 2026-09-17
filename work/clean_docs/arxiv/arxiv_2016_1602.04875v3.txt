@@ -1,0 +1,889 @@
+POMDP-lite for Robust Robot Planning under Uncertainty
+Min Chen
+Emilio Frazzoli
+David Hsu
+Wee Sun Lee
+Abstract— The partially observable Markov decision process
+(POMDP) provides a principled general model for planning
+under uncertainty. However, solving a general POMDP is com-
+putationally intractable in the worst case. This paper introduces
+POMDP-lite, a subclass of POMDPs in which the hidden state
+variables are constant or only change deterministically. We
+show that a POMDP-lite is equivalent to a set of fully observable
+Markov decision processes indexed by a hidden parameter
+and is useful for modeling a variety of interesting robotic
+tasks. We develop a simple model-based Bayesian reinforcement
+learning algorithm to solve POMDP-lite models. The algorithm
+performs well on large-scale POMDP-lite models with up to
+1020 states and outperforms the state-of-the-art general-purpose
+POMDP algorithms. We further show that the algorithm is
+near-Bayesian-optimal under suitable conditions.
+I. INTRODUCTION
+Imperfect robot control, sensor noise, and unexpected
+environment changes all contribute to uncertainties and pose
+signiﬁcant challenges to robust robot planning. Robots must
+explore in order to gain information and reduce uncertainty.
+At the same time, they must exploit the information to
+achieve task objectives. The partially observable Markov
+decision process (POMDP) [8], [25] provides a principled
+general framework to balance exploration and exploitation
+optimally. It has found application in many robotic tasks,
+ranging from navigation [20], manipulation [7], [12] to
+human-robot interaction [14]. However, solving POMDPs
+exactly is computationally intractable in the worst case [16].
+While there has been rapid progress on efﬁcient approximate
+POMDP algorithms in recent years (e.g., [23], [13], [22],
+[24], [21]), it remains a challenge to scale up to very large
+POMDPs with complex dynamics.
+The complexity of a POMDP lies in the system dynam-
+ics, partial observability, and particularly, the conﬂuence
+of the two. We introduce POMDP-lite, a factored model
+that restricts partial observability to state variables that are
+constant or change deterministically. While this may appear
+restrictive, the POMDP-lite is powerful enough to model a
+variety of interesting robotic tasks:
+Chen, Hsu, and Lee are with the Department of Computer Science,
+National University of Singapore, Singapore 117417, Singapore. Frazzoli
+is with the Laboratory for Information & Decision Systems, Massachusetts
+Institute of Technology, Cambridge, MA 02139, USA
+Chen is supported by Singapore-MIT Alliance for Research & Technol-
+ogy (SMART) graduate fellowship, Frazzoli is supported by the Singapore
+NRF through the SMART Future Urban Mobility IRG, Hsu is supported
+by A*STAR Industrial Robotics Program grant R-252-506-001-305 and
+Lee is supported by AOARD grant FA2386-12-1-4031. The views and
+conclusions contained herein are those of the authors and should not be
+interpreted as necessarily representing the ofﬁcial policies or endorsements,
+either expressed or implied, of the Air Force Research Laboratory or the
+U.S. Government.
+• Unknown system parameters. A double-pendulum ac-
+robot with link mass unknown a priori swings up to
+the standup conﬁguration [3], [5].
+• Unknown types. In autonomous driving, a robot vehicle
+encounters a human driver of unknown behavior at an
+uncontrolled trafﬁc intersection [4]. In a human-robot
+collaborative task, the robot poses an object to the
+human according to unknown human preference [14].
+• Unknown goals. An assistive agent helps a human
+cooking one of several dishes, without knowing the
+human’s intention in advance [6].
+These tasks all require the robot to gather information on the
+unknown quantities from noisy observations, while achieving
+the task objective at the same time. They in fact belong to a
+special case, in which the hidden variables remain constant
+throughout. We mainly focus on this special case here.
+Interestingly, the famous Tiger problem, which appeared in
+a seminal paper on POMDPs [8], also belongs to this special
+case, after a small modiﬁcation. In Tiger, an agent stands in
+front of two closed doors. A tiger is behind one of the doors.
+The agent’s objective is to open the door without the tiger. In
+the POMDP model, the state is the unknown tiger position.
+The agent has three actions: open the left door (OL), open
+the right door (OR), and listen (LS). OL and OR produce
+no observation. LS produces a noisy observation, tiger left
+(TL) or tiger right (TR), each correct with probability 0.85.
+Listening has a cost of −1. If the agent opens the door with
+no tiger, it gets a reward of 10; otherwise, it incurs a penalty
+of −100. To perform well, the agent must decide on the
+optimal number of listening actions before taking the open
+action. While Tiger is a toy problem, it captures the essence
+of robust planning under uncertainty: trade off gathering
+information and exploiting the information to achieve the
+task objective. The original Tiger is a repeated game. Once
+the agent opens a door, the game resets with the tiger going
+behind the two doors with equal probability. We change it
+into a one-shot game: the game terminates once the agent
+opens a door. The one-shot game has a single state variable,
+the tiger position, which remains unchanged during the game,
+and thus admits a POMDP-lite model. The repeated game is
+a POMDP, but not a POMDP-lite.
+A POMDP-lite is equivalent to a set of Markov decision
+processes (MDPs) indexed by a hidden parameter. The key
+idea for the equivalence transformation is to combine a
+POMDP state and an observation to form an expanded MDP
+state, and capture both POMDP state-transition uncertainty
+and observation uncertainty in the MDP transition dynamics.
+In the one-shot Tiger example, we form two MDPs indexed
+arXiv:1602.04875v3  [cs.AI]  23 Feb 2016
+
+L, TL
+L, null
+L, TR
+END
+LS,0.85,-1
+LS,0.15,-1
+OL,1,-100
+OR,1,10
+LS,0.85,-1
+LS,0.15,-1
+OL,1,-100
+OR,1,10
+LS,0.15,-1
+LS,0.85,-1
+OL,1,-100
+OR,1,10
+(a) Tiger on the left
+R, TL
+R, null
+R, TR
+END
+LS,0.15,-1
+LS,0.85,-1
+OL,1,10
+OR,1,-100
+LS,0.15,-1
+LS,0.85,-1
+OL,1,10
+OR,1,-100
+LS,0.85,-1
+LS,0.15,-1
+OL,1,10
+OR,1,-100
+(b) Tiger on the right
+Fig. 1: A POMDP model for one-shot Tiger is transformed
+into a set of two MDPs. A node is labeled by a pair,
+representing a POMDP state and an observation. The start
+state has null observation and is labeled accordingly. The
+special terminal state is labeled as “END”. An edge is
+labeled by a triple, representing the action , the probability
+of reaching the next state with the action, and the reward.
+by the tiger position, left (L) or right (R) (Fig. 1). An
+MDP state is a pair, consisting of a POMDP state and an
+observation. For example, in the MDP with the tiger on the
+left, we have (L, TL), which represents that the true tiger
+position is L and the agent receives the observation TL. If the
+agent takes the action LS, with probability 0.15, we transit
+to the new state (L, TR) and receives observation TR. See
+Section III for details of the general construction.
+The equivalence enables us to develop an online algorithm
+for POMDP-lite through model-based Bayesian reinforce-
+ment learning (RL). If the hidden parameter value were
+known, our problem would simply become an MDP, which
+has well-established algorithms. To gather information on
+the unknown hidden parameter, the robot must explore. It
+maintains a belief, i.e., a probability distribution over the
+hidden parameter and follows the internal reward approach
+for model-based Bayesian RL [11], [26], which modiﬁes the
+MDP reward function in order to encourage exploration. At
+each time step, the online algorithm solves an internal reward
+MDP to choose an action and then updates the belief to incor-
+porate the new observation received. Our algorithm is simple
+to implement. It performs well on large-scale POMDP-lite
+tasks with up to 1020 states and outperforms the state-of-
+the-art general-purpose POMDP algorithms. Furthermore, it
+is near-Bayesian-optimal under suitable conditions.
+II. RELATED WORK
+POMDP planning has a huge literature (see, e.g., [8],
+[13], [25], [23], [13], [22], [24], [21] ). Our brief review
+focuses on online search algorithms. At each time step, an
+online algorithm performs a look-ahead search and com-
+putes a best action for the current belief only [19]. After
+the robot executes the action, the algorithm updates the
+belief based on the observation received. The process then
+repeats at the new belief for the next time step. Online
+search algorithms scale up by focusing on the current belief
+only, rather than all possible beliefs that the robot may
+encounter. Further, since online algorithms recompute a best
+action from scratch at each step, they naturally handle
+unexpected environment changes without additional over-
+head. POMCP [22] and DESPOT [24] are the fastest online
+POMDP algorithms available today. Both employ the idea
+of sampling future contingencies. POMCP performs Monte
+Carlo tree search (MCTS). It has low overhead and scales up
+to very large POMDPs, but it has extremely poor worst-case
+performance, because MCTS is sometimes overly greedy.
+DESPOT samples a ﬁxed number of future contingencies
+deterministically in advance and performs heuristic search
+on the resulting search tree. This substantially improves the
+worst-case performance bound. It is also more ﬂexible and
+easily incorporates domain knowledge. DESPOT has been
+successfully implemented for real-time autonomous driving
+in a crowd [2]. It is also a crucial component in a system that
+won the Humanitarian Robotics and Automation Technology
+Challenge (HRATC) 2015 on a demining task.
+Instead of solving the general POMDP, we take a different
+approach and identify a structural property that enables
+simpler and more efﬁcient algorithms through model-based
+Bayesian RL. Like POMDP-lite, the mixed observability
+Markov decision process (MOMDP) [15] is also a factored
+model. However, it does not place any restriction on partially
+observable state variables. It is in fact equivalent to the
+general POMDP, as every POMDP can be represented as a
+MOMDP and vice versa. The hidden goal Markov decision
+process (HGMDP) [6] and the hidden parameter Markov
+decision process (HiP-MDP) [5] are related to POMDP-
+lite. They both restrict partially observability to static hidden
+variables. The work on HGMDP relies on a myopic heuristic
+for planning, and it is unlikely to perform well on tasks that
+need exploration. The work on HiP-MDP focuses mainly on
+learning the hidden structure from data.
+There are several approaches to Bayesian RL [1], [17],
+[27], [11]. The internal reward approach is among the
+most successful. It is simple and performs well in practice.
+Internal reward methods can be further divided into two main
+categories, PAC-MDP and Bayesian optimal. PAC-MDP al-
+gorithms are optimal with respect to the true MDP [9], [27],
+[26]. They provide strong theoretical guarantee, but may
+suffer from over exploration empirically. Bayesian optimal
+algorithms are optimal with respect to the optimal Bayesian
+policy. They simply try to achieve high expected total reward.
+In particular, the Bayesian Exploration Bonus (BEB) [11]
+algorithm achieves lower sample complexity than the PAC-
+MDP algorithms. However, BEB requires a Dirichlet prior
+on the hidden parameters. Our algorithm is inspired by BEB,
+but constructs the exploration bonus differently. It allows
+arbitrary discrete prior, a very useful feature in practice.
+III. POMDP-LITE
+A. Deﬁnition
+POMDP-lite is a special class of POMDP with a “de-
+terministic assumption” on its partially observable variable,
+speciﬁcally, the partially observable variable in POMDP-
+lite is static or has deterministic dynamic. Formally we
+
+introduce POMDP-lite as a tuple (X, Θ, A, O, T, Z, R, γ),
+where X is a set of fully observable states, Θ is the
+hidden parameter which has ﬁnite number of possible
+values: Θ = {θ1, θ2, ..., θN}, the state space is a cross
+product of fully observable states and hidden parameter:
+X × Θ = {(xi, θj)|xi ∈X, θj ∈Θ}. A is a set of
+actions, O is a set of observations. The transition function
+T(x, θ, a, x′, θ′) = P(x′|θ, x, a)P(θ′|θ, x, a) for x, x′ ∈
+X, θ, θ′ ∈Θ, a ∈A speciﬁes the probability of reach-
+ing state (x′, θ′) when the agent takes action a at state
+(x, θ), where θ′ = θ or P(θ′|θ, x, a) = 1 according to
+the “deterministic assumption”. The observation function
+Z(x′, θ′, a, o) = P(o|θ′, x′, a) speciﬁes the probability of
+receiving observation o after taking action a and reaching
+state (x′, θ′). The reward function R(x, θ, a) speciﬁes the
+reward received when the agent takes action a at state (x, θ).
+γ is the discount factor.
+In POMDP-lite, the state is unknown and the agent main-
+tains a belief b, which is a probability distribution over the
+states. In each step, the agent takes an action a and receives
+a new observation, the belief is updated according to Bayes’
+rule, b′ = τ(b, a, o). The solution to a POMDP-lite is a policy
+π which maps belief states to actions, i.e., π(b) = a. The
+value of a policy π is the expected reward with respect to
+the initial belief b0: V π(b0) = E
+ ∞
+P
+t=0
+γtR(xt, θt, at)
+
+, where
+(xt, θt) and at denote the state and action at time t. An
+optimal policy has the highest value in all belief states, i.e.,
+V ∗(b) ≥V π(b), ∀π, b, and the corresponding optimal value
+function satisﬁes Bellman’s equation:
+V ∗(b) = max
+a
+
+X
+x∈X,θ∈Θ
+b(x, θ)R(x, θ, a)
++ γ
+X
+o∈O
+P(o|b, a)V ∗ τ(b, a, o)
+
+B. Equivalent Transformation to a Set of MDPs
+In this section, we show an important property of POMDP-
+lite model that it is equivalent to a collection of MDPs
+indexed by θ. A MDP model with parameter θi is a tuple
+(S, A, T, R, γ, θi), where S is a set of states, A is a set of
+actions, T(θi, s, a, s′) is the transition function, R(θi, s, a)
+is the reward function, γ is the discount factor.
+Theorem 1: Let H
+=
+(X, Θ, A, O, T, Z, R, γ) be a
+POMDP-lite
+model,
+where
+Θ
+=
+{θ1, θ2, ..., θN}.
+It
+equals to a collection of MDPs indexed by θ, C
+=
+S
+θi∈Θ
+(S, A, T, R, γ, θi).
+Proof: [Proof of Theorem 1] To show the equivalence
+between H and C, we ﬁrst reduce C to H. This direction is
+easy, we can simply treat θi as part of the state in a POMDP-
+lite model, the remaining part can become part of a POMDP-
+lite model without change. The more interesting direction is
+to reduce H to C.
+Let’s ﬁrst consider the case when the value of θ re-
+mains constant. Given θ = θi, the POMDP-lite model
+becomes a MDP model with parameter θi, which consists
+POMDP-lite
+x
+θ
+x′
+θ′
+a
+o
+R
+MDPθi
+x
+˜o
+x′
+˜o′
+a
+θi
+R
+Fig. 2: Graphic model for POMDP-lite (left) and the MDP
+model with parameter θi (right).
+of the following elements: (S, A, T, R, γ, θi). Where S is
+the state space: S
+= X × ˜O,
+˜O
+= O ∪{null}, in
+which null simply means no observation received. A is
+the set of actions which is identical to the actions in the
+POMDP-lite model. The transition function T(θi, s, a, s′) =
+P(x′, ˜o′|θi, x, ˜o, a) = P(˜o′|θi, x′, a)P(x′|θi, x, a) speciﬁes
+the probability of reaching state s′ after taking action a at
+state s, where P(x′|θi, x, a) and P(˜o′|θi, x′, a) are the tran-
+sition and observation probability function in the POMDP-
+lite model. The reward function R(θi, s, a) = R(θi, x, a)
+speciﬁes the reward received when the agent takes action
+a at state s. γ is the discount factor. The graphic model
+in Fig. 2 shows the relationship between POMDP-lite model
+and the corresponding MDP model with parameter θi. Since
+the hidden parameter has ﬁnite number of values, a POMDP-
+lite can be reduced to a collection of MDPs indexed by θ.
+Then, we show that a simple extension allows us to handle
+the case when the value of the hidden variable changes deter-
+ministically. The key intuition here is that the deterministic
+dynamic of hidden variable does not introduce additional
+uncertainties into the model, i.e., given the initial value of
+hidden variable θ0, and the history up to any time step t,
+ht = {x0, a0, x1, a1, ..., xt−1, at−1}, the value of hidden
+variable can be predicted using a deterministic function, θt =
+φ(θ0, ht). Thus given the initial value of hidden variable
+θ0 = θ0
+i and a deterministic function φ, a POMDP-lite
+model can be reduced to a MDP model: (S, A, T, R, γ, θ0
+i ).
+Compared with the static case, the state here is further
+augmented by the history ht i.e., st = (xt, ˜ot, ht). The value
+of θt was fully captured by st, θ0
+i and φ, θt = φ(θ0
+i , st).
+The rest of the MDP model is similar to the static case. In
+particular, the set of actions A is identical to the POMDP-
+lite model, the transition function is T(θ0
+i , st, at, st+1) =
+P(˜ot+1|θt+1, xt+1, at)P(xt+1|θt, xt, at), the reward func-
+tion is R(θ0
+i , st, at) = R(θt, xt, at), γ is the discount factor.
+Since θ0 has ﬁnite number of values, a POMDP-lite can be
+reduced to a collection of MDPs indexed by θ0.
+C. Algorithm
+In this part, we present an efﬁcient model based BRL
+algorithm for POMDP-lite. The solution to the BRL problem
+is a policy π, which maps a tuple (belief, state) to actions,
+i.e., a = π(b, s). The value of a policy π for a belief b and
+
+state s is given by Bellman’s equation
+V π(b, s) = R(b, s, a) + γ
+X
+b′,s′
+P(b′, s′|b, s, a)V π(b′, s′)
+= R(b, s, a) + γ
+X
+s′
+P(s′|b, s, a)V π(b′, s′)
+Where a = π(s, b), R(b, s, a) = P
+θi
+R(θi, s, a)b(θi) is the
+mean reward function, P(s′|b, s, a) = P
+θi
+T(θi, s, a, s′)b(θi)
+is the mean transition function. The second line follows from
+the fact that belief update is deterministic, i.e., P(b′|b, a, o) =
+1. The optimal Bayesian value function is
+V ∗(b, s) = max
+a
+
+R(b, s, a) + γ
+X
+s′
+P(s′|b, s, a)V ∗(b′, s′)
+
+(1)
+a = π∗(b, s) is the optimal action that maximizes the right
+hand size. Like the optimal policy in the original POMDP-
+lite problem, the optimal Bayesian policy chooses actions not
+only based on how they affect the next state but also based
+on how they affect the next belief.
+However, the optimal Bayesian policy is computationally
+intractable. Instead of exploring by updating the belief each
+step, our algorithm explores by explicitly modify the reward
+function. In other words, each state action pair will have a
+reward bonus based on how much information it can reveal.
+The reward bonus used by our algorithm is motivated by
+the observation that the belief gets updated whenever some
+information about the hidden parameter has been revealed,
+thus we use the L1 divergence between two beliefs to
+measure the amount of information gain. The reward bonus
+is deﬁned formally as follows:
+Deﬁnition 1: When the belief is updated from bi to bj, we
+measure the information gain by the L1 divergence between
+bi and bj, i.e., ∥bj −bi∥1 = P
+θi∈Θ
+bj(θi) −bi(θi)
+. Based on
+it, the reward bonus for (s, a) is deﬁned as the expected L1
+divergence between current belief b and next belief bs′:
+RB(b, s, a) = βE
+s′
+
+∥bs′ −b∥1
+
+= β
+X
+s′
+P(s′|b, s, a)∥bs′ −b∥1
+where β is the constant tuning factor, bs′ is the updated belief
+after observing s′.
+At each time step, our algorithm solves an internal reward
+MDP, M = (S, A, T, ˜R, γ, b). It chooses action greedily with
+respect to the following value function
+˜V ∗(b, s) = max
+a
+
+˜R(b, s, a) + γ
+X
+s′
+P(s′|b, s, a) ˜V ∗(b, s′)
+
+(2)
+Where ˜R(b, s, a) = R(b, s, a) + RB(b, s, a), in which
+RB(b, s, a) is the reward bonus term and it is deﬁned
+in Deﬁnition 1. Other parts are identical to Equation 1 except
+that belief b is not updated in this equation. We can solve
+it using the standard Value Iteration algorithms, which have
+time complexity of O(|A||X|2|Θ|2). In this work, we are
+more interested in problems with large state space, thus
+we are using UCT [10], an online MDP solver, to achieve
+online performance. Details of our algorithm is described
+in Algorithm 1, in which ˜Q∗(bt, st, a) =
+˜R(bt, st, a) +
+γ P
+st+1
+P(st+1|bt, st, a) ˜V ∗(bt, st+1).
+Algorithm 1
+1: t ←0, bt ←b0, st ←s0
+// initialize the values
+2: T ←Maximum Steps
+3: while not end and t < T do
+4:
+at ←arg maxa ˜Q∗(bt, st, a)
+// greedily choose an action
+5:
+(rt, st+1) ←ExecuteAction(at)
+6:
+bt+1 ←UpdateBelief(bt, st+1)
+// update the belief
+7:
+t = t + 1
+8: end while
+IV. ANALYSIS
+Although our algorithm is a greedy algorithm, it actually
+performs sub-optimally only in a polynomial number of time
+steps. In this section, we present some theoretical results
+to bound the sample complexity of our algorithm. Unless
+stated otherwise, the proof of the lemmas in this section are
+deferred to the appendix. For a clean analysis, we assume
+the reward function is bounded in [0, 1].
+A. Sample Complexity
+The sample complexity measures the number of samples
+needed for an algorithm to perform optimally. We start with a
+deﬁnition of sample complexity on a state action pair (s, a).
+Deﬁnition 2: Given the initial belief b0, target accuracy
+κ, reward bonus tuning factor β, we deﬁne the sample
+complexity function of (s, a) as: ζ(s, a) = f(b0, s, a, κ, β),
+such that if (s, a) has been visited more than ζ(s, a) times,
+starting from belief b0, the corresponding reward bonus
+of visiting (s, a) at the new belief b′ is less than κ, i.e.,
+RB(b′, s, a) < κ. We declare (s, a) as known if it has been
+sampled more than ζ(s, a) times, and cease to update the
+belief for sampling known state action pairs.
+The following is an assumption for our theorem to hold
+true in general. The assumption essentially says that the
+earlier you try a state-action pair, the more information you
+can gain from it. We give a concrete example to illustrate
+our assumption in Lemma 1.
+Assumption 1: The reward bonus monotonically decreases
+for all state action pairs (s, a) and timesteps t, i.e.,
+RB(bi, s, a) ≥RB(bi+1, s, a).
+Now, we present our central theoretical result, which
+bounds the sample complexity of our algorithm with respect
+to the optimal Bayesian policy.
+Theorem 2: Let the sample complexity of (s, a) be
+ζ(s, a) = f(b0, s, a, κ, β), where β = O
+  |S|2|A|
+(1−γ)2
+
+, κ =
+ϵ(1−γ). Let At denote the policy followed by the algorithm
+at time t, and let st, bt be the corresponding state and
+belief. Then with probability at least 1 −δ, V At(bt, st) ≥
+V ∗(bt, st) −4ϵ, i.e., the algorithm is 4ϵ-close to the optimal
+Bayesian policy, for all but
+
+m = O
+ P
+s,a ζ(s,a)
+ϵ(1−γ)3
+ln 1
+σ ln
+1
+ϵ(1−γ)
+
+time steps.
+In other words, our algorithm acts sub-optimally for only
+a polynomial number of time steps.
+Although our algorithm was primary designed for Discrete
+prior, Theorem 2 can be applied to many prior distributions.
+We apply it to two simple special classes, which we can
+provide concrete sample complexity bound. First, we show
+that in the case of independent Dirichlet prior, the reward
+bonus monotonically decreases and the sample complexity
+of a (s, a) pair can be bounded by a polynomial function.
+This case also satisﬁes Assumption 1.
+Lemma 1 (Independent Dirichlet Prior): Let n(s, a) be
+the number of times (s, a) has been visited. For a known
+reward function and an independent Dirichlet prior over
+the transition dynamics for each (s, a) pair, RB(b, s, a)
+monotonically decreases at the rate of O
+ 1/n(s, a)
+
+, and the
+sample complexity function f(b0, s, a, κ, β) = O
+  |S|2|A|
+κ(1−γ)2
+
+.
+The strength of our algorithm lies in its ability to handle
+Discrete prior. We use a very simple example (Discrete prior
+over unknown deterministic MDPs) to show this advantage,
+and we state it in the following lemma. The intuition behind
+this lemma is quite simple, after sampling a state action pair,
+the agent will know its effect without noise.
+Lemma 2 (Discrete prior over Deterministic MDPs): Let
+b0 be a Discrete prior over deterministic MDPs, the sample
+complexity function f(b0, s, a, κ, β) ≤1.
+B. Proof of Theorem 2
+The key intuition for us to prove our algorithm quickly
+achieves near-optimality is that at each time step our algo-
+rithm is ϵ-optimistic with respect to the Bayesian policy, and
+the value of optimism decays to zero given enough samples.
+The proof for Theorem 2 follows the standard argu-
+ments from previous PAC-MDP results. We ﬁrst show that
+V At(bt, st) is close to the value of acting according to
+the optimal Bayesian policy, assuming the probability of
+escaping the known state-action set is small. Then we use
+the Hoeffding bound to show that this “escaping probability”
+can be large only for a polynomial number of time steps.
+We begin our proof with the following lemmas. Our ﬁrst
+lemma essentially says that if we solve the internal reward
+MDP using the current mean of belief state with an additional
+exploration bonus in Deﬁnition 1, this will lead to a value
+function which is ϵ-optimistic to the Bayesian policy.
+Lemma 3 (Optimistic): Let ˜V ∗(b, s) be the value function
+in our algorithm, V ∗(b, s) be the value function in Bayesian
+policy. if β = O
+  |S|2|A|
+(1−γ)2
+
+, then ∀s, ˜V ∗(b, s) ≥V ∗(b, s) −ϵ.
+The following deﬁnition is a generalization of the “known
+state-action MDP” in [27] to Bayesian settings. It is an MDP
+whose dynamics (transition function and reward function) are
+equal to the mean MDP for (s, a) pairs in K (known set).
+For other (s, a) pairs, the value of taking those (s, a) pairs
+in MK is equal to the current ˜Q value estimate.
+Deﬁnition 3: Given current belief is b, a set of ˜Q value
+estimate for each (s, a) pair, i.e., ˜Q(b, s, a) = ˜R(b, s, a) +
+γP
+s′ T(b, s, a, s′) ˜V ∗(b, s′), and a set K of known (s, a) pairs,
+i.e., RB(b, s, a) < ϵ(1 −γ). We deﬁne the known state-
+action MDP, MK = (S ∪{s0}, A, TK, RK, γ), as follows.
+s0 is an additional state, under all actions from s0 the agent
+returned to s0 with probability 1 and received reward 0. For
+all (s, a) ∈K, RK(s, a) = R(b, s, a) and TK(s, a, s′) =
+T(b, s, a, s′). For all (s, a) /∈K, RK(s, a) = ˜Q(b, s, a) and
+TK(s, a, s0) = 1.
+Our ﬁnal lemma shows that the internal reward MDP and
+the known state-action MDP have low error in the set of
+known (s, a) pairs.
+Lemma 4 (Accuracy): Fix the history to the time step t,
+let bt be the belief, st be the state, Kt be the set of known
+(s, a) pairs, MKt be the known state-action MDP, πt be
+the greedy policy with respect to current belief bt, i.e., πt =
+arg maxa ˜Q(bt, s, a). Then ˜V πt(bt, st) −V πt
+MKt(bt, st) ≤ϵ.
+Now, we are ready to prove Theorem 2.
+Proof: [Proof of Theorem 2] Let bt, st, Kt, MKt, πt be
+as described in Lemma 4. Let T = 1/(1−γ) ln(1/ϵ(1−γ)),
+then |V πt
+MKt(bt, st, T) −V πt
+MKt(bt, st)| ≤ϵ (see Lemma 2
+of [9]). Let AK denote the event that, a (s, a) pair not in Kt
+is generated when executing At starting from st for T time
+steps. We have
+V At(bt, st, T) ≥V πt
+MKt(bt, st, T) −P(AK)/(1 −γ)2
+≥V πt
+MKt(bt, st) −ϵ −P(AK)/(1 −γ)2
+≥˜V πt(bt, st) −2ϵ −P(AK)/(1 −γ)2
+≥V ∗(bt, st) −3ϵ −P(AK)/(1 −γ)2
+The ﬁrst inequality follows from the fact that At equals
+to πt unless AK occurs, and ˜Q(b, s, a) can be bounded by
+1/(1−γ)2 since we can limit the reward bonus to 1/(1−γ)
+and still maintain optimism. The second inequality follows
+from the deﬁnition of T above, the third inequality follows
+from Lemma 4, the last inequality follows from Lemma 3
+and the fact that πt is precisely the optimal policy for the in-
+ternal reward MDP at time t. Now, suppose P(AK) < ϵ(1−
+γ)2, we have V At(bt, st) ≥V At(bt, st, T) ≥V ∗(bt, st)−4ϵ.
+Otherwise, if P(AK) ≥ϵ(1 −γ)2, by Hoeffding inequality,
+this will happen no more than ˜O
+P
+s,a
+ζ(s, a)T/ϵ(1 −γ)2)
+
+time steps with probability 1 −δ, where ˜O (.) notation
+suppresses logarithmic factors.
+V. EXPERIMENTS
+To evaluate our algorithm experimentally, we compare it
+with several state of the art algorithms in POMDP literature.
+POMCP [22] and DESPOT [24] are two successful online
+POMDP planners which can scale to very large POMDPs.
+QMDP [28] is a myopic ofﬂine solver being widely used
+for its efﬁciency. SARSOP [13] is a state of the art ofﬂine
+POMDP solver which helps to calibrate the best performance
+achievable for POMDPs of moderate size. Mean MDP is
+a common myopic approximation of Bayesian planning,
+which does not do exploration. For SARSOP, POMCP and
+DESPOT, we used the software provided by the authors,
+
+with a slight modiﬁcation on POMCP to make it strictly
+follow 1-second time limit for planning. For our algorithm
+and Mean MDP, a MDP needs to be solved each step. We
+use an online MDP solver UCT [10] with similar parameter
+settings used in POMCP. The reward bonus scalar β used by
+our algorithm is typically much smaller than the one required
+by Theorem 2, which is a common trend for internal reward
+algorithms. We tuned β ofﬂine before using it for planning.
+We ﬁrst apply the algorithms on two benchmarks prob-
+lems in POMDP literature, in which we demonstrate the
+scaling up ability of our algorithm on larger POMDPs. In
+Rocksample(n, k) [23], a robot moving in an n × n grid
+which contains k rocks, each of which may be good or
+bad with probability 0.5 initially. At each step, the robot
+can move to an adjacent cell, or sense a rock. The robot
+can only sample the rock when it is in the grid which
+contains a rock. Sample a rock gives a reward of +10 if the
+rock is good and −10 otherwise. Move or Sample will not
+produce observation. Sensing produces an observation in set
+O = {Good, Bad} with accuracy decreasing exponentially
+as the robot’s distance to the rock increases. The robot
+reaches the terminal state when it passes the east edge of
+the map. The discount factor is 0.95. The hidden parameter
+is the property of rock and it remains constant, thus this
+problem can be modeled as POMDP-lite.
+In Battleship(n, k) [22], k ships are placed at random
+into a n × n grid, subject to the constraint that no ship may
+be placed adjacent or diagonally adjacent to another ship.
+Each ship has a different size of (k + 1) × 1, k × 1, ..., 2 × 1.
+The goal is to ﬁnd and sink all ships. Initially, the agent does
+not know the conﬁguration of the ships. Each step, the agent
+can ﬁre upon one cell of the grid, and receives observation
+1 if a ship was hit, otherwise it will receive observation 0.
+There is a −1 reward per step, and a terminal reward of n×n
+for hitting every cell of every ship. It is illegal to ﬁre twice on
+the same cell. The discount factor is 1. The hidden parameter
+is the conﬁguration of ships, which remains constant, thus
+this problem can also be modeled as POMDP-lite.
+The results for Rocksample and Battleship are shown
+in Table I. All algorithms, except for QMDP and SARSOP
+(ofﬂine algorithms), run in real time with 1 second per
+step. The result for SARSOP was replicated from [15],
+other results are from our own test and were averaged over
+1000 runs. “−” means the problem size is too large for
+the algorithm. RS is short for Rocksample, BS is short
+for Battleship. As we can see from Table I, our algorithm
+achieves similar performance with the state of the art ofﬂine
+solvers when the problem size is small. However, when the
+size of problem increases, ofﬂine solvers start to fail and our
+algorithm outperforms other online algorithms.
+Finally, we show a robot arm grasping task, which is
+originated from Amazon Picking Challenge. A V-REP [18]
+simulation view is shown in Fig. 3a. The goal of the robot
+arm is to grasp the cup out of the shelf quickly and robustly.
+The robot knows its conﬁguration exactly and its movement
+is deterministic. However, due to sensor limitations, the
+initial position of the cup is uncertain. The gripper has
+TABLE II: Performance comparison on grasping cup
+Model Evaluation
+V-REP simulation
+States |X|
+Continuous
+Continuous
+Actions |A|
+7
+7
+Observations |O|
+6
+6
+Return
+Success Rate
+Return
+Success Rate
+POMCP
+14.17 ± 0.36
+100%
+12.91 ± 2.10
+94%
+DESPOT
+11.35 ± 0.46
+99.8%
+9.63 ± 2.52
+92%
+Mean MDP
+14.16 ± 0.46
+98.6%
+11.28 ± 1.81
+94%
+POMDP-lite
+15.56 ± 0.31
+100%
+15.46 ± 1.20
+98%
+a tactile sensor inside each ﬁnger, which gives positive
+readings when the inner part of the ﬁnger gets in touch
+with the cup. The robot needs to move around to localize
+the cup, and grasp it as soon as possible. Usually, this can
+be modeled as a POMDP problem. However, if we model
+it as a POMDP-lite, our algorithm can achieve much better
+performance compared with solving it as a POMDP. Now,
+we introduce our planning model for this task. We restrict the
+movement of the gripper in a 2D plane, as shown in Fig. 3b.
+We divide the 2D plane into 3 regions relative to the gripper.
+If the cup is in region 0, the gripper can get in touch with
+the cup by moving along x-axis or y-axis. If the cup is in
+region 1, the gripper can get in touch with the cup by moving
+along the y-axis. If the cup is in region 2, the gripper can not
+sense the cup by moving in a single direction. The gripper
+can move along the x or y axis with step size of 0.01. The
+reward for each movement is −1 in region 0, −2 in region 1
+and −5 in region 2. The gripper can close or open its ﬁngers,
+with reward of −10. Picking the cup gives a reward of 100
+if the pick is successful and −100 otherwise.
+We compare our algorithm with POMCP, DESPOT, and
+Mean MDP, since QMDP and SARSOP do not support
+continuous state space. All algorithm are tested via model
+evaluation and V-REP simulation. Model evaluation means
+we use the planning model to examine the policy. V-REP
+simulation means we compute the best action using the
+planning model, then execute it in V-REP simulation. The
+next state and observation are obtained from V-REP. The
+results for model evaluation and V-REP simulation are re-
+ported in Table II. The time used for online planning of all
+algorithms is 1 second per step. We run 1000 trials for model
+evaluation and 100 trials for V-REP simulation. As we can
+see, our algorithm achieves higher return and success rate in
+both settings compared with other algorithms.
+VI. CONCLUSION
+We have introduced POMDP-lite, a subclass of POMDP
+with hidden variables that are either static or change de-
+terministically. A POMDP-lite is equivalent to a set of
+MDPs indexed by a hidden parameter. By exploiting this
+equivalence, we have developed a simple online algorithm for
+POMDP-lite through model-based Bayesian reinforcement
+learning. Preliminary experiments suggest that the algorithm
+outperforms state-of-the-art general-purpose POMDP solvers
+on very large POMDP-lite models, makes it a promising tool
+for large-scale robot planning under uncertainty.
+Currently, we are implementing and experimenting with
+the algorithm on a Kinova Mico robot for object manipula-
+
+TABLE I: Performance comparison on Rocksample and Battleship
+RS(7, 8)
+RS(11, 11)
+RS(15, 15)
+RS(20, 20)
+BS(10, 5)
+BS(15, 7)
+States |X|
+12, 544
+247, 808
+7, 372, 800
+108
+1013
+1020
+Actions |A|
+13
+16
+20
+25
+100
+225
+Observations |O|
+3
+3
+3
+3
+2
+2
+QMDP
+17.55 ± 0.44
+16.10 ± 0.40
+−
+−
+−
+−
+SARSOP
+21.47 ± 0.04
+21.56 ± 0.11
+−
+−
+−
+−
+POMCP
+19.95 ± 0.23
+20.11 ± 0.23
+15.51 ± 0.23
+12.11 ± 0.23
+57.40 ± 0.19
+119.33 ± 0.58
+DESPOT
+20.80 ± 0.22
+21.12 ± 0.21
+18.59 ± 0.43
+12.56 ± 0.38
+56.34 ± 0.22
+117.39 ± 0.88
+Mean MDP
+15.11 ± 0.17
+11.64 ± 0.17
+7.53 ± 0.16
+6.96 ± 0.11
+57.46 ± 0.17
+122.60 ± 0.59
+POMDP-lite
+21.03 ± 0.21
+21.52 ± 0.20
+18.63 ± 0.20
+16.81 ± 0.20
+58.16 ± 0.17
+127.12 ± 0.61
+(a) Simulation view
+(b) Simpliﬁed model
+Fig. 3: Robot arm grasping task
+tion. It is interesting and important to investigate extensions
+that handle large observation and action spaces.

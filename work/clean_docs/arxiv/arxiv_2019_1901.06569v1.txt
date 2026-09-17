@@ -1,0 +1,1066 @@
+Learning retrosynthetic planning through self-play
+John S. Schreck,*,† Connor W. Coley,‡ and Kyle J. M. Bishop*,†
+†Department of Chemical Engineering, Columbia University, New York, NY 10027, USA
+‡Department of Chemical Engineering, Massachusetts Institute of Technology, Cambridge,
+MA 02139, USA
+
+Abstract
+The problem of retrosynthetic planning can be framed as one player game, in
+which the chemist (or a computer program) works backwards from a molecular target
+to simpler starting materials though a series of choices regarding which reactions
+to perform. This game is challenging as the combinatorial space of possible choices
+is astronomical, and the value of each choice remains uncertain until the synthesis
+plan is completed and its cost evaluated. Here, we address this problem using deep
+reinforcement learning to identify policies that make (near) optimal reaction choices
+during each step of retrosynthetic planning. Using simulated experience or self-play,
+we train neural networks to estimate the expected synthesis cost or value of any given
+molecule based on a representation of its molecular structure. We show that learned
+policies based on this value network outperform heuristic approaches in synthesizing
+unfamiliar molecules from available starting materials using the fewest number of
+reactions. We discuss how the learned policies described here can be incorporated
+into existing synthesis planning tools and how they can be adapted to changes in the
+synthesis cost objective or material availability.
+1
+arXiv:1901.06569v1  [cs.LG]  19 Jan 2019
+
+Introduction
+The primary goal of computer-aided synthesis planning (CASP) is to help chemists accelerate
+the synthesis of desired molecules.1–3 Generally, a CASP program takes as input the structure
+of a target molecule and returns a sequence of feasible reactions linking the target to
+commercially available starting materials. The number of possible synthesis plans is often
+astronomical, and it is therefore desirable to identify the plan(s) that minimize some user-
+speciﬁed objective function (e.g., synthesis cost 𝐶). The challenge of identifying these optimal
+syntheses can be framed as a one-player game—the retrosynthesis game—to allow for useful
+analogies with chess and Go, for which powerful solutions based on deep reinforcement
+learning now exist.4,5 During play, the chemist starts from the target molecule and identiﬁes
+a set of candidate reactions by which to make the target in one step (Figure 1). At this
+point, the chemist must decide which reaction to choose. As in other games such as chess,
+the beneﬁts of a particular decision may not be immediately obvious. Only when the game is
+won or lost can one fairly assess the value of decisions that contributed to the outcome. Once
+a reaction is selected, its reactant(s) become the new target(s) of successive retrosynthetic
+analyses. This branching recursive process of identifying candidate reactions and deciding
+which to use continues until the growing synthesis tree reaches the available substrates (a
+“win”) or it exceeds a speciﬁed number of synthetic steps (a “loss”).
+Winning outcomes are further distinguished by the cost 𝐶of the synthesis pathway
+identiﬁed—the lower the better. This synthesis cost is often ambiguous and diﬃcult to
+evaluate as it involves a variety of uncertain or unknown quantities. For example, the
+synthesis cost might include the price of the starting materials, the number of synthetic
+steps, the yield of each step, the ease of product separation and puriﬁcation, the amount of
+chemical waste generated, the safety or environmental hazards associated with the reactions
+and reagents, et cetera. It is arguably more challenging to accurately evaluate the cost of
+a proposed synthesis than it is to generate candidate syntheses. It is therefore common to
+adopt simple objective functions that make use of the information available (e.g., the number
+2
+
+of reactions but not their respective yields).6 We refer to the output of any such function as
+the cost of the synthesis; optimal synthesis plans correspond to those with minimal cost.
+An expert chemist excels at the retrosynthesis game for two reasons: (1) she can identify
+a large number of feasible reaction candidates at each step, and (2) she can select those
+candidates most likely to lead to winning syntheses. These abilities derive from the chemist’s
+prior knowledge and her past experience in making molecules. In contrast to games with a
+ﬁxed rule set like chess, the identiﬁcation of feasible reaction candidates (i.e., the possible
+“moves”) is nontrivial: there may be thousands of possible candidates at each step using known
+chemistries. To address this challenge, computational approaches have been developed to
+suggest candidate reactions using libraries of reaction templates prepared by expert chemists7
+or derived from literature data.8–10 Armed with these “rules” of synthetic chemistry, a
+computer can, in principle, search the entire space of possible synthesis pathways and identify
+the optimal one.
+In practice, however, an exhaustive search of possible synthesis trees is not computationally
+feasible or desirable owing to the exponential growth in the number of reactions with distance
+from the target.6,11 Instead, search algorithms generate a subset of possible synthesis trees,
+which may or may not contain the optimal pathway(s). For longer syntheses, the subset of
+pathways identiﬁed is an increasingly small fraction of the total available. Thus, it is essential
+to bias retrosynthetic search algorithms towards those regions of synthesis space most likely
+to contain the optimal pathway. In the game of retrosynthesis, the player requires a strong
+guiding model, or policy, for selecting the reaction at each step that leads to the optimal
+synthetic pathway(s).
+Prior reports on retrosynthetic planning have explored a variety of policies for guiding the
+generation of candidate syntheses.7,12–14 These programs select among possible reactions using
+heuristic scoring functions,7,15 crowd-sourced accessibility scores,13,16 analogy to precedent
+reactions,17 or parametric models (e.g., neural networks) trained on literature precedents.18,19
+In particular, the Syntaurus software7 allows for user-speciﬁed scoring functions that can
+3
+
+5
+0
+1
+2
+1
+2
+Product
+Intermediate
+Substrate
+Max depth
+Rare
+Selected
+Possible
+Reactions,
+Chemical, m
+Reaction r0 selected with 
+probability
+16
+1
+1
+1
+1
+1
+d = 0
+d = 1
+d = 2
+d = 3
+dmax = 10
+0
+0
+0
+0
+0
+100
+10
+Figure 1: The objective of the retrosynthesis game is to synthesize the target product 𝑚0 from
+available substrates by way of a synthesis tree that minimizes the cost function. Molecules
+and reactions are illustrated by circles and squares, respectively. Starting from the target, a
+reaction 𝑟0 ∈ℛ(𝑚0) (yellow) is selected according to a policy 𝜋(𝑟0|𝑚0) that links 𝑚0 with
+precursors 𝑚1, 𝑚2, 𝑚3. The grey squares leading to 𝑚0 illustrate the other potential reactions
+in ℛ(𝑚0) ∖𝑟0. The game continues one move at time reducing intermediate molecules (blue)
+until there are only substrates remaining, or until a maximum depth of 10 is reached. Rare
+molecules (green), which are not makeable under these constraints nor commercially available,
+are assigned a cost penalty of 100, while molecules at maximum depth (purple) are assigned
+a cost penalty of 10. Commercially available substrates are assigned zero cost. The synthesis
+cost of the product may be computed according to Eq. 1 only on completion of the game.
+Here, the sampled pathway leading to the target (red arrows) has a cost of 5.
+.
+4
+
+describe common strategies used by expert chemists20 (e.g., using symmetric disconnections
+to favor convergent syntheses). By contrast, Segler and Waller used literature reaction data
+to train a neural network that determines which reaction templates are most likely to be
+eﬀective on a given molecule.18 The ability to rank order candidate reactions (by any means)
+allows for guiding network search algorithms (e.g., Monte Carlo tree search19) to generate
+large numbers of possible synthesis plans. The costs of these candidates can then be evaluated
+to identify the “best” syntheses, which are provided to the chemist (or perhaps a robotic
+synthesizer).
+Here, we describe a diﬀerent approach to retrosynthetic planning based on reinforcement
+learning,21 in which the computer learns to select those candidate reactions that lead ultimately
+to synthesis plans minimizing a user-speciﬁed cost function. Our approach is inspired by
+the recent success of deep reinforcement learning in mastering combinatorial games such as
+Go using experience generated by repeated self-play.4,5 In this way, DeepMind’s AlphaGo
+Zero learned to estimate the value of any possible move from any state in the game, thereby
+capturing the title of world champion.4,22 Similarly, by repeated plays of the retrosynthesis
+game, the computer can learn which candidate reactions are most likely to lead from a given
+molecule to available starting materials in an optimal fashion. This approach requires no prior
+knowledge of synthetic strategy beyond the “rules” governing single-step reactions encoded
+in a library of reaction templates. Starting from a random policy, the computer explores the
+synthetic space to generate estimates of the synthesis cost for any molecule. These estimates
+form the basis for improved policies that guide the discovery of synthesis plans with lower
+cost. This iterative process of policy improvement converges in time to optimal policies that
+identify the “best” pathway in a single play of the retrosynthesis game. Importantly, we show
+that (near) optimal policies trained on the synthesis of ∼100,000 diverse molecules generalize
+well to the synthesis of unfamiliar molecules. We discuss how the learned policies described
+here can be incorporated into existing synthesis planning tools and how they can be adapted
+to diﬀerent cost functions that reﬂect the changing demands of organic synthesis.
+5
+
+Results and Discussion
+The Retrosynthesis Game
+We formulate the problem of retrosynthetic analysis as a game played by a synthetic chemist
+or a computer program. At the start of the game, the player is given a target molecule 𝑚
+to synthesize starting from a set of buyable molecules denoted ℬ. For any such molecule,
+there exists a set of reactions, denoted ℛ(𝑚), where each reaction includes the molecule 𝑚
+as a product. From this set, the player chooses a particular reaction 𝑟∈ℛ(𝑚) according
+to a policy 𝜋(𝑟| 𝑚), which deﬁnes the probability of selecting that reaction for use in the
+synthesis. The cost 𝑐rxn(𝑟) of performing the chosen reaction is added to a running total,
+which ultimately determines the overall synthesis cost. Having completed one step of the
+retrosynthesis game, the player considers the reactant(s) of the chosen reaction in turn. If a
+reactant 𝑚′ is included among the buyable substrates, 𝑚′ ∈ℬ, then the cost of that molecule
+𝑐sub(𝑚′) is added to the running total. Otherwise, the reactant 𝑚′ must be synthesized
+following the same procedure outlined above. This recursive processes results in a synthesis
+tree whose root is the target molecule and whose leaves are buyable substrates. The total
+cost of the resulting synthesis is
+𝑐tot =
+∑︁
+𝑟
+𝑐rxn(𝑟) +
+∑︁
+𝑚
+𝑐sub(𝑚),
+(1)
+where the respective sums are evaluated over all reactions 𝑟and all leaf molecules 𝑚included
+in the ﬁnal synthesis tree. This simple cost function neglects eﬀects due to interactions
+between successive reactions (e.g., costs incurred in switching solvents); however, it has the
+useful property that the expected cost 𝑣𝜋(𝑚) of making any molecule 𝑚in one step via
+reaction 𝑟is directly related to the expected cost of the associated reactants 𝑚′,
+𝑣𝜋(𝑚) =
+∑︁
+𝑟∈ℛ(𝑚)
+𝜋(𝑟| 𝑚)
+⎡
+⎣𝑐rxn(𝑟) +
+∑︁
+𝑚′(𝑟)
+𝑣𝜋(𝑚′)
+⎤
+⎦.
+(2)
+6
+
+This recursive function terminates at buyable molecules of known cost, for which 𝑣𝜋(𝑚) =
+𝑐sub(𝑚) independent of the policy.
+The function 𝑣𝜋(𝑚) denotes the expected cost or “value” of any molecule 𝑚under a
+speciﬁed policy 𝜋. By repeating the game many times starting from many target molecules,
+it is possible to learn a parametric representation of this function valid for most molecules.
+Importantly, knowledge of the value function under one policy 𝜋enables the creation of new
+and better policies 𝜋′ that reduce the expected cost of synthesizing a molecule. Using methods
+of reinforcement learning, such iterative improvement schemes lead to the identiﬁcation of
+optimal policies 𝜋*, which identify synthesis trees of minimal cost. The value of a molecule
+under such a policy is equal to the expected cost of selecting the “best” reaction at each step
+such that
+𝑣*(𝑚) = min
+𝑟
+⎡
+⎣𝑐rxn(𝑟) +
+∑︁
+𝑚′(𝑟)
+𝑣*(𝑚′)
+⎤
+⎦.
+(3)
+From a practical perspective, the optimal value function takes as input a molecule (e.g., a
+representation of its molecular structure) and outputs a numeric value corresponding to the
+minimal cost with which it can be synthesized.
+Here, we considered a set of 100,000 target molecules selected from the Reaxys database on
+the basis of their structural diversity (see Methods). The set of buyable substrates ℬcontained
+∼300,000 molecules selected from the Sigma-Aldrich,23 eMolecules,24 and LabNetwork25
+catalogs that have list prices less than $100/g. At each step, the possible reactions ℛ(𝑚) were
+identiﬁed using a set of 60,000 reaction templates derived from more than 12 million single-step
+reaction examples reported in the Reaxys database (see Methods). Because the application
+of reaction templates is computationally expensive, we used a template prioritizer to identify
+those templates most relevant to a given molecule.18 On average, this procedure resulted in
+up to 50 possible reactions for each molecule encountered during synthesis planning. We
+assume the space of molecules and reactions implicit in these transformations is representative
+of real organic chemistry while recognizing the inevitable limitations of templates culled from
+7
+
+incomplete and sometimes inaccurate reaction databases. For simplicity, the cost of each
+reaction step was set to one, 𝑐rxn(𝑟) = 1, and the substrate costs to zero, 𝑐sub(𝑚) = 0. With
+these assignments, the cost of making a molecule is equivalent to the number of reactions in
+the ﬁnal synthesis tree.
+To prohibit the formation of unreasonably deep synthesis trees, we limited our retrosyn-
+thetic searches to a maximum depth of 𝑑max = 10. As detailed in the Methods, the addition
+of this termination criterion to the recursive deﬁnition of the value function (2) requires some
+minor modiﬁcations to the retrosynthesis game. In particular, the expected cost of synthesiz-
+ing a molecule 𝑚depends also on the residual depth, 𝑣𝜋= 𝑣𝜋(𝑚, 𝛿), where 𝛿= 𝑑max −𝑑is the
+diﬀerence between the maximum depth and the current depth 𝑑within the tree. If a molecule
+𝑚not included among the buyable substrates is encountered at a residual depth of zero, it is
+assigned a large cost 𝑣𝜋(𝑚, 0) = 𝑃1, thereby penalizing the failed search. Additionally, in the
+event that no reactions are identiﬁed for a given molecule 𝑚(ℛ(𝑚) = ∅), we assign an even
+larger penalty 𝑃2, which encourages the player to avoid such molecules if possible. Below, we
+use the speciﬁc numeric penalties of 𝑃1 = 10 and 𝑃2 = 100 for all games.
+Heuristic Policies
+En route to the development of optimal policies for retrosynthesis, we ﬁrst consider the
+performance of some heuristic policies that provide context for the results below. Arguably
+the simplest policy is one of complete ignorance, in which the player selects a reaction at
+random at each stage of the synthesis—that is, 𝜋(𝑟| 𝑚) = constant. We use this “straw man”
+policy to describe the general process of policy evaluation and provide a baseline from which
+to measure subsequent improvements.
+During the evaluation process, the computer plays the retrosynthesis game to the end
+making random moves at each step of the way. After each game, the cost of each molecule
+in the resulting synthesis tree is computed. This process is repeated for each of the 100,000
+target molecules considered. These data points—each containing a molecule 𝑚at residual
+8
+
+depth 𝛿with cost 𝑐—are used to update the parametric approximation of the value function
+𝑣𝜋(𝑚, 𝛿). As detailed in the Methods, the value function is approximated by a neural network
+that takes as input an extended-connectivity (ECFP) ﬁngerprint of the molecule 𝑚and the
+residual depth 𝛿and outputs a real valued estimate of the expected cost under the policy 𝜋.26
+This process is repeated in an iterative manner as the value estimates of the target molecules,
+𝑣𝜋(𝑚, 𝑑max), approach their asymptotic values.
+Figure 2a shows the total synthesis cost 𝑐tot for a single target molecule under the random
+policy (markers). Each play of the retrosynthesis game has one of three possible outcomes:
+a “winning” synthesis plan terminating in buyable substrates (blue circles), a “losing” plan
+that exceeds the maximum depth (green triangles), and a “losing” plan that contains dead-
+end molecules that cannot be bought or made (black pentagons). After many synthesis
+attempts, the running average of the ﬂuctuating synthesis cost converges to the expected
+cost 𝑣𝜋(𝑚, 𝑑max) as approximated by the neural network (red line). Repeating this analysis
+for the 100,000 target molecules, the random policy results in an average cost of ∼110 per
+molecule with only a 25% chance of identifying a winning synthesis in each attempt. Clearly,
+there is room for improvement.
+Beyond the random policy, even simple heuristics can be used to improve performance
+signiﬁcantly. In one such policy, inspired by Syntaurus,7 the player selects the reaction 𝑟that
+maximizes the quantity
+𝑓(𝑟) = 𝑛𝑠(𝑚)𝛾−
+∑︁
+𝑚′(𝑟)
+𝑛𝑠(𝑚′)𝛾
+(4)
+where 𝑛𝑠(𝑚) is the length of the canonical smiles string representing molecule 𝑚, 𝛾is a
+user-speciﬁed exponent, and the sum is taken over all reactants 𝑚′ associated with a reaction
+𝑟. When 𝛾> 1, the reactions that maximize this function can be interpreted as those that
+decompose the product into multiple parts of roughly equal size. Note that in contrast to the
+random policy, this greedy heuristic is deterministic: each play of the game results in the
+same outcome. Figure 2a shows the performance of this “symmetric disconnection” policy
+9
+
+1
+10
+20
+30
+40
+50
+Synthesis attempts
+4
+10
+100
+ctot
+1
+5
+10
+15
+⟨ctot⟩
+102
+103
+104
+N (⟨ctot⟩)
+0.0
+0.1
+0.2
+0.4
+0.6
+1.0
+0.0
+0.25
+0.5
+0.75
+1.0
+ε
+25
+40
+55
+70
+⟨ctot⟩
+⟨ctot⟩
+⟨b⟩
+1.40
+1.45
+1.50
+1.55
+⟨b⟩
+104
+103
+102
+(a)
+(b)
+(c)
+100
+10
+4
+70
+55
+40
+25
+1         5           10          15
+1
+30
+40
+50
+20
+10
+Synthesis attempts
+0.0
+0.25
+0.5
+0.75
+1.0
+1.55
+1.50
+1.45
+1.40
+Figure 2: Heuristic policies. (a) Synthesis cost 𝑐tot for a single molecule 𝑚(N-dibutyl-4-
+acetylbenzeneacetamide) for successive iterations of the retrosynthesis game under the random
+policy. Blue circles denote “winning” synthesis plans that trace back to buyable molecules.
+Green triangles and black pentagons denote “losing” plans that exceed the maximum depth or
+include unmakable molecules, respectively. The solid line shows the neural network prediction
+of the value function 𝑣𝜋(𝑚, 𝑑max) as it converges to the average synthesis cost. The dashed
+line shows the expected cost under the deterministic “symmetric disconnection” policy with
+𝛾= 1.5. (b) Distribution of expected costs 𝑣𝜋(𝑚, 𝑑max) over the set of 100,000 target molecules
+for diﬀerent noise levels 𝜀. The red squares and black circles show the performance of the
+symmetric disconnection policy (𝜀= 0) and the random policy (𝜀= 1), respectively. (c) The
+average synthesis cost of the target molecules decreases with increasing noise level 𝜀, while
+the average branching factor increases. Averages were estimated from 50 plays for each target
+molecule.
+10
+
+with 𝛾= 1.5 for a single target molecule (dashed line). Interestingly, while the pathway
+identiﬁed by the greedy policy is much better on average than those of the random policy
+(𝑐tot = 4 vs. ⟨𝑐tot⟩= 35.1), repeated application of the latter reveals the existence of an
+even better pathway containing only three reactions. An optimal policy would allow for the
+identiﬁcation of that best synthesis plan during a single play of the retrosynthesis game.
+The performance of a policy is characterized by the distribution of expected costs over
+the set of target molecules. Figure 2b shows the cost distribution for a series of policies that
+interpolate between the greedy “symmetric disconnection” policy and the random policy
+(see also Figure 6). The intermediate 𝜀-greedy policies behave greedily with probability
+1 −𝜀, selecting the reaction that maximizes 𝑓(𝑟), but behave randomly with probability 𝜀,
+selecting any one of the possible reactions 𝑟∈ℛ(𝑚) with equal probability. On average, the
+addition of such noise is usually detrimental to policy performance. Noisy policies are less
+likely to identify a successful synthesis for a given target (Figure 7a) and result in longer
+syntheses when they do succeed (Figure 7b). Consequently, the average cost ⟨𝑐tot⟩increases
+monotonically with increasing noise as quantiﬁed by the parameter 𝜀(Figure 2c).
+The superior performance (lower synthesis costs) of the greedy policy is correlated with
+the average branching factor ⟨𝑏⟩, which represents the average number of reactants for each
+reaction in the synthesis tree. Branching is largest for the greedy policy (𝜀= 0) and decreases
+monotonically with increasing 𝜀(Figure 2c).
+On average, synthesis plans with greater
+branching (i.e., convergent syntheses) require fewer synthetic steps to connect the target
+molecules to the set of buyable substrates. This observation supports the chemical intuition
+underlying the symmetric disconnection policy: break apart each “complex” molecule into
+“simpler” precursors. However, this greedy heuristic can sometimes be short-sighted. An
+optimal retrosynthetic “move” may increase molecular complexity in the short run to reach
+simpler precursors more quickly in the longer run (e.g., in protecting group chemistry). An
+optimal policy would enable the player to identify local moves (i.e., reactions) that lead to
+synthesis pathways with minimum total cost.
+11
+
+Policy improvement through self-play
+Knowledge of the value function, 𝑣𝜋, under a given policy 𝜋enables the identiﬁcation of
+better policies that reduce the expected synthesis cost. To see this, consider a new policy 𝜋′
+that selects at each step the reaction that minimizes the expected cost under the old policy 𝜋
+𝜋′(𝑟| 𝑚) =
+⎧
+⎪
+⎪
+⎪
+⎪
+⎨
+⎪
+⎪
+⎪
+⎪
+⎩
+1
+if 𝑟= arg min
+𝑟∈ℛ(𝑚)
+⎡
+⎣𝑐rxn(𝑟) +
+∑︁
+𝑚′(𝑟)
+𝑣𝜋(𝑚′)
+⎤
+⎦
+0
+otherwise
+.
+(5)
+By the policy improvement theorem,21 this greedy policy 𝜋′ is guaranteed to be as good or
+better than the old policy 𝜋—that is, 𝑣𝜋′ ≤𝑣𝜋, where equality holds only for the optimal
+policy. This result provides a basis for systematically improving any policy in an iterative
+procedure called policy iteration,21 in which the value function 𝑣𝜋leads to an improved policy
+𝜋′ that leads to a new value function 𝑣𝜋′ and so on.
+One of the challenges in using the greedy policy Eq. 5 is that it generates only a single
+pathway and its associated cost for each of the target molecules. The limited exposure of
+these greedy searches can result in poor estimates of the new value function 𝑣𝜋′, in particular
+for molecules that are not included in the identiﬁed pathways. A better estimate of 𝑣𝜋′ can
+be achieved by exploring more of the molecule space in the neighborhood of these greedy
+pathways. Here, we encourage exploration by using an 𝜀-greedy policy, which introduces
+random choices with probability 𝜀but otherwise follows the greedy policy Eq. 5. Iteration of
+this 𝜀-soft policy is guaranteed to converge to an optimal policy that minimizes the expected
+synthesis cost for a given noise level 𝜀> 0.21 Moreover, by gradually lowering the noise level,
+it is possible to approach the optimal greedy policy in the limit as 𝜀→0.
+12
+
+Training protocol
+Starting from the random policy, we used self-play to learn an improved policy over the
+course of 1000 iterations, each comprised of ∼100,000 retrosynthesis games initiated from the
+target molecules. During the ﬁrst iteration, each target molecule was considered in turn using
+the 𝜀-greedy policy Eq. 5 with 𝜀= 0.2. Candidate reactions and their associated reactants
+were identiﬁed by application of reaction templates as detailed in the Methods. Absent an
+initial model of the value function, the expected costs of molecules encountered during play
+were selected at random from a uniform distribution on the interval [1, 100]. Following the
+completion of each game, the costs of molecules in the selected pathway were computed and
+stored for later use. In subsequent iterations, the values of molecules encountered previously
+(at a particular depth) were estimated by their average cost. After the ﬁrst 50 iterations, the
+value estimates accumulated during play were used to train a neural network, which allowed
+for estimating the values of new molecules not encountered during the previous games (see
+Methods for details on the network architecture and training). Policy improvement continued
+in an iterative fashion guided both by the average costs (for molecules previously encountered)
+and by the neural network (for new molecules), which was updated every 50-100 iterations.
+During policy iteration, the noise parameter was reduced from 𝜀= 0.2 to 0 in increments
+of 0.05 every 200 iterations in an eﬀort to anneal the system towards an optimal policy.
+Following each change in 𝜀, the saved costs were discarded such that subsequent value
+estimates were generated at the current noise level 𝜀. The result of this training procedure
+was a neural network approximation of the (near) optimal value function 𝑣*(𝑚, 𝛿), which
+estimates the minimum cost of synthesizing any molecule 𝑚starting from residual depth
+𝛿. In practice, we found that a slightly better value function could be obtained using the
+cumulative reaction network generated during policy iteration. Following Kowalik et al.,6 we
+used dynamic programming to compute the minimum synthesis cost for each molecule in
+the reaction network. These minimum costs were then used to train the ﬁnal neural network
+approximation of the value function 𝑣*.
+13
+
+10
+30
+50
+70
+90
+⟨ctot⟩
+1
+200
+400
+600
+800
+1000
+Iterations
+1.45
+1.55
+1.65
+⟨btot⟩
+0.2       0.15       0.1  
+    0.05       0.0
+(a)
+90
+70
+50
+30
+10
+1.65
+1.55
+1.45
+(b)
+Iterations
+1         200       400       600       800      1000
+Figure 3: Training results. In (a) and (b) ⟨𝑐tot⟩and ⟨𝑏tot⟩computed using 𝜋* are plotted
+versus policy iterations, respectively (solid blue squares). Solid horizontal lines show these
+quantities for the heuristic policy 𝜋𝑠𝑑(red triangles) and the random policy (black circles).
+The larger cyan square shows ⟨𝑐tot⟩after each tree had been searched for the best (lowest)
+target cost. Dashed vertical lines show points when 𝜀was lowered.
+Training results
+Figure 3a shows how the average synthesis cost ⟨𝑐tot⟩decreased with each iteration over
+the course of the training process. Initially, the average cost was similar to that of the
+random policy (⟨𝑐tot⟩≈70) but improved steadily as the computer learned to identify
+“winning” reactions that lead quickly to buyable substrates. After 800 iterations, the cost
+dropped below that of the symmetric disconnection policy (⟨𝑐tot⟩= 19.3) but showed little
+further improvement in the absence of exploration (i.e., with 𝜀= 0). The ﬁnal cost estimate
+(⟨𝑐tot⟩= 11.4, cyan square) was generated by identifying the minimum cost pathways present
+in the cumulative reaction network generated during the training process. The ﬁnal drop
+14
+
+Table 1:
+Training and testing results for the symmetric disconnection policy 𝜋𝑠𝑑and the
+learned policy 𝜋*. Percentages were computed based the sizes of the training set (∼100,000)
+and the testing set (∼25,000).
+Train (100,00)
+Test (25,000)
+𝜋𝑠𝑑
+𝜋*
+𝜋𝑠𝑑
+𝜋*
+⟨𝑐tot⟩
+19.3
+13.1
+19.2
+11.5
+⟨𝑏⟩
+1.54
+1.65
+1.54
+1.58
+𝑐tot < 𝑃1
+64%
+83%
+65%
+73%
+𝑃1 ≤𝑐tot < 𝑃2
+25%
+11%
+24%
+22%
+𝑐tot ≥𝑃2
+11%
+6%
+11%
+5%
+in cost for 𝜀= 0 suggests that further policy improvements are possible using improved
+annealing schedules. We emphasize that the ﬁnal near-optimal policy was trained from a
+state of complete ignorance, as directed by the user-speciﬁed objective function to minimize
+the synthesis cost.
+During the training process, the decrease in synthesis cost was guided both by motivation,
+as prescribed by the cost function, and by opportunity, as dictated by the availability of
+alternate pathways. Early improvements in the average cost were achieved by avoiding
+“unmakable” molecules, which contributed the largest cost penalty, 𝑃2 = 100. Of the target
+molecules, 11% reduced their synthesis cost from 𝑐tot > 𝑃2 to 𝑃2 > 𝑐tot > 𝑃1 by avoiding
+such problematic molecules. By contrast, only 2% of targets improved their cost from
+𝑃2 > 𝑐tot > 𝑃1 to 𝑃1 > 𝑐tot. In other words, if a synthesis tree was not found initially at a
+maximum depth of 𝑑max = 10, it was unlikely to be discovered during the course of training.
+Perhaps more interesting are those molecules (ca. 10%) for which syntheses were more easily
+found but subsequently improved (i.e., shortened) during the course of the training process.
+See Table 1 for a more detailed breakdown of these diﬀerent groups.
+Consistent with our observations above, lower cost pathways were again correlated with
+the degree of branching 𝑏along the synthesis trees (Figure 3b). Interestingly, the average
+branching factor for synthesis plans identiﬁed by the learned policy was signiﬁcantly larger
+15
+
+than that of the symmetric disconnection policy (⟨𝑏⟩= 1.65 vs. 1.54). While the latter favors
+branching, it does so locally based on limited information—namely, the heuristic score of Eq.
+5. By contrast, the learned policy uses information provided in the molecular ﬁngerprint to
+select reactions that increase branching across the entire synthesis tree (not just the single
+step). Furthermore, while the heuristic policy favors branching a priori, the learned policy
+does so only in the service of reducing the total cost. Changes in the objective function (e.g.,
+in the cost and availability of the buyable substrates) will lead to diﬀerent learned policies.
+Model validation
+Figure 4 compares the performance of the learned policy evaluated on the entire set of
+∼100,000 target molecules used for training and on a diﬀerent set of ∼25,000 target molecules
+set aside for testing. For the training molecules, the value estimates 𝑣*(𝑚) predicted by the
+neural network are highly correlated with the actual costs obtained by the ﬁnal learned policy
+𝜋* (Figure 4a). We used the same near-optimal policy to determine the synthesis cost of the
+testing molecules, 𝑐tot(𝜋*). As illustrated in Figure 4b, these costs were correlated to the
+predictions of the value network 𝑣*(𝑚) albeit more weakly than those of the training data
+(Pearson coeﬃcient of 0.5 for testing vs. 0.99 for training). This correlation was stronger for
+the data in Figure 4b, which focuses on those molecules that could actually be synthesized
+(Pearson coeﬃcient of 0.7 for the 73% testing molecules with “winning” syntheses).
+Figure 4c,d compares the synthesis costs of the symmetric disconnection policy 𝜋𝑠𝑑against
+that of the learned policy 𝜋* for both the training and testing molecules. The ﬁgure shows
+that the results are highly correlated (Pearson coeﬃcient 0.84 and 0.86 for training and
+testing, respectively), indicating that the two policies make similar predictions. However,
+closer inspection reveals that the learned policy is systematically better than the heuristic as
+evidenced by the portion of the histogram below the diagonal (red line). For these molecules
+(42% and 31% of the training and testing sets, respectively), the learned policy identiﬁes
+synthesis trees containing fewer reactions than those of the heuristic policy during single
+16
+
+1
+5
+10
+cpredicted (v∗)
+1
+5
+10
+ctot (π∗)
+1
+5
+10
+ctot (πsd)
+1
+5
+10
+1
+5
+10
+15
+⟨ctot⟩
+101
+102
+103
+104
+N (⟨ctot⟩)
+π∗
+πsd
+(a)(i)
+1
+5
+10
+cpredicted (v∗)
+1
+5
+10
+ctot (π∗)
+1
+5
+10
+ctot (πsd)
+1
+5
+10
+1
+5
+10
+15
+⟨ctot⟩
+102
+103
+N (⟨ctot⟩)
+π∗
+πsd
+(b)(i)
+(ii)
+(iii)
+(ii)
+(iii)
+True cost is higher 
+than predicted
+True cost is lower
+than predicted
+4.4%
+42%
+10%
+31%
+Figure 4: Model Validation. In (a) and (b) a 2D histogram illustrates the relationship
+between the synthesis cost 𝑐tot determined by the learned policy 𝜋* and that predicted by
+the value network 𝑣* for each of the ∼100,000 training molecules and the ∼25,000 testing
+molecules, respectively. In (c) and (d), a 2D histogram compares the synthesis cost 𝑐tot
+determined by the symmetric disconnection policy 𝜋𝑠𝑑to that of learned policy 𝜋* for training
+and testing molecules, respectively. In (a-d), the gray-scale intensity is linearly proportional
+to the number of molecules within a given bin; the red line shows the identity relation. In (c)
+and (d), the percentage of molecules for which 𝜋* (𝜋𝑠𝑑) found the cheaper pathway is listed
+below (above) the red line. In (e) and (f), distributions of synthesis costs 𝑐tot determined
+under policies 𝜋𝑠𝑑and 𝜋* are shown for both testing and testing molecules, respectively.
+deterministic plays of the retrosynthesis game. By contrast, it is rare in both the training
+and testing molecules (about 4% and 11%, respectively) that the symmetric disconnection
+policy performs better than the learned policy. Additionally, the learned policy is more likely
+to succeed in identifying a viable synthesis plan leading to buyable substrates (Figure 4c).
+Of the ∼25,000 testing molecules, “winning” synthesis plans were identiﬁed for 73% using
+the learn policy as compared to 64% using the heuristic. These results suggest that the
+lessons gleaned from the training molecules can be used to improve the synthesis of new and
+unfamiliar molecules.
+17
+
+Conclusions
+We have shown that reinforcement learning can be used to identify eﬀective policies for the
+computational design of retrosynthetic pathways. In this approach, one speciﬁes the global
+objective function to be minimized (here, the synthesis cost) without the need for ad hoc
+models or heuristics to guide local decisions during generation of the synthesis plan. Starting
+from a random policy, repeated plays of the retrosynthesis game are used to systematically
+improve performance in an iterative process that converges in time to an optimal policy. The
+learned value function provides a convenient estimate for the synthesis cost of any molecule,
+while the associated policy allows for rapid identiﬁcation of the synthesis path. Importantly,
+the cost function can be easily adapted, for example to include speciﬁc costs for reactions
+and/or buyable substrates. Policy iteration using a diﬀerent cost function will result in a
+diﬀerent policy that reﬂects the newly speciﬁed objectives.
+The chemical feasibility of synthetic pathways identiﬁed by the learned policy are largely
+determined by the quality of the reaction templates. The present templates are derived
+algorithmically from reaction precedents reported in the literature; however, an identical
+approach based on reinforcement learning could be applied using template libraries curated
+by human experts.7,27 Alternatively, it may be possible to forgo the use of reaction templates
+altogether in favor of machine learning approaches that suggest reaction precursors by other
+means.28 Ideally, such predictions should be accompanied by recommendations regarding the
+desired conditions for performing each reaction in high yield.29–32
+In the present approach, the deterministic policy learned during training is applied only
+once to suggest one (near) optimal synthesis pathway. Additional pathways are readily
+generated, for example using Monte-Carlo Tree Search (MCTS) to bias subsequent searches
+away from previously identiﬁed pathways.18 A similar approach is used by Syntaurus, which
+relies on heuristic scoring functions to guide the generation of many possible synthesis plans,
+from which the “best” are selected. The main advantage of a strong learned policy is to
+direct such exploration more eﬀectively towards these best syntheses, thereby reducing the
+18
+
+computational cost of exploration.
+We note, however, that the computational costs of training the learned policy are signiﬁcant
+(ca. several million CPU hours for the training in Figure 3). While the application of reaction
+templates remains the primary bottleneck (ca. ∼50%), the additional costs of computing
+ECFP ﬁngerprints and evaluating the neural network were a close second (ca. ∼45%). These
+costs can be greatly reduced by using simple heuristics to generate synthetic pathways, from
+which stronger policies can be learned. We found that Eq. 4 performed remarkably well and
+was much faster to evaluate than the neural network. Such fast heuristics could be used as
+starting points for iterative policy improvement or as roll-out policies within MCTS-based
+learning algorithms.21 This approach is conceptually similar to the ﬁrst iteration of AlphaGo
+introduced by DeepMind.33 Looking forward, we anticipate that the retrosynthesis game will
+soon follow the way of chess and go, in which self-taught algorithms consistently outperform
+human experts.
+Methods
+Target molecules
+Training/testing sets of 95,774/23,945 molecules were selected from the Reaxys database on
+the basis of their structural diversity. Starting from more than 20 million molecules in the
+database, we excluded (i) those listed in the database of buyable compounds, (ii) those with
+SMILES strings shorter than 20 or longer than 100, and (iii) those with multiple fragments
+(i.e., molecules with ‘.’ in the SMILES string). The resulting ∼16 million molecules were
+then aggregated using the Taylor-Butina (TB) algorithm34 to form ∼1 million clusters, each
+comprised of “similar” molecules. Structural similarity between two molecules 𝑖and 𝑗was
+determined by the Tanimoto coeﬃcient
+𝑇=
+𝑚𝑖· 𝑚𝑗
+|𝑚𝑖|2 + |𝑚𝑗|2 −|𝑚𝑖· 𝑚𝑗|,
+(6)
+19
+
+where 𝑚𝑖is the ECFP4 ﬁngerprint for molecule 𝑖.35 We used ﬁngerprints of length 1024
+and radius 3. Two molecules within a common cluster were required to have a Tanimoto
+coeﬃcient of 𝑇> 0.4. The target molecules were chosen as the centroids of the ∼125, 000
+largest clusters, each containing more than 20 molecules and together representing more than
+∼12 million molecules. These target molecules were partitioned at random to form the ﬁnal
+sets for training and testing.
+Buyable molecules
+A molecule is deﬁned to be a substrate if it is listed in the commercially available Sigma-
+Aldrich,23 eMolecules,24 or LabNetwork catalogs,25 and does not cost more than $100/g.
+The complete set of molecules in these catalogs with price per gram ≤$100 is denoted
+ℬ= {𝑚1, . . . , 𝑚𝑛} with 𝑛≈300, 000. The molecules contained in each catalog can be
+downloaded by visiting the respective webpage.
+Reaction templates
+Given a molecule 𝑚, we used a set of ∼60, 000 reaction templates to generate sets of possible
+precursors 𝑚′, which can be used to synthesize 𝑚in one step. As detailed previously,36 these
+templates were extracted automatically from literature precedents and encoded using the
+SMARTS language. The application of the templates involves two main steps, substructure
+matching and bond rewiring, which were implemented using RDkit.37 Brieﬂy, we ﬁrst search
+the molecule 𝑚for a structural pattern speciﬁed by the template. For each match, the
+reaction template further speciﬁes the breaking and making of bonds among the constituent
+atoms to produce the precursor molecule(s) 𝑚′. We used the RDChiral package38 to handle
+the creation, destruction, and preservation of chiral centers during the reaction.
+The application of reaction templates to produce candidate reactions represents a major
+computational bottleneck in the retrosynthesis game due to the combinatorial complexity of
+substructure matching. Additionally, even when a template generates a successful match, it
+20
+
+may fail to account for the larger molecular context resulting in undesired byproducts during
+the forward reaction. These two challenges can be partially alleviated by use of a “template
+prioritizer”,18 which takes as input a representation of the target molecule 𝑚and generates
+a probability distribution over the set of templates based on their likelihood of success. By
+focusing only on the most probable templates, the prioritizer can serve to improve both
+quality of the suggested reactions and the speed with which they are generated. In practice,
+we trained a neural network prioritizer on 5.4 million reaction examples from Reaxys and
+selected the top 99.5% of templates for each molecule 𝑚encountered. This ﬁltering process
+drastically reduced the total number templates applied from 60,000 to less than 50 for most
+molecules. The training and validation details as well as the model architecture are available
+on Github.39
+Policy Iteration
+As noted in the main text, the depth constraint imposed on synthesis trees generated during
+the retrosynthesis requires some minor modiﬁcations to the value function of Eq. 2. The
+expected cost of synthesizing a molecule 𝑚now depends on the residual depth 𝛿as
+𝑣𝜋(𝑚, 𝛿) =
+∑︁
+𝑟∈ℛ(𝑚)
+𝜋(𝑟| 𝑚, 𝛿)
+⎡
+⎣𝑐rxn(𝑟) +
+∑︁
+𝑚′(𝑟)
+𝑣𝜋(𝑚′, 𝛿−1)
+⎤
+⎦,
+(7)
+where the ﬁrst sum is over candidate reactions with 𝑚as product, and the second is over
+all reactants 𝑚′(𝑟) associated with a reaction 𝑟. For the present cost model, the expected
+cost 𝑣𝜋(𝑚′, 𝛿) increases with decreasing 𝛿due to the increased likelihood of being penalized
+(to the extent 𝑃1) for reaching the maximum depth (𝑑= 𝑑max such that 𝛿= 0). Similarly,
+the 𝜀-greedy policy used in policy improvement must also account for the residual depth at
+21
+
+which a molecule is encountered
+𝜋(𝑟| 𝑚, 𝛿) =
+⎧
+⎪
+⎪
+⎪
+⎪
+⎨
+⎪
+⎪
+⎪
+⎪
+⎩
+1 −𝜀
+if 𝑟= arg min
+𝑟∈ℛ(𝑚)
+⎡
+⎣𝑐rxn(𝑟) +
+∑︁
+𝑚′(𝑟)
+𝑣𝜋(𝑚′, 𝛿−1)
+⎤
+⎦
+𝜀
+otherwise
+.
+(8)
+These recursive functions are fully speciﬁed by three terminating conditions introduced in the
+main text: (1) buyable molecule encountered, 𝑣(𝑚, 𝛿̸= 0) = 𝑐sub(𝑚) for 𝑚∈ℬ; (2) maximum
+depth reached, 𝑣(𝑚, 0) = 𝑃1; and (3) unmakeable molecule encountered, 𝑣(𝑚, 𝛿̸= 0) = 𝑃2
+for ℛ(𝑚) = ∅.
+Neural network architecture and training
+We employed a multi-layer neural network illustrated schematically in Figure 5. The 17
+million model parameters were learned using gradient descent on training data generated
+by repeated plays of the retrosynthesis game. Training was performed using Keras with the
+Theano backend and the Adam optimizer with an initial learning rate of 0.001, which decayed
+with the number of model updates 𝑘as 0.001/(1 + 2
+√
+𝑘) (13 updates were used to compute
+𝜋*). During each update, batches of 128 molecules and their computed average costs at a
+ﬁxed 𝜀were selected from the most recent data and added to a replay buﬀer. Batches of
+equivalent size were randomly selected from the buﬀer and passed through the model for
+up to 100 epochs (1 epoch was taken as the total number of new data points having passed
+through the network). The mean-average error between the averaged (true) and predicted
+costs was used as the loss function. The latest model weights were then used as the policy
+for the next round of synthesis games.
+Additional results
+Figure 6 shows the full cost distribution for the heuristic policy (𝜋𝑠𝑑) and the learned optimal
+policy (𝜋*). Figure 7a shows the probability of successfully synthesizing a molecule from the
+22
+
+Dense: 1024, ReLU
+Input ECFP4: 16384 + 1
+Batch Normalization
+Dense: 300, ReLU
+5X
+Dense: 1, Linear
+Batch Normalization
+500 - 500 e-|x|
+Figure 5: The neural model for the cost of molecules is a feed-forward neural network that
+accepts as input (green) an ECFP ﬁngerprint of size 16384 extended to include the residual
+depth 𝛿of the molecule. The architecture includes one input later (blue) consisting of 1024
+nodes, ﬁve hidden layers (red) each containing 300 nodes, and one output layer (purple) of
+size one plus a ﬁlter (also purple) that scales the initial output number to be within the range
+[0, 500]. We also used batch normalization after each layer. The ﬁnal output represents the
+estimated cost.
+training set (𝑝success) versus 𝜀. Figure 7b shows the average cost (⟨𝑐tot⟩) of the training set
+versus 𝜀. Figure 8 shows normalized probability distributions 𝑝𝜀(⟨𝑐tot⟩) for the target costs
+in the training set for diﬀerent values of 𝜀. Figure 9 shows the 2D probability distribution
+𝑝𝜀(⟨𝑐tot⟩) computed with 𝜀= 0 for the training set.
+23
+
+Table 2: Comparison of the performance of 𝜋𝑠𝑑versus 𝜋*. The values show the percent that
+one policy found a lower cost than the other, or whether the two policies found pathways
+with identical cost (e.g. a tie), for the molecules in the training and testing sets. All percents
+were computed using the size of the training (∼100,000) or testing set (∼25,000).
+Train (100,00)
+Test (25,000)
+𝜋𝑠𝑑(%)
+𝜋* (%)
+Tie (%)
+𝜋𝑠𝑑(%)
+𝜋* (%)
+Tie (%)
+𝑐tot < 𝑃1
+0.4
+35.0
+47.9
+6.1
+21.3
+47.9
+𝑃1 ≤tot < 𝑃2
+3.9
+5.2
+5.1
+3.4
+8.6
+9.9
+𝑐tot ≥𝑃2
+<1
+1.6
+<1
+<1
+1.1
+1.3
+Bulk
+4.4
+41.8
+53.8
+9.9
+31.0
+59.1
+100
+101
+102
+⟨ctot⟩
+101
+102
+103
+104
+N (⟨ctot⟩)
+πsd(0.0)
+πsd(0.05)
+πsd(0.1)
+πsd(0.15)
+πsd(0.2)
+πsd(0.3)
+πsd(0.4)
+πsd(0.5)
+πsd(0.6)
+πsd(0.8)
+πsd(1.0)
+π∗
+Figure 6: The distribution of expected costs, ⟨𝑐tot⟩, over the set of 100,000 target molecules
+is shown for the greedy optimal policy 𝑣*(𝑚) and the symmetric disconnection policy 𝜋𝑠𝑑for
+diﬀerent values of 𝜀.
+24
+
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.2
+0.4
+0.6
+psuccess
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ε
+3.0
+3.5
+4.0
+⟨ctot⟩
+(a)
+(b)
+Figure 7: (a) The probability of successfully synthesizing target molecules and (b) ⟨𝑐tot⟩
+(bottom) for those synthesized are shown versus 𝜖for the symmetric disconnection policy 𝜋𝑠𝑑.
+0.0
+0.05
+0.1
+0.15
+0.2
+0.25
+0.3
+0.4
+0.5
+1.0
+ε
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+⟨ctot⟩
+0.000
+0.025
+0.050
+0.075
+0.100
+0.125
+0.150
+0.175
+0.200
+pε (⟨ctot⟩)
+Figure 8: Normalized probability distributions 𝑝𝜀(⟨𝑐tot⟩) are shown for diﬀerent values of 𝜀
+for the symmetric disconnection policy 𝜋𝑠𝑑. Note that the columns in the plot each sum up
+to one.
+25
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+Average cost , ⟨ctot⟩
+1.00
+1.25
+1.50
+1.75
+2.00
+2.25
+2.50
+2.75
+3.00
+Pathway branching , ⟨b⟩
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+1.6
+p (⟨ctot⟩, ⟨b⟩)
+Figure 9: A 2D histogram 𝑝(⟨𝑐tot⟩, (⟨𝑏tot⟩) is shown for the symmetric disconnection policy
+𝜋𝑠𝑑.
+26

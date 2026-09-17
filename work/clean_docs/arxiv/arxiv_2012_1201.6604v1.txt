@@ -1,0 +1,982 @@
+arXiv:1201.6604v1  [cs.AI]  31 Jan 2012
+Gaussian processes for sample eﬃcient
+reinforcement learning with RMAX-like
+exploration
+Tobias Jung1 and Peter Stone1
+
+Department of Computer Science
+University of Texas at Austin
+Abstract. We present an implementation of model-based online rein-
+forcement learning (RL) for continuous domains with deterministic tran-
+sitions that is speciﬁcally designed to achieve low sample complexity. To
+achieve low sample complexity, since the environment is unknown, an
+agent must intelligently balance exploration and exploitation, and must
+be able to rapidly generalize from observations. While in the past a num-
+ber of related sample eﬃcient RL algorithms have been proposed, to al-
+low theoretical analysis, mainly model-learners with weak generalization
+capabilities were considered. Here, we separate function approximation
+in the model learner (which does require samples) from the interpolation
+in the planner (which does not require samples). For model-learning we
+apply Gaussian processes regression (GP) which is able to automatically
+adjust itself to the complexity of the problem (via Bayesian hyperpa-
+rameter selection) and, in practice, often able to learn a highly accu-
+rate model from very little data. In addition, a GP provides a natural
+way to determine the uncertainty of its predictions, which allows us to
+implement the “optimism in the face of uncertainty” principle used to
+eﬃciently control exploration. Our method is evaluated on four common
+benchmark domains.
+1
+Introduction
+In reinforcement learning (RL), an agent interacts with an environment and
+attempts to choose its actions such that an externally deﬁned performance mea-
+sure, the accumulated per-step reward, is maximized over time. One deﬁning
+characteristic of RL is that the environment is unknown and that the agent has
+to learn how to act directly from experience. In practical applications, e.g., in
+robotics, obtaining this experience means having a physical system interact with
+the physical environment in real time. Therefore, RL methods that are able to
+learn quickly and minimize the amount of time the robot needs to interact with
+the environment until good or optimal behavior is learned, are highly desirable.
+In this paper we are interested in online RL for tasks with continuous state
+spaces and smooth transition dynamics that are typical for robotic control do-
+mains. Our primary goal is to have an algorithm which keeps sample complexity
+as low as possible.
+
+1.1
+Overview of the contribution
+To maximize sample eﬃciency, we consider online RL that is model-based in the
+spirit of RMAX [3], but extended to continuous state spaces similar to [1,10,5].
+As in RMAX and related methods, our algorithm, GP-RMAX, consists of two
+parts: a model-learner and a planner. The model-learner estimates the dynam-
+ics of the environment from the sample transitions the agent experiences while
+interacting with the environment. The planner is used to ﬁnd the best possible
+action, given the current model. As the predictions of the model-learner become
+increasingly more accurate, the actions derived become increasingly closer to
+optimal. To control the amount of exploration, the “optimism in the face of un-
+certainty” principle is employed which makes the agent visit unexplored states
+ﬁrst. In our algorithm, the model-learner is implemented by Gaussian process
+(GP) regression; being non-parametric, GPs give us enhanced modeling ﬂexibil-
+ity. GPs allow Bayesian model selection and automatic relevance determination.
+In addition, GPs provide a natural way to determine the uncertainty of predic-
+tions, which allows us to implement the “optimism in the face of uncertainty”
+exploration of RMAX in a principled way. The planner uses the estimated tran-
+sition function (as estimated by the model) to solve the Bellman equation via
+value iteration on a uniform grid.1
+The key point of our algorithm is that we separate the steps estimating a
+function from samples in the model-learner from solving the Bellman equation
+in the planner. The rationale behind this is that, if the transition function is
+relatively simple, it can be estimated accurately from only few sample transi-
+tions. On the other hand, the optimal value function, due to the inclusion of
+the max operator, often is a complex function with sharp discontinuities. Solv-
+ing the Bellman equation, however, does not require actual “samples”; instead,
+we must only be able to evaluate the Bellman operator in arbitrary points of
+the state space. This way, when the transition function can be learned from
+only a few samples, large gains in sample eﬃciency are possible. Competing
+model-free methods, such as ﬁtted Q-iteration [18,8,15] or policy iteration based
+LSPI/LSTD/LSPE [12,4,13,11], do not have this advantage, as they need the
+actual sample transitions to estimate and represent the value function.
+Conceptually, our approach is closely related to Fitted R-MAX, which was
+proposed in [10] and uses an instance-based approach in the model-learner, and
+related work in [5,1], which uses grid-based interpolation in the model-learner.
+The primary contribution of this paper is to use GPs instead. Doing this means
+we are willing to trade oﬀtheoretical analysis with practical performance. For
+example, unlike the recent ARL [1], for which PAC-style performance bounds
+could be derived (because of its grid-based implementation of model-learning),
+a GP is much better able to handle generalization and as a consequence can
+achieve much lower sample complexity.
+1 While certainly more advanced methods exist, e.g., [9,14], for our purpose here, a
+uniform grid is suﬃcient as proof of concept.
+
+1.2
+Assumptions and limitations
+Our approach makes the following assumptions (most of which are also made in
+related work, even if it is not always explicitly stated):
+– Low dimensionality of the state space. With a uniform grid, the number
+of grid points for solving the Bellman equation scales exponentially with
+the dimensionality. While more advanced methods, such as sparse grids or
+adaptive grids, may allow us to somewhat reduce this exponential increase, at
+the end they do not break the curse of dimensionality. Alternatively, one can
+use nonlinear function approximation; however, despite some encouraging
+results, it is unclear as to whether this approach would really do any better
+in general applications. Today, breaking the curse of dimensionality is still
+an open research problem.
+– Discrete actions. While continuous actions may be discretized, in practice,
+for higher dimensional action spaces this becomes infeasible.
+– Smooth transition function. Performing an action from states that are “close”
+must lead to successor states that are “close”. (Otherwise both the gener-
+alization in the model learner and the interpolation in the value function
+approximation would not work).
+– Deterministic transitions. This is not a fundamental requirement of our ap-
+proach, since GPs can also learn noisy functions (either due to observation
+noise or random disturbances with small magnitude), and the Bellman op-
+erator can be evaluated in the resulting predictive distribution. Rather it is
+one taken for convenience.
+– Known reward function. Assuming that the reward function is known and
+only the transition function needs to be learned is what is diﬀerent from most
+comparable work. While it is not a fundamental requirement of our approach
+(since we could learn the reward function as well), it is an assumption that
+we think is well justiﬁed: for one, reward is the performance criterion and
+speciﬁes the goal. For the type of control problems we consider here, reward
+is always externally deﬁned and never something that is “generated” from
+within the environment. Two, reward sometimes is a discontinuous function,
+e.g., +1 at the goal state and 0 elsewhere. Which makes it not very amenable
+for function approximation.
+2
+Background: Planning when the model is exact
+Consider the reinforcement learning problem for MDPs with continuous state
+space, ﬁnite action space, discounted reward criterion and deterministic dynam-
+ics [19]. In this section we assume that dynamics and rewards are available to the
+learning agent. Let state space X be a hyperrectangle in
+Rd (this assumption is
+justiﬁed if, for example, the system is a motor control task), A be the ﬁnite ac-
+tion space (assuming continuous controls are discretized), xt+1 = f(xt, at) be the
+transition function (assuming that continuous time problems are discretized in
+time), and r(x, a) be the reward function. For the following theoretical argument
+
+ξ00
+ξ10
+ξ11
+ξ01
+Q(z, a′) =?
+z := f(ξi, a)
+ξi
+transition f
+dx
+dy
+hx
+hy
+z = (x, y)
+x0
+x1
+(ξ00, qa′
+00)
+(ξ10, qa′
+10)
+(ξ11, qa′
+11)
+(ξ01, qa′
+01)
+Fig. 1. Bilinear interpolation to determine Q(f(ξi, a), a′) in
+R2.
+we require that both transition and reward function are Lipschitz continuous in
+the actions; i.e., there exist constants Lf, Lr such that ∥f(x, a) −f(x′, a)∥≤
+Lf ∥x −x′∥, and |r(x, a) −r(x′, a)| ≤Lr ∥x −x′∥, ∀x, x′ ∈X, a ∈A. In addi-
+tion, we assume that the reward is bounded, |r(x, a)| ≤RMAX, ∀x, a. Note that
+in practice, while the ﬁrst condition, continuity in the transition function, is usu-
+ally fulﬁlled for domains derived from physical systems, the second condition,
+continuity in the rewards, is often violated (e.g. in the mountain car domain,
+reward is 0 in the goal and −1 everywhere else). Despite that we ﬁnd that in
+many of these cases the outlined procedure may still work well enough.
+For any state x, we are interested in determining a sequence of actions
+a0, a1, a2, . . . such that the accumulated reward is maximized,
+V ∗(x) := max
+a0,a1,...
+n ∞
+X
+t=0
+γtr(xt, at) | x0 = x, xt+1 = f(xt, at)
+o
+,
+where 0 < γ < 1. Using the Q-notation, where Q∗(x, a) := r(x, a)+γV ∗(f(x, a)),
+the optimal decision policy π∗is found by ﬁrst solving the Bellman equation in
+the unknown function Q,
+Q(x, a) = r(x, a) + γ max
+a′
+Q(f(x, a), a′)
+∀x ∈X, a ∈A
+(1)
+to yield Q∗, and then choosing the action with the highest Q-value,
+π∗(x) = argmax
+a′
+Q∗(x, a′).
+The Bellman operator T related to (1) is deﬁned by
+ T Q
+
+(x, a) := r(x, a) + γ max
+a′
+Q(f(x, a), a′).
+(2)
+It is well known that T is a contraction and Q∗the unique bounded solution to
+the ﬁxed point problem Q(x, a) =
+ T Q
+
+(x, a), ∀x, a.
+
+In order to solve the inﬁnite dimensional problem in (1) numerically, we
+have to reduce it to a ﬁnite dimensional problem. This is done by introducing
+a discretization Γ of X into a ﬁnite number of elements, applying the Bellman
+operator to only the nodes and interpolating in between.
+In the following we will consider a uniform grid Γh with N vertices ξi and
+d-dimensional tensor B-spline interpolation of order 1. The solution of (1) is
+then obtained in the space of piecewise aﬃne functions.
+For a ﬁxed action a′, the value QΓh(z, a′) of any state z with respect to
+grid Γh can be written as a convex combination of the vertices ξj of the grid
+cell enclosing z with coeﬃcients wij (see Figure 1a). For example, consider the
+2-dimensional case (bilinear interpolation) in Figure 1b. Let z = (x, y) ∈
+R2.
+To determine QΓh(z, a′), we ﬁnd the four vertices ξ00, ξ01, ξ10, ξ11 ∈
+R2 of the
+enclosing cell with known function values qa′
+00 := QΓh(ξ00, a′), . . . etc. We then
+perform two linear interpolations along the x-coordinate (order invariant) in the
+auxilary points x0, x1 to obtain
+QΓh(x0, a′) = (1 −λ0)qa′
+00 + λ0qa′
+01
+QΓh(x1, a′) = (1 −λ0)qa′
+10 + λ0qa′
+11
+where λ0 := dx/hx (see Figure 1b for a deﬁnition of dx, hx, x0, x1). We then
+perform another linear interpolation in x0, x1 along the y-coordinate to obtain
+QΓh(z, a′) = (1 −λ1)(1 −λ0)qa′
+00 + (1 −λ1)λ0qa′
+01 + λ1(1 −λ0)qa′
+10 + λ1λ0qa′
+11 (3)
+where λ1 := dy/hy. Weights wij now correspond to the coeﬃcients in (3). An
+analogous procedure applies to higher dimensions.
+Let Qa′ be the N ×1 vector with entries [Qa′]i = QΓh(ξi, a′). Let za
+1, . . . , za
+N ∈
+Rd denote the successor state we obtain when we apply the transition function
+f to vertices ξi using action a, i.e., za
+i := f(ξi, a). Let [wa
+i ]j = wa
+ij denote the
+1 × N vector of coeﬃcients for za
+i from (3). The Q-value of za
+i for any action a′
+with respect to grid Γh can thus be written as QΓh(za
+i , a′) = PN
+j=1[wa
+i ]j[Qa′]j.
+Let W a with rows [wa
+i ] be the N × N matrix of all coeﬃcients. (Note that this
+matrix is sparse: each row contains only 2d nonzero entries).
+Let Ra be the N × 1 vector of associated rewards, [Ra]i := r(ξi, a). Now we
+can use (2) to obtain a ﬁxed point equation in the vertices of the grid Γh,
+QΓh(ξi, a) =
+ T ΓhQΓh
+(ξi, a)
+i = 1, . . . , N, a = 1, . . . , |A|,
+(4)
+where
+ T ΓhQΓh
+(ξi, a) := r(ξi, a) + γ max
+a′
+QΓh(f(ξi, a), a′).
+Slightly abusing the notation, we can write this more compactly in terms of
+matrices and vectors,
+T ΓhQΓh := Ra + γ max
+a′
+
+W aQa′	
+∀a.
+(5)
+The Q-function is now represented by |A| N-dimensional vectors Qa′, each con-
+taining the values for the vertices ξi. The discretized Bellman operator T Γh is
+
+xt+1 = f(xt, at)
+xt
+xt
+at
+(xt, at, xt+1)
+˜
+f(x, a), c(x, a)
+Fig. 2. High-level overview of the GP-RMAX framework
+a contraction in
+Rd × A and therefore has a unique ﬁxed point Q∗∈
+Rd × A.
+Let function Q∗,Γh : (Rd × A) →
+R be the Q-function obtained by linear in-
+terpolation of vector Q∗along states. The function Q∗,Γh can now be used to
+determine (approximately) optimal control actions: for any state x ∈X, we
+simply determine
+π∗,Γh(x) = argmax
+a′
+Q∗,Γh(x, a′).
+In order to estimate how well function Q∗,Γh approximates the true Q∗, a poste-
+riori estimates can be deﬁned that are based on local errors, i.e. the maximum
+of residual in each grid cell. The local error in a grid cell in turn depends on the
+granularity of the grid, h, and the modulus of continuity Lf, Lg (e.g., see [9,14]
+for details).
+3
+Our algorithm: GP-RMAX
+In the last section we have seen how, for a continuous state space, optimal
+behavior of an agent can be obtained in a numerically robust way, given that
+the transition function xt+1 = f(xt, at) is known.2
+For model-based RL we are now interested in solving the same problem for
+the case that the transition function is not known. Instead, the agent has to
+interact with the environment, and only use the samples it observes to compute
+optimal behavior. Our goal in this paper is to develop a learning framework
+2 Remember our working assumption: reward as a performance criterion is externally
+given and does not need to be estimated by the agent. Also note that discretization
+(even with more advanced methods like adaptive or sparse grids) is likely to be
+feasible only in state spaces with low to medium dimensionality. Breaking the curse
+of dimensionality is an open research problem.
+
+where this number is kept as small as possible. This will be done by using the
+samples to learn an estimate ˜f(x, a) of f(x, a) and then use this estimate ˜f in
+place of f in the numerical procedure outlined in the previous section.
+3.1
+Overview
+A sketch of our architecture is shown in Figure 2. GP-RMAX consists of the
+two parts model learning and planning which are interwoven for online learning.
+The model-learner estimates the dynamics of the environment from the sample
+transitions the agent experiences while interacting with the environment. The
+planner is used to ﬁnd the best possible action, given the current model. As the
+predictions of the model-learner become increasingly more accurate, the actions
+derived from the planner become increasingly closer to optimal. Below is a high-
+level overview of the algorithm:
+– Input:
+• Reward function r(x, a)
+• Discount factor γ
+• Performance parameters:
+∗planning and model-update frequency K
+∗model accuracy δM
+1 , δM
+2
+(stopping criterion for model-learning)
+∗discretization of planner N
+– Initialize:
+• Model M1, Q-function Q1, observed transitions D1
+– Loop: t = 1, 2, . . .
+• Interact with system:
+∗observe current state xt
+∗choose action at greedy with respect to Qt
+at = argmax
+a′
+Qt(xt, a′)
+∗execute action at, observe next state xt+1, store transition Dt+1 =
+Dt ∪{xt, at, xt+1}
+• Model learning: (see Section 3.2)
+∗only every K steps, and only if Mt is not suﬃciently exact (as de-
+termined by evaluating the stopping criterion)
+· Mt+1 = update model (Mt, Dt+1)
+· evaluate stopping criterion(Mt+1, Mt, δM
+1 , δM
+2 )
+∗else
+· Mt+1 = Mt
+• Planning with model: (see Section 3.3)
+∗only every K steps, and only if Mt is not suﬃciently exact (as de-
+termined by evaluating the stopping criterion)
+
+∗else
+· Qt+1 = Qt
+Next, we will explain in more detail how each of the two functional modules
+“model-learner” and “planner” is implemented.
+
+3.2
+Model learning with GPs
+In essence, estimating ˜f from samples is a regression problem. While in the-
+ory any nonlinear regression algorithm could serve this purpose, we believe that
+GPs are particularly well-suited: (1) being non-parametric means great model-
+ing ﬂexibility; (2) setting the hyperparameters can be done automatically (and
+in a principled way) via optimization of the marginal likelihood and allows au-
+tomatic determination of relevant inputs; and (3) GPs provide a natural way to
+determine the uncertainty of its predictions which will be used to guide explo-
+ration. Furthermore, uncertainty in GPs is supervised in that it depends on the
+target function that is estimated (because of (2)); other methods only consider
+the density of the data (unsupervised) and will tend to overexplore if the target
+function is simple.
+Assume we have observed a number of transitions, given as triplets of state,
+performed action, and resulting successor state, e.g., D = {xt, at, xt+1}t=1,2,...
+where xt+1 = f(xt, at). Note that f is a d-dimensional function, f(xt, at) =
+
+f1(xt, at), . . . , fd(xt, at)
+T . Instead of trying to estimate f directly (which cor-
+responds to absolute transitions), we try to estimate the relative change xt+1−xt
+as in [10]. The eﬀect of each action on each state variable will be treated indepen-
+dently: we train multiple univariate GPs and combine the individual predictions
+afterwards. Each individual GPij is trained in the respective subset of data in
+D, e.g., GPij is trained on all xt as input, and x(i)
+t+1 −x(i)
+t
+as output, where
+at = j. Each individual GPij has its own set of hyperparameters obtained from
+optimizing the marginal likelihood.
+The details of working3 with GPs can be found in [17]; using GPs to learn
+a model for RL was previously also studied in [6] (for oﬄine RL and without
+uncertainty-guided exploration). One characteristic of GPs is that their func-
+tional form is given in terms of a parameterized covariance function. Here we
+use the squared exponential,
+k(x, x′; v0, b, θ) = v0 exp
+n
+−0.5(x −x′)T Ω(x −x′)
+o
++ b,
+where matrix Ωis either one of the following: (1) Ω= θI (uniform), (2)
+Ω= diag(θ1, . . . , θd) (axis aligned ARD), (3) Ω= MkM T
+k (factor analysis).
+Scalars v0, b and the (Ω-dependent number of) entries of θ constitute the hy-
+perparameters of the GP and are adapted from the training data (likelihood
+3 There is also the problem of implementing GPs eﬃciently when dealing with a pos-
+sible large number of data points. For the lack of space we can only sketch our
+particular implementation, see [16] for more detailed information. Our GP imple-
+mentation is based on the subset of regressors approximation. The elements of the
+subset are chosen by a stepwise greedy procedure aimed at minimizing the error in-
+curred from using a low rank approximation (incomplete Cholesky decomposition).
+Optimization of the likelihood is done on random subsets of the data of ﬁxed size.
+To avoid a degenerate predictive variance, the projected process approximation was
+used.
+
+optimization). Note that variant (2) and (3) implement automatic relevance de-
+termination: relevant inputs or linear projections of inputs are automatically
+identiﬁed, whereby model complexity is reduced and generalization sped up.
+Once trained, for any testpoint x, GPij provides a distribution over target
+values, N(µij(x), σ2
+ij(x)), with mean µij(x) and variance σ2
+ij(x) (exact formulas
+for µ and σ can be found in [17]). Each individual mean µij predicts the change
+in the i-th coordinate of the state under the j-th action. Each individual variance
+σ2
+ij can be interpreted as the associated uncertainty; it will be close to 0 if GPij
+is certain, and close to k(x, x) if it is uncertain (the value of k(x, x) depends on
+the hyperparameters of GPij). Stacking the individual predictions together, our
+model-learner produces in summary
+˜f(x, a) :=
+
+
+x(1)
+...
+x(d)
+
++
+
+
+µ1a(x)
+...
+µda(x)
+
+,
+c(x, a) :=
+max
+i=1,...,d
+ normalizeia(σ2
+ia)
+
+,
+(6)
+where ˜f(x, a) is the predicted successor state and c(x, a) the associated un-
+certainty (taken as maximum over the normalized per-coordinate uncertainties,
+where normalization ensures that the values lie between 0 and 1).
+3.3
+Planning with a model
+At any time t, the planner receives as input model Mt. For any state x and
+action a, model Mt can be evaluated to “produce” the transition ˜f(x, a) along
+with normalized scalar uncertainty c(x, a) ∈[0, 1], where 0 means maximally
+certain and 1 maximally uncertain (see Section 3.2)
+Let Γh be the discretization of the state space X with nodes ξi, i = 1, . . . , N.
+We now solve the planning stage by plugging ˜f into the procedure described in
+Section 2. First, we compute ˜za
+i = ˜f(ξi, a), c(ξi, a) from (6) and the associated
+interpolation coeﬃcients wa
+ij from (3) for each node ξi and action a.
+Let Ca denote the N × 1 vector corresponding to the uncertainties, [Ca]i =
+c(ξi, a); and Ra be the N×1 vector corresponding to the rewards, [Ra]i = r(ξi, a).
+To solve the discretized Bellman equation in Eq. (4), we perform basic Jacobi
+iteration:
+– Initialize [Qa
+0]i, i = 1, . . . , N, a = 1, . . . , |A|
+– Repeat for k = 0, 1, 2, . . .
+[Qa
+k+1]i = [Ra]i + γ max
+a′
+
+
+
+N
+X
+j=1
+wa
+ij[Qa′
+k ]j
+
+
+
+∀i, a
+(7)
+until |Qa
+k+1−Qa
+k|∞< tol, ∀a, or a maximum number of iterations is reached.
+To reduce the number of iterations necessary, we adapt Gr¨une’s increasing
+coordinate algorithm [9] to the case of Q-functions: instead of Eq. (7), we perform
+
+updates of the form
+[Qa
+k+1]i = [1 −γwa
+ii]−1
+
+[Ra]i + γ max
+a′
+
+
+
+N
+X
+j=1,j̸=i
+wa
+ij[Qa′
+k ]j
+
+
+
+
+.
+(7’)
+In [9] it was proved that Eq. (7’) converges to the same ﬁxed point as Eq. (7), and
+it was empirically demonstrated that convergence can occur in signiﬁcantly fewer
+iterations. The exact reduction is problem-dependent, savings will be greater for
+small γ and large cells where self-transitions occur (i.e., ξi is among the vertices
+of the cell enclosing ˜za
+i ).
+To implement the “optimism in the face of uncertainty” principle, that is, to
+make the agent explore regions of the state space where the model predictions
+are uncertain, we employ the heuristic modiﬁcation of the Bellman operator
+which was suggested in [15] and shown to perform well. Instead of Eq. (7’), the
+update rule becomes
+[Qa
+k+1]i = (1 −[Ca]i)[1 −γwa
+ii]−1
+
+[Ra]i + γ max
+a′
+
+
+
+N
+X
+j=1,j̸=i
+wa
+ij[Qa′
+k ]j
+
+
+
+
++
++ [Ca]iVMAX
+(7”)
+where VMAX := RMAX/(1 −γ). Eq. (7”) can be seen as a generalization of
+the binary uncertainty in the original RMAX paper to continuous uncertainty;
+whereas in RMAX a state was either “known” (suﬃciently explored), in which
+case the unmodiﬁed update was used, or “unknown” (not suﬃciently explored),
+in which case the value VMAX was assigned, here the shift from exploration to
+exploitation is more gradual.
+Finally we can take advantage of the fact that the planning function will be
+called many times during the process of learning. Since the discretization Γh is
+kept ﬁxed, we can reuse the ﬁnal Q-values obtained in one call to plan as initial
+values for the next call to plan. Since updates to the model often aﬀect only
+states in some local neighborhood (in particular in later stages), the number of
+necessary iterations in each call to planning will be further reduced.
+A summary of our model-based planning function is shown below.
+– Input:
+• Model Mt, initial [Qa
+0]i, i = 1, . . . , N, a = 1, . . . , |A|
+– Static inputs:
+• Grid Γh with nodes ξ1, . . . , ξN, discount factor γ, reward function r(x, a)
+evaluated in nodes giving [Ra]i
+– Initialize:
+• Compute ˜za
+i = ˜f(ξi, a) and [Ca]i from Mt (see Eq. (6))
+• Compute weights wa
+ij for each ˜za
+i (see Eq. (3))
+– Loop:
+• Repeat update Eq. (7”) until |Qa
+k+1 −Qa
+k|∞< tol, ∀a, or the maximum
+number of iterations is reached.
+
+4
+Experiments
+We now examine the online learning performance of GP-RMAX in various well-
+known RL benchmark domains.
+4.1
+Description of domains
+In particular, we choose the following domains (where a large number of com-
+parative results is available in the literature):
+Mountain car: In mountain car, the goal is to drive an underpowered car from
+the bottom of a valley to the top of one hill. The car is not powerful enough to
+climb the hill directly, instead it has to build up the necessary momentum by
+reversing throttle and going up the hill on the opposite side ﬁrst. The problem
+is 2-dimensional, state variable x1 ∈[−1.2, 0.5] describes the position of the car,
+x2 ∈[−0.07, 0.07] its velocity. Possible actions are a ∈{−1, 0, +1}. Learning is
+episodic: every step gives a reward of −1 until the top of the hill at x1 ≥0.5
+is reached. Our experimental setup (dynamics and domain speciﬁc constants) is
+the same as in [19], with the following exceptions: maximal episode length is 500
+steps, discount factor γ = 0.99 and every episode starts with the agent being at
+the bottom of the valley with zero velocity, xstart = (−π/6, 0).
+Inverted pendulum: The next task is to swing up and stabilize a single-link
+inverted pendulum. As in mountain car, the motor does not provide enough
+torque to push the pendulum up in a single rotation. Instead, the pendulum
+needs to be swung back and forth to gather energy, before being pushed up and
+balanced. This creates a more diﬃcult, nonlinear control problem. The state
+space is 2-dimensional, θ ∈[−π, π] being the angle, ˙θ ∈[−10, 10] the angular
+velocity. Control force is discretized to a ∈{−5, −2.5, 0, +2.5, +5} and held
+constant for 0.2sec. Reward is deﬁned as r(x, a) := −0.1x2
+1 −0.01x2
+2 −0.01a2.
+The remaining experimental setup (equations of motion and domain speciﬁc
+constants) is the same as in [6]. The task is made episodic by resetting the system
+every 500 steps to the initial state xstart = (0, 0). Discount factor γ = 0.99.
+Bicycle: Next we consider the problem of balancing a bicycle that rides at a
+constant speed [8],[12]. The problem is 4-dimensional: state variables are the
+roll angle ω ∈[−12π/180, 12π/180], roll rate ˙ω ∈[−2π, 2π], angle of the handle
+bar α ∈[−80π/180, 80π/180], and the angular velocity ˙α ∈[−2π, 2π]. The ac-
+tion space is inherently 2-dimensional (displacement of rider from the vertical
+and turning the handlebar); in RL it is usually discretized into 5 actions. Our
+experimental setup so far is similar to [8]. To allow a more conclusive compar-
+ison of performance, instead of just being able to keep the bicycle from falling,
+we deﬁne a more discriminating reward r(x, a) = −x2
+1, and r(x, a) = −10 for
+|x1| < 12π/180 (bicycle has fallen). Learning is episodic: every episode starts in
+one of two (symmetric) states close to the boundary from where recovery is im-
+possible: xstart = (10π/180, 0, 0, 0) or xstart = (−10π/180, 0, 0, 0), and proceeds
+for 500 steps or until the bicycle has fallen. Discount factor γ = 0.98.
+
+Acrobot: Our ﬁnal problem is the acrobot swing-up task [19]. The goal is to
+swing up the tip of the lower link of an underactuated two-link robot over a
+given height (length of ﬁrst link). Since only the lower link is actuated, this is a
+rather challenging problem. The state space is 4-dimensional: θ1 ∈[−π, π], ˙θ1 ∈
+[−4π, 4π], θ2 ∈[−π, π], ˙θ2 ∈[−9π, 9π]. Possible actions are a ∈{−1, +1}. Our
+experimental setup and implementation of state transition dynamics is similar
+to [19]. The objective of learning is to reach a goal state as quickly as possible,
+thus r(x, a) = −1 for every step. The initial state for every episode is xstart =
+(0, 0, 0, 0). An episode ends if either a goal state is reached or 500 steps have
+passed. The discount factor was set to γ = 1, as in [19].
+4.2
+Results
+We now apply our algorithm GP-RMAX to each of the four problems. The
+granularity of the discretization Γh in the planner is chosen such that for the 2-
+dimensional problems, the loss in performance due to discretization is negligible.
+For the 4-dimensional problems, we ran oﬄine trials with the true transition
+function to ﬁnd the best compromise of granularity and computational eﬃciency.
+As result, we use a 100 × 100 grid for mountain car and inverted pendulum, a
+20 × 20 × 20 × 20 grid for the bicycle balancing task, and a 25 × 25 × 25 × 25
+grid for the acrobot. The maximum number of value iterations was set to 500,
+tolerance was < 10−2. In practice, running the full planning step took between
+0.1-10 seconds for the small problems, and less than 5 min for the large problems
+(where often more than 50% of the CPU time was spent on computing the GP
+predictions in all the nodes of the grid). Using the planning module oﬄine with
+the true transition function, we computed the best possible performance for each
+domain in advance. We obtained: mountain car (103 steps), inverted pendulum
+(-18.41 total cost), bicycle balancing (-3.49 total cost), and acrobot (64 steps).4
+For the GP-based model-learner, we set the maximum size of the subset to
+1000, and ICD tolerance to 10−2. The hyperparameters of the covariance were
+not manually tuned, but found from the data by likelihood optimiziation.
+Since it would be computationally too expensive to update the model and
+perform the full planning step after every single observation, we set the planning
+frequency K to 50 steps. To gauge if optimal behavior is reached and further
+learning becomes unnessecary, we monitor the change in the model predictions
+and uncertainties between successive updates and stop if both fall below a thresh-
+old (test points in a ﬁxed coarse grid).
+We consider the following variations of the base algorithm: (1) GP-RMAXexp,
+which actively explores by adjusting the Bellman updates in Eq. (7”) according
+to the uncertainties produced by the GP prediction; (2) GP-RMAXgrid, which
+does the same but uses binary uncertainty by overlaying a uniform grid on top
+of the state-action space and keeping track which cells are visited; and (3) GP-
+RMAXnoexp, which does not actively explore (see Eq. (7’)). For comparison,
+4 Note that 64 steps is not the optimal solution, [2] demonstrated swing-up with 61
+steps.
+
+we repeat the experiments using the standard online model-free RL algorithm
+Sarsa(λ) with tile coding [19], where we consider two diﬀerent setup of the tilings
+(one ﬁner and one coarser).
+Figure 3 shows the result of online learning with GP-RMAX and Sarsa. In
+short, the graphs show us two things in particular: (1) GP-RMAX learns very
+quickly; and (2) GP-RMAX learns a behavior that is very close to optimal. In
+comparison, Sarsa(λ) has a much higher sample complexity and does not always
+learn the optimal behavior (exception is the acrobot). While direct compari-
+son with other high performance RL algorithms, such as ﬁtted value iteration
+[18,8,15], policy iteration based LSPI/LSTD/LSPE [12,4,13,11], or other kernel-
+based methods [7,6] is diﬃcult, because they are either batch methods or handle
+exploration in a more ad-hoc way, from the respective results given in the litera-
+ture it is clear that for the domains we examined GP-RMAX performs relatively
+well.
+Examining the plots in more detail, we ﬁnd that, while GP-RMAXgrid
+is somewhat less sample eﬃcient (explores more), GP-RMAXexp and GP-
+RMAXnoexp perform nearly the same. Initially, this appears to be in contrast
+with the whole point of RMAX, which is eﬃcient exploration guided by the un-
+certainty of the predictions. Here, we believe that this behavior can be explained
+by the good generalization capabilities of GPs. Figure 4 illustrates model learn-
+ing and certainty propagation with GPs in the mountain car domain (predicting
+acceleration as function of state). The state of the model-learner is shown for
+two snapshots: after 40 transitions and after 120 transitions. The top row shows
+the value function that results from applying value iteration with the update
+modiﬁed for uncertainty, see Eq. (7”). The bottom row shows the observed sam-
+ples and the associated certainty of the predictions. As expected, certainty is
+high in regions where data was observed. However, due to the generalization
+of GPs and data-dependent hyperparameter selection, certainty is also high in
+unexplored regions; and in particular it is constant along the y-coordinate. To
+understand this, we have to look at the state transition function of the moun-
+tain car: acceleration of the car indeed only depends on the position, but not on
+velocity. This shows that certainty estimates of GPs are supervised and take the
+properties of the target function into account, whereas prior RMAX treatments
+of uncertainty are unsupervised and only consider the density of samples to de-
+cide if a state is “known”. For comparison, we also show what GP-RMAX with
+grid-based uncertainty would produce in the same situation.
+5
+Summary
+We presented an implementation of model-based online reinforcement learning
+similar to RMAX for continuous domains by combining GP-based model learn-
+ing and value iteration on a grid. Doing so, our algorithm separates the problem
+function approximation in the model-learner from the problem function approx-
+imation/interpolation in the planner. If the transition function is easier to learn,
+i.e., requires only few samples relative to the representation of the optimal value
+
+0
+5
+10
+15
+20
+100
+150
+200
+250
+300
+350
+400
+450
+500
+Episodes
+Steps to goal (lower is better)
+Mountain car (GP−RMAX)
+ 
+ 
+optimal
+GP−RMAX exp
+GP−RMAX noexp
+GP−RMAX grid5
+GP−RMAX grid10
+0
+200
+400
+600
+800
+1000
+100
+150
+200
+250
+300
+350
+400
+450
+500
+Episodes
+Steps to goal (lower is better)
+Mountain car (Sarsa)
+ 
+ 
+optimal
+Sarsa(λ) Tilecoding 10
+Sarsa(λ) Tilecoding 20
+0
+5
+10
+15
+20
+−600
+−500
+−400
+−300
+−200
+−100
+0
+Episodes
+Total reward (higher is better)
+Inverted pendulum (GP−RMAX)
+ 
+ 
+optimal
+GP−RMAX exp
+GP−RMAX noexp
+GP−RMAX grid5
+GP−RMAX grid10
+0
+100
+200
+300
+400
+500
+−450
+−400
+−350
+−300
+−250
+−200
+−150
+−100
+−50
+0
+Episodes
+Total reward (higher is better)
+Inverted pendulum (Sarsa)
+ 
+ 
+optimal
+Sarsa(λ) Tilecoding 10
+Sarsa(λ) Tilecoding 40
+0
+10
+20
+30
+40
+50
+−14
+−12
+−10
+−8
+−6
+−4
+−2
+Episodes
+Total reward (higher is better)
+Bicycle balancing (GP−RMAX)
+ 
+ 
+Bicycle not balanced
+optimal
+GP−RMAX exp
+GP−RMAX noexp
+GP−RMAX grid5
+0
+50
+100
+150
+200
+250
+−14
+−12
+−10
+−8
+−6
+−4
+−2
+Episodes
+Total reward (higher is better)
+Bicycle balancing (Sarsa)
+ 
+ 
+Bicycle not balanced
+optimal
+Sarsa(λ) Tilecoding 7
+Sarsa(λ) Tilecoding 10
+0
+20
+40
+60
+80
+100
+50
+100
+150
+200
+250
+300
+350
+400
+450
+500
+Episodes
+Steps to goal (lower is better)
+Acrobot (GP−RMAX)
+ 
+ 
+optimal**
+GP−RMAX exp
+GP−RMAX noexp
+GP−RMAX grid5
+0
+100
+200
+300
+400
+500
+50
+100
+150
+200
+250
+300
+350
+400
+450
+500
+Episodes
+Steps to goal (lower is better)
+Acrobot (Sarsa)
+ 
+ 
+optimal**
+Sarsa(λ) Tilecoding 7
+Sarsa(λ) Tilecoding 20
+Fig. 3. Learning curves of our algorithm GP-RMAX (left column) and the standard
+method Sarsa(λ) with tile coding (right column) in the four benchmark domains. Each
+curve shows the online learning performance and plots the total reward as a function of
+the episode (and thus sample complexity). The black horizontal line denotes the best
+possible performance computed oﬄine. Note the diﬀerent scale of the x-axis between
+GP-RMAX and Sarsa.
+
+−1
+−0.5
+0
+0.5
+−0.05
+0
+0.05
+0
+5
+10
+15
+20
+25
+(a) GP after 40 samples
+−1
+−0.5
+0
+0.5
+−0.05
+0
+0.05
+20
+40
+60
+80
+(b) GP after 120 samples
+−1
+−0.5
+0
+0.5
+−0.05
+0
+0.05
+0
+2
+4
+6
+8
+(c) Grid after 120 samples
+Fig. 4. Model-learning and propagation of “knownness” of state-action pairs with GPs.
+The top row shows the value function that results from applying value iteration with the
+update modiﬁed for uncertainty, see Eq. (7”). The bottom row shows the actual samples
+(red circles) and the induced uncertainty of all states: black is perfectly “known”, white
+is perfectly “unknown”. Panels (a) and (b) show that with GPs certainty of model
+predictions is rapidly propagated through the whole state space, leading to strong
+generalization and targeted exploration. This in turn allows the optimal value function
+to be learned from very few sample transitions: panel (b) shows that after only 120
+transitions (still in the middle of the very ﬁrst episode) the approximated value function
+already resembles the true one [19]. Panel (c) shows the same for a counter-based binary
+uncertainty; most of the grid cells are unvisited and the thus the approximate value
+function is zero in most parts of the state space.
+function, then large savings in sample-complexity can be gained. Related model-
+free methods, such as ﬁtted Q-iteration, can not take advantage of this situation.
+The fundamental limitation of our approach is that it relies on solving the Bell-
+man equation globally over the state space. Even with more advanced discretiza-
+tion methods, such as adaptive grids, or sparse grids, the curse of dimensionality
+limits the applicability to problems with low or moderate dimensionality. Other,
+more minor limitations, concern the simplifying assumptions we made: deter-
+ministic state transitions and known reward function. However, these are not
+conceptual limitations but rather simplifying assumptions made for the present
+paper; they could be easily addressed in future work.

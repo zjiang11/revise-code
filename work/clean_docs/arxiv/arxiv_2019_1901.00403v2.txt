@@ -1,0 +1,927 @@
+Can You Trust This Prediction?
+Auditing Pointwise Reliability After Learning
+Peter Schulam
+Suchi Saria
+Department of Computer Science
+Johns Hopkins University
+
+Department of Computer Science
+Johns Hopkins University
+
+Abstract
+To use machine learning in high stakes ap-
+plications (e.g. medicine), we need tools for
+building conﬁdence in the system and evaluat-
+ing whether it is reliable. Methods to improve
+model reliability often require new learning
+algorithms (e.g. using Bayesian inference to
+obtain uncertainty estimates). An alternative
+is to audit a model after it is trained. In this
+paper, we describe resampling uncertainty es-
+timation (RUE), an algorithm to audit the
+pointwise reliability of predictions. Intuitively,
+RUE estimates the amount that a prediction
+would change if the model had been ﬁt on
+diﬀerent training data. The algorithm uses
+the gradient and Hessian of the model’s loss
+function to create an ensemble of predictions.
+Experimentally, we show that RUE more ef-
+fectively detects inaccurate predictions than
+existing tools for auditing reliability subse-
+quent to training. We also show that RUE
+can create predictive distributions that are
+competitive with state-of-the-art methods like
+Monte Carlo dropout, probabilistic backprop-
+agation, and deep ensembles, but does not
+depend on speciﬁc algorithms at train-time
+like these methods do.
+1
+Introduction
+Machine learning is quickly becoming an important
+component of everyday software systems. This is due,
+in large part, to advances in tools that make it easy to
+express and train models. Using automatic diﬀerentia-
+tion software, a programmer can describe the “forward
+Proceedings of the 22nd International Conference on Ar-
+tiﬁcial Intelligence and Statistics (AISTATS) 2019, Naha,
+Okinawa, Japan. PMLR: Volume 89. Copyright 2019 by
+the author(s).
+pass” of a predictive model and then train the model
+using gradient-based methods without much additional
+eﬀort (e.g. Maclaurin et al. 2015; Abadi et al. 2016).
+As the barriers to building machine learning systems
+become lower, there is rising excitement around the
+idea of applying the technology in high-impact domains
+(e.g. Soleimani et al. 2018; Lipton et al. 2018).
+Tools for quickly building machine learning systems,
+however, have generally outpaced the growth and adop-
+tion of tools to understand whether they are reliable.
+The average error on heldout training data is a common
+measure of model performance, but is inadequate for
+ensuring model reliability. For instance, low average
+error on heldout training data does not give assurances
+under data set shift (see e.g. Quiñonero Candela et al.
+2009). A model with low average error can also still
+make large pointwise errors on individual predictions
+for some types of inputs (see e.g. Nushi et al. 2018).
+Reliability is commonly addressed during learning. In
+this paper, we focus on methods that improve reliability
+by preventing errors at test time (there are other ways
+to make a system reliable; Saria and Subbaswamy 2019).
+For instance, we can proactively account for data set
+shift by using learning algorithms that adjust for possi-
+ble causes of the diﬀerence between train and test dis-
+tributions (e.g. Schulam and Saria 2017; Subbaswamy
+and Saria 2018; Subbaswamy et al. 2019). To detect
+pointwise errors, we can use specialized learning algo-
+rithms that produce models equipped with uncertainty
+estimates of predictions (e.g. Gal and Ghahramani
+2016; Lakshminarayanan et al. 2017). More generally,
+we can build conﬁdence in a model by criticizing and
+reﬁning it (e.g. Blei 2014; Kim et al. 2016).
+In this paper, we consider the problem of improving
+model reliability after learning with tools that audit
+the predictions of a ﬁxed model. To perform the audit,
+we introduce the Resampling Uncertainty Estimation
+(RUE) algorithm to calculate an uncertainty score for
+each prediction at test time.
+RUE makes minimal
+assumptions about the structure of the model and how
+arXiv:1901.00403v2  [stat.ML]  28 Feb 2019
+
+Can You Trust This Prediction?
+it was learned. This makes RUE easy to use alongside
+the rich ecosystem of tools for training models (like
+automatic diﬀerentiation).
+The most common approach in machine learning to
+assessing uncertainty is using Bayesian methods (e.g.
+Graves 2011; Blundell et al. 2015; Gal and Ghahramani
+2016). This approach is tightly coupled to the model
+structure and the learning algorithm.
+As a result,
+Bayesian methods cannot be applied after learning as
+an auditing tool. Many non-Bayesian methods like
+the bootstrap (Efron and Tibshirani, 1986) or deep
+ensembles (Lakshminarayanan et al., 2017) also depend
+on speciﬁc train-time procedures, and so cannot be
+applied after learning either.
+There are several existing tools for improving model
+reliability after learning. For instance, Courrieu (1994)
+computes the convex hull of inputs in the training data
+and uses it to deﬁne a region wherein outcomes can be
+safely interpolated by a neural network. Bishop (1994)
+generalizes this idea by using density estimation to
+characterize regions where there are suﬃcient training
+samples to make reliable predictions. This approach
+can be further generalized using ideas from novelty
+detection where the aim is to characterize the support
+of a distribution without an explicit generative model
+(see e.g. Schölkopf et al. 2000). Another approach is to
+ﬁt a second model to errors made by the ﬁrst, which is
+related to stacked generalization (Wolpert, 1992).
+One limitation of many existing tools for improving
+model reliability after learning is that they rely on
+Euclidean distance, which often ignores model-speciﬁc
+structure. For example, the predictive model may use
+an internal representation wherein similar points (ac-
+cording to the internal representation) are in fact far
+away in Euclidean space. This is an issue especially
+for deep learning, where the empirical successes are
+thought to be due to rich internal representations of the
+data that are learned to reﬂect task-speciﬁc invariances
+(Bengio et al., 2013; Farabet et al., 2013). Characteriz-
+ing similarity among inputs for these models is diﬃcult
+because it is not clear how internal representations can
+be extracted (see e.g. Hinton et al. 2015; Mahendran
+and Vedaldi 2015).
+In Section 3.2, we show that RUE’s uncertainty score
+reﬂects two important criteria to judge whether a pre-
+diction is reliable: the density criterion and local ﬁt
+criterion (Leonard et al., 1992). The density criterion
+states that a prediction at input x is reliable if there
+are samples in the training data that are similar to x.
+The local ﬁt criterion states that a prediction at x is
+reliable if the model has small error on samples in the
+training data similar to x. These criteria hinge upon
+a deﬁnition of similarity, and we show that RUE im-
+plements these criteria using a model-dependent inner
+product to measure similarity.
+Contributions. We describe Resampling Uncertainty
+Estimation (RUE), an algorithm used to audit the
+pointwise reliability of predictions by computing an un-
+certainty score. To quantify uncertainty, the RUE algo-
+rithm uses the gradients and Hessian of the model’s loss
+on training data (Line 2 in Algorithm 1) and bootstrap
+samples (Line 7) to produce an ensemble of predictions
+for a test input (Lines 9-11). Intuitively, this estimates
+the amount that the prediction would change had the
+model been ﬁt on diﬀerent data sets drawn from the
+same distribution as the training data. This intuition
+has connections to the classical bootstrap (Efron and
+Tibshirani, 1986), and in Section 3.1 we show that
+RUE can be derived as an approximation to this pro-
+cedure that does not require ﬁtting multiple models.
+We also show that RUE implements the density and
+local ﬁt criteria using a model-dependent inner product
+as a measure of similarity. Experimentally, we show
+that RUE more eﬀectively detects inaccurate predic-
+tions than existing methods for improving reliability
+after learning. Moreover, we show that RUE’s uncer-
+tainty score can create predictive distributions that are
+well-calibrated and competitive with state-of-the-art in-
+tegrated methods (i.e. methods like Hernández-Lobato
+and Adams 2015; Gal and Ghahramani 2016; and Lak-
+shminarayanan et al. 2017) that estimate uncertainty
+during learning.
+2
+Related Work
+The dominant approach to modeling uncertainty in ma-
+chine learning is to use Bayesian inference. Gaussian
+processes are a ﬂexible class of Bayesian nonparametric
+priors over functions and provide a natural framework
+for reasoning about posterior predictive distributions at
+test time given training data (Rasmussen and Williams,
+2006). Bayesian neural networks are another important
+class of regression models, but have historically been
+much more challenging to work with given the non-
+linearities in the likelihood function. Early important
+work on this subject was done by Buntine and Weigend
+(1991) and by MacKay (1992), who proposed using a
+Laplace approximation to the posterior distribution in
+order to obtain posterior predictive distributions and
+estimates of the evidence (marginal probability of the
+data) for model selection. A key challenge with this
+technique is that it requires computing and inverting
+the Hessian with respect to the network parameters,
+which can be prohibitively expensive for larger neural
+networks. There has, however, been recent work in scal-
+able approximations to the Hessian for second-order
+optimization (e.g. Martens and Grosse 2015; Botev
+et al. 2017), which could make the Laplace approxima-
+tion to the posterior feasible (Ritter et al., 2018).
+
+Peter Schulam, Suchi Saria
+Eﬀorts to scale Bayesian inference to modern neu-
+ral networks have revolved around mean ﬁeld varia-
+tional approximations to the posterior distribution (e.g.
+Graves 2011; Blundell et al. 2015). There has also been
+work to apply expectation propagation to Bayesian
+neural networks (Hernández-Lobato and Adams, 2015;
+Hernández-Lobato et al., 2016).
+Dropout, a non-
+Bayesian technique for regularizing neural networks
+(Srivastava et al., 2014), was recently shown to ap-
+proximate a variational approximation of the posterior
+(Gal and Ghahramani, 2016), and the insight led to an
+approach for computing posterior predictive distribu-
+tions using a simple simulation algorithm that leverages
+existing software for ﬁtting neural networks that imple-
+ments dropout layers. There has also been recent work
+to scale MCMC for posterior inference by designing ap-
+proximate transition operators that trade oﬀbetween
+ﬁdelity to the desired stationary distribution and com-
+putational cost (e.g. Welling and Teh 2011; Ahn et al.
+2012). Although the Bayesian approach is conceptually
+appealing, it is diﬃcult to place meaningful priors on
+neural networks (see e.g. Buntine and Weigend 1991).
+Many authors have explored alternatives to Bayesian
+methods for modeling uncertainty in predictive mod-
+els.
+Early work by Leonard et al. (1992) explored
+heuristic scores that reﬂect the density and local ﬁt
+principles.
+Bishop (1994) proposes a technique for
+identifying “novel” inputs as a way to detect when a
+model is likely to be unreliable. Hooker (2004) pro-
+poses a tree-based density estimator for detecting novel
+inputs. More recently, Hendrycks and Gimpel (2016)
+proposed a simple heuristic using softmax outputs to
+detect misclassiﬁcations and out-of-distribution sam-
+ples for classiﬁcation problems. They also propose an
+“abnormality module” for detecting novel inputs that is
+similar in spirit to the validity index network proposed
+by Leonard et al. (1992). Guo et al. (2017) investigate
+whether softmax outputs are calibrated estimates of
+the conditional distribution p(y | x). They ﬁnd that
+the softmax probabilities are not calibrated in large
+neural networks and propose an approach related to
+Platt scaling (Platt, 1999) to address the issue. Ensem-
+bles can also be used to express uncertainties (Breiman,
+1996; Lakshminarayanan et al., 2017).
+The bootstrap (Efron and Tibshirani, 1986) is a classic
+approach to estimating uncertainty that uses Monte
+Carlo simulation to estimate the sampling distribution
+of arbitrary functions of a data set. It cannot be used
+after learning because we must ﬁt many models at
+train time rather than just one (this also makes it
+computationally expensive). We show that RUE is
+an approximation of the boostrap by building upon
+sensitivity analysis ideas pioneered by Cook (1986) that
+were recently extended to modern machine learning
+problems by Koh and Liang (2017) in order to shed light
+on a model’s provenance and improve interpretability.
+There are several other threads of research related to
+improving model reliability. One issue that in clas-
+siﬁcation problems is when the current set of labels
+that a model assigns to inputs is not exhaustive. If
+this occurs, a model that automatically identiﬁes and
+learns to classify new categories can make the system
+more robust (e.g. Bendale and Boult 2016; Liu et al.
+2018). It is also useful for a machine learning system
+to implement a policy for rejecting an input due to
+uncertainty. Such a policy can be easy to implement if
+the model outputs well-calibrated probability distribu-
+tions (e.g. Chow 1970), but models can also be trained
+to directly minimize a risk function incorporating the
+reject option (e.g. Herbei and Wegkamp 2006; Bartlett
+and Wegkamp 2008; Grandvalet et al. 2009).
+3
+Resampling Uncertainty Estimation
+We assume the classical supervised learning setup. Let
+(x, y) denote an input-output pair, where x lies in
+X ⊆Rp and y lies in Y ⊆R. Our learning algorithm
+is given n training examples D ≜{(xi, yi)}n
+i=1, which
+we assume are drawn iid from an unknown distribution
+P. Let H denote a hypothesis space with members f
+indexed by a vector of parameters θ ∈Rd. We assume
+that our algorithm learns by minimizing an objective
+JD(θ) ≜
+n
+X
+i=1
+ℓ(yi, f(xi, θ)) + R(θ),
+(1)
+where ℓis a loss function and R(θ) is a regularizer.
+To apply RUE, we assume that we have access to
+(1) the matrix L ∈Rd×n where each column i con-
+tains the gradient ∇θℓ(yi, f(xi, ˆθ) and (2) the Hes-
+sian H = ∇2
+θJD(ˆθ), where ˆθ is the parameter vector
+returned by the learning algorithm. RUE does not
+depend on assumptions about how the solution ˆθ is
+obtained. Moreover, we do not assume that ˆθ is a local
+or global minimum.
+Algorithm 1 shows the full steps used to compute un-
+certainty estimates using RUE for a set of m test points
+{xj}m
+j=1. Note that RUE must invert the Hessian H,
+but because we do not assume anything about the con-
+vergence of the learning algorithm to a local minimum
+of Equation 1, there is no guarantee that H is positive
+deﬁnite. As in Koh and Liang (2017), we can add a
+dampening term λI to make the Hessian invertible,
+which is equivalent to adding L2 regularization to the
+learning objective. We denote this adjusted Hessian
+using ˜H ≜H + λI, and discuss a strategy to select λ
+in the experiments section below.
+
+Can You Trust This Prediction?
+Algorithm 1 Resampling Uncertainty Estimation
+Require: num. training samples n, ensemble size b,
+Hessian of loss H ∈Rd×d, loss gradient matrix
+L ∈Rd×n, test cases {xj}m
+j=1, dampen term λ.
+1: ˜H ←H + λ ∗Eye(d)
+2: A ←˜H−1L
+3: w0 ←Ones(n)
+4: p0 ←w0/n
+5: ˆY ←Zeros(b, m)
+6: for i = 1 to b do
+7:
+wi ∼Multinomial(n, p0)
+8:
+θ∗
+i ←ˆθ −A(wi −w0)
+9:
+for j = 1 to m do
+10:
+ˆY [i, j] ←Predict(θ∗
+i , xj)
+11:
+end for
+12: end for
+13: return ColumnWiseVariance( ˆY )
+3.1
+RUE as Approximation to the Bootstrap
+In this section, we connect RUE to Efron’s bootstrap
+procedure. The bootstrap approximates the sampling
+distribution of an estimate by repeatedly simulating
+bootstrap samples, which are new data sets of size n
+created by sampling with replacement from the uniform
+distribution over the original data set. To bootstrap
+a supervised learning algorithm, one would need to
+sample b bootstrap datasets and run the learning pro-
+cedure from scratch each time. When learning on the
+original sample, let ˆθ denote the learned parameters
+that satisfy
+∇JD(ˆθ) =
+n
+X
+i=1
+∇θℓi(ˆθ) + ∇θR(ˆθ) = C
+(2)
+for some constant C, where we have used ℓi(ˆθ) as short-
+hand for ℓ(yi, f(xi, ˆθ)). Let wi denote a multiplicative
+weight for the ith training sample in the objective func-
+tion. When wi = 1 for all i, then the objective can be
+rewritten to depend on the weights
+JD(θ; w) =
+n
+X
+i=1
+wiℓi(θ) + R(θ).
+(3)
+The bootstrap is equivalent to choosing new weights wi
+that count the number of times a particular example
+is included in the bootstrap sample and then reﬁtting
+the objective. Considering our objective function as a
+function of both the model parameters θ and sample
+weights w0 ≜{wi}, the following equality holds at the
+solution ˆθ:
+∇θJD(ˆθ; w0) ≜KD(ˆθ; w0) = Lw0 + ∇θR(ˆθ) = C. (4)
+As a reminder, L ∈Rd×n is a matrix where the ith
+column is the gradient of the loss of the ith sample
+∇θℓi(ˆθ), and w0 ∈Rn is a vector of ones.
+If we assume that KD(ˆθ; w0) is smooth in θ (this
+amounts to assuming that the loss and regularizer are
+twice continuously diﬀerentiable), we can use the im-
+plicit function theorem to conclude that there exists
+a local function such that φ(w0) = ˆθ. In other words,
+there is a map from the sample weights to learned
+model parameters.
+If we knew this map, then the
+bootstrap procedure would be straightforward: sam-
+ple new weights w∗and map them to the parameters
+φ(w∗) = θ∗. Our approach approximates this function
+using a ﬁrst-order Taylor expansion around ˆθ, which
+means we can estimate the parameters we would obtain
+with a bootstrap sample w∗as
+θ∗≈ˆθ + ∂φ
+∂w
+
+w0
+(w∗−w0) = ˆθ −H−1L(w∗−w0), (5)
+where the equality above also follows from the implicit
+function theorem (recall that H is the Hessian of the
+objective JD evaluated at ˆθ). The Jacobian of φ can
+be computed once (this is the matrix A in Algorithm
+1), then sampling θ∗only requires drawing new weights
+w∗and a matrix multiplication. To approximate the
+sampling distribution of the model’s prediction at a
+new point x∗, we compute the predictions made by a
+collection of models with parameters {θ∗
+i }b
+i=1.
+3.2
+Density and Local Fit Criteria
+RUE outputs uncertainty scores ˆσRUE(x) by computing
+the standard deviation of predictions sampled within
+the loop on lines 6-12 in Algorithm 1. In this section,
+we argue that these uncertainty scores check both the
+density and local ﬁt criteria. Moreover, we show that
+RUE uses a model-dependent similarity measure. For
+this analysis, we will assume that the loss ℓis the
+negative log likelihood of an exponential family:
+ℓ(yi, f) = −log h(yi) −t(yi)f + a(f),
+(6)
+where h(yi) is the base measure of the exponential fam-
+ily, t(yi) is the natural suﬃcient statistic, the predicted
+value f is the natural parameter, and a(f) is the log
+normalizing constant. Our argument rests upon the
+following claim.
+Claim 1. As the number of training samples n grows,
+we can approximate ˆσ2
+RUE(x) as
+ˆσ2
+RUE(x) ≈
+n
+X
+i=1
+r2
+i kRUE(x, xi),
+(7)
+where ri = E[t(yi) | f] −t(yi) and kRUE is a positive
+deﬁnite kernel function with deﬁnition
+kRUE(x1, x2) =
+h
+∇⊤
+θ f(x1, ˆθ) ˜H−1∇θf(x2, ˆθ)
+i2
+.
+(8)
+
+Peter Schulam, Suchi Saria
+y = β1(1 −e−β2x) + ✏
+(a)
+(b)
+(c)
+ˆσ2(·)
+Figure 1: Simulated data demonstrating the model-dependent density and local ﬁt principles for Resampling
+Uncertainty Estimation (RUE).
+Proof. Let θ∗denote a parameter vector resampled
+according to lines 7-8 in Algorithm 1, then
+ˆσ2
+RUE(x) = V[f(x, θ∗)]
+(9)
+≈V[f(x, ˆθ) + ∇⊤
+θ f(x, ˆθ)(θ∗−ˆθ)]
+(10)
+= ∇⊤
+θ f(x, ˆθ)V[θ∗]∇⊤
+θ f(x, ˆθ)
+(11)
+To compute the variance of θ∗, recall that θ∗=
+ˆθ −˜H−1L(w −w0), where w ∼Multinomial(n, p0),
+p0 ∈Rn with all entries n−1, and w0 ∈Rn is a vector
+of ones. The covariance matrix is therefore V[θ∗] =
+˜H−1LV[w]L⊤˜H−1. Because w is a multinomial ran-
+dom variable, its covariance matrix is n/n−1 along the di-
+agonal, and −1/n on the oﬀdiagonal. Therefore, as the
+number of samples n →∞we have V[w] →I, where I
+is the identity matrix. Now, recall that L ∈Rd×n is a
+matrix where column i contains ∇θℓ(yi, f(xi, ˆθ). Using
+the chain rule, we can write L = GR, where G ∈Rd×n
+is a matrix where column i contains ∇θf(xi, ˆθ) and
+R ∈Rn×n is a diagonal matrix where the ith diagonal
+is ri ≜∇fℓ(yi, f(xi, ˆθ) = E[t(yi) | f] −t(yi).1 As n
+gets large, we have
+ˆσ2
+RUE(x) ≈∇⊤
+θ f(x, ˆθ) ˜H−1LL⊤˜H−1∇θf(x, ˆθ)
+= ∇⊤
+θ f(x, ˆθ) ˜H−1GR2G⊤˜H−1∇θf(x, ˆθ).
+Deﬁnine the kernel as in 8 and write the matrix expres-
+sion as a sum of scalars to complete the argument.
+Note that the approximation of ˆσ2
+RUE(x) resembles a
+kernel smoothing estimate of the exponential family
+residual at a test input x. Interpeting the kernel func-
+tion kRUE(x, xi) as a measure of similarity between
+the test point x and training point xi, we can see that
+ˆσRUE(x) reﬂects the local ﬁt criterion. In other words,
+the uncertainty score will be smaller (larger) if the
+model’s predictions have small (large) errors on the
+training samples that are similar to x.
+We can also use Equations 7 and 8 to show that RUE
+implements the density criterion. Let N(x) denote
+1The last equality follows from ∇fa(f) = E[t(y) | f]
+the set of inﬂuential neighbors of x; i.e. those with
+the highest similarity that contribute most to the un-
+certainty score ˆσRUE(x). In Equation 8, we see that
+the similarity kRUE(x, xi) depends on the gradients
+∇θf(x, ˆθ) and ∇θf(xi, ˆθ), but also on the dampened
+Hessian ˜H ≜H + λI. In particular, we see that the
+gradients will be projected into the space spanned by
+the eigenvectors of ˜H, and then scaled by the corre-
+sponding inverse eigenvalues. The eigenvectors with
+largest eigenvalues will point in directions with high
+curvature, implying that the training data strongly
+determine the model parameters along that direction.
+We see that ˆσRUE(x) will be smaller if x’s gradient and
+those of its neighbors N(x) lie along a direction with
+high curvature. If we consider curvature to be a proxy
+for density, then we see that RUE also implements a
+form of the density criterion.
+Finally, we note that the similarity metric kRUE(x, xi)
+depends on both the structure of the model and the
+learned parameter values ˆθ through the gradient and
+Hessian. We therefore see that RUE uses a measure of
+similarity that is model-dependent for both the local ﬁt
+and density criteria, which is a distinguishing feature
+among tools for improving reliability after learning.
+3.2.1
+Simulated Data Illustration
+To make the connection between RUE and the density
+and local ﬁt criteria concrete, we use a small simu-
+lated data set shown in Figure 1. We consider a 1-
+dimensional nonlinear regression problem, where the
+mean function is shown in Figure 1a (grey line) and
+is deﬁned as E[y | x] = β1(1 −exp−β2x). The data
+are normally distributed around the mean and are
+shown as points in the same panel. In Figure 1b, we
+plot the directions of the gradient of the likelihood
+∇θℓ(yi, f(xi, ˆθ)) evaluated at the MLE for each of the
+training samples projected on to the eigenvectors of
+the Hessian. The grey contours show the shape of the
+quadratic deﬁned by the Hessian in this rotated space.
+The colors of the points in Figure 1a and of the direc-
+tions in Figure 1b show the correspondence between
+training samples and their gradients. We highlight two
+
+Can You Trust This Prediction?
+observations about panel (b). First, the points whose
+gradient vectors lie along similar directions are not nec-
+essarily close on the x-axis in panel (a). The blue and
+tan points, for example, have similar gradient vectors
+but the tan points are closer to the red than to the
+blue points in panel (a). Second, the gradient vectors
+lie along directions with high curvature (i.e. moving
+left to right in panel (b)), suggesting that curvature
+does indeed reﬂect the density principle in this space.
+Finally, in Figure 1c we show how the model-dependent
+kernel and error terms r2
+i are smoothed to produce an
+uncertainty estimate. Each summand in Equation 7
+is an error r2
+i weighted by a basis function kRUE(·, xi).
+Panel (c) plots these basis functions for three samples
+from the training data (colored curves, location of train-
+ing sample is indicated by colored tick at the top of
+the plot) and also shows the uncertainty score ˆσ2
+RUE(·)
+as a function of x (dotted curve). Higher values of the
+basis functions reﬂect points for which the associated
+training sample is considered relevant.
+3.2.2
+Related Uncertainty Scores
+Laplace approximation.
+As a point of compari-
+son, the variance of θ under the Laplace approxima-
+tion to the posterior is V[θ] = [∇2
+θJD(ˆθ)]−1 = H−1.
+If we linearize the model at ˆθ we can approximate
+the posterior predictive variance at a test point x as
+ˆσ2
+Laplace(x) ≈∇⊤
+θ f(x, ˆθ) ˜H−1∇θf(x, ˆθ). We see that
+the Laplace approximation measures uncertainty using
+the norm of the test point according to a model-speciﬁc
+inner product. The score is small when the gradient of
+the input points in a direction of high curvature, and
+so reﬂects the density criteria, but not local ﬁt.
+Sandwich covariance estimator.
+RUE has con-
+nections to robust statistics. When the learning objec-
+tive is the log likelihood of independent samples, the
+negative Hessian of the objective is known as the Fisher
+information matrix, and it is often used to approximate
+the covariance matrix under the sampling distribution
+of a maximum likelihood estimator (Tibshirani, 1996).
+In likelihood theory, an alternative estimator of the
+covariance matrix of the parameters that is robust to
+model misspeciﬁcation is the sandwich covariance esti-
+mator (Kent, 1982), which is g⊤(x)H−1LL⊤H−1g(x).
+Recall that we arrived at a similar expression in Equa-
+tion 7 by letting n →∞. This draws a connection be-
+tween RUE and robust statistics (Huber and Ronchetti,
+2009). In our experiments, we ﬁnd that RUE outper-
+forms the Laplace approximation and these connections
+to robust statistics may help to develop theory that
+explains this observation.
+3.2.3
+Scalability
+One concern with RUE is that it may be too compu-
+tationally demanding to use in practice. In particular,
+the algorithm requires us to store the Hessian (requir-
+ing O(d2) space), invert the Hessian (requiring O(d3)
+operations), and store all gradients of the training data
+(requiring O(nd) space). We address the issue related to
+storing all gradients of the training data by noting that
+it may be possible to retain only a small fraction of the
+original data set and still obtain high quality reliability
+scores. Note that in step 8 of Algorithm 1, we sample a
+parameter using the update θ∗
+i ←ˆθ−A(wi−w0), where
+A = ˜H−1L. This sampling step is a Newton-Raphson
+update using a resampled data set. Just as there are
+diminishing returns in terms of accuracy when comput-
+ing stochastic gradient updates with larger minibatches
+(Bousquet and Bottou), there may be a similar rela-
+tionship between the amount of training data retained
+and the quality of the reliability scores computed using
+RUE. In our experiments, we consider smaller data sets
+and so leave this extension for future work.
+To address storage and computation issues related to
+the Hessian, we note that we do not need to explic-
+itly store the Hessian so long as we have access to the
+model code and can run backwards-mode automatic
+diﬀerentiation, which allows us to eﬃciently compute
+Hessian-vector products (Pearlmutter, 1994). More-
+over, we can perform the required inversion approxi-
+mately using conjugate gradients (which only requires
+Hessian-vector products), or can use more sophisti-
+cated techniques discussed by Koh and Liang (2017).
+Alternatively, we could use recently developed approxi-
+mations to the Hessian such as K-FAC (Martens and
+Grosse, 2015). We leave exploration and evaluation of
+these approximations for future work.
+4
+Experiments
+Overview. We ﬁrst evaluate RUE on an auditing task
+where the goal is to detect when model predictions
+will be wrong. We compare to existing methods for
+improving reliability after learning, and show that RUE
+generally outperforms them. Next, we show that RUE
+can create predictive distributions over outputs that are
+competitive with state-of-the-art integrated methods
+that rely on particular algorithms at train time (e.g.
+Bayesian inference).
+4.1
+Error Detection
+In our ﬁrst experiment, we compare how well RUE and
+three baseline methods for improving reliability after
+learning are able to detect when a model’s prediction
+will be far from the true value. The ﬁrst alternative is
+the Laplace approximation (MacKay, 1992), which uses
+the curvature of the learning objective as the precision
+matrix of a multivariate normal over the model param-
+eters. We draw samples from this multivariate normal
+distribution and compute an ensemble of predictions
+to obtain a predictive distribution. The second base-
+
+Peter Schulam, Suchi Saria
+Housing
+Concrete
+Energy
+Kin8nm
+Naval
+Power
+Wine
+Yacht
+Error Threshold
+Area Under the ROC Curve
+RUE
+Laplace
+KDE
+Bootstrap SGD
+Figure 2: Comparison of uncertainty scores across eight benchmark regression data sets. Each ﬁgure plots area
+under the ROC curve as a function of the error threshold used to deﬁne correct and incorrect predictions (curves
+that grow higher and faster from left to right are better).
+line uses a kernel density estimator (KDE) to estimate
+the marginal distribution over inputs in the training
+sample. The uncertainty score of a test prediction is
+the negative density of the input; test cases that have
+higher density lie closer to the training data in Eu-
+clidean space and so should be more certain according
+to the density principle. We use an isotropic Gaussian
+kernel for the KDE, which depends on a single band-
+width parameter that we estimate using 5-fold cross
+validation on the training data. Finally, we compare to
+a method similar to RUE but that uses only ﬁrst-order
+rather than second-order information. This baseline
+computes an ensemble as in Algorithm 1 but on Line 8
+the new parameter θ∗
+i is set to θ −ηLwi, which is the
+parameter vector obtained by taking a single gradient
+step using a bootstrapped sample with step size η. We
+use the step size η = 0.001, which is the base learning
+rate during training (more information is in paragraph
+Model below). We refer to this baseline as Bootstrap
+SGD. Both RUE and the Laplace approximation must
+invert the Hessian. To choose a dampening factor λ, we
+compute the eigenvalues of H using LAPACK’s syevd
+routine and choose λ so that the smallest eigenvalue of
+˜H is at least one.
+Data.
+We run our experiments on eight common
+benchmark regression data sets (e.g. Hernández-Lobato
+and Adams 2015; Gal and Ghahramani 2016; Laksh-
+minarayanan et al. 2017). The data sets we use are:
+Boston housing, concrete compression strength, energy
+eﬃciency, robot arm kinematics, naval propulsion, com-
+bined cycle power plant, red wine quality, and yacht
+hydrodynamics.2 For each data set, we sample twenty
+2These
+data
+sets
+are
+all
+available
+from
+https://archive.ics.uci.edu/ml/index.php
+train-test splits. For the smaller data sets (housing,
+concrete, energy, and yacht), we sample 90% of the
+points for training. The remaining data sets are larger
+and so we use smaller percentages of the data set for
+each training split in order to simulate a small data
+regime, where uncertainty scores are most useful. For
+the larger data sets we sample approximately 600 train-
+ing points per split and test on the remaining points.
+Model.
+To control for model structure, learning ob-
+jective, and optimization algorithm across all data sets
+and uncertainty estimation algorithms, we ﬁx a single
+feedforward neural network architecture with a single
+hidden layer comprised of 50 hidden units, softplus
+nonlinearities, and L2 loss. We regularize with weight
+decay and set the penalty α = 1. Moreover, we use a
+single set of learning hyperparameters: we learn for a
+total of 500 epochs with 128 samples per minibatch,
+and use the default settings (b1 = 0.9, b2 = 0.999) of
+Adam (Kingma and Ba, 2015) with a ﬁxed learning
+rate of 0.001. We ﬁt a single model for each split of
+each data set, and compute uncertainty scores for the
+predictions made by that model on the test set using
+the four alternative uncertainty score methods (RUE,
+Laplace, KDE, and Bootstrap SGD).
+Evaluation.
+Let y ∈R denote the true output for
+input x and let ˆy ∈R be the model’s prediction. For a
+given error tolerance τ, our goal is to use uncertainty
+scores to detect whether the prediction will be correct
+(|y −ˆy| ≤τ) or incorrect (|y −ˆy| > τ). We use the
+area under the ROC curve (AUC) to evaluate each un-
+certainty score’s ability to detect incorrect predictions
+across all test splits for a given data set. Figure 2 shows
+AUC as a function of error tolerance τ for each data
+set and for each uncertainty score. We sweep across
+
+Can You Trust This Prediction?
+Table 1: Negative log likelihoods for integrated and after-learning methods. Details are in Section 4.2
+.
+Integrated Methods
+Subsequent-to-Training Methods
+Data Set
+PBP
+MCDropout
+Deep Ensembles
+RUE
+Laplace
+Bootstrap SGD
+Housing
+2.57 (0.09)
+2.46 (0.25)
+2.39 (0.25)
+2.54 (0.06)
+4.12 (0.01)
+2.55 (0.04)
+Concrete
+3.16 (0.02)
+3.04 (0.09)
+3.05 (0.15)
+3.36 (0.02)
+4.09 (0.01)
+3.40 (0.01)
+Energy
+2.04 (0.02)
+1.99 (0.09)
+1.40 (0.17)
+2.27 (0.02)
+3.66 (0.01)
+2.32 (0.01)
+Kin8nm
+-0.90 (0.01)
+-0.95 (0.03)
+-1.19 (0.02)
+-0.34 (0.00)
+0.11 (0.00)
+-0.32 (0.00)
+Naval
+-3.73 (0.01)
+-3.80 (0.05)
+-4.17 (0.05)
+-3.33 (0.00)
+-2.74 (0.00)
+-3.01 (0.00)
+Power
+2.84 (0.01)
+2.80 (0.05)
+2.78 (0.04)
+2.88 (0.00)
+4.51 (0.00)
+2.90 (0.00)
+Wine
+0.97 (0.01)
+0.93 (0.06)
+0.93 (0.12)
+1.01 (0.00)
+1.47 (0.00)
+1.01 (0.00)
+Yacht
+1.63 (0.02)
+1.55 (0.12)
+1.18 (0.19)
+3.02 (0.05)
+3.88 (0.01)
+2.99 (0.04)
+thresholds between the 5th and 95th percentiles of the
+empirical distribution over absolute errors.
+Results.
+RUE is better at detecting errors than
+Laplace, KDE, and Bootstrap SGD for most data sets
+and most error tolerances. Note that the range of AUC
+scores varies widely across data sets. For instance, the
+RUE scores are able to discriminate well across all
+thresholds in the energy data set. The power data set,
+however, is challenging; all AUCs are < 0.56.
+4.2
+RUE Predictive Distributions
+Existing methods for quantifying uncertainty output
+probabilities. Although the methods we compare to in
+the ﬁrst experiments above do not output probability
+distributions, there is a natural way to create one for the
+methods that use ensembles of model predictions (RUE,
+Laplace, and Bootstrap SGD). When the observation
+noise is additive—that is, y = f(x) + ϵ—the posterior
+variance of a prediction at input x for a Bayesian model
+is the posterior variance of f(x) plus the variance of
+the observation noise ϵ. For the ensemble methods,
+the uncertainty scores can be seen as approximations
+of the variance of f(x), which we denote using ˆσ2(x).
+We can also estimate the variance of ϵ using the resid-
+uals on the training data, which we denote using ˆν2.
+A natural predictive distribution is a Gaussian cen-
+tered at the prediction f(x) under the learned model
+parameters ˆθ with variance ˆσ2(x)+ ˆν2. We use this pre-
+dictive distribution to compute negative log likelihoods
+(NLL) and compare the methods used after learning to
+state-of-the-art alternatives that estimate uncertainty
+during training using specialized objectives (Gal and
+Ghahramani 2016; Hernández-Lobato and Adams 2015;
+Lakshminarayanan et al. 2017), which we refer to as
+integrated methods.
+Table 1 shows the results of this experiment. The neg-
+ative log likelihoods for the integrated methods are the
+results reported in Table 1 of Lakshminarayanan et al.
+(2017). We ﬁnd that RUE has better NLL than Laplace
+and Bootstrap SGD on all but two data sets. The im-
+provements over Bootstrap SGD, however, are small,
+but recall that RUE generally outperformed Bootstrap
+SGD in the detection experiments shown in Figure 2.
+We also compare RUE to three integrated methods:
+Probabilistic Backpropagation (Hernández-Lobato and
+Adams, 2015), Monte Carlo Dropout (Gal and Ghahra-
+mani, 2016), and Deep Ensembles (Lakshminarayanan
+et al., 2017). We ﬁnd that RUE is competitive with
+these methods (e.g., on Housing, Power and Wine),
+but does not outperform them. We are not surprised
+by this result because integrated methods jointly ﬁt
+predictions and uncertainty using a specialized objec-
+tive. Furthermore, we suspect that RUE’s negative log
+likelihood would be further improved if the learning
+rates and regularization weights were tuned using cross
+validation for each data set (these choices were ﬁxed
+upfront at a single setting for all data sets in order to
+control for eﬀects of learning algorithms).
+5
+Conclusion
+We introduced RUE, an algorithm that audits a model
+by estimating the uncertainty of predictions without
+changing the learning algorithm. This makes it easy
+to use RUE alongside the rich ecosystem of existing
+tools for training machine learning models (e.g. auto-
+matic diﬀerentiation libraries). This is in contrast to
+methods like Bayesian inference that depend on spe-
+ciﬁc learning algorithms to estimate uncertainty. By
+making it easier to estimate uncertainty, we suspect
+that after-learning auditing methods like RUE will help
+to increase the adoption of machine learning in high-
+stakes domains such as medicine. We evaluated RUE
+on an error detection task, and showed that it out-
+performs existing tools for improving model reliability
+after learning. Moreover, we showed that RUE gener-
+ates predictive distributions that are competitive with
+state-of-the-art integrated methods that use special-
+ized training algorithms to quantify uncertainty (e.g.
+Bayesian inference). We also showed that RUE’s un-
+certainty score reﬂects the density and local ﬁt criteria
+using a model-dependent similarity measure. In future
+work we can deﬁne new audits by leveraging diﬀer-
+ent principles. For instance, methods for interpreting
+model predictions (e.g. Ribeiro et al. 2016) or perform-
+ing sensitivity analyses (e.g. Koh and Liang 2017) after
+learning may inspire new criteria for reliability that
+could be integrated into diﬀerent auditing tools.
+
+Peter Schulam, Suchi Saria

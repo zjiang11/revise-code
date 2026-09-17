@@ -1,0 +1,911 @@
+Published as a conference paper at ICLR 2020
+META REINFORCEMENT LEARNING WITH
+AUTONOMOUS INFERENCE OF SUBTASK DEPENDENCIES
+Sungryull Sohn1
+Hyunjae Woo1
+Jongwook Choi1
+Honglak Lee2,1
+1University of Michigan
+2Google Brain
+
+ABSTRACT
+We propose and address a novel few-shot RL problem, where a task is characterized
+by a subtask graph which describes a set of subtasks and their dependencies that
+are unknown to the agent. The agent needs to quickly adapt to the task over few
+episodes during adaptation phase to maximize the return in the test phase. Instead
+of directly learning a meta-policy, we develop a Meta-learner with Subtask Graph
+Inference (MSGI), which infers the latent parameter of the task by interacting with
+the environment and maximizes the return given the latent parameter. To facilitate
+learning, we adopt an intrinsic reward inspired by upper conﬁdence bound (UCB)
+that encourages efﬁcient exploration. Our experiment results on two grid-world
+domains and StarCraft II environments show that the proposed method is able
+to accurately infer the latent task parameter, and to adapt more efﬁciently than
+existing meta RL and hierarchical RL methods 1.
+1
+INTRODUCTION
+Recently, reinforcement learning (RL) systems have achieved super-human performance on many
+complex tasks (Mnih et al., 2015; Silver et al., 2016; Van Seijen et al., 2017). However, these works
+mostly have been focused on a single known task where the agent can be trained for a long time (e.g.,
+Silver et al. (2016)). We argue that agent should be able to solve multiple tasks with varying sources
+of reward. Recent work in multi-task RL has attempted to address this; however, they focused on
+the setting where the structure of task are explicitly described with natural language instructions (Oh
+et al., 2017; Andreas et al., 2017; Yu et al., 2017; Chaplot et al., 2018), programs (Denil et al., 2017),
+or graph structures (Sohn et al., 2018). However, such task descriptions may not readily be available.
+A more ﬂexible solution is to have the agents infer the task by interacting with the environment.
+Recent work in Meta RL (Hochreiter et al., 2001; Duan et al., 2016; Wang et al., 2016; Finn et al.,
+2017) (especially in few-shot learning settings) has attempted to have the agents implicitly infer tasks
+and quickly adapt to them. However, they have focused on relatively simple tasks with a single goal
+(e.g., multi-armed bandit, locomotion, navigation, etc.).
+We argue that real-world tasks often have a hierarchical structure and multiple goals, which require
+long horizon planning or reasoning ability (Erol, 1996; Xu et al., 2017; Ghazanfari & Taylor, 2017;
+Sohn et al., 2018). Take, for example, the task of making a breakfast in Figure 1. A meal can be
+served with different dishes and drinks (e.g., boiled egg and coffee), where each could be considered
+as a subtask. These can then be further decomposed into smaller substask until some base subtask
+(e.g., pickup egg) is reached. Each subtask can provide the agent with reward; if only few subtasks
+provide reward, this is considered a sparse reward problem. When the subtask dependencies are
+complex and reward is sparse, learning an optimal policy can require a large number of interactions
+with the environment. This is the problem scope we focus on in this work: learning to quickly infer
+and adapt to varying hierarchical tasks with multiple goals and complex subtask dependencies.
+To this end, we formulate and tackle a new few-shot RL problem called subtask graph inference
+problem, where the task is deﬁned as a factored MDP (Boutilier et al., 1995; Jonsson & Barto, 2006)
+with hierarchical structure represented by subtask graph (Sohn et al., 2018) where the task is not
+known a priori. The task consists of multiple subtasks, where each subtask gives reward when
+completed (see Figure 1). The complex dependencies between subtasks (i.e., preconditions) enforce
+agent to execute all the required subtasks before it can execute a certain subtask. Intuitively, the
+1The demo videos and the code are available at https://bit.ly/msgi-videos and
+https://github.com/srsohn/msgi.
+1
+arXiv:2001.00248v2  [cs.LG]  14 Apr 2020
+
+Published as a conference paper at ICLR 2020
+Put
+in
+Pickup
+Use
+ = 1
+...
+Pickup
+Pickup
+Boil
+Put
+in
+Put
+in
+ = 2
+Adaptation (exploration)
+Test (exploitation)
+Inferred subtask graph
+...
+Put
+in
+Pickup
+Subtask Graph Inference
+g
+1
+1
+g
+′
+...
+Use
+Pickup
+Pickup
+Put
+in
+Update
+: Precondition
+: Subtask
+Figure 1: Overview of our method in the context of prepare breakfast task. This task can be broken down into
+subtasks (e.g., pickup mug) that composes the underlying subtask graph G. (Left) To learn about the unknown
+task, the agent collects trajectories over K episodes through a parameterized adaptation policy πadapt
+θ
+that learns
+to explore the environment. (Center) With each new trajectory, the agent attempts to infer the task’s underlying
+ground-truth subtask graph G with bG. (Right) A separate test policy πtest
+b
+G uses the inferred subtask graph bG to
+produce a trajectory that attempts to maximize the agent’s reward P rt (e.g., the green trajectory that achieves
+the boil egg subtask). The more precise bG, the more reward the agent would receive, which implicitly improves
+the adaptation policy πadapt
+θ
+to better explore the environment and therefore better infer bG in return.
+agent can efﬁciently solve the task by leveraging the inductive bias of underlying task structure
+(Section 2.2).
+Inspired by the recent works on multi-task and few-shot RL, we propose a meta reinforcement
+learning approach that explicitly infers the latent structure of the task (e.g., subtask graph). The agent
+learns its adaptation policy to collect as much information about the environment as possible in order
+to rapidly and accurately infer the unknown task structure. After that, the agent’s test policy is a
+contextual policy that takes the inferred subtask graph as an input and maximizes the expected return
+(See Figure 1). We leverage inductive logic programming (ILP) technique to derive an efﬁcient task
+inference method based on the principle of maximum likelihood. To facilitate learning, we adopt an
+intrinsic reward inspired by upper conﬁdence bound (UCB) that encourages efﬁcient exploration. We
+evaluate our approach on various environments ranging from simple grid-world (Sohn et al., 2018) to
+StarCraft II (Vinyals et al., 2017). In all cases, our method can accurately infer the latent subtask
+graph structure, and adapt more efﬁciently to unseen tasks than the baselines.
+The contribution of this work can be summarized as follows:
+• We propose a new meta-RL problem with more general and richer form of tasks compared to the
+recent meta-RL approaches.
+• We propose an efﬁcient task inference algorithm that leverages inductive logic programming,
+which accurately infers the latent subtask graph from the agent’s experience data.
+• We implement a deep meta-RL agent that efﬁciently infers the subtask graph for faster adaptation.
+• We compare our method with other meta-RL agents on various domains, and show that our method
+adapts more efﬁciently to unseen tasks with complex subtask dependencies.
+2
+PROBLEM DEFINITION
+2.1
+BACKGROUND: FEW-SHOT REINFORCEMENT LEARNING
+A task is deﬁned by an MDP MG = (S, A, PG, RG) parameterized by a task parameter G with a
+set of states S, a set of actions A, transition dynamics PG, reward function RG. In the K-shot RL
+formulation (Duan et al., 2016; Finn et al., 2017), each trial under a ﬁxed task MG consists of an
+adaptation phase where the agent learns a task-speciﬁc behavior and a test phase where the adapted
+behavior is evaluated. For example, RNN-based meta-learners (Duan et al., 2016; Wang et al., 2016)
+adapt to a task MG by updating its RNN states (or fast-parameters) φt, where the initialization and
+update rule of φt is parameterized by a slow-parameter θ: φ0 = g(θ), φt+1 = f(φt; θ). Gradient-
+based meta-learners (Finn et al., 2017; Nichol et al., 2018) instead aim to learn a good initialization
+of the model so that it can adapt to a new task with few gradient update steps. In the test phase, the
+2
+
+Published as a conference paper at ICLR 2020
+Algorithm 1 Adaptation policy optimization during meta-training
+Require: p(G): distribution over subtask graph
+1: while not done do
+2:
+Sample batch of task parameters {Gi}M
+i=1 ∼p(G)
+3:
+for all Gi in the batch do
+4:
+Rollout K episodes τ = {st, ot, rt, dt}H
+t=1 ∼πadapt
+θ
+in task MGi
+▷adaptation phase
+5:
+Compute rUCB
+t
+as in Eq.(7)
+6:
+bGi = ILP(τ)
+▷subtask graph inference
+7:
+Sample τ ′ ∼πexe
+b
+Gi in task MGi
+▷test phase
+8:
+Update θ ←θ + η∇θ
+PM
+i=1 RPG+UCB
+MGi
+
+πadapt
+θ
+
+using RPG+UCB
+M
+in Eq.(9)
+agent’s performance on the task MG is measured in terms of the return:
+RMG(πφH) = EπφH ,MG
+hPH′
+t=1 rt
+i
+,
+(1)
+where πφH is the policy after K episodes (or H update steps) of adaptation, H′ is the horizon of test
+phase, and rt is the reward at time t in the test phase. The goal is to ﬁnd an optimal parameter θ that
+maximizes the expected return EG[RMG(πφH)] over a given distribution of tasks p(G).
+2.2
+THE SUBTASK GRAPH INFERENCE PROBLEM
+We formulate the subtask graph inference problem, an instance of few-shot RL problem where a
+task is parameterized by subtask graph (Sohn et al., 2018). The details of how a subtask graph
+parameterizes the MDP is described in Appendix B. Our problem extends the subtask graph execution
+problem in (Sohn et al., 2018) by removing the assumption that a subtask graph is given to the agent;
+thus, the agent must infer the subtask graph in order to perform the complex task. Following few-shot
+RL settings, the agent’s goal is to quickly adapt to the given task (i.e., MDP) in the adaptation phase
+to maximize the return in the test phase (see Figure 1). A task consists of N subtasks and the subtask
+graph models a hierarchical dependency between subtasks.
+Subtask: A subtask Φi can be deﬁned by a tuple (completion set Si
+comp ⊂S, precondition Gi
+c :
+S 7→{0, 1}, subtask reward function Gi
+r : S →R). A subtask Φi is complete if the current state is
+contained in its completion set (i.e., st ∈Si
+comp), and the agent receives a reward rt ∼Gi
+r upon the
+completion of subtask Φi. A subtask Φi is eligible (i.e., subtask can be executed) if its precondition
+Gi
+c is satisﬁed (see Figure 1 for examples). A subtask graph is a tuple of precondition and subtask
+reward of all the subtasks: G = (Gc, Gr). Then, the task deﬁned by the subtask graph is a factored
+MDP (Boutilier et al., 1995; Schuurmans & Patrascu, 2002); i.e., the transition model is factored as
+p(s′|s, a) = Q
+i pGi
+c(s′
+i|s, a) and the reward function is factored as R(s, a) = P
+i RGri(s, a) (see
+Appendix for the detail). The main beneﬁt of factored MDP is that it allows us to model many
+hierarchical tasks in a principled way with a compact representation such as dynamic Bayesian
+network (Dean & Kanazawa, 1989; Boutilier et al., 1995). For each subtask Φi, the agent can learn
+an option Oi (Sutton et al., 1999b) that executes the subtask2.
+Environment: The state input to the agent at time step t consists of st = {xt, et, stept, epit, obst}.
+• Completion: xt ∈{0, 1}N indicates whether each subtask is complete.
+• Eligibility: et ∈{0, 1}N indicates whether each subtask is eligible (i.e., precondition is satisﬁed).
+• Time budget: stept ∈R is the remaining time steps until episode termination.
+• Episode budget: epit ∈R is the remaining number of episodes in adaptation phase.
+• Observation: obst ∈RH×W×C is a (visual) observation at time t.
+At time step t, we denote the option taken by the agent as ot and the binary variable that indicates
+whether episode is terminated as dt.
+3
+
+Published as a conference paper at ICLR 2020
+Logic
+expression
+Logic
+expression
+CART
+train
+𝑡
+𝒙
+𝒆
+𝐴𝐵𝐶𝐷𝐸𝐴𝐵𝐶𝐷𝐸
+0 00000 11100
+1 10000 11100
+2 11000 11101
+⋮
+⋮
+⋮
+𝐻11110 11111
+Agent 
+trajectory
+Precondition of 𝐸
+CART
+train
+Subtask
+𝐴
+⋮
+Input
+𝒙
+out
+𝒆𝐴
+𝐴𝐵𝐶𝐷𝐸
+𝐴
+00000 1
+10000 1
+11000 1
+⋮
+⋮
+11110 1
+Subtask
+𝐸
+𝐴𝐵
+ҧ𝐴𝐵𝐶
++
+𝐴𝐵+ 𝐵𝐶
+Simplify
+F
+T
+𝒙𝐵>0
+𝒆𝐸=0
+𝒙𝐴>0
+F
+T
+𝒙𝐶>0
+𝒆𝐸=1
+F
+T
+𝒆𝐸=0
+𝒆𝐸=1
+𝒆𝐴=1
+Decision tree of 𝐴
+Decision tree of 𝐸
+Precondition of 𝐴
+True
+Input out
+𝒙
+𝒆𝐸
+𝐴𝐵𝐶𝐷𝐸
+𝐸
+00000 0
+10000 0
+11000 1
+⋮
+⋮
+11110 1
+Inferred 
+subtask graph
+⋮
+A
+B
+C
+D
+E
+A
+B
+C
+A
+E
+Build
+graph
+Build
+graph
+Figure 2: Our inductive logic programming module infers the precondition Gc from adaptation trajectory. For
+example, the decision tree of subtask E (bottom row) estimates the latent precondition function fGE
+c : x 7→eE
+by ﬁtting its input-output data (i.e., agent’s trajectory {xt, eE
+t }H
+t=1). The decision tree is constructed by choosing
+a variable (i.e., a component of x) at each node that best splits the data. The learned decision trees of all the
+subtasks are represented as logic expressions, and then transformed and merged to form a subtask graph.
+3
+METHOD
+We propose a Meta-learner with Subtask Graph Inference (MSGI) which infers the latent subtask
+graph G. Figure 1 overviews our approach. Our main idea is to employ two policies: adaptation
+policy and test policy. During the adaptation phase, an adaptation policy πadapt
+θ
+rolls out K episodes
+of adaptation trajectories. From the collected adaptation trajectories, the agent infers the subtask
+graph bG using inductive logic programming (ILP) technique. A test policy πtest
+b
+G , conditioned on the
+inferred subtask graph bG, rolls out episodes and maximizes the return in the test phase. Note that the
+performance depends on the quality of the inferred subtask graph. The adaptation policy indirectly
+contributes to the performance by improving the quality of inference. Intuitively, if the adaptation
+policy completes more diverse subtasks during adaptation, the more “training data” is given to the
+ILP module, which results in more accurate inferred subtask graph.
+Algorithm 1 summarizes our meta-training procedure. For meta-testing, see Algorithm 2 in Ap-
+pendix D.
+3.1
+SUBTASK GRAPH INFERENCE
+Let τH = {s1, o1, r1, d1, . . . , sH} be an adaptation trajectory of the adaptation policy πadapt
+θ
+for K
+episodes (or H steps in total) in adaptation phase. The goal is to infer the subtask graph G for
+this task, speciﬁed by preconditions Gc and subtask rewards Gr. We ﬁnd the maximum-likelihood
+estimate (MLE) of G = (Gc, Gr) that maximizes the likelihood of the adaptation trajectory τH:
+bGMLE = arg maxGc,Gr p(τH|Gc, Gr).
+The likelihood term can be expanded as
+p(τH|Gc, Gr) = p(s1|Gc)
+H
+Y
+t=1
+πθ (ot|τt) p(st+1|st, ot, Gc)p(rt|st, ot, Gr)p(dt|st, ot)
+(2)
+∝p(s1|Gc)
+H
+Y
+t=1
+p(st+1|st, ot, Gc)p(rt|st, ot, Gr),
+(3)
+where we dropped the terms that are independent of G. From the deﬁnitions in Section 2.2, precondi-
+tion Gc deﬁnes the mapping x 7→e, and the subtask reward Gr determines the reward as rt ∼Gri if
+subtask i is eligible (i.e., ei
+t = 1) and option Oi is executed at time t. Therefore, we have
+bGMLE = ( bGMLE
+c
+, bGMLE
+r
+) =
+ 
+arg max
+Gc
+H
+Y
+t=1
+p(et|xt, Gc), arg max
+Gr
+H
+Y
+t=1
+p(rt|et, ot, Gr)
+!
+.
+(4)
+2As in Andreas et al. (2017); Oh et al. (2017); Sohn et al. (2018), such options are pre-learned with curriculum
+learning; the policy is learned by maximizing the subtask reward, and the initiation set and termination condition
+are given as Ii = {s|Gi
+c(s) = 1} and βi = I(xi = 1)
+4
+
+Published as a conference paper at ICLR 2020
+We note that no supervision from the ground-truth subtask graph G is used. Below we explain how to
+compute the estimate of preconditions bGMLE
+c
+and subtask rewards bGMLE
+r
+.
+Precondition inference via logic induction
+Since the precondition function fGc : x 7→e (see
+Section 2.2 for deﬁnition) is a deterministic mapping, the probability term p(et|xt, Gc) in Eq.(4) is 1
+if et = fGc(xt) and 0 otherwise. Therefore, we can rewrite bGMLE
+c
+in Eq.(4) as:
+bGMLE
+c
+= arg max
+Gc
+H
+Y
+t=1
+I(et = fGc(xt)),
+(5)
+where I(·) is the indicator function. Since the eligibility e is factored, the precondition function fGci
+for each subtask is inferred independently. We formulate the problem of ﬁnding a boolean function
+that satisﬁes all the indicator functions in Eq.(5) (i.e., QH
+t=1 I(et = fGc(xt)) = 1) as an inductive
+logic programming (ILP) problem (Muggleton, 1991). Speciﬁcally, {xt}H
+t=1 forms binary vector
+inputs to programs, and {ei
+t}H
+t=1 forms Boolean-valued outputs of the i-th program that denotes the
+eligibility of the i-th subtask. We use the classiﬁcation and regression tree (CART) to infer the
+precondition function fGc for each subtask based on Gini impurity (Breiman, 1984). Intuitively, the
+constructed decision tree is the simplest boolean function approximation for the given input-output
+pairs {xt, et}. Then, we convert it to a logic expression (i.e., precondition) in sum-of-product (SOP)
+form to build the subtask graph. Figure 2 summarizes the overall logic induction process.
+Subtask reward inference
+To infer the subtask reward function bGMLE
+r
+in Eq.(4), we model each
+component of subtask reward as a Gaussian distribution Gi
+r ∼N(bµi, bσi). Then, bµi
+MLE becomes the
+empirical mean of the rewards received after taking the eligible option Oi in the trajectory τH:
+bGMLE,i
+r
+= bµi
+MLE = E
+
+rt|ot = Oi, ei
+t = 1
+
+=
+PH
+t=1 rtI(ot = Oi, ei
+t = 1)
+PH
+t=1 I(ot = Oi, ei
+t = 1)
+.
+(6)
+3.2
+TEST PHASE: SUBTASK GRAPH EXECUTION POLICY
+Once a subtask graph bG has been inferred, we can derive a subtask graph execution (SGE) policy
+πexe
+b
+G (o|x) that aims to maximize the cumulative reward in the test phase. Note that this is precisely
+the problem setting used in Sohn et al. (2018). Therefore, we employ a graph reward propagation
+(GRProp) policy (Sohn et al., 2018) as our SGE policy. Intuitively, the GRProp policy approximates
+a subtask graph to a differentiable form such that we can compute the gradient of modiﬁed return
+with respect to the completion vector to measure how much each subtask is likely to increase the
+modiﬁed return. Due to space limitation, we give a detail of the GRProp policy in Appendix I.
+3.3
+LEARNING: OPTIMIZATION OF THE ADAPTATION POLICY
+We now describe how to learn the adaptation policy πadapt
+θ
+, or its parameters θ. We can directly
+optimize the objective RMG(π) using policy gradient methods (Williams, 1992; Sutton et al., 1999a),
+such as actor-critic method with generalized advantage estimation (GAE) (Schulman et al., 2016).
+However, we ﬁnd it challenging to train our model for two reasons: 1) delayed and sparse reward
+(i.e., the return in the test phase is treated as if it were given as a one-time reward at the last step of
+adaptation phase), and 2) large task variance due to highly expressive power of subtask graph. To
+facilitate learning, we propose to give an intrinsic reward rUCB
+t
+to agent in addition to the extrinsic
+environment reward, where rUCB
+t
+is the upper conﬁdence bound (UCB) (Auer et al., 2002)-inspired
+exploration bonus term as follows:
+rUCB
+t
+= wUCB · I(xt is novel),
+wUCB =
+N
+X
+i=1
+log(ni(0) + ni(1))
+ni(ei
+t)
+,
+(7)
+where N is the number of subtasks, ei
+t is the eligibility of subtask i at time t, and ni(e) is the
+visitation count of ei (i.e., the eligibility of subtask i) during the adaptation phase until time t. The
+weight wUCB is designed to encourage the agent to make eligible and execute those subtasks that have
+infrequently been eligible, since such rare data points in general largely improve the inference by
+balancing the dataset that CART (i.e., our logic induction module) learns from. The conditioning
+term I(xt is novel) encourages the adaptation policy to visit novel states with a previously unseen
+completion vector xt (i.e., different combination of completed subtasks), since the data points with
+5
+
+Published as a conference paper at ICLR 2020
+same xt input will be ignored in the ILP module as a duplication. We implement I(xt is novel) using
+a hash table for computational efﬁciency. Then, the intrinsic objective is given as follows:
+RUCB
+MG
+
+πadapt
+θ
+
+= Eπadapt
+θ
+,MG
+hPH
+t=1 rUCB
+t
+i
+,
+(8)
+where H is the horizon of adaptation phase. Finally, we train the adaptation policy πadapt
+θ
+using an
+actor-critic method with GAE (Schulman et al., 2016) to maximize the following objective:
+RPG+UCB
+MG
+
+πadapt
+θ
+
+= RMG
+
+πGRProp
+b
+G
+
++ βUCBRUCB
+MG
+
+πadapt
+θ
+
+,
+(9)
+where RMG(·) is the meta-learning objective in Eq.(1), βUCB is the mixing hyper-parameter, and bG
+is the inferred subtask graph that depends on the adaptation policy πadapt
+θ
+. The complete procedure for
+training our MSGI agent with UCB reward is summarized in Algorithm 1.
+4
+RELATED WORK
+Meta Reinforcement Learning. There are roughly two broad categories of meta-RL approaches:
+gradient-based meta-learners (Finn et al., 2017; Nichol et al., 2018; Gupta et al., 2018; Finn et al.,
+2018; Kim et al., 2018) and RNN-based meta-learners (Duan et al., 2016; Wang et al., 2016). Gradient-
+based meta RL algorithms, such as MAML (Finn et al., 2017) and Reptile (Nichol et al., 2018), learn
+the agent’s policy by taking policy gradient steps during an adaptation phase, where the meta-learner
+aims to learn a good initialization that enables rapid adaptation to an unseen task. RNN-based
+meta-RL methods (Duan et al., 2016; Wang et al., 2016) updates the hidden states of a RNN as a
+process of adaptation, where both of hidden state initialization and update rule are meta-learned.
+Other variants of adaptation models instead of RNNs such as temporal convolutions (SNAIL) (Mishra
+et al., 2018) also have been explored. Our approach is closer to the second category, but different
+from existing works as we directly and explicitly infer the task parameter.
+Logic induction. Inductive logic programming systems (Muggleton, 1991) learn a set of rules from
+examples. (Xu et al., 2017) These works differ from ours as they are open-loop LPI; the input data to
+LPI module is generated by other policy that does not care about ILP process. However, our agent
+learns a policy to collect data more efﬁciently (i.e., closed-loop ILP). There also have been efforts
+to combine neural networks and logic rules to deal with noisy and erroneous data and seek data
+efﬁciency, such as (Hu et al., 2016; Evans & Grefenstette, 2017; Dong et al., 2019).
+Autonomous Construction of Task Structure. Task planning approaches represented the task
+structure using Hierarchical Task Networks (HTNs) (Tate, 1977). HTN identiﬁes subtasks for a given
+task and represent symbolic representations of their preconditions and effects, to reduce the search
+space of planning (Hayes & Scassellati, 2016). They aim to execute a single goal task, often with
+assumptions of simpler subtask dependency structures (e.g., without NOT dependency (Ghazanfari &
+Taylor, 2017; Liu et al., 2016)) such that the task structure can be constructed from the successful
+trajectories. In contrast, we tackle a more general and challenging setting, where each subtask gives a
+reward (i.e., multi-goal setting) and the goal is to maximize the cumulative sum of reward within an
+episode. More recently, these task planning approaches were successfully applied to the few-shot
+visual imitation learning tasks by constructing recursive programs (Xu et al., 2017) or graph (Huang
+et al., 2018). Contrary to them, we employ an active policy that seeks for experience useful in
+discovering the task structure in unknown and stochastic environments.
+5
+EXPERIMENTS
+In the experiment, we investigate the following research questions: (1) Does MSGI correctly infer
+task parameters G? (2) Does adaptation policy πadapt
+θ
+improve the efﬁciency of few-shot RL? (3) Does
+the use of UCB bonus facilitate training? (See Appendix H.1) (4) How well does MSGI perform
+compared with other meta-RL algorithms? (5) Can MSGI generalize to longer adaptation horizon,
+and unseen and more complex tasks?
+We evaluate our approach in comparison with the following baselines:
+• Random is a policy that executes a random eligible subtask that has not been completed.
+• RL2 is the meta-RL agent in Duan et al. (2016), trained to maximize the return over K episodes.
+• HRL is the hierarchical RL agent in Sohn et al. (2018) trained with the same actor-critic method as
+our approach during adaptation phase. The network parameter is reset when the task changes.
+6
+
+Published as a conference paper at ICLR 2020
+Figure 3: Left: A visual illustration of Playground domain and an example of underlying subtask graph. The
+goal is to execute subtasks in the optimal order to maximize the reward within time budget. The subtask graph
+describes subtasks with the corresponding rewards (e.g., transforming a chest gives 0.1 reward) and dependencies
+between subtasks through AND and OR nodes. For instance, the agent must ﬁrst transform chest AND transform
+diamond before executing pick up duck. Right: A warfare scenario in SC2LE domain (Vinyals et al., 2017).
+The agent must prepare for the upcoming warfare by training appropriate units, through an appropriate order of
+subtasks (see Appendix for more details).
+• GRProp+Oracle is the GRProp policy (Sohn et al., 2018) provided with the ground-truth subtask
+graph as input. This is roughly an upper bound of the performance of MSGI-based approaches.
+• MSGI-Rand (Ours) uses a random policy as an adaptation policy, with the task inference module.
+• MSGI-Meta (Ours) uses a meta-learned policy (i.e., πadapt
+θ
+) as an adaptation policy, with the task
+inference module.
+For RL2 and HRL, we use the same network architecture as our MSGI adaptation policy. More details
+of training and network architecture can be found in Appendix J. The domains on which we evaluate
+these approaches include two simple grid-world environments (Mining and Playground) (Sohn
+et al., 2018) and a more challenging domain SC2LE (Vinyals et al., 2017) (StarCraft II).
+5.1
+EXPERIMENTS ON MINING AND PLAYGROUND DOMAINS
+Mining (Sohn et al., 2018) is inspired by Minecraft (see Figure 3) where the agent receives reward by
+picking up raw materials in the world or crafting items with raw materials. Playground (Sohn et al.,
+2018) is a more ﬂexible and challenging domain, where the environment is stochastic and subtask
+graphs are randomly generated (i.e., precondition is an arbitrary logic expression). We follow the
+setting in Sohn et al. (2018) for choosing train/evaluation sets. We measure the performance in terms
+of normalized reward bR = (R−Rmin)/(Rmax−Rmin) averaged over 4 random seeds, where Rmin and
+Rmax correspond to the average reward of the Random and the GRProp+Oracle agent, respectively.
+5.1.1
+TRAINING PERFORMANCE
+0
+1
+2
+3
+4
+5
+6
+7
+8
+Trial (thousand)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+ˆR
+Playground (D1)
+MSGI-Meta(Ours)
+MSGI-Rand(Ours)
+HRL
+RL2
+Figure 4: Learning curves on the
+Playground domain.
+We mea-
+sure the normalized reward (y-
+axis) in a test phase, after a certain
+number of training trials (x-axis).
+Figure 4 shows the learning curves of MSGI-Meta and RL2, trained
+on the D1-Train set of Playground domain. We set the adaptation
+budget in each trial to K = 10 episodes. For MSGI-Rand and HRL
+(which are not meta-learners), we show the average performance
+after 10 episodes of adaptation. As training goes on, the performance
+of MSGI-Meta signiﬁcantly improves over MSGI-Rand with a large
+margin. It demonstrates that our meta adaptation policy learns to
+explore the environment more efﬁciently, inferring subtask graphs
+more accurately. We also observe that the performance of RL2 agent
+improves over time, eventually outperforming the HRL agent. This
+indicates that RL2 learns 1) a good initial policy parameter that
+captures the common knowledge generally applied to all the tasks
+and 2) an efﬁcient adaptation scheme such that it can adapt to the
+given task more quickly than standard policy gradient update in HRL.
+5.1.2
+ADAPTATION AND GENERALIZATION PERFORMANCE
+Adaptation efﬁciency. In Figure 5, we measure the test performance (in terms of the normalized
+reward bR) by varying episode budget K (i.e., how many episodes are used in adaptation phase), after
+7
+
+Published as a conference paper at ICLR 2020
+0
+5
+10
+15
+20
+Budget (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ˆR
+Playground (D1)
+0
+5
+10
+15
+20
+Budget (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ˆR
+Playground (D2)
+0
+5
+10
+15
+20
+Budget (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ˆR
+Playground (D3)
+0
+5
+10
+15
+20
+Budget (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ˆR
+Playground (D4)
+0
+10
+20
+30
+40
+50
+Budget (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+ˆR
+Mining
+MSGI-Meta(Ours)
+MSGI-Rand(Ours)
+HRL
+RL2
+Figure 5: Generalization performance on unseen tasks (D1-Eval, D2, D3, D4, and Mining-Eval) with varying
+adaptation horizon. We trained agent with the ﬁxed adaptation budget (K = 10 for Playground and K = 25
+for Mining) denoted by the vertical dashed line, and tested with varying unseen adaptation budgets. We report
+the average normalized return during test phase, where GRProp+Oracle is the upper bound (i.e., bR = 1) and
+Random is the lower bound (i.e., bR = 0). The shaded area in the plot indicates the range between bR + σ and
+bR −σ where σ is the standard error of normalized return.
+8000 trials of meta-training (Figure 4). Intuitively, it shows how quickly the agent can adapt to the
+given task. Our full algorithm MSGI-Meta consistently outperforms MSGI-Rand across all the tasks,
+showing that our meta adaptation policy can efﬁciently explore informative states that are likely
+to result in more accurate subtask graph inference. Also, both of our MSGI-based models perform
+better than HRL and RL2 baselines in all the tasks, showing that explicitly inferring underlying task
+structure and executing the predicted subtask graph is more effective than learning slow-parameters
+and fast-parameters (e.g., RNN states) on those tasks involving complex subtask dependencies.
+Generalization performance. We test whether the agents can generalize over unseen task and longer
+adaptation horizon, as shown in Figure 5. For Playground, we follow the setup of (Sohn et al., 2018):
+we train the agent on D1-Train with the adaptation budget of 10 episodes, and test on unseen graph
+distributions D1-Eval and larger graphs D2-D4 (See Appendix C for more details about the tasks in
+Playground and Mining). We report the agent’s performance as the normalized reward with up to 20
+episodes of adaptation budget. For Mining, the agent is trained on randomly generated graphs with
+25 episodes budget and tested on 440 hand-designed graphs used in (Sohn et al., 2018), with up to
+50 episodes of adaptation budget. Both of our MSGI-based models generalize well to unseen tasks
+and over different adaptation horizon lengths, continuingly improving the agent’s performance. It
+demonstrates that the efﬁcient exploration scheme that our meta adaptation policy can generalize to
+unseen tasks and longer adaptation horizon, and that our task execution policy, GRProp, generalizes
+well to unseen tasks as already shown in (Sohn et al., 2018). However, RL2 fails to generalize to
+unseen task and longer adaptation horizon: on D2-D4 with adaptation horizons longer than the length
+the meta-learner was trained for, the performance of the RL2 agent is almost stationary or even
+decreases for very long-horizon case (D2, D3, and Mining), eventually being surpassed by the HRL
+agent. This indicates (1) the adaptation scheme that RL2 learned does not generalize well to longer
+adaptation horizons, and (2) a common knowledge learned from the training tasks does not generalize
+well to unseen test tasks.
+5.2
+EXPERIMENTS ON STARCRAFT II DOMAIN
+SC2LE (Vinyals et al., 2017) is a challenging RL domain built upon the real-time strategy game
+StarCraft II. We focus on two particular types of scenarios: Defeat Enemy and Build Unit. Each
+type of the scenarios models the different aspect of challenges in the full game. The goal of Defeat
+Enemy is to eliminate various enemy armies invading within 2,400 steps. We consider three different
+combinations of units with varying difﬁculty: Defeat Zerglings, Defeat Hydralisks, Defeat Hydralisks
+& Ultralisks (see Figure 9 and demo videos at https://bit.ly/msgi-videos). The goal of
+Build Unit scenario is to build a speciﬁc unit within 2,400 steps. To showcase the advantage of MSGI
+infering the underlying subtask graph, we set the target unit as Battlecruiser, which is at the highest
+rank in the technology tree of Terran race. In both scenarios, the agent needs to train the workers,
+8
+
+Published as a conference paper at ICLR 2020
+0
+5
+10
+15
+20
+Adaptation (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Avg. success rate
+Build BattleCruiser
+0
+5
+10
+15
+20
+Adaptation (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Avg. win rate
+Defeat Zerglings
+0
+5
+10
+15
+20
+Adaptation (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Avg. win rate
+Defeat Hydralisks
+0
+5
+10
+15
+20
+Adaptation (episodes)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Avg. win rate
+Defeat Hydra- & Ultra-lisks
+MSGI-GRProp (Ours)
+HRL
+Random
+Figure 6: Adaptation performance with different adaptation horizon on SC2LE domain.
+collect resources, and construct buildings and produce units in correct sequential order to win the
+game. Each building or unit has a precondition as per the technology tree of the player’s race (see
+Figure 11 and Appendix E for more details).
+Agents. Note that the precondition of each subtask is determined by the domain and remains ﬁxed
+across the tasks. If we train the meta agents (MSGI-Meta and RL2), the agents memorize the subtask
+dependencies (i.e., over-ﬁtting) and does not learn any useful policy for efﬁcient adaptation. Thus,
+we only evaluate Random and HRL as our baseline agents. Instead of MSGI-Meta, we used MSGI-
+GRProp. MSGI-GRProp uses the GRProp policy as an adaptation policy since GRProp is a good
+approximation algorithm that works well without meta-training as shown in (Sohn et al., 2018). Since
+the environment does not provide any subtask-speciﬁc reward, we set the subtask reward using the
+UCB bonus term in Eq. (7) to encourage efﬁcient exploration (See Appendix for detail).
+Subtask graph inference. We quantitatively evaluate the inferred subtask graph in terms of the
+precision and recall of the inferred precondition function fbc : x 7→be. Speciﬁcally, we compare the
+inference output be with the GT label e generated by the GT precondition function fc : x 7→e for all
+possible binary assignments of input (i.e., completion vector x). For all the tasks, our MSGI-GRProp
+agent almost perfectly infers the preconditions with more than 94% precision and 96% recall of all
+possible binary assignments, when averaged over all 163 preconditions in the game, with only 20
+episodes of adaptation budget. We provide the detailed quantitative and qualitative results on the
+inferred subtask graph in supplemental material.
+Adaptation efﬁciency. Figure 6 shows the adaptation efﬁciency of MSGI-GRProp, HRL agents, and
+Random policy on the four scenarios. We report the average victory or success rate over 8 episodes.
+MSGI-GRProp consistently outperforms HRL agents with a high victory rate, by (1) quickly ﬁguring
+out the useful units and their prerequisite buildings and (2) focusing on executing these subtasks in
+a correct order. For example, our MSGI-GRProp learns from the inferred subtask graph that some
+buildings such as sensor tower or engineering bay are unnecessary for training units and avoids
+constructing them (see Appendix F for the inferred subtask graph).
+6
+CONCLUSION
+We introduced and addressed a few-shot RL problem with a complex subtask dependencies. We
+proposed to learn the adaptation policy that efﬁciently collects experiences in the environment, infer
+the underlying hierarchical task structure, and maximize the expected reward using the execution
+policy given the inferred subtask graph. The empirical results conﬁrm that our agent can efﬁciently
+explore the environment during the adaptation phase that leads to better task inference and leverage
+the inferred task structure during the test phase. In this work, we assumed that the option is pre-
+learned and the environment provides the status of each subtask. In the future work, our approach
+may be extended to more challenging settings where the relevant subtask structure is fully learned
+from pure observations, and options to execute these subtasks are also automatically discovered.

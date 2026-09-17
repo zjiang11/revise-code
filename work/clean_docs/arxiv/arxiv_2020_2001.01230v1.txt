@@ -1,0 +1,2145 @@
+Learning ﬁne-grained search space pruning
+and heuristics for combinatorial optimization ∗
+Juho Lauri
+Sourav Dutta†
+Marco Grassia‡
+Deepak Ajwani§
+January 7, 2020
+Abstract
+Combinatorial optimization problems arise naturally in a wide range of applications
+from diverse domains. Many of these problems are NP-hard and designing eﬃcient heuris-
+tics for them requires considerable time, eﬀort and experimentation. On the other hand,
+the number of optimization problems in the industry continues to grow. In recent years,
+machine learning techniques have been explored to address this gap. In this paper, we
+propose a novel framework for leveraging machine learning techniques to scale-up exact
+combinatorial optimization algorithms. In contrast to the existing approaches based on
+deep-learning, reinforcement learning and restricted Boltzmann machines that attempt to
+directly learn the output of the optimization problem from its input (with limited suc-
+cess), our framework learns the relatively simpler task of pruning the elements in order
+to reduce the size of the problem instances. In addition, our framework uses only inter-
+pretable learning models based on intuitive local features and thus the learning process
+provides deeper insights into the optimization problem and the instance class, that can
+be used for designing better heuristics.
+For the classical maximum clique enumeration problem, we show that our framework
+can prune a large fraction of the input graph (around 99 % of nodes in case of sparse
+graphs) and still detect almost all of the maximum cliques. This results in several fold
+speedups of state-of-the-art algorithms. Furthermore, the classiﬁcation model used in our
+framework highlights that the chi-squared value of neighborhood degree has a statistically
+signiﬁcant correlation with the presence of a node in a maximum clique, particularly in
+dense graphs which constitute a signiﬁcant challenge for modern solvers. We leverage this
+insight to design a novel heuristic for this problem outperforming the state-of-the-art. Our
+heuristic is also of independent interest for maximum clique detection and enumeration.
+1
+Introduction
+Combinatorial optimization is at the heart of a large number of applications from a wide range
+of domains such as economics (e.g., price optimization [24], eﬃcient energy scheduling [41]),
+bioinformatics (e.g., [11, 16, 30]), robotics (e.g., [54]), industrial production, and planning
+∗The present manuscript integrates and extends the works [34, 27, 17], which appeared at AAAI’19, the
+DSO Workshop at IJCAI’19 and CIKM’19, respectively. Part of this work was done while all authors were at
+Nokia Bell Labs, Ireland.
+†Eaton Corp., Ireland
+‡University of Catania, Italy
+§University College Dublin, Ireland
+1
+arXiv:2001.01230v1  [cs.DS]  5 Jan 2020
+
+(e.g., [49, 50]). In fact, numerous real-life decision-making problems have been formulated
+in terms of combinatorial optimization problems [57, 32] and as a result, combinatorial opti-
+mization algorithms are widely applied in industry.
+Combinatorial optimization problems typically involve ﬁnding groupings (subsets), or-
+derings or assignments of a discrete, ﬁnite set of objects that satisfy certain conditions or
+constraints. For instance, in the maximum clique enumeration problem, the goal is to explic-
+itly list all the largest subsets of nodes that are all adjacent to each other. In the travelling
+salesman problem (TSP), the goal is to identify a subset of edges that constitute a smallest
+tour covering all nodes (or alternatively, an ordering of nodes which results in a shortest
+tour). Both these and many other computational problems are NP-hard, implying that —
+unless P = NP — no polynomial-time algorithms exist for these problems that can solve
+every instance of the problem to optimality. Over the last century, numerous approaches
+have been developed for these applications, including (i) exact algorithms with exponen-
+tial time complexity, (ii) approximation algorithms with formal guarantees on the solution
+quality, (iii) parameterized algorithms (see e.g., [15] for more), (iv) carefully designed heuris-
+tics that leverage the structure often available in real-world instances and (v) meta-heuristic
+frameworks such as genetic algorithms or ant colony optimization. While exact algorithms
+have poor scalability, the design of approximation algorithms, parameterized algorithms and
+domain-speciﬁc heuristics require considerable development and design time. Moreover, it is
+not always the case that theoretically appealing approximation or parameterized algorithms
+would be practical. Similarly, meta-heuristics often require signiﬁcant conﬁguration time to
+select the best parameters and operators for a given optimization problem and can take con-
+siderable time to ﬁnd a combination of elements close to the optimal solution. Furthermore,
+the solutions produced by heuristics (including those generated by meta-heuristic frameworks)
+can be arbitrarily far from an optimal solution.
+As the number of optimization problems continues to grow in industry and the design
+time for eﬃcient solutions remains high, it is vital to explore if we can accelerate the algo-
+rithm design process using machine learning techniques. With the recent advances in machine
+learning techniques and its success in areas such as multi-media classiﬁcation, machine trans-
+lation, text generation, recommender systems and computer games, researchers have started
+exploring if they can also be successfully applied to combinatorial optimization.
+Existing machine learning techniques for combinatorial optimization can be broadly cat-
+egorized into three diﬀerent approaches:
+1. Supervised deep-learning approaches that directly learn the output from the input.
+Examples of this framework include the pointer network [58].
+2. Reinforcement learning to learn a mapping from state to policy. Examples of this frame-
+work include neural combinatorial optimization [5] and greedy Q-learning for graph
+optimization problems [31].
+3. Unsupervised approaches based on restricted Boltzmann machines. Examples of this
+framework include the Estimation of Distribution Algorithm by Probst et al. [46].
+These frameworks aim to learn the exact decision boundary to separate the elements in
+the optimal subset from the remaining elements.
+Since many combinatorial optimization
+problems are NP-hard, this is a challenging task requiring complex learning models with a
+large number of parameters. As a result, the learning models are not easy to interpret. Since
+2
+
+the learned heuristic (mapping from input to output) is implicit in the complex learning
+model, this implies that the learned heuristic is itself not interpretable. This has the following
+consequences:
+• With a large number of parameters, the learned algorithm is not easy for humans to
+understand and consequently there is little potential for mathematical analysis of the
+resultant algorithm.
+• It is not clear if the learned model will still work if there is an additional constraint
+added to the problem. This is a major concern for applications in industry where the
+ﬁrst modelling of a problem into the optimization objective and associated constraints
+is rarely enough and new constraints are incrementally discovered and added.
+• It is not clear if the learned model will still work if a dataset from a slightly diﬀer-
+ent distribution is used as an input. This has further implications for cross-domain
+generalizability of the learning model.
+In contrast, we propose a novel framework for solving combinatorial optimization problems
+that uses interpretable learning models based on intuitive local features. For the interpretable
+models to work well, we focus on the relatively simpler task of (non-exhaustive) pruning
+of the elements that are not in the optimal subset. This reduces the problem size, often
+signiﬁcantly, enabling existing solvers to deal with considerably larger instances. Further, it
+has the potential to not only reduce the size of the instances, but to make the search space
+easier to handle by breaking symmetries, for example.
+To prune the elements further, we extend our framework to have multiple pruning stages.
+In each stage, the framework learns a new classiﬁcation model for elements that were not
+pruned by earlier classiﬁcation models (thereby increasingly focusing on harder elements to
+prune). Figure 1 illustrates the exact decision boundary and the multi-stage pruning frame-
+work.
+Furthermore, the learning process in our framework provides deeper insights into the
+optimization problem and the instance class. In particular, it identiﬁes the combination of
+simple features that are most indicative of an element belonging to an optimal subset. This
+insight can be leveraged to design better heuristics for the optimization problems.
+For the classical maximum clique enumeration problem, we show that our framework can
+prune a large fraction of the graph (around 99 % of nodes in case of sparse graphs) and still
+detect almost all of the maximum cliques. This results in several fold speedups of state-of-
+the-art algorithms. Furthermore, the classiﬁcation model used in our framework highlights
+that the chi-squared value of neighborhood degree has a statistically signiﬁcant correlation
+with the presence of a node in a maximum clique, particular in the case of dense graphs
+which constitute a major challenge for state-of-the-art solvers. We leverage this insight to
+design a novel heuristic for this problem enhancing the state-of-the-art. Our heuristic is also
+of independent interest for maximum clique detection and enumeration.
+2
+Related work
+2.1
+Machine learning for combinatorial optimization
+Although the area of learning techniques for combinatorial optimization is only beginning to
+ﬂourish, many frameworks have been developed in the last ﬁve years. DiCarro [12] surveyed
+3
+
+(a) Exact decision boundary
+(b) Interpretable model boundary
+(c) Pruning
+(d) Repeated pruning
+Figure 1:
+Depiction of the overall framework.
+The black stars indicate the elements in
+the optimal subset while the white circles represent the elements not in the optimal subset.
+Earlier learning frameworks attempted to learn the exact decision boundary (drawn with a
+solid black line). Our framework use simple, interpretable classiﬁer (shown by dashed lines)
+to repeatedly prune the white circles.
+various learning frameworks for combinatorial optimization, covering various issues related to
+the complex architectures of the models and the large number of parameters. The existing
+literature on learning techniques can be broadly categorized into the following classes.
+Supervised learning to directly learn the solution of combinatorial optimization
+problems
+This framework involves the use of deep-learning for learning the output.
+Vinyals et al. [58] viewed the task of learning combinatorial optimization solutions as a
+sequence-to-sequence learning problem. They aimed for directly learning the output solution
+from the input sequence for optimization problems such as convex hull and Delauney trian-
+gulation. The authors used a recurrent neural network (RNN) for the sequence-to-sequence
+learning. To deal with the issue of long-range correlations (elements far from each other in
+the input sequence aﬀecting the same output element), they used an attention mechanism
+to augment the RNN model. To deal with the issue of a ﬁxed vocabulary size required for
+the output of a recurrent neural network, they used pointers to elements in the input stream,
+4
+
+resulting in the name pointer network.
+Reinforcement learning for combinatorial optimization
+Deep learning approaches
+require a large amount of training data and to generate this, a large number of NP-hard
+problem instances need to be solved, limiting the applicability of these techniques. On the
+other hand, given a solution, it is relatively easy to evaluate the quality of the solution by
+computing the optimization objective. Thus, in recent years, reinforcement learning based
+techniques have been developed to solve optimization problems. In this framework, the goal
+is to learn a stochastic policy that samples solutions of high quality with high probability. In
+particular, Khalil et al. [31] used the Q-learning technique to learn the solutions for graph opti-
+mization problems, speciﬁcally minimum vertex cover and maximum cut. They encode nodes
+using a graph embedding technique and then build a solution using a greedy construction
+meta-algorithm. The greedy decisions are based on an estimated Q-function parameterized
+by the embedding. The embedding parameters for the Q-function are updated step by step
+based on the partial solution computed.
+The GCOMB approach of Mittal et al. [40] follows the same framework, but claims to scale
+to very large graphs. Another example of this framework is the use of neural combinatorial
+optimization [5] for TSP.
+Unsupervised learning for combinatorial optimization
+Unsupervised approaches via
+restricted Boltzmann machines have also been used to deal with combinatorial optimization
+problems.
+An example of this framework is the Estimation of Distribution Algorithm by
+Probst et al. [46]. This approach iteratively builds and samples from a probabilistic model
+of candidate solutions. Intuitively, these approaches build information about the probability
+distribution of good candidate solutions. This model is built using contrastive divergence.
+Limitations of the above frameworks
+The learning models used in these existing state-
+of-the-art frameworks are both hard to interpret and architecturally complex. For instance,
+the neural combinatorial optimization approach [5] is a combination of pointer networks
+(with two LSTM networks), a Monte Carlo policy gradient and an actor-critic architecture.
+The complexity of these approaches comes at a signiﬁcant cost of interpretability. Since the
+learned algorithm (mapping from input to output) is implicit in the complex learning model,
+this implies that the learned heuristic is itself not easy for humans to understand. As a direct
+consequence, it is diﬃcult to analyze the learned algorithm mathematically. Moreover, it is
+unclear what features of the input instances are being exploited by the learned heuristic and
+on which class of datasets will it perform well.
+Maximum clique enumeration
+We instantiate our framework for the maximum clique
+enumeration (MCE) problem. In this problem, the goal is to list all maximum (as opposed
+to maximal) cliques in a given graph.
+The maximum clique problem is one of the most
+heavily-studied combinatorial problems arising in various domains such as in the analysis of
+social networks [22, 26, 43, 44], behavioral networks [6], and ﬁnancial networks [7]. It is also
+relevant in clustering [55, 61] and cloud computing [59, 62]. The listing variant of the problem,
+MCE, is encountered in computational biology [1, 20, 63, 9] in problems like the detection of
+protein-protein interaction complex, clustering protein sequences, and searching for common
+cis-regulatory elements [3].
+5
+
+The computational aspects of the problem are well-studied.
+Indeed, it is NP-hard to
+even approximate the maximum clique problem within n1−ϵ for any ϵ > 0 [64]. Furthermore,
+unless an unlikely collapse occurs in complexity theory, the problem of identifying whether
+a graph of n vertices has a clique of size k is not solvable in time f(k)no(k) for any function
+f [13]. As such, even small instances of this problem can be non-trivial to solve. Moreover,
+under reasonable complexity-theoretic assumptions, there is no polynomial-time algorithm
+that preprocesses an instance of k-clique to have only f(k) vertices, where f is any computable
+function depending solely on k (see e.g., [15]). These results indicate that it is unlikely that
+an eﬃcient preprocessing method for MCE exists that can reduce the size of input instance
+drastically while guaranteeing to preserve all the maximum cliques. In particular, it is unlikely
+that polynomial-time sparsiﬁcation methods (see e.g., [4]) would be applicable to MCE. This
+has led researchers to focus on heuristic pruning approaches.
+On preprocessing for maximum clique
+For the discussion to follow, it will be useful to
+recall the concept of a k-core of a graph G. Here, the k-core of G is a maximal subgraph of G
+where every vertex in the subgraph has degree at least k in the subgraph. The core number of
+a vertex v is the largest k for which a k-core containing v exists. A typical preprocessing step
+in a state-of-the-art solver is the following: (i) quickly ﬁnd a large clique (say of size k), (ii)
+compute the core number of each vertex of the input graph G, and (iii) delete every vertex of
+G with core number less than k−1. This can be equivalently achieved by repeatedly removing
+all vertices with degree less than k. For example, the solver pmc [52] – which is regarded as
+“the leading reference solver” [53] – use this as the only preprocessing method. However, there
+are two major downsides to this preprocessing step. First, it is crucially dependant on k, the
+size of a large clique found. Since the maximum clique size is NP-hard to approximate within
+a factor of n1−ϵ, maximum clique estimates with no formal guarantees are used. Second and
+more important, it is typical that even if the estimate k was equal to the size of a maximum
+clique in G, the core number of most vertices could be considerably higher than k −1. This is
+particularly true in the case of dense graphs and it results in little or no pruning of the search
+space. Similarly, other preprocessing strategies (see e.g., [19] for more discussion) depend on
+NP-hard estimates of speciﬁc graph properties and are not useful for pruning dense graphs.
+These facts further motivate the quest for preprocessing methods that (i) are eﬀective on
+dense graphs and (ii) work independently of any estimate k for the maximum clique size.
+Unfortunately, as described earlier, under widely-believed complexity-theoretic assumptions,
+no methods exist that can give strong guarantees for pruning arbitrary graphs. This raises
+the question if one can discover heuristic methods that can do signiﬁcant pruning, in practice,
+on graphs from diﬀerent domains, including dense graphs. Even more importantly, can we
+learn a heuristic to prune the input instance?
+3
+Our framework
+In this section, we describe our framework for subset-based combinatorial optimization prob-
+lems. For ease of exposition, we describe the framework in terms of the MCE problem. We
+stress that our approach is not restricted to MCE, but can be applied to other problems as
+well.
+In our case, we assume the instance is represented as an undirected graph G = (V, E).
+Moreover, in contrast to previous approaches, we view individual vertices of G as classiﬁcation
+6
+
+problems as opposed to G itself. That is, the problem is to induce a mapping γ : V →{0, 1}
+from a set of L training examples T = {⟨f(vi), yi⟩}L
+i=1, where vi ∈V is a vertex, yi ∈{0, 1}
+a class label, and f : V →Rd a mapping from a vertex to a d-dimensional feature space.
+For reasons of scalability, we strive to keep d small and to ensure that f can be computed
+eﬃciently.
+Single-stage sparsiﬁcation
+To learn the mapping γ from T, we use a probabilistic clas-
+siﬁer P which outputs a probability distribution over {0, 1} for a given f(u) for u ∈V . A
+natural parameterized search strategy, which we call probabilistic preprocessing (or single-stage
+sparsiﬁcation), for enhancing a search algorithm A by P is as follows. Deﬁne a conﬁdence
+threshold q ∈[0, 1]. Delete from G each vertex predicted by P to not be in a solution with
+probability at least q, i.e., let G′ = G\V ′, where V ′ = {u | u ∈V ∧P(u = 0) ≥q}. Execute A
+with G′ as input instead of G. Here, the purpose of q is to control the error and pruning rate
+of preprocessing: (i) it is more acceptable to not remove a vertex that is not in a solution than
+to remove a vertex that is in a solution, and (ii) a lower value of q translates to a possibly
+higher pruning rate. Clearly, this strategy is a heuristic, i.e., it is possible that the cost of an
+optimal solution in G′ diﬀers from that in G.
+Multi-stage sparsiﬁcation
+A natural generalization of the probabilistic preprocessing
+strategy is the following approach that we call multi-stage sparsiﬁcation: Let G1 be the input
+set of networks. Consider a graph G ∈G1. Let M be the set of all maximum cliques of G,
+and denote by V (M) the set of all vertices in M. The positive examples in the training set
+T1 consist of all vertices that are in some maximum clique (V (M)) and the negative exam-
+ples are the ones in the set V \ V (M). Since the training dataset can be highly skewed, we
+under-sample the larger class to achieve a balanced training data. A probabilistic classiﬁer
+P1 is trained on the balanced training data in stage 1. Then, in the next stage, we remove
+all vertices that were predicted by P1 to be in the negative class with a probability above a
+predeﬁned threshold q. We focus on the set G2 of subgraphs (of graphs in G1) induced on the
+remaining vertices and repeat the above process. The positive examples in the training set T2
+consists of all vertices in some maximum clique (V (M)) and the negative examples are the
+ones in the set V \ V (M), training dataset is balanced by under-sampling and we use that
+balanced dataset to learn the probabilistic classiﬁer P2. We repeat the process for ℓstages.
+4
+Computational features
+In this section, we describe the computational features used in our framework.
+Graph-theoretic features
+We use the following graph-theoretic features: (F1) number of
+vertices, (F2) number of edges, (F3) vertex degree, (F4) local clustering coeﬃcient (LCC),
+and (F5) eigencentrality.
+The crude information captured by features (F1)-(F3) provide a reference for the classiﬁer
+for generalizing to diﬀerent distributions from which the graph might have been generated.
+Feature (F4), the LCC of a vertex is the fraction of its neighbors with which the vertex forms a
+triangle, encapsulating the well-known small world phenomenon. Feature (F5) eigencentrality
+represents a high degree of connectivity of a vertex to other vertices, which in turn have high
+degrees as well. The eigenvector centrality ⃗v is the eigenvector of the adjacency matrix A
+7
+
+v
+Figure 2: While the shown proper 3-coloring is optimal, we can swap the non-white colors in
+either triangle to see that the local chromatic density χd(v) = 1/3.
+of G with the largest eigenvalue λ, i.e., it is the solution of ⃗A⃗v = λ⃗v. The ith entry of ⃗v
+is the eigencentrality of vertex v. In other words, this feature provides a measure of local
+“denseness”. A vertex in a dense region shows higher probability of being part of a large
+clique.
+Statistical features
+In addition, we use the following statistical features: (F6) the χ2
+value over vertex degree, (F7) average χ2 value over neighbor degrees, (F8) χ2 value over
+LCC, and (F9) average χ2 value over neighbor LCCs.
+The intuition behind (F6)-(F9) is that for a vertex v present in a large clique, its degree
+and LCC would deviate from the underlying expected distribution characterizing the graph.
+Further, the neighbors of v also present in the clique would demonstrate such behaviour.
+Indeed, statistical features have been shown to be robust in approximately capturing local
+structural patterns [18].
+Statistical signiﬁcance is captured by the notion of p-value [48], and well-estimated [47]
+by the Pearson’s chi-square statistic, χ2, computed as
+χ2 =
+X
+∀i
+h
+(Oi −Ei)2 /Ei
+i
+,
+(1)
+where Oi and Ei are the observed and expected number of occurrences of the possible out-
+comes i.
+Local chromatic density
+Let G = (V, E) be a graph. A k-coloring of G is a function
+c : V →{1, 2, . . . , k}. A coloring is a k-coloring for some k ≤n, where n = |V |. A coloring c
+is proper if c(u) ̸= c(v) for every edge uv ∈E. The chromatic number of G, denoted by χ(G),
+is the smallest k such that G has a proper k-coloring. We deﬁne the local chromatic density
+of a vertex v ∈V , denoted by χd(v), as the ratio between the minimum number of distinct
+colors appearing in N(v) among any optimal proper colouring of G and the chromatic number
+of G. Informally, the local chromatic density of v is the minimum possible number of colors
+in the immediate neighborhood of v in any optimal proper coloring of G (see Figure 2).
+We use the local chromatic density as the feature (F10). A vertex v with high χd(v)
+means that the neighborhood of v is dense, as it captures the adjacency relations between the
+vertices in N(v). Thus, a vertex in such a dense region has a higher chance of belonging to a
+large clique.
+However, the problem of computing χd(v) is computationally diﬃcult. In the decision
+variant of the problem, we are given a graph G = (V, E), a vertex v ∈V , and a ratio q ∈(0, 1).
+8
+
+Table 1: The eﬀect of introducing the feature (F10) the local chromatic density into the feature
+set. The column “W/o” is the vertex classiﬁcation accuracy of the classiﬁer of Subsection 5.2
+without (F10) while column “With” is the same with (F10).
+bio
+soc
+socfb
+web
+all
+W/o With W/o With W/o With W/o With W/o With
+0.95
+0.98
+0.89
+0.99
+0.90
+0.95
+0.96
+0.99
+0.87
+0.96
+The task is to decide whether there is proper k-coloring c of V witnessing χd(v) ≥q. As shown
+in the following, the claimed hardness is straightforward to establish.
+Theorem 1. Given a graph G = (V, E), v ∈V , and q ∈(0, 1), it is NP-hard to decide
+whether χd(v) ≤q.
+Proof. Let G be an instance of graph k-coloring, for any ﬁxed k ≥3. This problem is well-
+known to be NP-complete for every k ≥3. We construct G′ = G ∪Kk, i.e., G′ is the disjoint
+union of G and a complete graph on k vertices. Fix v to be an arbitrary vertex of the Kk.
+We claim that G has a proper k-coloring if and only if χd(v) ≤q, where q = k−1
+k .
+If G admits a proper k-coloring, we map {1, 2, . . . , k} bijectively to V (Kk), implying that
+χd(v) = k−1
+k . On the other hand, a proper k-coloring of G′ witnessing that χd(v) = k−1
+k
+is
+clearly a proper k-coloring when restricted to G as well.
+Despite its computational hardness, we can estimate χd(v) with the following simple heuristic.
+Compute a proper coloring for G using e.g., the well-known linear-time greedy heuristic of [60]
+and then estimate χd(v) as the ratio between the number of colors in N(v) divided by the
+number of colors used by the greedy coloring algorithm. Note that we could use other graph
+coloring heuristics as well (see e.g., [35] for an overview of the state-of-the-art).
+Learning over edges
+Instead of individual vertices, we can view the framework also over
+individual edges. In this case, the goal is to ﬁnd a mapping γ′ : E →{0, 1}, and the training
+set L′ contains feature vectors corresponding to edges instead of vertices. We also brieﬂy
+explore this direction in this work.
+Edge features
+We use the following features (E1)-(E9) for an edge {u, v}. (E1) Jaccard
+similarity is the number of common neighbors of u and v divided by the number of vertices
+that are neighbors of at least one of u and v. (E2) Dice similarity is twice the number of
+common neighbors of u and v, divided by the sum of their degrees. (E3) Inverse log-weighted
+similarity is the number of common neighbors of u and v weighted by the inverse logarithm of
+their degrees. Formally, we compute P
+x∈N(u)∩N(v) 1/ log(deg(x)). (E4) Cosine similarity is
+the number of common neighbors of u and v divided by the geometric mean of their degrees.
+The next three features are inspired by the vertex features: (E5) average LCC over u and v,
+(E6) average degree over u and v, and (E7) average eigencentrality over u and v. (E8) is
+the number of length-two paths between u and v. Finally, we use (E9) local edge-chromatic
+density, i.e., the number of distinct colors on the common neighbors of u and v divided by
+the total number of colors used in any optimal proper coloring.
+The intuition behind (E1)-(E4) is well-established for community detection; see e.g., [2]
+for more. For (E8), observe that the number of length-two paths is high when the edge is part
+9
+
+of a large clique, and at most n −2 when {u, v} is an edge of a complete graph on n vertices.
+Notice that (E9) could be converted into a deterministic rule: the edge {u, v} can be safely
+deleted if the common neighbors of u and v see less than k −2 colors in any proper coloring of
+the input graph G, where k is an estimate for ω(G). To our best knowledge, such a rule has
+not been considered previously in the literature. Further, notice that there are situations in
+which this rule can be applied whereas the similar vertex rule uncovered from (F10) cannot.
+To see this, let G be a graph consisting of two triangles {a, b, c} and {x, y, z}, connected by
+an edge {a, x}, and let k = 3. The vertex rule cannot delete a nor x, but the described edge
+rule removes {a, x}.
+5
+Experimental results
+In this section, we describe how multi-stage sparsiﬁcation is applied to the MCE problem and
+our computational results.
+All experiments are executed on a machine equipped with an Intel Core i7-4770K CPU
+(3.5 GHz), 8 GB of RAM, running Ubuntu 16.04.
+Training and test data
+All our datasets are obtained from Network Repository [51] (avail-
+able at http://networkrepository.com/).
+We discard all vertex and edge weights and
+parallel edges (if any) and treat every directed edge as undirected.
+For dense networks, we choose a total of 30 networks from various categories with the
+criteria that the edge density is at least 0.5 in each. We name this category “dense”. The
+test instances are in Table 2, chosen based on empirical hardness (i.e., they are solvable in
+reasonable amount of time).
+For sparse networks, we choose our training data from four diﬀerent categories: 31 biolog-
+ical networks (“bio”), 32 social networks (“soc”), 107 Facebook networks (“socfb”), and 13
+web networks (“web”). In addition, we build a ﬁfth category “all” that comprises all networks
+from the mentioned four categories. The test instances are in Table 3.
+Feature computation
+We implement the feature computation in C++, relying on the
+igraph [14] C graph library. In particular, our feature computation is single-threaded with
+further optimization possible.
+Domain oblivious training via local chromatic density
+To achieve a high classiﬁcation
+accuracy, it is natural to assume that the classiﬁer should be trained with networks coming
+from the same domain, and that testing should be performed on networks from that domain.
+Certainly, some similarity is needed between the two for training to be eﬀective. For example,
+sparse networks (say trees) should not be representative of dense networks. However, we
+demonstrate in Table 1 that a classiﬁer can be trained with networks from various domains,
+yet predictions remain accurate across diﬀerent domains (see column “all”). The accuracy
+is boosted considerably by the introduction of the local chromatic density (F10) into the
+feature set (see Table 1). In particular, when generalizing across various domains, the impact
+on accuracy is almost 10 %. For this reason, rather than focusing on network categories, we
+only consider networks by edge density (at least 0.5 or not).
+10
+
+Accuracy measures and setup
+For our experiments, the vertex pruning ratio is the
+ratio of the number of vertices removed from the instance to the number of vertices |V | in
+the original instance. The edge pruning ratio is deﬁned similarly, but for edges instead of
+vertices. We say clique accuracy is one precisely when the number of all maximum cliques of
+the instance G is equal to the number of all maximum cliques of the reduced instance G′ and
+ω(G) = ω(G′).
+State-of-the-art solvers for MCE
+To our best knowledge, the only publicly available
+maximum clique solvers able to list all maximum cliques1 are cliquer [42], based on a branch-
+and-bound strategy; and MoMC [37], introducing incremental maximum satisﬁability reasoning
+to a branch-and-bound strategy. We use these solvers in our experiments2.
+5.1
+Dense networks
+In this subsection, we show results for probabilistic preprocessing on dense networks (i.e.,
+edge density at least 0.5).
+1For instance, pmc [52] does not have this feature.
+2It is worth noticing that in principle, one could solve the problem by any algorithm that lists all maximal
+cliques. However, even such algorithms solve a more general problem (i.e., every maximum clique is maximal
+but the opposite is not true in general) which usually comes with a signiﬁcantly higher computational cost.
+11
+
+Table 2: Experiments for dense graphs. The column “ω” is the max. clique size and the column “n. ω” is the number of such cliques. In
+both, * means the quantity is preserved in the preprocessed instance; otherwise the new quantity is in parenthesis. The multicolumns
+“k-core” and “1-stage” give the vertex pruning ratio followed by the edge pruning ratio when preprocessed by removing vertices of
+core number < ω −1 and our preprocessor, respectively. For the last three columns, all runtimes are in seconds averaged over three
+independent runs. The column “Pruning” is the time for feature computation and pruning. The two remaining columns give the
+runtime of a solver, containing the runtime on the pruned instance with the speedup obtained in parenthesis. We denote by t/o killed
+execution after an hour and — denotes no speedup.
+Instance
+|V |
+|E|
+ω
+n. ω
+k-core
+1-stage
+Pruning
+cliquer
+MoMC
+brock200-1
+200
+14.8 K
+21 (20)
+2 (16)
+—
+—
+0.34
+0.55
+<0.01
+0.39 (53.07)
+0.04 (44.57)
+keller4
+171
+9.4 K
+11*
+2304 (37)
+—
+—
+0.30
+0.50
+<0.01
+<0.01 (38.11)
+0.02 (5.68)
+keller5
+776
+226 K
+27*
+1000 (5)
+—
+—
+0.28
+0.48
+0.19
+t/o
+1421.24 (>2.53)
+p-hat300-3
+300
+33.4 K
+36*
+10*
+—
+—
+0.38
+0.58
+0.02
+87.1 (9.12)
+0.05 (6.00)
+p-hat500-3
+500
+93.8 K
+50*
+62 (40)
+—
+—
+0.34
+0.52
+0.07
+t/o
+2.51 (5.98)
+p-hat700-1
+700
+61 K
+11*
+2*
+—
+—
+0.36
+0.47
+0.03
+0.08 (1.22)
+0.05 (1.30)
+p-hat700-2
+700
+121.7 K
+44*
+138*
+—
+—
+0.36
+0.45
+0.11
+t/o
+1.35 (—)
+p-hat1000-1
+1 K
+122.3 K
+10*
+276 (165)
+—
+—
+0.36
+0.47
+0.08
+0.86 (2.22)
+0.71 (1.67)
+p-hat1500-1
+1.5 K
+284.9 K
+12 (11)
+1 (376)
+—
+—
+0.33
+0.43
+0.25
+13.18 (—)
+3.2 (1.54)
+fp
+7.5 K
+841 K
+10*
+1001*
+—
+—
+0.06
+0.29
+0.36
+0.65 (—)
+5.19 (1.13)
+nd3k
+9 K
+1.64 M
+70*
+720*
+—
+—
+0.23
+0.28
+1.28
+t/o
+7.05 (1.09)
+raefsky1
+3.2 K
+291 K
+32*
+613 (362)
+—
+—
+0.33
+0.38
+0.11
+2.80 (—)
+0.31 (1.36)
+HFE18 96 in
+4 K
+993.3 K
+20*
+2*
+<1e-4
+<1e-4
+0.26
+0.27
+0.49
+58.88 (1.05)
+4.30 (1.18)
+heart1
+3.6 K
+1.4 M
+200*
+45 (26)
+<1e-4
+<1e-4
+0.19
+0.25
+0.66
+t/o
+19.37 (—)
+cegb2802
+2.8 K
+137.3 K
+60*
+101 (38)
+0.09
+0.04
+0.39
+0.46
+0.09
+0.05 (—)
+0.15 (1.61)
+movielens-1m
+6 K
+1 M
+31*
+147*
+0.05
+0.007
+0.22
+0.23
+0.98
+31.31 (—)
+2.85 (1.14)
+ex7
+1.6 K
+52.9 K
+18*
+199 (127)
+0.02
+0.01
+0.26
+0.28
+0.04
+0.01 (—)
+0.1 (1.29)
+Trec14
+15.9 K
+2.87 M
+16*
+99*
+0.16
+0.009
+0.34
+0.15
+2.19
+3.62 (—)
+0.35 (—)
+12
+
+Classiﬁcation framework for dense networks
+For training, we get 4762 feature vectors
+from our “dense” category.
+As a baseline, a 4-fold cross validation over this using logis-
+tic regression results in an accuracy of 0.73.
+We improve on this by obtaining an accu-
+racy of 0.81 with gradient boosted trees (further details omitted), found with the help of
+auto-sklearn [25].
+Search strategies
+Given the empirical hardness of dense instances, one should not expect
+a very high accuracy with polynomial-time computable features such as (F1)-(F10). For this
+reason, we set the conﬁdence threshold q = 0.98 here.
+The failure of k-core decomposition on dense graphs
+It is common that widely-
+adopted preprocessing methods like the k-core decomposition cannot prune any vertices on a
+dense network G, even if they had the computationally expensive knowledge of ω(G). This
+is so because the degree of each vertex is higher than than the maximum clique size ω(G).
+We showcase precisely this poor behaviour in Table 2. For most of the instances, the k-
+core decomposition with the exact knowledge of ω(G) cannot prune any vertices. In contrast,
+the probabilistic preprocessor prunes typically around 30 % of the vertices and around 40 %
+of the edges.
+Accuracy
+Given that around 30 % of the vertices are removed, how many mistakes do
+we make? For almost all instances we retain the clique number, i.e., ω(G′) = ω(G), where
+G′ is the instance obtained by preprocessing G (see column “ω” in Table 2). In fact, the
+only exceptions are brock200-1 and p-hat1500-1, for which ω(G′) = ω(G) −1 still holds.
+Importantly, for about half of the instances, we retain all optimal solutions.
+Speedups
+We show speedups for the solvers after executing our pruning strategy in Table 2
+(last two columns). We obtain speedups as large as 53x and for 38x brock200-1 and keller4,
+respectively. This might not be surprising, since in both cases we lose some maximum cliques
+(but note that for keller4, the size of a maximum clique is still retained). For p-hat300-3,
+the preprocessor makes no mistakes, resulting in speedups of upto 9x.
+The speedup for
+keller5 is at least 2.5x, since the original instance was not solved within 3600 seconds, but the
+preprocessed instances was solved in roughly 1421 seconds.
+Most speedups are less than 2x, explained by the relative simplicity of instances. Indeed,
+it seems challenging to locate dense instances of MCE that are (i) structured and (ii) solvable
+within a reasonable time.
+5.2
+Sparse networks
+In this subsection, we show results for probabilistic preprocessing on sparse networks (i.e.,
+edge density below 0.5).
+Classiﬁcation framework for sparse networks
+We use logistic regression trained with
+stochastic gradient descent. We use a standard L2 regularizer, and use 0.0001 as the regular-
+ization term multiplier determined by a systematic grid search. The classiﬁer is trained for
+400 epochs.
+13
+
+Table 3: Experiments for sparse graphs. The columns are precisely as in Table 2, with the exception that we show pruning ratios for 5
+stages. All ratios are rounded to three decimal places. Ratios of 1.000 are between 1 and 0.999. An s marks a segmentation fault.
+Instance
+|V |
+|E|
+ω
+n. ω
+k-core
+5-stage
+Pruning
+cliquer
+MoMC
+bio-WormNet-v3
+16 K
+763 K
+121*
+18*
+0.868
+0.602
+0.987
+0.975
+0.36
+0.37 (—)
+0.40 (3.94)
+ia-wiki-user-edits-page
+2 M
+9 M
+15*
+15*
+0.958
+0.641
+0.997
+0.946
+1.12
+1.16 (29.94)
+s
+rt-retweet-crawl
+1 M
+2 M
+13*
+26*
+0.979
+0.863
+0.997
+0.989
+0.38
+0.41 (5.66)
+s
+soc-digg
+771 K
+6 M
+50*
+192*
+0.969
+0.496
+0.998
+0.964
+4.80
+4.91 (1.78)
+s
+soc-ﬂixster
+3 M
+8 M
+31*
+752*
+0.986
+0.834
+0.999
+0.989
+1.32
+1.41 (3.86)
+s
+soc-google-plus
+211 K
+2 M
+66*
+24*
+0.986
+0.785
+0.998
+0.972
+0.35
+0.35 (—)
+0.41 (3.98)
+soc-lastfm
+1 M
+5 M
+14*
+330 (324)
+0.933
+0.625
+0.993
+0.938
+2.24
+2.57 (10.56)
+s
+soc-pokec
+2 M
+22 M
+29*
+6*
+0.824
+0.595
+0.975
+0.940
+17.59
+24.40 (45.80)
+s
+soc-themarker
+69 K
+2 M
+22*
+40*
+0.713
+0.151
+0.972
+0.842
+2.03
+4.95 (—)
+s
+soc-twitter-higgs
+457 K
+15 M
+71*
+14*
+0.852
+0.540
+0.986
+0.943
+9.52
+9.85 (1.92)
+s
+soc-wiki-Talk-dir
+2 M
+5 M
+26*
+141*
+0.993
+0.830
+0.999
+0.970
+1.09
+3.47 (1.25)
+s
+socfb-A-anon
+3 M
+24 M
+25*
+35*
+0.879
+0.403
+0.984
+0.907
+28.49
+38.05 (55.95)
+s
+socfb-B-anon
+3 M
+21 M
+24*
+196*
+0.884
+0.378
+0.986
+0.920
+28.33
+35.49 (67.46)
+s
+socfb-Texas84
+36 K
+2 M
+51*
+34*
+0.540
+0.322
+0.957
+0.941
+1.04
+1.07 (1.32)
+s
+tech-as-skitter
+2 M
+11 M
+67*
+4*
+0.997
+0.971
+1.000
+0.998
+0.28
+0.28 (—)
+0.36 (4.31)
+web-baidu-baike
+2 M
+18 M
+31*
+4*
+0.933
+0.618
+0.992
+0.934
+9.67
+11.00 (7.48)
+s
+web-google-dir
+876 K
+5 M
+44*
+8*
+1.000
+0.999
+1.000
+1.000
+< 0.00
+< 0.00 (—)
+< 0.00 (2.06)
+web-hudong
+2 M
+15 M
+267 (266)
+59 (1)
+1.000
+0.996
+1.000
+0.997
+0.09
+0.10 (—)
+0.1 (9.99)
+web-wikipedia2009
+2 M
+5 M
+31*
+3*
+0.999
+0.988
+1.000
+1.000
+0.03
+0.03 (—)
+0.03 (4.28)
+14
+
+Implementing the k-core decomposition
+Recall the exact state-of-the-art preprocessor:
+(i) use a heuristic to ﬁnd a large clique (say of size k) and (ii) delete every vertex of G of core
+number less than k −1. For sparse graphs, a state-of-the-art solver pmc has been reported
+to ﬁnd large cliques, i.e., typically k is at most a small additive constant away from ω(G)3.
+Further, given that some real-world sparse networks are scale-free (many vertices have low
+degree) the k-core decomposition can be eﬀective in practice.
+To ensure highest possible prune ratios for the k-core decomposition method, we supply
+it with the number ω(G) instead of an estimate provided by any real-world implementation.
+This ensures ideal conditions: (i) the method always prunes as aggressively as possible, and
+(ii) we further assume its execution has zero cost. We call this method the ω-oracle.
+Test instance pruning
+Before applying our preprocessor on the sparse test instances, we
+prune them using the ω-oracle. This ensures that the pruning we report is highly non-trivial,
+while also speeding up feature computation.
+Search strategies
+We experiment with the following two multi-stage search strategies:
+• Constant conﬁdence (CC): at every stage, perform probabilistic preprocessing with
+conﬁdence threshold q.
+• Increasing conﬁdence (IC): at the ﬁrst stage, perform probabilistic preprocessing with
+conﬁdence threshold q, progressing q by d for every later stage.
+Our goal is two-fold: to ﬁnd (i) a number of stages ℓand (ii) parameters q and d, such
+that the strategy never errs while pruning as aggressively as possible. We do a systematic
+search over parameters ℓ, q, and d. For the CC strategy, we let ℓ∈{1, 2, . . . , 8} and q ∈
+{0.55, 0.6, . . . , 0.95}. For the IC strategy, we try q ∈{0.55, 0.60, 0.65}, d = 0.05, and set ℓso
+that in the last stage the conﬁdence is 0.95.
+We ﬁnd the CC strategy with q = 0.95 to prune the highest while still retaining all optimal
+solutions. Thus, for the remaining experiments, we use a CC strategy with q = 0.95.
+Our 5-stage strategy outperforms, almost always safely, the ω-oracle (see Table 3). In
+particular, note that even if the diﬀerence between the vertex pruning ratios is small, the
+impact for the number of edges removed can be considerable (see e.g., all instances of the
+“soc” category). We note that the runtime is not sensitive to the number of stages ℓ. In
+fact, already the ﬁrst step of pruning makes the graph so small that further stages add
+comparatively very small amounts to the overall runtime.
+Speedups
+We show speedups for the solvers in Table 3. We use as a baseline the solver
+executed on an instance pruned by the ω-oracle, which renders many of the instances easy
+already. Most notably, this is not the case for soc-pokec, socfb-A-anon, and socfb-B-anon, all
+requiring at least 5 minutes of solver time. The largest speedup is for socfb-B-anon, where
+we go from requiring 40 minutes to only 7 seconds of solver time. For MoMC, most instances
+report a segmentation fault (marked with an s) for an unknown reason.
+3A table of results seen at http://ryanrossi.com/pmc/download.php
+15
+
+0.00
+0.05
+0.10
+0.15
+0.20
+Feature importance
+F1
+F2
+F3
+F4
+F5
+F6
+F7
+F8
+F9
+F10
+Feature
+0.00
+0.05
+0.10
+0.15
+0.20
+Feature importance
+F1
+F2
+F3
+F4
+F5
+F6
+F7
+F8
+F9
+F10
+Feature
+(a) Dense networks
+(b) Sparse networks
+Figure 3: The feature importance for (a) dense nets (category “dense”) and (b) sparse nets
+(category “all”).
+5.3
+Edge-based classiﬁcation
+For edges, we do a similar training as that described for vertices. For the category “dense”,
+we obtain 79472 feature vectors. Further, for this category, the edge classiﬁcation accuracy is
+0.83, which is 1 % higher than the vertex classiﬁcation accuracy using the same classiﬁer as in
+Subsection 5.1. However, we note that the edge feature computation is noticeably slower than
+that for vertex features. This reason combined with the fact that the classiﬁcation accuracy is
+almost the same, we omit further experiments with the edge features due to smaller speedups.
+5.4
+Model analysis
+Gradient boosted trees (used with dense networks in Subsection 5.1) naturally output feature
+importances.
+We apply the same classiﬁer for the sparse case to allow for a comparison
+of feature importance. In both cases, the importance values are distributed among the ten
+features and sum up to one.
+Unsurprisingly, for sparse networks, the local chromatic density (F10) dominates (impor-
+tance 0.22). In contrast, (F10) is ineﬀective for dense networks (importance 0.08), since the
+chromatic number tends to be much higher than the maximum clique size. In both cases,
+(F5) eigencentrality has relatively high importance, justifying its expensive computation.
+For dense networks, (F7) average χ2 over neighbor degrees has the highest importance
+(importance 0.23), whereas in the sparse case it is least important feature (importance 0.03).
+This is so because all degrees in a dense graph are high and the degree distribution tends to
+be tightly bound or coupled. Hence, even slight deviations from the expected (e.g., vertices in
+large cliques) depict high statistical signiﬁcance scores. We will capitalize on this observation
+later on in Section 7.
+16
+
+6
+On supervised learning for hard problems
+The goal of this section is two-fold: (i) to explain the high accuracy of our proposed framework,
+even when it was trained with small instances, and (ii) as a consequence, argue that supervised
+learning is a viable approach for solving structured instances of certain hard problems.
+To ensure that the input instances are, at some point, “structure-free” we turn to the
+following heavily-studied variant of the maximum clique problem. This serves as a repre-
+sentative of the worst-case input for our preprocessing strategy. Also, observe that in case
+the input graph has a unique maximum clique, MCE is equivalent to ﬁnding the (single)
+maximum clique. For simplicity, we restrict ourselves to single stage sparsiﬁcation in these
+experiments.
+6.1
+Planted clique
+In the planted clique problem [28, 33], we are given an Erd˝os-R´enyi random graph H :=
+G(n, p), i.e., an n-vertex graph where the presence of each edge is determined independently
+with probability p (see [21]). In addition, the problem is parameterized by an integer k such
+that a random subset of k vertices has been chosen from H and a clique added on it. On this
+input, the task is to identify (with the knowledge of the value of k) the k vertices containing
+the planted clique.
+The problem is easy for k ≤log2(n). In particular, as shown in [8], the clique number of
+G(n, p) as n →∞is almost surely w or w + 1 where w is the greatest natural number such
+that
+n
+w
+
+p(w
+2) ≥log(n),
+(2)
+where w is roughly 2 log2(n). Even when a clique of such size is known to exist (whp), we
+only know how to ﬁnd a clique of size log2(n) eﬃciently,4 and also solve the problem in
+polynomial-time when k is large enough. Speciﬁcally, it is known that several algorithmic
+techniques such as spectral methods (see e.g., [23] for more) produce eﬃcient algorithms for
+the problem when k = Ω(√n).
+However, settling the complexity of the problem is a notorious open problem when k is
+between 2 log2(n) and √n. Next, we will focus precisely on this diﬃcult region.
+6.2
+Pushing the limits of preprocessing
+In this subsection, we explore the limits of scalability and robustness of our framework on
+the planted clique problem. All experiments are done on an Intel Core i5-6300U CPU (2.4
+GHz), 8 GB of RAM, running Ubuntu 16.04, diﬀering only slightly from the earlier hardware
+conﬁguration. For all experiments here, we use only the igraph algorithm.
+Generation of synthetic data
+We use the genrang utility program [39] to sample a
+random graph H := G(n, p). To plant a clique of size k, we sample uniformly at random k
+vertices, denoted by K, from H and insert all corresponding at most
+ k
+2
+
+missing edges into H.
+For each H, we compute the features described in Section 4 with the following diﬀerences:
+we replace (F10) the local chromatic density with the order-four LCC and modify (F8) and
+4It is conjectured [29, 23] that there is no polynomial-time algorithm for ﬁnding a clique of size (1+ε) log2 n
+for any ε > 0 in G(n, 1/2).
+17
+
+ 0.7
+ 0.8
+ 0.9
+ 1
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+Vertex classification accuracy
+Size of planted clique (k)
+n= 64
+n=128
+n=256
+ 0.2
+ 0.4
+ 0.6
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+Pruning ratio
+Size of planted clique (k)
+n=64
+n=128
+n=256
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+Clique accuracy
+Size of planted clique (k)
+n=64
+n=128
+n=256
+(a) Vertex acc.
+(b) Pruning ratio
+(c) Clique acc.
+Figure 4: The vertex accuracy, pruning ratio, and clique accuracy of our framework when
+trained with G(n, 1/2) with three diﬀerent parameter pairs (64, 10), (128, 12), and (256, 13).
+The predictions are for independent, distinct samples with the same n, but growing planted
+clique size k.
+ 9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+0.005 0.045
+0.22
+0.71
+0.02
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+0.47
+0.345
+0.17
+0.015
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+0.05
+0.05
+0.7
+0.1
+0.1
+(a) (128, 13)
+(b) (256, 13)
+(c) (512, 16)
+Figure 5: Distribution of extracted maximum clique size, with black bars denoting the size
+of the planted clique. Both (a) and (b) are over 200 samples, while (c) is over 20 samples. In
+each, the predicting classiﬁer has been trained with 64-vertex random graphs with a planted
+clique of size 10.
+(F9) to consider order-four LCC instead of the LCC. This brings more predictive power while
+still remaining computationally feasible for small graphs. The values Ei in Equation 1 for
+(F6) and (F7) are the expected degree n · p, while for (F8) and (F9) they are the expected
+order-k LCC given as
+ n−1
+k−1
+
+p(k
+2) · 1/
+  np
+k−1
+
+. To ensure a balanced dataset, we sample (i) k
+label-0 examples from K and (ii) k label-1 examples from G \ K, both uniformly at random.
+For training, we consider n ∈{64, 128, 256, 512} because the clique number grows roughly
+logarithmically with n (see Equation 2). We ﬁx p = 1/2. For every n, we compute w from
+Equation 2, and sample graphs G(n, p) with a planted clique of size k ∈{w + 2, . . . , w + 6}
+such that each pair (n, k) gives a dataset of size at least 100 K feature vectors. When planting
+a clique of size at least w + 2, we try to guarantee the existence of a unique maximum clique
+in the graph. However, this procedure does not always succeed due to randomness, but we
+do not discard such rare outcomes.
+Vertex classiﬁcation accuracy
+We study the accuracy of our classiﬁers for distinguishing
+vertices that are and are not in a maximum clique. Speciﬁcally, we train a classiﬁer for each
+pair (n, k) ∈{(64, 10), (128, 12), (256, 12)}, and test for unseen graphs with the same n but
+growing planted clique size k′ = k + 1, . . . , k + 4. The results are shown in Figure 4 (a). As
+expected, the classiﬁcation task becomes easier once k′ increases. This is also supported the
+18
+
+Table 4: Robustness and speedups with ﬁxed n and increasing k. The leftmost two columns
+show the data (n, k) used to train a classiﬁer P. For each planted clique size k + 1, k + 2,
+and k + 3, we show the average pruning ratio (column “Pr.”), the average clique accuracy
+(column “Acc.’), the average runtime of igraph on the reduced instance obtained from our
+framework using P (column “Time (s)”), and the average speedup over executing the same
+algorithm on the original instance.
+k + 1
+k + 2
+k + 3
+n
+k
+Pr.
+Acc.
+Time
+Speedup Pr.
+Acc.
+Time
+Speedup Pr.
+Acc.
+Time
+Speedup
+64 10 0.530 0.905 0.068
+0.132
+0.548 0.965 0.068
+0.135
+0.564 0.995 0.068
+0.135
+128 12 0.506 0.710 0.301
+0.759
+0.517 0.875 0.296
+0.774
+0.525 0.935 0.297
+0.784
+256 13 0.489 0.170 3.261
+3.264
+0.493 0.190 3.233
+3.304
+0.493 0.310 3.260
+3.315
+512 15 0.492 0.05
+70.587 12.994
+0.492 0.05
+70.086 12.816
+0.491 0.100 70.562 12.722
+fact that multiple algorithms solve the planted clique problem in polynomial-time for large
+enough k′ (see Subsection 6.1). In addition, as n grows larger, we see accuracy deterioration
+caused by the converge of the local properties towards their expected values.
+Especially
+for small values of k′, the injection of the planted clique is not substantial enough to cause
+signiﬁcant deviations from the expected values.
+Pruning ratio and clique accuracy
+We study the eﬀectiveness of our framework as a
+probabilistic preprocessor for the planted clique instances. We ﬁx the conﬁdence threshold
+q = 0.55 and use the same set of classiﬁers and test data. The average pruning ratios over
+all instances are shown in Figure 4 (b). We see pruning ratios as high as at most 0.6, while
+always discarding more than 40 % of the vertices.
+Now, it is possible that P makes an erroneous prediction causing the deletion of a vertex,
+which in turn lowers the size of a maximum clique in the instance.
+The average clique
+accuracies over all instances are shown in Figure 4 (c). Here, we see that for n = 256, the
+vertex accuracy (Figure 4 (a)) is still above 0.7, but the clique accuracy drops to above 0.4.
+As the vertex accuracy decreases, the probability of deleting a vertex present in a maximum
+clique increases, translating to a higher chance of error in extracting a maximum clique.
+However, while not completely error-free, we observe that even in the case of (256, 13) we
+always delete at most two members of a maximum clique, whereas in the case of (512, 16),
+95 % of the time, we extract a maximum clique of size at least 13 (see Figure 5).
+Robustness and speedups
+The robustness and speedups obtained using the igraph al-
+gorithm are given in Table 4. Here, the clique accuracy and runtime are obtained as the
+average over 200 samples for each (n, k) except for (n, k) = (512, 15) for which there are 20
+independent samples. We see the drop in clique accuracy when a classiﬁer P is trained with
+(n, k) ∈{(256, 12), (512, 15)} and is predicting for the same n but increasing k. The clique
+accuracy is a strict measure, so to quantify the severeness of the erroneous predictions made
+by P we show the distributions of the extracted maximum clique sizes in Figure 5 for some
+pairs (n, k). Again, we observe the eﬀects of growing n causing the convergence of local prop-
+erties, consequently decreasing the predictive power of P. For (n, k) = (128, 13), 73 % of the
+runs still produce an optimal solution (here, one can also observe the rare event of having a
+maximum clique of size 14 when the planted clique was of size 13).
+19
+
+Table 5: Deviation in vertex classiﬁcation accuracy.
+n
+k
+Trained acc.
+Rob. acc.
+128 12
+0.858
+0.844
+256
+13
+0.747
+0.728
+512 15
+0.678
+0.665
+The case for supervised learning on intractable problems
+As n grows, the instances
+get increasingly time-consuming to solve even for state-of-the-art solvers for suitable k, as
+there is no exploitable structure. Consequently, obtaining optimally labeled data becomes
+practically impossible for large enough n. However, in our experiments, we ﬁnd that random
+graphs with n = 64 and k = 10 are representative of the input for moderately larger graphs
+as well, up to a point. Further, obtaining the optimal label for such small graphs is fast.
+We show the deviation in vertex classiﬁcation accuracy in Table 5. The column “Trained
+acc.” corresponds to the accuracy of the classiﬁer trained with the values n and k mentioned
+in the two ﬁrst columns, while the column “Rob. acc.” is the accuracy of a classiﬁer trained
+with smaller (n, k) = (64, 10) instances, and predictions are made for the speciﬁed (n, k) with
+planted clique size k + 1. A key observation is that the diﬀerence between the two accuracies
+in a single row in Table 5 is small enough not to warrant training on larger instances. This
+oﬀers an explanation for the perfect clique accuracy with limited training, observed earlier for
+sparse real-world networks. This observation reduces the need of labeling costly data points
+for training.
+7
+ALTHEA: a novel clique-ﬁnding heuristic for dense graphs
+In this section, we capitalize on the observation we made in Subsection 5.4. In particular, we
+describe a heuristic we call ALTHEA for extracting an approximate maximum clique from a
+simple input graph G = (V, E).
+7.1
+Description of ALTHEA
+ALTHEA hinges on categorizing the degree of each vertex in G based on its deviation from
+the average degree of G. Each vertex is subsequently represented by a sequence of category
+symbols encoding its neighbourhood, which are then used for computing its statistical sig-
+niﬁcance score. Any vertex depicting the maximum χ2 value (along with its neighbourhood)
+forms a candidate region for containing a maximum clique in G. ALTHEA comprises the
+following 5 steps.
+1. Initialization
+We compute the following three degree characteristics of G.
+• (i) ∆(G): the maximum degree of any vertex in G,
+• (ii) a(G): the average degree of the vertices in G; and
+• (iii) σ(G): the standard deviation of the vertex degrees of G.
+Formally, we deﬁne
+∆(G) = max{deg(v) : ∀v ∈V },
+(3)
+20
+
+a(G) =
+P
+∀v∈V deg(v)
+|V |
+,
+(4)
+and
+σ(G) =
+sP
+∀v∈V (deg(v) −a(G))2
+|V | −1
+,
+(5)
+where deg(v) is degree of vertex v.
+2. Symbol categorization
+ALTHEA captures the nature of vertex degree deviation (in
+the number of standard deviations) from the underlying degree distribution of G. The number
+of category symbols τ G is ⌈(∆(G) −a(G))/σ(G)⌉+ 1. The obtained set of category symbols
+is ΓG = {γ1, γ2, . . . , γτ G}, where γi is the multiple of σ(G) by which the degree of vi deviates
+from a(G). Next, we compute the expected probability of occurrence for the symbols in ΓG.
+To this end, we use Chebyshev’s inequality [56], which for a random variable X and a real
+number k > 0 states that Pr(|X −µ| ≥kδ) ≤1/k2, where µ and δ are the mean and standard
+deviation, respectively, of the distribution from which X is drawn.
+Thus, the occurrence
+probability of γi is given by Pr(γi) = 1/i2 −1/(i + 1)2.
+Other tail distribution bounds or domain-dependent probability distributions capturing
+the underlying characteristics of G might also be used depending on the application. This
+makes ALTHEA robust to diverse domains, applicable to diﬀerent input distributions.
+3. Vertex symbol sequence
+For each vertex v ∈V , we extract its closed neighbourhood
+N[v] = {v} ∪{u : (u, v) ∈E}. The vertex v is then represented by a sequence of category
+symbols Seq(v) of length |N[v]| based on the symbol categorization of the degree of the vertices
+in its neighbourhood N[v]. Formally, this is given as
+Seq(v) = {γ(u) : ∀u ∈N[v]},
+(6)
+where γ(u) is the unique γi ∈ΓG and i ∈{1, 2, . . . , τ G}, for which the inequality i ≤(deg(u)−
+a(G))/σ(G) + 1 < i + 1 holds.
+4.
+Statistical signiﬁcance computation
+For each vertex v, ALTHEA computes the
+χ2 statistical signiﬁcance score using Seq(v) and the associated symbol probabilities. For
+each category symbol γi ∈ΓG, its expected occurrence count for vertex v is computed as
+Ev
+γi = Pr(γi) × |N[v]|.
+Similarly, the corresponding observed occurrence count Ov
+γi of the
+category symbol γi for v can be obtained from Seq(v).
+Combining the above steps, the
+statistical signiﬁcance of v is
+χ2(v) =
+X
+∀γi∈ΓG
+(Ov
+γi −Ev
+γi)2
+Evγi
+.
+(7)
+5. Approximate maximum clique extraction
+After computing the statistical signiﬁ-
+cance of the vertices, ALTHEA selects the vertex v′ demonstrating the maximum statistical
+signiﬁcance (chosen arbitrarily in case of ties), as the best candidate whose neighbourhood
+contains an (approximate) maximum clique for G. Intuitively, a vertex and its neighbours
+that are a part of a maximum clique in G would exhibit the largest variation in the degree
+distribution characteristic compared to the average (or expected) characteristic of G, which
+21
+
+is captured by the notion of statistical signiﬁcance. Finally, the subgraph induced by the
+neighbourhood N[v′] is fed to a maximum clique solver for extracting a large clique of G.
+Discussion
+In a dense graph the degree of a vertex is high, and the degree distribution tends
+to be tightly bound (or coupled). Hence, even slight deviations from the expected behaviour
+(in cases of vertices that are a part of large cliques) depict high statistical signiﬁcance scores.
+This enables ALTHEA to eﬀectively identify large maximum cliques, as we will experimentally
+show next.
+22
+
+Table 6: Performance comparison of ALTHEA on real-world datasets. Here, (i) ω denotes the maximum clique size and ω′ is the
+approximate maximum clique size found; (ii) results for approaches that were “killed” after 5 minutes of run-time (without output)
+are marked with −; (iii) for results marked with #, refer to Table 7 for additional results; (iv) averaged run-times over 5 runs are
+shown in seconds; and (v) vertex and edge pruning (Pr.) are given in percentage of |V | and |E| respectively.
+Dataset Characteristics
+Heuristic Approaches
+Exact Approaches
+Instance
+|V |
+|E|
+ω
+ALTHEA + FMC(H)
+FMC(H)
+RMC
+FMC(E) MoMC
+igraph
+Vert. Pr. Edge Pr. Time (s)
+ω′
+Time (s) ω′
+Time (s) ω′
+Time (s)
+Time (s) Time (s)
+bio-WormNet-v3-benchmark
+2 K
+79 K
+126
+94.48
+89.83
+0.00383
+126
+0.0154
+126
+0.00067 126
+0.00564
+0.496
+0.239
+bn-macaque-rhesus inter-cort-netw 2 93
+2 K
+30
+68.82
+82.05
+0.000123 30
+0.00024
+30
+0.001
+30
+0.00024
+0.004
+0.0008
+bn-mouse retina 1
+1 K
+91 K
+51
+77.74
+80.30
+0.0125
+39#
+0.0438
+35
+0.184
+51
+-
+0.26
+-
+cari
+1 K
+77 K
+200
+68.28
+11.19
+0.783
+200
+0.883
+200
+0.176
+200
+-
+0.656
+4.933
+cavity26
+5 K
+71 K
+19
+98.66
+99.00
+0.00219
+19
+0.00913
+19
+0.0381
+19
+0.017
+1.148
+0.132
+econ-psmigr1
+3 K
+411 K
+144
+90.16
+92.20
+0.138
+116
+0.728
+114
+-
+-
+-
+1.38
+-
+frb30-15-1
+451
+83 K
+30
+17.29
+32.21
+0.0734
+25
+0.133
+25
+1.0085
+25
+-
+0.324
+-
+hamming10-2
+1 K
+519 K
+512
+1.171
+2.14
+39.70
+512
+42.00
+512
+11.158
+512
+-
+29.188
+-
+light in tissue
+29 K 188 K
+6
+99.94
+99.97
+0.00773
+6
+0.0122
+6
+10.894
+6
+0.0306
+-
+0.63
+nasa2910
+3 K
+86 K
+36
+96.6
+97.48
+0.00292
+36
+0.036
+36
+0.0272
+36
+0.479
+0.64
+0.31
+robot24c1 mat5 J
+405
+14 K
+24
+88.89
+95.49
+0.0006
+21
+0.00283
+20
+0.00313
+24
+-
+0.016
+0.53
+scc enron-only
+152
+10 K
+120
+7.89
+4.92
+0.04
+120
+0.0371
+120
+0.002
+120
+-
+0.336
+0.0224
+scc infect-dublin
+11 K 176 K
+84
+99.12
+97.57
+0.0119
+84
+0.0321
+84
+0.021
+84
+2.715
+-
+0.864
+scc twitter-copen
+9 K
+474 K
+581
+87.74
+16.80
+26.223
+581
+30.967
+581
+10.267
+581
+-
+38.004
+-
+Trec12
+3 K
+151 K
+11
+91.71
+98.46
+0.00376
+8
+0.0381
+8
+-
+-
+21.334
+0.756
+8.926
+polblogs
+2 K
+17 K
+20
+95.44
+93.74
+0.00107
+19#
+0.00354
+16
+0.005
+20
+0.186
+0.204
+0.503
+moreno-blogs
+1 K
+1109 K 1490 0.134
+0.134
+0.405
+1490 0.369
+1490 16.75
+1490 1.645
+-
+0.24
+23
+
+Table 7: Performance comparison of ALTHEA on diﬃcult real-world data. Here, (i) results marked with ∗denote the maximum clique
+size found by the heuristic before the cut-oﬀtime of 5 min.; (ii) RMC reported segmentation fault for the econ-psmigr1 network, and
+is marked with −; (iii) average run-times over 5 runs are shown in sec.; and (iv) vertex and edge pruning (Pr.) are given in % of |V |
+and |E|, respectively.
+Dataset Characteristics
+ALTHEA + FMC(H)
+ALTHEA + MoMC
+FMC(H)
+RMC
+Instance
+|V |
+|E|
+Vert. Pr.
+Edge Pr.
+Time (s)
+ω′
+Time (s)
+ω′
+Time (s)
+ω′
+Time (s)
+ω′
+bio-WormNet-v3
+16K
+763K
+96.23
+91.85
+0.0914
+94
+0.166
+121
+0.465
+90
+0.156
+121
+brock800-1
+801
+208K
+35.21
+58.08
+0.088
+17
+-
+19*
+0.289
+17
+-
+17*
+C1000-9
+1001
+450K
+7.69
+14.64
+2.41
+51
+-
+59*
+3.065
+51
+-
+53*
+econ-psmigr1
+3141
+411K
+90.16
+92.20
+0.138
+116
+0.615
+122
+0.728
+114
+-
+-
+frb30-15-1
+451
+83K
+17.29
+32.21
+0.0734
+25
+0.866
+29
+0.133
+25
+-
+25*
+frb50-23-5
+1151
+581K
+16.33
+29.77
+2.1
+42
+-
+48*
+3.235
+41
+-
+40*
+frb53-24-5
+1273
+714K
+5.81
+11.35
+3.863
+42
+-
+49*
+4.65
+42
+-
+42*
+p-hat1500-3
+1501
+847K
+17.19
+30.40
+2.725
+60
+-
+91*
+4.589
+60
+-
+60*
+bn-mouse retina 1
+1123
+91K
+77.74
+80.30
+0.0125
+39
+0.026
+51
+0.0438
+35
+0.184
+51
+polblogs
+1491
+17K
+95.44
+93.74
+0.0011
+19
+0.197
+20
+0.0035
+16
+0.005
+20
+24
+
+7.2
+Experimental Evaluation
+Baselines
+We benchmark the performance of ALTHEA against the following existing state-
+of-the-art approaches: (i) igraph [14] C library’s implementation of the exact modiﬁed Bron-
+Kerbosch algorithm [10], (ii) MoMC [36] employing a branch-and-bound pruning strategy, (iii)
+FMC(E) [45] using exact hierarchical pruning strategy and (iv) FMC(H) – the fast heuristic
+variant of FMC(E), and (v) RMC [38] – randomized heuristic based on “binary search” with
+optimum-bounding and is obtained from the authors. By deﬁnition, the exact algorithms give
+the maximum clique size ω.
+Note that the ﬁnal pruned subgraph obtained by ALTHEA is presented to a maximum
+clique solver. We couple ALTHEA with either the exact MoMC solver, or the fast FMC(H)
+heuristic (denoted as ALTHEA+MoMC and ALTHEA+FMC(H), respectively).
+The ap-
+proaches are evaluated on run-time eﬃciency and accuracy of extracting a maximum clique.
+Our implementation of ALTHEA is in C, and all experiments are run on an Intel Xeon E5-2680
+CPU (2.80 GHz) with 8 cores and 32 GB of RAM.
+7.3
+Real Datasets
+We experiment on structured datasets from diverse domains such as biological networks,
+ﬁnancial graphs, social interaction and blog conversations. Again, our instances are obtained
+from Network Repository [51].
+Easy instances
+We selected 17 dense graphs (see Table 6) with varying sizes of upto
+30 K vertices and 1 M edges.
+Table 6 reports the vertex and edge pruning achieved by
+ALTHEA+FMC(H) in addition to run-time and the maximum clique size extracted. We see
+that ALTHEA is highly accurate in identifying regions that contain a maximum clique. In
+fact, it is successful in extracting an optimal maximum clique in 13 of the instances, while in
+the remaining 4 instances, it extracts larger cliques than standalone FMC(H).
+We observe that ALTHEA aggressively prunes the search space (with high accuracy),
+achieving vertex and edge prunings as high as 99 % — with more than 80 % vertex/edge
+pruning on 11 instances. This enables our framework to be very eﬃcient in practice, show-
+casing consistent speedups of around 3× compared to the best performing heuristic and upto
+10× with respect to the exact algorithms. On the other hand, RMC is able to extract the
+maximum clique size in nearly all the instances, but suﬀers from large run-time in general
+(compared to other heuristics), owing to its dependency on vertex coloring and independent
+set computation.
+Hard instances
+We select 8 additional hard instances, on which exact algorithms were
+unable to run to completion with a timeout of 5 minutes. Table 7 tabulates these instances
+and the performance of the competing approaches. Here, we also evaluate the performance
+of ALTHEA when coupled with the exact MoMC solver.
+Similar to our previous observations from Table 6, we ﬁnd that ALTHEA+FMC(H) per-
+forms better that the standalone FMC(H) heuristic, and extracts better solutions. Further,
+vertex and edge pruning (of around 40 % on average) gives ALTHEA faster run-times with
+upto 5× speedups over FMC(H). Again, RMC requires high computation time but extracts
+larger cliques.
+25
+
+From Table 7, we see that the pruning strategy of ALTHEA with MoMC provides an
+interesting trade-oﬀbetween solution quality and run-time. This approach is able to identify
+signiﬁcantly better solutions compared to others, in all instances. In fact, for the last two
+instances in Table 7 (also in Table 6), we are now able to extract the optimal solution.
+Although ALTHEA+MoMC consumes slightly more run-time (than FMC(H)), it is still faster
+than RMC.
+To summarize, we see that ALTHEA provides an eﬃcient and robust pruning strategy
+for ﬁnding an approximate maximum clique with high accuracy in dense real-life graphs from
+diverse domains. Further, as is well-known, such dense instances constitute a major challenge
+for state-of-the-art solvers.
+7.4
+Synthetic datasets
+We turn to study the robustness of ALTHEA on Erd˝os-R´enyi (ER) random graphs, denoted as
+G(n, p), which is an n-vertex graph where every edge is present with independent probability p.
+We observe the pruning ratio, run-time and accuracy of the approaches, by varying the two
+parameters n and p. Particularly for p ≥0.5, random graphs present a challenging benchmark
+for pruning. Hence, we relax the accuracy measure by considering a heuristic accurate if the
+size of the clique returned is at most 1 less than the optimum.
+Graph density
+The eﬀect of density on the performance of the approaches is shown
+in Figures 6(a)-(c) obtained on ER-graphs with 64 vertices with varying density of p ∈
+{0.25, 0.33, 0.5, 0.67, 0.75}. In terms of pruning rate, we observe in Figure 6(a) that ALTHEA
+eﬀectively prunes nearly 50 % of the edges (and vertices) even in dense random graphs (i.e.,
+p = 0.5). However, the pruning rate decreases linearly with increase in density (to around
+20 % for p = 0.75). The high pruning rate enables ALTHEA (coupled with FMC(H) heuris-
+tic) to be superior than the other approaches in terms of run-time demonstrating upto 1.5×
+speedups compared to the standalone FMC(H). Similar to the real datasets, RMC suﬀers from
+high run-time (upto 10× slower). Interestingly, we observe that ALTHEA exhibits higher ac-
+curacy compared to FMC(H) (Figure 6(c)). For G(64, 0.75), we report an accuracy of more
+than 70 % compared to around 50 % for FMC(H). The accuracy of FMC(H) is seen to de-
+grade signiﬁcantly as density increases. For low density graphs (i.e., p < 0.5), both heuristics
+perform similarly. RMC has perfect accuracy, but infeasible running times for larger and
+denser graphs.
+Graph size
+We assess the eﬀect of varying n on the performance of ALTHEA. Figures 6(d)-
+(e) present the results for n = 256.
+The approaches are seen to exhibit similar behaviour as above, with high pruning rates for
+ALTHEA, along with a large speedup in extracting large cliques compared to FMC(H). From
+Figure 6(e), we observe that our approach depicts signiﬁcantly superior accuracy (compared
+to FMC(H)) – being nearly 6× more accurate in identifying a maximum clique in dense
+input graphs. Finally, we remark that similar results were observed on ER-graphs for other
+parameter values of n and p, but omit further details.
+26
+
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+Pruning percent
+Probability of edges (p)
+Vertex pruning
+Edge pruning
+(a)
+ 0
+ 0.5
+ 1
+ 1.5
+ 2
+ 2.5
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+Run-time (ms)
+Probability of edges (p)
+ALTHEA+FMC(H)
+FMC(H)
+RMC
+(b)
+ 40
+ 50
+ 60
+ 70
+ 80
+ 90
+ 100
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+Maximum clique accuracy
+Probability of edges (p)
+ALTHEA+FMC(H)
+FMC(H)
+(c)
+ 0
+ 10
+ 20
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+Run-time (ms)
+Probability of edges (p)
+ 70
+ 470
+ 870
+ALTHEA+FMC(H)
+FMC(H)
+RMC
+(d)
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 0
+ 0.2
+ 0.4
+ 0.6
+ 0.8
+ 1
+Maximum clique accuracy
+Probability of edges (p)
+ALTHEA+FMC(H)
+FMC(H)
+(e)
+Figure 6: Performance comparison of competing approaches on ER random graphs G(64, p)
+with varying density p based on (a) vertex and edge pruning rates, (b) run-time, and (c)
+maximum clique accuracy; and on G(256, p) with varying density p, based on (d) run-time
+and (e) maximum clique accuracy.
+27
+
+8
+Conclusions
+We have proposed a novel framework for learning to scale-up combinatorial optimization algo-
+rithms. In contrast to the existing learning frameworks that use diﬃcult-to-interpret learning
+models to learn the exact decision boundary, our proposed framework relies on interpretable
+learning models with local features to prune the elements that are not in any optimal so-
+lution(s). The deeper insights learned by our multi-stage pruning framework result in the
+identiﬁcation of feature combinations relevant to the optimization problem and the instance
+class. This can result in better heuristics for the problem, as evidenced by maximum clique
+enumeration.
+Our framework has been designed primarily for combinatorial optimization problems that
+involve ﬁnding an optimal subset of elements. A crucial direction for future research is to
+explore if this framework can be extended to deal with combinatorial optimizations involving
+ordering and assignment problems. Other avenues for future research include the design of
+approaches to improve the accuracy of the pruning by incorporating problem constraints in
+the learning process.

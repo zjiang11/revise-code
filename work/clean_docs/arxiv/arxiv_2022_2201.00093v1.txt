@@ -1,0 +1,786 @@
+Distributed Evolution Strategies Using TPUs for
+Meta-Learning
+1st Alex Sheng
+College of Arts and Science
+New York University
+New York, USA
+
+2nd Jun Yi Derek He
+Academy of Science and Technology
+The Woodlands College Park High School
+The Woodlands, USA
+
+Abstract—Meta-learning traditionally relies on backpropaga-
+tion through entire tasks to iteratively improve a model’s learning
+dynamics. However, this approach is computationally intractable
+when scaled to complex tasks. We propose a distributed evolution-
+ary meta-learning strategy using Tensor Processing Units (TPUs)
+that is highly parallel and scalable to arbitrarily long tasks with
+no increase in memory cost. Using a Prototypical Network trained
+with evolution strategies on the Omniglot dataset, we achieved
+an accuracy of 98.4% on a 5-shot classiﬁcation problem. Our
+algorithm used as much as 40 times less memory than automatic
+differentiation to compute the gradient, with the resulting model
+achieving accuracy within 1.3% of a backpropagation-trained
+equivalent (99.6%). We observed better classiﬁcation accuracy
+as high as 99.1% with larger population conﬁgurations. We
+further experimentally validate the stability and performance
+of ES-ProtoNet across a variety of training conditions (varying
+population size, model size, number of workers, shot, way, ES hy-
+perparameters, etc.). Our contributions are twofold: we provide
+the ﬁrst assessment of evolutionary meta-learning in a supervised
+setting, and create a general framework for distributed evolution
+strategies on TPUs.
+Index Terms—meta-learning, evolution strategies, tpu
+I. INTRODUCTION
+Meta-Learning is a rapidly growing ﬁeld in deep learning
+which allows for the creation of models that can modify their
+own learning dynamics [1, 2, 3]. One critical aspect of human
+intelligence, which meta-learning algorithms aim to emulate,
+involves being able to classify unseen objects after only a
+few instances of viewing it. This is the goal of few shot
+learning [4, 5, 6]. This paper assesses the viability of an
+evolutionary strategy meta-learning approach on supervised
+few-shot classiﬁcation problems.
+Matching Nets (MN) use neural networks augmented with
+an attention mechanism to embed an unseen data point given
+a support set and uses a weighted distance calculation to
+determine the closest known class label to the new test point
+[4]. This effectively combines beneﬁcial traits of parametric
+learning and nonparametric learning to solve the few shot
+classiﬁcation problem.
+A model proposed in 2017, the Prototypical Network (Pro-
+toNet), is also geared towards solving few shot classiﬁcation
+problems [7]. A neural network is trained to map its embed-
+ding of instances of various classes into a latent vector space,
+where the mean of the instances of each class is computed
+to determine the class “prototype”. A distance calculation is
+performed with the prototype and new embedded cases to
+determine how to classify those new cases.
+Model-Agnostic Meta-Learning (MAML) is another key
+development. MAML attempts to meta-learn a model initial-
+ization that converges after a small number of gradient steps
+on a variety of tasks [8]. When the model is trained to adapt
+to new tasks, a gradient of each task’s loss with repect to
+the initial parameters can be computed to iteratively adapt
+the model initialization. The key advantage of MAML is that
+it inherits the convergence guarantees of gradient descent,
+introducing a helpful inductive bias for the meta-learner.
+Early work in the evolutionary meta-learning area used
+genetic algorithms in an adversarial environment to evolve
+self-referential meta-learner agents [9]. Furthermore, the work
+provided a biological rationale for evolutionary meta-learning
+as a paradigm to evolve increasingly intelligent agents.
+ES-MAML [10] introduced by Song et al. showed that
+evolutionary strategies could be used to replace the outer
+loop backpropagation step in MAML, removing the need
+for computing second-order gradients. ES-MAML showed
+promising results on meta-learning tasks in reinforcement
+learning, but few experiments (few-shot sine regression) were
+done on supervised learning tasks. In this paper, we extend the
+evolutionary meta-learning regime to the supervised learning
+by using evolution strategies to train ProtoNet.
+II. ALGORITHMS
+A. Few-shot Classiﬁcation
+In few-shot learning, the goal is to train a meta-learner to
+quickly learn new tasks [1, 2]. A common objective is to
+learn to accurately classify a set of image classes given only
+a few samples from each class [11]. This is typically done
+with 1 or 5 samples per class, referred to as 1-shot or 5-shot
+classiﬁcation respectively. Few-shot learning is broken down
+into episodes. In each episode, multiple classes are sampled.
+Typically, either 5 classes (5-way classiﬁcation) or 20 classes
+(20-way classiﬁcation) are used.
+In N-way K-shot classiﬁcation, N classes are sampled
+per episode to create a N-way classiﬁcation task. K labeled
+samples from each class are given to a meta-learner to learn
+978-1-7281-2547-3/20/$31.00 ©2020 IEEE
+arXiv:2201.00093v1  [cs.NE]  1 Jan 2022
+
+the task. These samples used to learn the task are referred to as
+the support set. The conditioned meta-learner is then evaluated
+on a separate query set (multiple unlabeled, unseen samples
+from the current episode’s classes), and the resulting average
+loss is used to update the meta-learner parameters.
+Over many episodes, the meta-learner becomes able to
+quickly learn new tasks with little data. In order to evaluate the
+meta-learner’s ability to learn new tasks, validation episodes
+sample unseen classes from a validation set of classes, and
+the performance of the meta-learner on the query sets of these
+classes after conditioning on the corresponding support sets
+is averaged to determine the validation set loss and accuracy.
+The same procedure is carried out for test episodes, using a
+separate test set of classes, which are only used once at the
+end of training.
+B. Prototypical Networks
+Prototypical Networks use a neural network f parameterized
+by ϕ that maps an input x of M dimensions into an N-
+dimensional latent space [7]. In an episode’s support set, each
+instance is mapped into latent space, and the mean of the latent
+vectors of all instances in each class k is deemed the prototype
+ck for that class. The number of classes in these sets is denoted
+by n.
+The similarity D between a query instance and each class
+prototype is found using a similarity metric, either negative
+squared Euclidean distance [12] or cosine similarity [13],
+and a softmax function is applied to the query-to-prototypes
+similarity vectors to generate class probability distributions
+[14, 15]. Categorical cross entropy is applied to the resulting
+class probabilities to compute the loss [16].
+D(x, y) = −(fϕ(x) −y)2
+(1)
+pϕ(fϕ(x) = k|x) =
+exp (D(x, ck))
+Pn
+i=0 exp (D(x, cki))
+(2)
+J(ϕ) = −log pϕ(fϕ(x) = k|x)
+(3)
+C. Evolution Strategies
+Evolution strategies, originally proposed in the 1970s, is
+an optimization methodology that is inspired by biological
+evolution [9, 17, 18]. In ES, a population of candidate models
+is instantiated by sampling from a standard distribution in
+parameter space with mean µ and standard deviation σ. All
+candidate models are evaluated based on a ﬁtness function
+and assigned a reward. Based on these rewards, µ and σ are
+updated via an optimization rule. A new population is then
+instantiated using the updated mean and standard deviation,
+and the process repeats. In the variation of ES that we use
+in this paper, the initial mean µ is randomly initialized, the
+standard deviation σ is a ﬁxed scalar hyperparameter, and the
+ﬁtness function is the negative of the few-shot cross-entropy
+loss. Our update rule performs gradient descent using the
+gradient of the expected loss computed via REINFORCE, in
+a very similar manner to Natural Evolution Strategies.
+Natural Evolution Strategies (NES) incorporates informa-
+tion from every candidate solution to estimate the search
+gradient [19]. Given a probability distribution function π(z, θ)
+parameterized by θ, the loss function J can be calculated by
+ﬁnding the expected value of the objective function F with
+respect to the model parameters z, which can be expressed
+below [20]:
+J(θ) = Eθ[F(z)] =
+Z
+F(z)π(z, θ)dz
+(4)
+The gradient of the loss function can be found by using the
+‘log-likelihood trick’ [20], shown below:
+∇θJ(θ) = Eθ[F(z)∇θ log π(z, θ)]
+(5)
+Given a population zi of N candidate solutions [10], the
+gradient can be approximated as:
+∇θJ(θ) ≈1
+N
+N
+X
+i=0
+F(zi)∇θ log π(zi, θ)
+(6)
+D. Evolutionary Meta-learning Rationale
+The key advantage of meta-learning is the ability to incorpo-
+rate the learning dynamics of the model itself into the training
+signal. In the case of few-shot learning, this is achieved by
+casting entire tasks as training samples for a meta-learner.
+This is traditionally done by storing activations and model
+states throughout a task, and then backpropagating through the
+entire task to compute meta-level gradients that account for the
+learning dynamics of the model over the course of the task.
+However, such a formulation of meta-learning requires storing
+backpropagation graphs that increase in size when scaling to
+longer tasks (the backpropagation graph will typically grow
+proportionally to task length), resulting in prohibitive memory
+costs when attempting meta-learning on complex tasks.
+The learning dynamics of a meta-learner can also be in-
+terpreted as being similar to the hidden state dynamics of a
+recurrent neural network, with backpropagation through a task
+in meta-learning being analogous to backpropagation-through-
+time in RNN training. With such an interpretation, it would
+theoretically be possible to use forward-mode differentiation
+similar to Real-time Recurrent Learning (RTRL) [21] to do
+meta-learning with memory cost that is invariant with respect
+to task length. Unfortunately, such an approach would inherit
+RTRL’s prohibitive computational complexity with respect to
+model size. However, such a formulation successfully ofﬂoads
+the bulk of the memory cost of meta-learning from the
+backpropagation graph to the large jacobian matrices used in
+forward-mode differentiation (the largest jacobian is typically
+comprised of the gradients of the present-step hidden state
+w.r.t. the model parameters). The key advantage here would
+be the ability to compute meta-level gradients with memory
+cost that is invariant with respect to task length, although
+the inherent complexity and poor parallelizability of forward-
+mode differentiation makes it a poor candidate to meaningfully
+reduce the computational cost of meta-learning.
+
+We propose an evolutionary meta-learning approach as a
+potential solution to the aforementioned problem. Speciﬁ-
+cally, meta-learning using evolution strategies would achieve
+backpropagation-free meta-learning (thus memory cost invari-
+ant with respect to task length) without the inherent computa-
+tional complexity of forward-mode differentiation, while also
+being highly parallel. ES-based meta-learning would further
+ofﬂoad the bulk of the memory cost of meta-learning from
+the large jacobians used in forward-mode differentiation to
+the population matrix used in ES. This would make meta-
+learning much more scalable and computationally tractable,
+as evolution strategies are naturally parallelizable along the
+population axis, and the population size in ES can be further
+adjusted to manage memory cost (although it is important to
+note that there is a tradeoff between memory cost and gradient
+accuracy when adjusting the population size in ES).
+E. Evolution vs. Analytical Methods for Meta-learning
+The dominant term ΩBP in the memory cost of meta-
+learning by backpropagation is the sum g of the memory sizes
+of all intermediate tensors computed in each inner-loop step
+multiplied by the number of inner-loop steps l in a task, such
+that ΩBP = g × l. Because of this linear scaling of memory
+cost with regard to task length, it is possible for the memory
+cost of backpropagation meta-learning to grow indeﬁnitely as
+task size increases.
+When meta-learning tasks exceed a certain number of steps
+in length, it is more memory-efﬁcient to use forward-mode
+differentiation than to use backpropagation. This is true specif-
+ically when the memory size ΩBP of the backpropagation
+graph is greater than the memory size ΩF M of the Jacobian
+matrix formed by aggregating the gradients of the inner-loop
+model state ψ ∈RDψ w.r.t. the meta-learner parameters
+ϕ ∈RDϕ. The “inner-loop model state” refers to a ﬂattened
+vector of size Dψ containing information about the adapted
+model during a task. In MAML, for example, this model state
+would contain the task-adapted parameters θ′ = ψ with the
+same size as the meta-learning parameters θ = ϕ such that
+Dψ = Dϕ, resulting in a forward-mode Jacobian of size
+Dψ × Dϕ = D2
+ϕ. On the other hand, the model state in
+ProtoNet would contain the stored class prototypes C from a
+task, such that the size of the model state is equal to the size
+Dc of each class prototype multiplied by the number of classes
+N, resulting in a Jacobian of size Dψ × Dϕ = Dc × N × Dϕ.
+The dominant term ΩF M in the memory cost of forward-
+mode differentiation depends only on the number of meta-
+learner parameters Dϕ and the number of elements in the
+model state Dψ. These scaling properties make forward-
+mode differentiation a suitable substitute for backpropagation
+(the memory cost of which also depends on task length) to
+reduce memory cost when performing meta-learning on long
+tasks. Because that both backpropagation and forward-mode
+differentiation are analytical differentiation methods, they will
+compute identical gradients and ultimately have the same
+convergence properties.
+The dominant term ΩES in the memory cost of evolution
+strategies meta-learning is the size of the population matrix,
+equal to the product of the population size n and the number
+of meta-learner parameters Dϕ. Because that P is a tuneable
+hyperparameter, it can be set smaller than Dψ to achieve a
+lower memory cost than forward-mode differentiation: ΩES <
+ΩF M given P < Dψ.
+Backpropagation is ideal for simple tasks with few inner-
+loop steps, as it is computationally cheap for short tasks
+and computes exact (analytical) gradients. Forward-mode
+differentiation also computes exact gradients, but is more
+memory-intensive than backpropagation on short tasks where
+g × l < Dψ × Dϕ and less memory-intensive on long
+tasks where g × l1 > Dψ × Dϕ. Evolution strategies, on
+the other hand, computes gradients numerically (therefore
+producing less exact gradients), but can be made less memory-
+intensive than forward-mode differentiation in almost any task
+by lowering the population size hyperparameter such that
+P < Dψ. With this lower constant memory cost, evolution
+strategies becomes less memory-intensive than backpropaga-
+tion at a lower threshold of task length than forward-mode
+differentiation: g × l2 = P × Dϕ where l2 < l1 when
+P < Dψ. Even in cases where P > Dψ, evolution strategies
+may still be more feasible to implement due to being more
+parallel than backpropagation or forward-mode differentiation.
+Evolution strategies effectively allows for less memory cost by
+trading off gradient accuracy, potentially resulting in slower
+convergence and lower resulting model performance. However,
+we empirically show in this paper that the accuracy lost when
+using evolution strategies in place of analytical gradients is
+not substantial.
+Backpropagation and forward-mode differentiation use the
+same set of forward and backward operations (backpropaga-
+tion backpropagates through the entire task while forward-
+mode backpropagates through individual steps to update the
+Jacobian matrix) to compute gradients, resulting in similar
+time demands to train a meta-learner on a given task. Evolution
+strategies only requires a forward pass, resulting in about
+half as many operations as backpropagation. However, these
+operations are more expensive, as the forward propagation
+is performed with one input per candidate model in parallel.
+Thus, the exact time demands of evolution strategies depends
+heavily on parallelization and communication overhead.
+F. TPU Evolution Strategies
+A key advantage of parallel evolution algorithms is that
+a large number of independent ﬁtness-level evaluations can
+be made in parallel across large clusters of processors [22].
+Because of this, parallel evolution algorithms are most efﬁcient
+when problems involve long ﬁtness-level evaluations, low
+cross-worker communication overhead, and potential beneﬁt
+when running a large number of evaluations in parallel. Due
+to these properties, parallel evolution strategies via TPUs are
+an ideal approach for meta-learning. Meta-learning entire tasks
+results in long ﬁtness evaluations, TPU pod high-speed mesh
+networks mitigate the communication overhead of parallel ES,
+
+and high-dimensional optimization of deep meta-learners can
+beneﬁt greatly from parallel evaluations for accurate gradient
+computation.
+As a key contribution of this paper, we present the ﬁrst-
+ever framework for distributed evolution strategies on TPUs.
+We use a similar algorithm to OpenAI’s distributed ES [23],
+with a modiﬁed update rule. In OpenAI-ES, the population is
+sampled using a ﬁxed seed, allowing for individual workers to
+re-sample the exact candidate model parameters of every other
+worker. Thus, it is possible to greatly reduce cross-worker
+communication overhead by only communicating ﬁnal reward
+values. However, the re-sampling step in OpenAI-ES causes
+the per-worker computational cost to increase proportionally to
+the total number of workers, which results in poor efﬁciency
+when scaling to large population sizes. Our algorithm takes
+advantage of the TPU’s efﬁcient communication topology
+to remove this constraint, by evaluating multiple candidates
+on each worker and computing gradient estimates separately
+without communicating rewards. The ﬁnal gradient is then av-
+eraged across workers before the update step. Our formulation
+of distributed ES is especially suitable for TPUs, as it takes
+advantage of high communication bandwidth to cut out the
+resampling step, achieving low per-worker computational cost
+when scaling to arbitrarily large clusters. Speciﬁcally, we use
+the unique TPU AllReduce operation to efﬁciently average the
+gradient node across all cores.
+G. Evolution Strategy Prototypical Networks
+In our evolution strategy, we randomly initialize the mean
+model parameter vector µ of the neural network. We generate
+candidate solutions x by adding displacement ε using a
+Gaussian distribution centered on 0 with standard deviation
+σ.
+xi = µ + ε
+(7)
+ε = N(0, σ)
+(8)
+Instead of weighting each candidate solution with the prob-
+ability distribution function as in NES, our gradient estima-
+tion takes the sum of all candidate solutions’ displacements
+weighted by their corresponding standardized ﬁtness (reward)
+scores [24]. We call this gradient-based evolution strategy
+Weighted Standard Rewards (WSR). Given the population size
+n, objective function F, mean reward F(m), and standard
+deviation of rewards σ′, the gradient can be approximated by
+the following expression:
+∇µJ(µ) ≈1
+n
+n
+X
+i=0
+F(µ + ε) −F(m)
+σ′
+∗εi
+(9)
+Another method of gradient estimation involves using ﬁnite
+differences to numerically approximate the partial derivative of
+the loss with respect to every parameter. Interestingly, the ﬁnite
+differences method can easily be cast within the framework of
+an ES model, in which the total population size is set equal
+to the number of parameters plus one, and the ES sampling
+procedure is modiﬁed to apply ﬁnite differences to the pa-
+rameters. In this modiﬁed sampling procedure, all candidate
+models would be near identical, except each model would have
+a single parameter—chosen based on a one-to-one mapping
+of parameters to candidate models—nudged with a small
+positive value σF D = 0.001, while every other parameter is
+held constant. An additional candidate model is instantiated
+with its parameters set equal to the mean parameter vector
+of the population with no parameters changed. The ﬁtness
+of this mean candidate model is used in place of F(m) in
+(9), and the ﬁnite difference value σF D is used in place of
+the standard deviation σ′. The resulting modiﬁed gradient
+approximation expression is used to compute the gradient
+for ﬁnite differences. We explore the performance of ﬁnite
+differences as an additional training algorithm for ProtoNet, in
+order to compare ES to an alternative numerical optimization
+algorithm for few-shot learning.
+III. EXPERIMENT
+A. Hardware
+Tensor Processing Units (TPUs) are a class of deep learning
+ASICs designed for compute-intensive neural network train-
+ing. TPUs have been found to be, on average, 15 to 30 times
+faster than contempary GPUs and CPUs [25, 26]. TPUs and
+TPU pods are available through the Google Cloud Platofrm.
+Each TPU device contains eight TPU cores, across which
+training can be parallelized and quickly synced. Each TPU
+core has either 8 gigabytes (in the case of TPUv2) or 16
+gigabytes (in the case of TPUv3) of high bandwidth memory
+(HBM). Multiple TPU devices can be assembled together as
+TPU pods, in which constituent TPU devices are intercon-
+nected by high-speed mesh networks for fast communication.
+This design results in TPUs being geared toward highly
+parallel training tasks, speciﬁcally training with large batch
+sizes, or—as we demonstrate in this paper—population paral-
+lelism in evolutionary algorithms. The TPUs we used in our
+experiments were the v3-8 (single TPUv3 device containing 8
+cores), and the v3-256 (TPUv3 pod containing 256 cores).
+It is important to note that the TPU cluster size determines
+the number of shards across which the population in ES is
+partitioned. The number of partitions is equal to the number
+of TPU cores, such that a v3-8 with 8 cores will partition the
+population across 8 shards and a v3-256 with 256 cores will
+partition the population across 256 shards. The population size
+per core is a tuneable hyperparameter that we choose based on
+per-core memory constraints, and total population size is the
+per-core population size multiplied by the number of cores.
+B. Experiment
+The Omniglot dataset [27] is comprised of 1623 classes of
+handwritten characters, each of which containing 20 grayscale
+105 × 105 images. The images were resized to 32 × 32 for our
+experiments, and the dataset was augmented using rotations
+of 90 degrees, 180 degrees, and 270 degrees. The original
+orientations were kept, so that the post-augmentation dataset
+
+TABLE I
+SUMMARY OF RESULTS
+TPU
+α
+σ
+Channels
+Pop. per core
+Total pop.
+Way
+Shot
+Accuracy
+v3-8
+1
+0.01
+16
+64
+512
+20
+1
+0.964 ± 0.013
+v3-256
+10
+0.1
+16
+64
+16384
+20
+1
+0.973 ± 0.014
+ProtoNet
+N/A
+N/A
+64
+N/A
+N/A
+20
+1
+0.987
+v3-8
+1
+0.01
+32
+32
+256
+10
+5
+0.990 ± 0.005
+v3-256
+10
+0.1
+16
+64
+16384
+20
+5
+0.991 ± 0.009
+ProtoNet
+N/A
+N/A
+64
+N/A
+N/A
+20
+5
+0.996
+is four times the size of the original dataset. The augmented
+dataset was randomly split into train, validation, and test sets
+with 4804, 1012, and 676 classes respectively. The results
+reported below are from the test set.
+Each trial consisted of 200 epochs, each with 100 episodes
+of training and one episode of validation. Each trial had a 5-
+way test and either 1-shot or 5-shot setup during meta-testing.
+Test accuracies were determined by running the trained model
+on 200 episodes with classes randomly sampled from the test
+set classes, and the standard deviation of the each accuracy
+value is reported as well.
+We varied variables such as TPU size and number of
+convolution channels to reﬂect the effect of hardware avail-
+ability and desired model size on test performance. All other
+hyperparameters were chosen based on validation performance
+(highest validation accuracies) to ﬁnd the ideal hyperparameter
+conﬁgurations for each given value of the variable under
+scrutiny. A set of high-performing hyperparameter conﬁgura-
+tions on the validation set for each given value of the variable
+under scrutiny was kept and re-evaluated on the test set. The
+resulting accuracies are reported throughout this section.
+Our ES-ProtoNet used the same convolutional network
+architecture as Snell et al. [7]: a sequence of four identical
+convolution blocks, with each block comprised of a 3 × 3
+convolution, batch normalization layer, ReLU nonlinearity,
+and 2x2 max-pooling layer in the same order that they are
+mentioned. The original ProtoNet used 64 channels for all of
+its convolution layers, but we experiment with 64, 32, and 16
+channels across different trials. The rest of our experimental
+parameters were set up identically to the original ProtoNet
+paper, unless otherwise stated.
+In Table 1, we summarize our results for the best performing
+models. In Table 2, we demonstrate how changes to the
+step size (alpha) and population standard deviation (sigma)
+parameters could cause test accuracy to deteriorate. In table
+2 only, alpha and sigma values were varied while all other
+hyperparameters were held constant (rather than tuned using
+the validation set). The control variables are the Euclidean
+distance metric, the population size, the train way, and the
+number of convolutional ﬁlters or channel counts. The term
+“Pop. per core” will be used to refer to the population size
+per TPU core (shard/worker) in the tables, whereas the total
+population size is equal to the per-core population multiplied
+by the number of cores, and is referred to by the “Total pop.”
+term. The dependent variable is the accuracy and accompany-
+ing standard deviation.
+TABLE II
+HYPERPARAMETER OPTIMIZATION
+α
+σ
+Accuracy
+0.1
+0.001
+0.62 ± 0.028
+1
+0.01
+0.987 ± 0.009
+10
+0.1
+0.971 ± 0.011
+25
+0.25
+Collapse
+Effect of varying α and σ on test accu-
+racy, with all other variables held constant
+(TPU=v3-8, Channels=16, Pop. per core=128,
+Total pop.=1024, Way=10).
+It can be seen that different TPU models had different
+optimal alpha (step size) and sigma (population standard
+deviation) values. When alpha and sigma were too large, the
+test accuracy would collapse to random guessing. When they
+were too small, the model parameters could not escape a local
+minimum in the loss function.
+We experimented with different numbers of train way (num-
+ber of classes sampled per training episode) from 5, 10, and 20
+on different TPU models with different alpha and sigma values
+as seen in Fig. 1. The control variables were the channel count
+and the test way. The population size per core was inversely
+proportional to the train way size. Refer to table 5 in the
+appendix for details.
+A train way of 10 allowed for the highest performances for
+the v3-8, but a value of 20 allowed for the highest performance
+for the v3-256 for both alpha and sigma combinations. This
+is consistent with the conclusion that models are more robust
+when the test way is smaller than the train way, as proposed
+in Snell et al. [7].
+We tested convolution with 16 channels, 32 channels, and 64
+channels, with different TPUs as seen in Table 3. The constants
+were the alpha and sigma values. Because that model size
+depended heavily on channel count (parameter count in the
+convolution blocks grows as a quadratic function of channel
+count) while memory available per core was constant, we were
+able to use larger per-core population sizes when using smaller
+convolution channel counts. Conversely, we could use larger
+channel counts when using smaller per-core population sizes.
+There was relatively little variation in accuracy performance
+based on the number of channels. 32 channels was optimal for
+v3-8, but 16 was optimal for v3-256.
+Fig. 2 compares the training progress of v3-8 TPU models
+depending on the number of convolution channels. The train
+way was 10 for all three channel counts. The larger channel
+
+count led to faster convergence but had similar performance
+after 200 epochs.
+The last set of experiments with our evolution strategy
+(WSR) was the one-shot tests, which can be found in Table 6
+in the appendix.
+Fig. 1. Modifying Train Way
+TABLE III
+MODIFYING NUMBER OF CHANNELS
+Channels
+Pop. per core
+Total pop.
+Way
+Accuracy
+64
+16
+128
+5
+0.978 ± 0.011
+64
+8
+64
+10
+0.984 ± 0.008
+32
+64
+512
+5
+0.98 ± 0.009
+32
+32
+256
+10
+0.99 ± 0.005
+32
+16
+128
+20
+0.987 ± 0.009
+16
+128
+1024
+10
+0.987 ± 0.009
+(with TPU=v3-8, α = 1, σ = 0.01)
+32
+32
+8192
+10
+0.989 ± 0.008
+32
+16
+4096
+20
+0.988 ± 0.01
+16
+64
+16384
+20
+0.991 ± 0.009
+16
+128
+32768
+10
+0.989 ± 0.008
+(with TPU=v3-256, α = 10, σ = 0.1)
+In the ﬁnite differences strategy experiments, it was found
+that the Euclidean distance metric achieved substantially lower
+accuracy compared to cosine similarity. The independent vari-
+ables were the learning rate, population size, and train way.
+In Table 4 we display the highest performing instances of the
+ﬁnite differences trials.
+Because that the ﬁnite differences algorithm signiﬁcantly
+underperformed compared to evolution strategies in 5-shot
+classiﬁcation, 1-shot trials were not attempted.
+Lastly, different learning rates of the ﬁnite differences algo-
+rithm were investigated. The results in Fig. 3 are from cosine
+similarity calculations because Euclidean distance was found
+to signiﬁcantly underperform. In addition, different population
+sizes and train way conﬁgurations were tried, as shown in
+Table 7 in the appendix. The optimal learning rate for v3-8
+was 5×10-03, and 5×10-04 for v3-256.
+Fig. 2. Convergence Speed Based on Number of Channels
+We observed a clear disparity in performance between
+ﬁnite differences and evolution strategies on ﬁve-shot ProtoNet
+classiﬁcation. Although ﬁnite differences ensures that the
+search directions of all candidate models are orthogonal to
+each other in parameter space, the same property conﬁnes the
+candidate models to a limited number of directions. In contrast,
+evolution strategies allows for a potentially inﬁnite number
+of search directions. However, based on our experimental
+results, we believe that the inﬁnite possible search directions
+evaluated allows for more accurate gradient estimations than
+ﬁnite differences.
+TABLE IV
+FINITE DIFFERENCES 5-SHOT RESULTS
+TPU
+Distance
+Learning Rate
+Way
+Accuracy
+v3-8
+Cosine
+5E-03
+10
+0.939 ± 0.012
+v3-8
+Cosine
+1E-02
+20
+0.944 ± 0.014
+v3-256
+Cosine
+5E-04
+20
+0.956 ± 0.014
+v3-8
+Euclidean
+1E-03
+10
+0.853 ± 0.026
+v3-256
+Euclidean
+1E-03
+10
+0.855 ± 0.028
+Fig. 3.
+Modifying Finite Differences (Cosine Similarity Metric) Learning
+Rate
+
+IV. CONCLUSION
+We experimentally validated the viability of evolution
+strategies as an alternative to backpropagation in supervised
+few-shot learning. We successfully used ES to train a pro-
+totypical network to perform competitively compared to a
+backpropagation-trained counterpart.
+We observed an almost negligible difference in performance
+( 0.5% accuracy drop) from backpropagation-trained Protonet,
+which we attribute to the natural inaccuracy of gradients esti-
+mated by evolution strategies in comparison to exact methods
+like backpropagation. We were able to achieve competitive
+results with many different hyperparameter conﬁgurations
+(including different model sizes, numbers of workers/cores,
+population sizes, step sizes, and population sampling standard
+deviation values), demonstrating the stability of ES-ProtoNet
+convergence across a broad variety of training conditions.
+We observed especially interesting results with some of
+the computationally cheaper training conﬁgurations we used,
+particularly one which involved training a ProtoNet with 64
+channels using a total population size of 64. In this particular
+run, the memory cost of the ES population matrix was ap-
+proximately forty times smaller than the memory cost of the
+dominant jacobian matrix in the equivalent analytical gradient
+computation. With theoretically as little as 3% of the memory
+cost, ES-ProtoNet was able to achieve 98.4% accuracy on
+5-shot Omniglot classiﬁcation (as shown in Table 3), within
+1.3% of the original ProtoNet at 99.6%.
+By conceding a marginal amount of performance, it is
+possible to achieve meta-learning that not only has constant
+memory complexity with respect to task length, but is also
+easily parallelizable along the population axis (potentially
+distributing the computational cost better than any other par-
+allelization method). Furthermore, the performance difference
+can be almost completely rectiﬁed either by using a large
+population size, or by accumulating gradients over multiple
+population steps to achieve a large effective population size.
+Such a result is promising, as it demonstrates the pos-
+sibility of eliminating the backward step in meta-learning
+while only storing the population matrix, which can be made
+smaller than the jacobian matrix necessary for forward-mode
+differentiation. Using ES, it is possible to perform meta-
+learning on arbitrarily complex tasks without bearing the full
+memory complexity of forward-mode differentiation, while
+also distributing most of the computational cost over large
+TPU clusters. We hope that these results will encourage future
+work to use evolution-based algorithms to scale up meta-
+learning to more complex and impactful task domains.
+ACKNOWLEDGMENT
+Our research was supported with Cloud TPUs from
+Google’s TensorFlow Research Cloud (TFRC).

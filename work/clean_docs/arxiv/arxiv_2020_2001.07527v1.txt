@@ -1,0 +1,800 @@
+Model-based Multi-Agent Reinforcement Learning
+with Cooperative Prioritized Sweeping
+Eugenio Bargiacchi1, Timothy Verstraeten1,
+Diederik M. Roijers2, Ann Now´e1
+1Vrije Universiteit Brussel
+
+Abstract
+We present a new model-based reinforcement learning algo-
+rithm, Cooperative Prioritized Sweeping, for efﬁcient learn-
+ing in multi-agent Markov decision processes. The algorithm
+allows for sample-efﬁcient learning on large problems by ex-
+ploiting a factorization to approximate the value function.
+Our approach only requires knowledge about the structure
+of the problem in the form of a dynamic decision network.
+Using this information, our method learns a model of the en-
+vironment and performs temporal difference updates which
+affect multiple joint states and actions at once. Batch updates
+are additionally performed which efﬁciently back-propagate
+knowledge throughout the factored Q-function. Our method
+outperforms the state-of-the-art algorithm sparse cooperative
+Q-learning algorithm, both on the well-known SysAdmin
+benchmark and randomized environments.
+Consider a control problem where multiple agents must
+learn to cooperate to achieve a common goal in an environ-
+ment with unknown and complex dynamics, such as robot
+soccer (Kok et al. 2003), warehouse commissioning (Claes
+et al. 2017), and trafﬁc light control (Wiering 2000). Such
+problems cannot be solved optimally in general even if the
+dynamics of the environment are known in advance, due to
+the size of both state and action spaces being exponential in
+the number of agents. Large environments also require in-
+creasingly large amounts of data to learn effectively, which
+are often impractical to obtain in real-life scenarios.
+In this paper, we introduce an approximate method for
+fast, sample efﬁcient reinforcement learning (RL) with a
+large set of cooperative agents, called cooperative prior-
+itized sweeping (CPS). Speciﬁcally, we generalize prior-
+itized sweeping (PS) (Moore and Atkeson 1993) to lin-
+early factored Q-functions (Guestrin, Koller, and Parr 2001;
+2002). We use model-based RL, which consists in learning
+a model of the environment, and using it to learn a value
+function and extract a policy for the agents. We represent
+this model using a dynamic decision network and exploit the
+state-action dependency graph to efﬁciently construct and
+manage the priority queue. CPS performs updates similar
+to Q-Learning, but is able to back-propagate these changes
+through the Q-function by using the factored model. All up-
+dates are stored in a priority queue, such that the largest
+changes are back-propagated ﬁrst in an anytime fashion.
+S1
+S2
+S3
+S4
+S′
+1
+S′
+2
+S′
+3
+S′
+4
+A1
+A2
+A3
+(a) A simple DDN in compact
+form.
+S1
+S2
+S3
+S4
+S′
+1
+S′
+2
+S′
+3
+S′
+4
+(b) A DBN induced by a partic-
+ular joint action.
+Figure 1: How to represent a multi-agent factored MDP.
+1
+Problem Formulation
+A multi-agent Markov decision process (MMDP) is a tu-
+ple ⟨S, A, T, R, γ⟩, where S and A are the state and ac-
+tion spaces, T is the transition function which describes the
+environment’s dynamics, R is the reward function associ-
+ating rewards with joint state-action pairs and γ ∈[0, 1)
+is the discount factor representing the importance of future
+rewards. The joint action space is the Cartesian product of
+the action spaces of each agent, i.e., A = A1 × · · · × AK.
+The state space is the Cartesian product of state factors, i.e.,
+S = S1 × · · · × SN.
+In an MMDP, the interactions between the state fac-
+tors and agents are assumed to be sparse. Therefore, we
+use a Dynamic Decision Network (DDN) to describe them
+(Guestrin, Koller, and Parr 2002). A DDN can be graphically
+represented in a compact form as a directed graph where
+each edge marks the direct inﬂuence of one variable over
+another. Note that, while compact, such a representation can
+lose information, as in a DDN actions induce conditional de-
+pendencies which may be subsets of the edges represented.
+More speciﬁcally, an edge in the graph marks that a relation-
+ship exists for at least one action. For example, in Figure 1,
+the state variable S′
+1 may depend solely on S1 when A1 = 0,
+i.e., P(S′
+1 | S1, S2, A1 = 0) = P(S′
+1 | S1, A1 = 0), but may
+depend on both S1 and S2 when A1 = 1. This information is
+part of the DDN itself— but usually not represented graphi-
+cally.
+arXiv:2001.07527v1  [cs.LG]  15 Jan 2020
+
+Using the DDN formulation, we can formulate the transi-
+tion function of an MMDP as
+T(s′ | s, a) =
+Y
+i
+Ti(s′
+i | s, a),
+(1)
+where a is the part of a on which s′
+i depends, and s is the
+part of s on which s′
+i depends given action a. Therefore each
+joint action induces a Dynamic Bayesian Network (DBN)
+out of the DDN (Figure 1b).
+We assume the reward function has the same structure as
+T, such that R(s, a) = P
+i Ri(s, a) where each Ri has the
+same domain (S, A) as Ti. Given this structure, we assume
+that rewards are sampled, both from the environment and
+from the model, as vectors with N elements. This is useful
+when updating the factored Q-function (see Section 2.2).
+This representation is somewhat different from what some
+other multi-agent RL algorithms use (e.g., (Kok and Vlassis
+2004)), which is to consider rewards on a per-agent basis,
+rather than on a per-state factor basis. In other words, they
+consider reward samples to be vectors with K entries, i.e.,
+one per agent. However, it is always possible to represent an
+agent-based reward function as a state-based one by simply
+adding one additional state factor per agent to convey the
+rewards.
+2
+Cooperative Prioritized Sweeping
+To be able to learn in a factored MMDP, it is key to ex-
+ploit the factored structure to learn an (approximate) sparse
+Q-function (Section 2.2). For example, Sparse Cooperative
+Q-Learning (SCQL) (Kok and Vlassis 2004) learns a fac-
+torised Q-function on a per-agent or a per-edge (2-agent
+factor) basis. However, the model-free approach with one-
+step look-ahead bootstrapping that SCQL uses is not very
+sample-efﬁcient. A straightforward idea to increase sample-
+efﬁciency would be to learn an approximate MMDP model
+(Section 2.1), and perform planning on this model to ob-
+tain an approximate sparse Q-function (Guestrin et al. 2003;
+Guestrin, Koller, and Parr 2002). The state-of-the-art plan-
+ning algorithm employs an LP that computes the approxi-
+mate value function that minimizes the max-norm distance
+to the optimal one (Guestrin, Koller, and Parr 2002). How-
+ever, because this requires solving a large scale LP at every
+time step as we learn the model, the computational require-
+ments make such a model-based approach infeasible.
+In this section, we propose a new model-based approach
+for MMDPs that generalizes the idea of prioritized sweep-
+ing (Moore and Atkeson 1993) to the multi-agent setting,
+by both using direct experience and simulated experience
+from an MMDP model (Section 2.3–2.5) to learn the sparse
+Q-function. Our algorithm—cooperative prioritized sweep-
+ing (Algorithm 1)—thus beneﬁts from the sample-efﬁciency
+of a model-based approach, while keeping the computation
+time in check.
+2.1
+Learning the Model
+Cooperative prioritized sweeping (CPS) approximates a
+model of the environment to determine how changes must
+be back-propagated through the value function after an up-
+date. Furthermore, this model is also used to generate new
+simulated experience that is sampled in batches and used to
+update the value function multiple times every time step.
+In order to learn the MMDP model, we assume that the
+DDN structure is fully described prior to learning. We use
+this structure for three purposes: to improve learning, to in-
+crease sample-efﬁciency, and to structure the CPS queue so
+that it contains parent sets rather than complete states (see
+Section 2.4). Given the structure of the MMDP, we learn the
+transition dynamics by maintaining estimates of the propor-
+tion that a state s′
+i is reached after taking a local joint action
+a in a local joint state s of its parents in the DDN (Andre,
+Friedman, and Parr 1998):
+Ti(s′
+i | s, a) =
+Ns,a,s′
+i + N 0
+s,a,s′
+i
+P
+s′′
+i ∈Si Ns,a,s′′
+i + N 0
+s,a,s′′
+i
+(2)
+where N 0
+s,a,s′′
+i are the priors on the model before interaction
+begins. The reward function can be learned accordingly.
+2.2
+One-step Q-Function Updates
+CPS learns the Q-function of the MMDP in a factorized
+manner. This means that it approximates the true Q-function
+as a linear sum of smaller components:
+Q(s, a) ≈ˆQ(s, a) =
+X
+x
+ˆQx(s, a)
+(3)
+We assume that the domains of each ˆQx are obtained by
+back-propagating some subset of the components in S (we
+call these basis domains). This is the same process that is
+used to obtain ˆQ from a suitably factored value function ˆV
+made out of basis functions in approximate MMDP planning
+(Guestrin, Koller, and Parr 2002). This assumption is impor-
+tant in order to correctly back-propagate rewards. For exam-
+ple, in Figure 1a, selecting variable S′
+1 as a basis results in a
+corresponding domain of its ˆQ component of S1 ∧S2 ∧A1.
+Selecting both S′
+1 ∧S′
+2 results in a corresponding domain
+of S1 ∧S2 ∧S3 ∧A1 ∧A2. The set of basis domains can
+be chosen arbitrarily—although some choices tend to per-
+form better than others. Deﬁning larger and more domains
+leads to better accuracy, but at the cost of higher computa-
+tion times for joint action selection. For example, CPS uses
+variable elimination to select the optimal action, which is
+known to be exponential in the induced width of the coordi-
+nation graph of the factored Q-function (after conditioning
+on the current state s), which in turn increases with the size
+and number of the domains in the factorization. Construct-
+ing a ˆQ made up of a single factor with the entire state space
+S as its basis degenerates the algorithm to single-agent PS,
+as it would make ˆQ = Q.
+After each interaction with the environment, we obtain
+an experience tuple, ⟨s, a, s′, r⟩, which CPS uses to update
+the factored Q-function. Since CPS takes a model-based ap-
+proach, the ideal update would ﬁrst use the data to update
+the model (both T and R), and then use the model to update
+the Q-function:
+ˆQ(s, a) = R(s, a) + γ
+X
+s′
+T(s′ | s, a) ˆV (s′)
+(4)
+
+Indeed, this operation, using a ˆV factored with the rele-
+vant basis domains, is not only possible but also relatively
+cheap (Guestrin, Koller, and Parr 2001): each ˆQx compo-
+nent can be updated separately, while ensuring that ˆQ fully
+reﬂects the changes of the just updated model. However,
+back-propagating the changes made to ˆQ to ˆV is not straight-
+forward; to do so, an algorithm would need to solve an ex-
+pensive LP (Guestrin, Koller, and Parr 2001). This opera-
+tion makes performing batches of updates to the Q-function
+computationally infeasible, and would prevent the algorithm
+from leveraging the learnt MMDP model.
+Because full backups are not feasible for the factored Q-
+functions, CPS employs local TD updates:
+ˆQ(s, a) = ˆQ(s, a)+α
+
+R(s, a) + γ max
+a′
+ˆQ(s′, a′) −ˆQ(s, a)
+
+(5)
+To perform this update, CPS requires the optimal joint ac-
+tion, a′⋆, for the next joint state s′, and thus needs to maxi-
+mize ˆQ for this joint state. This can be done efﬁciently using
+Variable Elimination (VE).1 Once the optimal full joint ac-
+tion a′⋆for s′ has been found, we can then split the update
+of the Q-function per component:
+ˆQx(s, a) = ˆQx(s, a)+α
+
+Rx(s, a) + γ ˆQx(s′, a′⋆) −ˆQx(s, a)
+
+(6)
+The only thing left is to compute Rx(s, a), as its domain
+will likely be different from any of the Ri functions in the
+learnt MMDP model, due to the back-propagation of the ba-
+sis domains. Hence, for each Si in the original basis domain
+of ˆQx, we compute Rx as a weighted sum of their respec-
+tive Ri, where the weights are inversely proportional to how
+many ˆQy have Si in their original basis domain:
+Rx(s, a) =
+X
+i
+I(Si ∈Basisx(S))
+Ri(s, a)
+N ˆ
+Q(Basis(Si))
+(7)
+where I is the indicator function and N ˆ
+Q(Basis(Si)) is
+the number of ˆQy factors ( ˆQx included) which have Si in
+their basis domain. We also indicate with s, a the parts of
+s, a required by Ri. This works because we are assuming
+that R has the same DDN structure as T, and due to the
+back-propagation, if Rx had Si in its basis domain, then s
+and a must contain the parents of si which are required by
+Ri.
+These updates are similar to those performed in SCQL
+(Kok and Vlassis 2004; 2005). However, CPS determines
+the shape of the Q-function and how it partitions the rewards
+using the basis domains, while SCQL does this in terms of
+agents and their direct neighbours.
+1We note that VE is an exact algorithm for coordination graphs
+that can be replaced by approximate algorithms (Kok and Vlassis
+2005; Marinescu and Dechter 2005; Liu and Ihler 2012) if need be.
+2.3
+Temporal Differences for Batch Q-Function
+Updates
+In order to perform batch updates on the Q-function to back-
+propagate useful values, CPS computes a series of temporal
+differences (TD) which represent how much the Q-function
+has changed due to the last update. This process is differ-
+ent from the single-agent PS algorithm (Moore and Atkeson
+1993; Andre, Friedman, and Parr 1998) in two key aspects:
+how we deﬁne the TD, and how CPS computes it.
+Single-agent PS computes a single TD for the state s that
+is being updated. In our case, we update each ˆQx indepen-
+dently, resulting in a series of ∆x, deﬁned as
+∆x = Rx(s, a) + γ ˆQx(s′, a′⋆) −ˆQx(s, a).
+(8)
+Given the factored Q-function (Equation 3) and factor up-
+date rule (Equation 6), we could reconstruct a full TD by
+simply summing them together, i.e., ∆= P
+x ∆x. How-
+ever, given the structure of our MMDP, computing a single
+TD for the whole state s is wasteful: given the structure of
+our MMDP, each ∆x of ˆQx(s, a) not only reﬂects changes
+for the single state s, but all states that contain s. In the same
+way, the change in value of ˆQx(s, a) not only affects the
+value of all possible parents of s, but of all possible par-
+ents of s. An interesting consequence of this fact is that our
+deﬁnition of a TD changes from the single-agent PS algo-
+rithm, where the TD is computed with respect to the change
+in the value function for the updated state s. This is because
+there is no reason to perform additional updates if the actual
+value function for the state is not modiﬁed. In our case, this
+is different, as any single ˆQx(s, a) value might contribute to
+ˆV (s) in some state where s ⊆s—although actually obtain-
+ing this information is not practical. Instead, we assume that
+the change is indeed modifying ˆV , and compute the TDs di-
+rectly on the change that CPS performs without the need to
+actually check ˆV or perform any additional maximizations.
+As these TDs are computed without the knowledge of how
+much each ∆x actually affects ˆV , this means that CPS tends
+to overestimate changes in order to not miss any.
+Given these considerations, our goal is to obtain a series
+of TDs which:
+1. Reﬂect the actual changes we have applied to the Q-
+function, without passing through ˆV .
+2. Do not lose the information about how much each part of
+the state space was changed.
+3. Are suitable for back-propagation in order to select new
+(s, a) pairs to update.
+The ∆x satisfy the ﬁrst two constraints, but not the third,
+as back-propagating their domain would mismatch the do-
+main of any ˆQx. Therefore, we transform them into a set of
+N elements ∆i, one for each factor of the state-space
+∆i = I(i ∈xs) ∆x
+|xs|
+(9)
+where xs refers to the state domain part of ˆQx. In this for-
+mat, these can be used in the back-propagation step (see Sec-
+tion 2.4). Note that the ∆i are only used to sample from the
+queue, and not in the actual ˆQ updates.
+
+2.4
+Updating the Queue
+CPS maintains a priority queue containing the changes it has
+done to the Q-function, where the priority is equal to the
+magnitude of the change. The key idea is to back-propagate
+these changes during batch updates to the Q-values of the
+parents of each si. Since CPS must do this given the limited
+time between interactions with the environment, the updates
+should be done from the highest priority to the lowest until
+the time runs out.
+CPS uses the ∆i to update the queue. Note that we go a
+single step backwards in time, such that our s is now consid-
+ered a future state. Then, for each si, CPS iterates over all
+the possible values of its parents Parents(si) = (s′′, a′′) as
+determined by the DDN of the problem.
+The algorithm can now compute the priority p of these
+parents as p = Ti(si|Parents(si)) · ∆i, i.e., the probability
+of observing this transition times the estimated amount of
+change of that particular component. Note that we do not
+include γ in the priority since it would not affect the relative
+ordering of the queue. If p is greater than a threshold value
+θ, it is added as a new entry to the queue, or increase its
+value by p if such an entry already exists. The entry will
+contain the parents of s′
+i (and their values), together with the
+computed priority p.
+2.5
+Sampling from the Queue
+CPS needs to sample from the queue to perform the batch
+updates required to increase the accuracy of the Q-function.
+In single-agent PS, this operation is relatively straightfor-
+ward: a state-action pair is sampled, and a new Q update
+is done. However, in CPS, the queue only contains partial
+state-action pairs, while a complete state-action pair is nec-
+essary to sample a new state and reward from the model and
+select the next optimal joint action needed to perform a full
+Q-function update. Thus, CPS extracts multiple compatible
+entries from the priority queue, and combines them into a
+complete state-action pair.
+While the optimal choice would be the set with the high-
+est combined priority, ﬁnding this set is equivalent to the
+knapsack problem, which is known to be NP-hard. A good
+heuristic would be to traverse the priority queue in order,
+greedily extracting the ﬁrst (s, a) entry from the queue, and
+then greedily selecting all entries which are compatible with
+both it and previously selected entries, where compatible
+means that the same parents (si, ai) must have the same val-
+ues in all selected entries. Unfortunately, this option is also
+not viable, as it would require examining all entries in the
+queue, which would be too computationally expensive to do
+repeatedly. However, by ignoring the order of priority, this
+strategy can be implemented very efﬁciently with the help
+of radix trees for bookkeeping, which signiﬁcantly reduces
+the number of comparisons needed. Thus, CPS still pops the
+highest priority entry from the queue, but randomizes the
+subsequent search order. In this way, we ensure that every
+compatible entry in the queue has a chance of being selected,
+and that all updates are performed in the limit.
+Once the set of entries has been ﬁnalized, CPS removes
+them from the priority queue, and proceeds to use them to
+update the factored Q-function. If some elements local state-
+action (si, ai) required to construct a full joint action are
+not in the selected set, CPS supplements these by uniformly
+sampling them from their respective domain. Another option
+would be to iterate over every possible combination of the
+missing values and do an update for each combination, but
+this operation would too expensive, as the number of updates
+would increase exponentially with the number of unassigned
+values. Finally, using the newly obtained (s, a) pair, CPS
+uses the model to sample a new state s′ and rewards r, and
+updates ˆQ as described in Section 2.2.
+Algorithm 1: Cooperative Prioritized Sweeping
+1: while True do
+2:
+Select action a given state s following policy π
+3:
+(s′, r) ←Execute action a in state s
+4:
+Update T, R using (s, a, s′, r)
+5:
+a′⋆←Use variable elimination for s′
+6:
+Update ˆQ(s, a) using (s, a, s′, a′⋆)
+7:
+for every state factor i do
+8:
+∆i ←Compute from TDs of ˆQ
+9:
+for every pair s′′, a′′ that is parent of si do
+10:
+p ←∆i · T(s′
+i = si | s′′, a′′)
+11:
+if p > θ then
+12:
+Add to Queue s′′, a′′ with priority p
+13:
+end if
+14:
+end for
+15:
+end for
+16:
+for number of batch updates do
+17:
+(s, a) ←Pop Queue max
+18:
+for every pair (s′′, a′′) in Queue, randomly do
+19:
+if (s, a) and (s′′, a′′) are compatible then
+20:
+Append (s′′, a′′) to (s, a)
+21:
+Remove (s′′, a′′) from Queue
+22:
+end if
+23:
+end for
+24:
+(s, a) ←Fill missing values of (s, a) randomly
+25:
+(s′, r) ←Sample from T, R using s and a
+26:
+Update ˆQ
+27:
+Update Queue with all ∆i
+28:
+end for
+29: end while
+3
+Experiments
+To test the performance of CPS, we evaluate it empirically
+on the SysAdmin problem (Guestrin, Koller, and Parr 2002)
+and randomly generated MMDPs.
+In the SysAdmin setting, a series of interconnected ma-
+chines randomly obtain jobs that they must complete. Over
+time, the machines may fail or die, and this in turn affects the
+probability of failures for adjacent machines. Each machine
+is associated with an agent, which can either do nothing or
+reboot its machine. Rebooting a machine resets its state, but
+loses all work. Each completed job receives a reward of 1 for
+its associated agent. We use three different topologies: a ring
+with 300 agents, a torus with 100 agents in a 10x10 grid and
+
+ 0
+ 500
+1000
+1500
+2000
+2500
+3000
+3500
+4000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps tg=1500
+cps tg=3000
+cps tg=5000
+rnd 
+scql tg=1500
+scql tg=3000
+scql tg=5000
+(a) Regret over time w.r.t. the best possible approximation
+(LP) in the shared ring control setting.
+ 0
+10000
+20000
+30000
+40000
+50000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps tg=500
+cps tg=1000
+cps tg=3000
+rnd 
+scql tg=250
+scql tg=500
+scql tg=1000
+scql tg=3000
+(b) Regret over time w.r.t. CPS tg = 250 in the ring set-
+ting, with 300 agents.
+ 0
+1000
+2000
+3000
+4000
+5000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps tg=250
+cps tg=500
+cps tg=1000
+cps tg=3000
+rnd 
+scql tg=250
+scql tg=500
+scql tg=1000
+scql tg=3000
+(c) Regret over time w.r.t. the best possible approximation
+(LP) in the random setting with 3 agents.
+ 0
+5000
+10000
+15000
+20000
+25000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps tg=500
+cps tg=1000
+cps tg=3000
+rnd 
+scql tg=250
+scql tg=500
+scql tg=1000
+scql tg=3000
+(d) Regret over time w.r.t. CPS tg = 250 in the torus set-
+ting, with 100 agents.
+ 0
+1000
+2000
+3000
+4000
+5000
+6000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps batch=5
+cps batch=10
+cps batch=20
+cps batch=30
+(e) Regret over time w.r.t. a batch size of 50 in the torus
+setting. tg here is 1000 for all runs.
+ 0
+2000
+4000
+6000
+8000
+10000
+12000
+14000
+16000
+18000
+ 0
+ 1000
+ 2000
+ 3000
+ 4000
+ 5000
+ 6000
+cps tg=500
+cps tg=1000
+cps tg=3000
+rnd 
+scql tg=250
+scql tg=500
+scql tg=1000
+scql tg=3000
+(f) Regret over time w.r.t. CPS tg = 250 in the random
+setting, with 15 agents.
+Figure 2: Mean and standard deviation of cumulative regret over time for different methods in each setting (lower is better).
+Note that in all plots but 2a and 2c regret may go down since it is computed w.r.t. a speciﬁc algorithm, as the LP upper bound
+is too expensive to compute.
+a shared control setting with a ring of 12 machines where
+each is controlled by its two adjacent agents. In this last set-
+ting, a machine reboots with a probability of 0.15 if only one
+agent issues the rebooting command, and with a probability
+of 1 if both do. We only use 12 agents so that it is feasible to
+use a factored LP (Guestrin, Koller, and Parr 2002) to obtain
+the best possible approximation and compute the true regret.
+We select each machine’s state and load pair as the basis do-
+
+mains, which is equivalent to the “single” basis reported in
+(Guestrin, Koller, and Parr 2002).
+Additionally, we evaluate the performance of CPS on ran-
+domly generated MMDPs. The DDNs for these problems
+were generated by connecting each S′
+i with Si, plus a ran-
+dom number of state and action factors (max 3) locally close
+to i. The transition tables were ﬁlled by uniformly sam-
+pling transition vectors. We generated sparse reward func-
+tions containing random values in [−1, 0, 1] for the parents
+of random factors Si, which are selected independently with
+probability 0.3. We select as basis domains all pairs of ad-
+jacent state factors (Si, Si+1). We show results for two ran-
+domly generated MMDPS, one with 4 state factors and 3
+agents, and another with 20 state factors and 15 agents. Both
+environments had to be kept relatively small, as on one hand
+the LP approach was very slow in these less structured envi-
+ronments, while on the other SCQL had trouble handling the
+large number of rules required to represent the Q-function
+(in the millions) with more than 15 agents.
+We compare our results against 3 benchmarks: a ran-
+dom policy as a naive approach, the factored LP planning
+method on the ground truth MMDP model as the upper
+bound (Guestrin, Koller, and Parr 2002), and Sparse Coop-
+erative Q-Learning (SCQL) (Kok and Vlassis 2004). SCQL
+runs used optimistic initialization to improve its exploration,
+with all its Q-function values set to 5.0, as without it SCQL
+was not able to learn correctly. Both SCQL and CPS use a
+constant learning rate of 0.3, and an ε-greedy policy with ε
+linearly decreasing from 0.9 to 0. We tested different time
+steps at which the exploration probability ε must reach 0,
+reported as parameter tg in Figure 2. CPS, SCQL and the
+LP approach all use the same Q-function factorization. CPS
+has no prior knowledge about the transition and reward func-
+tions at the beginning of each run. All results were averaged
+over 100 runs. Each experiment ran on a single core of an
+AMD FX-8350 CPU.
+CPS consistently outperforms SCQL in all settings, and
+is able to obtain good policies with very few samples: 250
+time steps are enough to learn a close-to-optimal policy in an
+environment with 2300 actions and 9300 states. At the same
+time, exploring for a longer time leads to slightly better poli-
+cies.
+Figure 2e shows the relationship between regret and batch
+size in CPS in the SysAdmin torus setting. As the batch size
+decreases, regret increases. However, smaller batch sizes
+still converge to the same policy over time. Because of the
+limited exploration time, the learnt model is imperfect. This
+results in slightly sub-optimal decisions inversely correlated
+with the batch size, as batch updates are sampled from the
+learnt model. Therefore, lower batch sizes show decreasing
+regret in the later time steps.
+4
+Related Work
+In general, exact planning in factored multi-agent settings
+is unfeasible for larger numbers of agents, for all but prob-
+lems with very few agents (Scharpff et al. 2016). Some
+sub-classes of decentralized versions of such problems ex-
+ist that do permit an exact factorization of the value function
+(Becker et al. 2004; Nair et al. 2005; Witwicki and Durfee
+2010). However, the cost of decentralization is still arbitrar-
+ily large, and planning in these specialized models is still
+expensive. Therefore, for model-based reinforcement learn-
+ing it is better to directly approximate a factored sparse Q-
+function, as this obviates the need for the additional over-
+simplifying model restrictions that using such models would
+entail.
+In this paper, we make use of variable elimination
+(Guestrin, Koller, and Parr 2002) to select the optimal joint
+action given w.r.t. an approximate value function. Such joint
+action selection can also be done approximately, e.g., via
+max-plus (Kok and Vlassis 2005), AND/OR tree search
+(Marinescu and Dechter 2005), or variational methods (Liu
+and Ihler 2012). We note that this is orthogonal to our con-
+tributions and can be added easily if the complexity of the
+chosen graphical structure of the value function requires it.
+Finally, recent advances have been made in deep multi-
+agent reinforcement learning (Gupta, Egorov, and Kochen-
+derfer 2017; Foerster et al. 2018; Hernandez-Leal, Kartal,
+and Taylor 2018). The most related method to ours from this
+line of research is QMIX (Rashid et al. 2018) which—to
+our knowledge—is the only deep MARL method to exploit
+some type of factorization. However, this method is limited
+to Q-functions that are monotonic in its constitution com-
+ponents, and thus not yet able to handle arbitrary factoriza-
+tions of the Q-function. It is our hope that the contributions
+presented in this paper will also contribute to future deep
+MARL methods that can handle any factorization, especially
+in light of the fact that it has been observed that the sparse
+factored representation for the value functions we employ is
+equivalent to a single layer neural network with features cor-
+responding to its basis functions (Guestrin, Koller, and Parr
+2002).
+5
+Discussion and Conclusions
+We have presented a new model-based reinforcement learn-
+ing algorithm, Cooperative Prioritized Sweeping, which ex-
+ploits the structure of a coordination graph in an MMDP to
+both learn a model of the environment and update the Q-
+function in a sample-efﬁcient manner. The algorithm main-
+tains a priority queue containing partial state-action pairs,
+representing the parts of the Q-function which are most ben-
+eﬁcial to update. The queue is sampled in batches between
+interactions with the environment, and the model is used to
+sample possible new state and reward pairs, which are then
+used to update the Q-function. CPS can learn good policies
+using signiﬁcantly less data than the previous state-of-the-
+art, resulting in signiﬁcantly less regret over time.
+Currently, CPS uses a naive ε-greedy exploration strategy.
+In future work, we aim to improve exploration; instead of
+randomly sampling a completely random joint-action when
+exploring, we would like to select the joint-action that max-
+imizes the collection of information from each T and R fac-
+tor, similar to previous work in multi-agent bandits (Bar-
+giacchi et al. 2018). Such an approach could further reduce
+the sample complexity of CPS. We will also implement sup-
+port for context-speciﬁc independence using rules (Guestrin,
+Venkataraman, and Koller 2002). Finally, we aim to use the
+
+techniques presented in this paper as a basis for construct-
+ing a deep MARL that can fully support arbitrary factored
+Q-functions.

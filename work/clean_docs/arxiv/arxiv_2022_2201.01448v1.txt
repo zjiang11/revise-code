@@ -1,0 +1,874 @@
+Conditional Imitation Learning
+for Multi-Agent Games
+Andy Shih
+Computer Science Department
+Stanford University
+
+Stefano Ermon
+Computer Science Department
+Stanford University
+
+Dorsa Sadigh
+Computer Science Department
+Stanford University
+
+Abstract—While advances in multi-agent learning have enabled
+the training of increasingly complex agents, most existing tech-
+niques produce a ﬁnal policy that is not designed to adapt to a
+new partner’s strategy. However, we would like our AI agents
+to adjust their strategy based on the strategies of those around
+them. In this work, we study the problem of conditional multi-
+agent imitation learning, where we have access to joint trajectory
+demonstrations at training time, and we must interact with and
+adapt to new partners at test time. This setting is challenging
+because we must infer a new partner’s strategy and adapt our
+policy to that strategy, all without knowledge of the environment
+reward or dynamics. We formalize this problem of conditional
+multi-agent imitation learning, and propose a novel approach to
+address the difﬁculties of scalability and data scarcity. Our key
+insight is that variations across partners in multi-agent games are
+often highly structured, and can be represented via a low-rank
+subspace. Leveraging tools from tensor decomposition, our model
+learns a low-rank subspace over ego and partner agent strategies,
+then infers and adapts to a new partner strategy by interpolating
+in the subspace. We experiments with a mix of collaborative
+tasks, including bandits, particle, and Hanabi environments.
+Additionally, we test our conditional policies against real human
+partners in a user study on the Overcooked game. Our model
+adapts better to new partners compared to baselines, and robustly
+handles diverse settings ranging from discrete/continuous actions
+and static/online evaluation with AI/human partners.
+Index Terms—multi-agent, imitation learning, conditional poli-
+cies, adaptive policies, low-rank, collaboration
+I. INTRODUCTION
+Many important robotics applications naturally involve mul-
+tiple agents, from assistive robotics to self-driving cars. New
+techniques in deep multi-agent reinforcement learning have
+led to breakthrough performance in many multi-agent tasks,
+such as Go [52], Hanabi [20], and poker [5]. Although
+these methods have shown impressive results, many of their
+formulations lack a key factor that is central to multi-agent
+interactions – the ability to adapt quickly to another agent.
+For example, in cooperative games such as Hanabi [3,
+20, 31], much of the focus has been on training a single
+set of partners to achieve a high score with each other. As
+a result, these methods produce agents that are skilled not
+at playing Hanabi in general, but at playing Hanabi with
+their training partners. Even in competitive or mixed settings,
+most current frameworks do not act with the opponent in
+mind [5, 47]. For example, state-of-the-art poker agents “play
+a ﬁxed strategy that does not adapt to the observed tendencies
+of the opponents” [5]. Recent works on the game of Diplomacy
+consider the “exploitability” of their own agent (e.g. if adaptive
+opponents can take advantage of their agent), but do not adapt
+to or exploit their opponents’ behavioral patterns in return [24].
+Rather, success in a multi-agent task should be measured
+in terms of the ability to perform well at the task with a new
+partner. Indeed, a skillful musician can adjust to the playing
+style of new partners (Figure 1), and a skillful poker player can
+exploit the blufﬁng patterns of new opponents. Similarly, we
+should train agents that are able to adapt their actions based
+on the tendencies of new partners.
+In this work, we explore the paradigm of conditional multi-
+agent imitation learning (conditional MAIL). Our goal is to
+learn a policy that can adapt to new partners, by training only
+on a dataset of demonstrations without any other assumptions
+such as access to environment reward or dynamics. Concretely,
+we are provided with expert demonstrations on how to coor-
+dinate with various partners sampled from some ﬁxed partner
+distribution. Then, given the actions of new partners, we would
+like to adapt our actions to best coordinate with them.
+Conditional MAIL is a ﬂexible framework, but there are two
+core challenges: 1) multi-agent evaluation and 2) data scarcity.
+1) Evaluation: Unlike the single-agent case where we can
+accurately estimate the performance of the learned policy,
+the learned policy performance for the multi-agent setting
+depends highly on the partner’s strategy and the potential non-
+stationarity of that policy.
+To look at trade-offs of evaluation cost and effectiveness,
+we experiment with three evaluation methods in our paper:
+ofﬂine, static and online evaluation. Ofﬂine evaluation simply
+measures the log-likelihood of a held out expert dataset as
+a proxy for reward, and can be evaluated without access to
+the environment even at test time. Another direct approach,
+which we refer to as static evaluation, is to behavioral-clone
+(BC) a test dataset of trajectories, and evaluate our ego agent
+against these BC agents. The downside of static evaluation is
+that BC agents have rigid behavior and work poorly if out of
+distribution. This is exacerbated in multi-agent games, where
+other agents can quickly push the joint state out of distribution.
+A more costly evaluation choice is online evaluation by
+pairing our conditional policy against non-stationary partners,
+such as human partners. Online evaluation is more meaningful
+but also more tedious. A highlight of our work is the ability
+arXiv:2201.01448v1  [cs.LG]  5 Jan 2022
+
+fast
+soft
+slow
+loud
+fast
+soft
+slow
+loud
+test
+train
+y1, …, ym
+y
+Dy1, …, Dym
+˜Dy
+ap
+ae
+ap
+Fig. 1.
+We consider the setting of adapting to a
+new partner in a multi-agent task. During train-
+ing, the ego-agent (pianist in white) learns from
+demonstrations from pairs of cellists and pianists
+playing music in coordination. We denote each cel-
+list/pianist pair with a different shade of purple/red,
+with the cellists representing the partners, and the
+pianists representing the experts. At test time, the
+ego-agent must coordinate with the cellist y in blue.
+To coordinate well, the pianist in white can ﬁrst
+build a mental model from the training data of
+how to coordinate with partners of various strat-
+egy (loud/soft, fast/slow). Then, he can infer the
+strategy of the new partner in blue, and correctly
+accompany her playing style.
+of our policy to interact and adapt to human users in an
+online fashion, demonstrated on the game of Overcooked.
+Our policies ﬁnetune their behavior after each episode of
+interaction with the user.
+2) Data Scarcity:
+Another challenge with conditional
+multi-agent imitation learning is data scarcity. To learn a con-
+ditional policy, we need training data consisting of a diverse
+set of coordination behavior, which is often hard to come by
+in practice. For example, the Overcooked dataset [7] only has
+around 15 joint trajectories per game layout. A limited dataset,
+combined with the lack of access to environment dynamics for
+simulation, means that our algorithms must learn an adaptable
+latent space using only a handful of demonstrations.
+To this end, our paper proposes a novel approach of synthe-
+sizing a low-rank space of policies via tensor decomposition.
+Learning a low-rank policy space enables us to scale to
+high dimensional environments, while avoiding the inherent
+difﬁculties of learning a non-linear latent space on limited
+data. Inspired by works that model the value function of rein-
+forcement learning tasks with low-rank decomposition [22, 58]
+and works that model human preferences in recommendation
+systems also with low-rank decomposition [28, 50, 59], we
+hypothesize that policies of either AI or human partners
+can admit a low-rank structure as well. We use techniques
+from tensor decomposition, in particular Tensor Trains, to
+model this low-rank representation in a scalable way. This
+formulation then allows us to adapt quickly to a new partner
+by interpolating in the low-rank subspace.
+A. Contributions
+The contributions of our paper are three-fold. First, our pa-
+per examines the various components (e.g. training objective,
+evaluation metric, user study integration) of the framework of
+conditional multi-agent imitation learning. Second, we propose
+a model with a structured low-rank prior aimed to address the
+challenges of data scarcity for the conditional MAIL frame-
+work. Finally, we run a wide range of experiments touching
+on all three methods of ofﬂine/static/online evaluation. Our
+experiments suggest that our tensor decomposition model with
+low-rank inductive bias can adapt better than baseline methods
+such as meta-learning, multi-task learning, or non-linear latent
+modelling approaches.
+In particular, we experiment with our model across various
+settings with both AI/human partner distributions and up to 60
+dimensional state spaces with both continuous/discrete actions.
+We study a collaborative contextual multi-armed bandit task,
+a continuous-action particle environment, and the card game
+Hanabi. For these environments, we generate partners by train-
+ing AI agents with different random seeds. We then do a more
+comprehensive evaluation on the task of Overcooked [7, 55],
+which consists of human-human gameplay on 5 different
+layouts of the game. We deploy our adaptive policy learned
+from these human-human demonstrations in a user study with
+crowd-sourced workers on Proliﬁc, and our study suggests that
+our models is robust to non-stationary human partners as well.
+II. RELATED WORK
+MARL. Many advancement have been made in multi-agent
+RL in training a group of agents to succeed at a task together,
+typically via centralized learning [19, 40]. In multi-agent
+imitation learning, techniques have been proposed based on
+adversarial training [53, 60] or structure learning in the setting
+of unassigned roles [36]. In these works, the focus is on
+training policies for one full set of agents in the environment,
+whereas our goal is to train a policy to adapt to new partners.
+Non-stationarity. Conditional imitation learning ﬁts under the
+general framework of non-stationarity in the other agent’s
+behavior [29]. There are many types of non-stationarity, with
+one line of work focusing on learning procedures that can take
+advantage of the other agent’s learning process [18, 61] or
+latent strategy dynamics [56, 57]. The non-stationarity in our
+problem arises from the introduction of new partners, and from
+the strategy drift of our partners over time. This is related to
+context-detection [13, 30] techniques that identify the partner
+behavior as switching between one of a ﬁnite number of
+stationary strategies. In contrast, our approach can ﬁt a policy
+for a new partner with a continuous latent space over strategies,
+and induces on a low-rank prior. Also related are convention
+modeling approaches [51] which target adaptation to new
+partners using modular policy networks.
+
+Partner Modeling.
+Many works on partner modeling have
+been successful with predicting a human partner’s intentions
+for robotics [2, 15, 32, 33], motion planning [43], games [41],
+driving [49], and more [10, 34, 37]. In [44], they ﬁrst run
+unsupervised clustering to learn partner types, and then run
+a solver on the MDP taking into account the inferred partner
+types. These works generally require a strong model of the
+environment so that after inferring the partner intent, they
+are able to incorporate the intent into a planner for the
+ego agent. Our framework differs in that we train only on
+trajectory datasets, without access to environment reward,
+dynamics, or a planner. This makes our setting challenging,
+but more applicable to general tasks for which we do not have
+knowledge of the environment.
+Imitation Learning. Since we are working with multiple
+partners, we can draw similarities to hierarchical/conditional
+imitation learning methods that context switch between a set
+of low-level policies [12, 35]. From this perspective, our
+approach is related to learning a continuous range of low-level
+policies, and choosing between them based on inference over
+the partner strategy. The framework of meta-imitation learn-
+ing [17] is also relevant, where they learn to solve a new RL
+task with just a single expert demonstration. On the other hand,
+there are works that learn from heterogeneous demonstrations
+too [39, 46]. The main difference between our setting and the
+single agent IL methods are that their test environment has
+no non-stationarity, and that their demonstrations are directly
+over the experts, whereas our goal is to predict expert actions
+given demonstrations of the partner.
+Sequence Prediction. Multi-agent trajectory prediction [1,
+25, 48] and multivariate time-series prediction [9] are closely
+related to the framework of predicting the expert actions given
+the partner actions. Whereas some works [1] aim to predict the
+actions of every agent given the past actions of every agent,
+our setting aims to predict the expert actions given access to
+only the partner actions.
+III. PROBLEM STATEMENT
+ap
+φ
+s
+ae
+Fig. 2.
+Partner strategies φ are
+sampled from an underlying dis-
+tribution Φptnr. The strategy of
+a partner affects its actions ap
+taken at a state s. We model
+the experts as having inferred the
+partner strategy, so their action
+ae at state s also depends on φ.
+We consider a two-player Markov Game with states S, and
+actions A = A × A. Agents take actions independently of
+each other, i.e. π(a|s) = π0(a|s)π1(a|s). Without loss of
+generality, the ego agent policy (that we control) is π0 and
+the partner policy is π1.
+One standard framework in multi-agent imitation learning is
+to train a single pair of policies (π0, π1) to mimic trajectories
+from a pair of experts [53]. This framework, however, does
+not consider generalization to new partners. We are interested
+in the adaptive setting – can we train an agent to play well
+against a new partner, whose actions come from a different
+policy than that of a partner from the training set?
+We assign each partner an ID y and strategy φ as a
+sample drawn from some ﬁxed distribution Φptnr. We assume
+that the agents generating the training dataset are stationary,
+having converged to the stochastic policy πφ(a|s, φ). Since
+we are in the imitation learning setting, for each partner y
+we have joint trajectories Dy = {(si, ae
+i, ap
+i )}k
+i=1, where ae’s
+are expert action, and ap’s are partner actions. We assume
+that the expert has inferred the partner’s strategy φ through
+prior repeated interactions, and acts based on a stochastic
+policy πexpert(a|s, φ). Hence, even though the agents take
+simultaneous actions, we model a dependency from φ to ae.
+At training time, we have access to batches of joint trajecto-
+ries Dy1, . . . , Dym, corresponding to supervision for the train-
+ing partners with underlying strategies φ1, . . . , φm ∼Φptnr. At
+test time, we interact with a new partner y0 and adapt our ego
+agent to best coordinate with the new partner.
+A. Evaluation Metrics
+As alluded to earlier, there are many evaluation metrics we
+can consider when interacting with the test partner.
+1) Ofﬂine Evaluation: One option is a purely ofﬂine eval-
+uation without the environment, in which case we require
+joint trajectories in the test set for evaluation. We split the
+joint trajectories from the test set Dy0 into partial trajectories
+consisting of the partner actions ˜Dy0 and the expert actions
+ˆDy0. Under this setup, adapting to a new partner y0 with
+strategy φ0 corresponds to generating a good ego-agent policy
+given observations of the partner’s actions ˜Dy0. We write
+our objective as minimizing the KL-divergence between the
+(unknown) expert policy and the generated ego-agent policy,
+denoted as π(a|s, ˜Dy0).
+inf
+π
+X
+si∈˜
+Dy0
+KL(πexpert(a|si, φ0) || π(a|si, ˜Dy0))
+= sup
+π
+X
+si∈˜
+Dy0
+Eπexpert(a|si,φ0)[log π(a|si, ˜Dy0)]
+(1)
+As the entropy of the expert policy is a constant, this
+objective corresponds to maximizing the log-likelihood of the
+actions of the expert policy. Although we don’t have access
+to the expert policy, we estimate the objective by treating the
+expert trajectories ˆDy0 as samples from the expert policy.
+2) Static Evaluation: If we have access to the environment
+dynamics and rewards at test time, we can pair our ego agent
+with new partner agents and measure the environment reward.
+Either the partner agent policies are provided at test time, or
+we behavioral-clone their policies from a test dataset.
+In both ofﬂine and static evaluation, the partner agent is
+stationary, governed by some ﬁxed strategy. Based on the
+formulation in Figure 2, we can then write our desired policy
+as a mixture of how an expert would react to each partner
+
+type, weighted by the probability of each partner type given
+observations ˜Dy0.
+π(a|s, ˜Dy0) =
+Z
+φ
+πexpert(a|s, ˜Dy0, φ)p(φ|s, ˜Dy0)dφ
+=
+Z
+φ
+πexpert(a|s, φ)p(φ| ˜Dy0)dφ
+(2)
+3) Online Evaluation: Lastly, we can relax our assumptions
+and measure the environment reward attained when pitting
+our adaptive ego agent against non-stationary partners at test
+time. The test partner policies may drift over time, and may
+not correspond to a ﬁxed strategy φ. This requires us to
+continuously ﬁnetune our ego agent policy as new interaction
+data is collected. Notably, for this online evaluation method,
+we can pair our adaptive policy against crowd-sourced human
+players, whose behavior will be naturally inﬂuenced by the
+actions that our ego agent makes.
+The highlight of the conditional multi-agent imitation learn-
+ing framework is that training only requires a static dataset of
+joint trajectories from diverse partner/expert pairs, making it
+generalizable to many tasks in the real world. As we have
+seen, the general aim is to learn a conditional expert policy
+πexpert(a|s, φ) over a latent space of strategies φ, and to infer φ
+using observations of a new partner’s actions at test time. By
+continuously updating φ based on newly collected trajectories,
+the ego agent can adapt even to non-stationary partners, all
+without training on the environment rewards or dynamics.
+IV. LEARNING A LOW RANK POLICY SPACE
+Learning a conditional expert policy πexpert(a|s, φ) along
+with a model p(φ| ˜Dy0) for inferring partner strategy is chal-
+lenging. In addition, learning a non-linear latent space over
+strategies can struggle with overﬁtting when data is limited.
+Instead we propose to learn a low-rank latent space that is
+both scalable to high dimensional environments and suitable
+for low data settings. Our method aims to impose a more
+structured prior on the latent space that may reduce the
+expressiveness of the model, but in return cut back on the
+model’s reliance on large amounts of data.
+Given the scalability and data-efﬁciency beneﬁts of impos-
+ing a low-rank prior, the main question is then – how restrictive
+is a low-rank prior on the model’s ability to learn a good
+latent space over strategies for conditional MAIL? Based on
+existing evidence in the literature, we argue that multi-agent
+tasks have two signiﬁcant sources of structure, which suggest
+that the space of reasonable policies may indeed lie on a very
+low-dimensional subspace.
+• Task constraints – the reward and dynamics of the
+Markov Game can be viewed as imposing soft con-
+straints, ruling out actions that are clearly suboptimal.
+These soft constraints, in the form of Q-functions of
+the environment, can ﬁlter out the majority of possible
+policies, in particular those that often take low-value
+actions. Recent work has shown that the Q-functions of
+RL environments have surprisingly low rank [22, 58].
+• Partner Similarities – the partners from the distribution
+Φptnr may only take on a small subspace of possible
+strategies, both when considering human or AI partners.
+For example, exploiting common similarities between hu-
+mans is what drives the success of collaborative ﬁltering
+methods [28, 50, 59]. Beyond human partners, it has
+also been observed that neural network agents trained
+via stochastic gradient descent span a surprisingly low-
+dimensional subspace [26, 38].
+In summary, the underlying Markov Game already rules out
+a large swath of undesirable policies, and the partner sampling
+distribution further restricts the space of possible partners.
+With this in mind, we explore the use of a low rank model to
+capture the existing structure in the latent space of strategies.
+Our proposed model makes use of low-rank tensor decom-
+position. In particular, we have three dimensions of interest in
+this low-rank structure: strategy φ, states s, and actions a. Un-
+like its matrix counterpart, the low-rank tensor decomposition
+does not have a unique formulation. Popular methodologies
+include the CANDECOMP/PARAFAC decomposition [6, 27],
+the Tucker decomposition [54] and the Tensor Train decom-
+position [11]. In this work, we focus on the Tensor Train
+decomposition due to its scalability properties [4, 45, 59].
+A. Tensor Train Decomposition
+The Tensor Train decomposition is a compact and scalable
+representation of high-dimensional functions. A Tensor Train
+of rank r can represent an n-dimensional function (each
+dimension taking on I values) with O(nIr2) parameters,
+whereas a na¨ıve representation requires O(In) parameters.
+Apart from scaling better than other low-rank tensor decompo-
+sition alternatives, the Tensor Train also comes equipped with
+rank-reducing approximation algorithms [11, 45].
+The discrete form of a Tensor Train represents a high-
+dimensional function g : I1 × . . . × In →Rk by keeping n
+“cores” (i.e. 3-dimensional tensors) of shape Ai = ri−1 ×Ii ×
+ri. The values [r0, . . . , rn] are the rank of the tensor, where
+each ri is an integer, with r0 = 1 and rn = k. For convenience,
+we will refer to a Tensor Train with r1 = . . . = rn−1 = r
+simply as having rank r. The values I1, . . . , In are the modes
+of the Tensor Train, indicating the number of values the input
+to each dimension can take on. To evaluate a tensor train on
+an input x1 . . . xn, we simply index into the cores at each
+dimension (resulting in a series of matrices), and perform a
+series of matrix multiplication.
+g(x1, . . . , xn) = A1[:, x1, :] × . . . × An[:, xn, :]
+The intermediate matrices have shape 1 × r and r × k at
+the endpoints, and r × r in between, so the series of matrix
+multiplications will produce an output value in Rk as desired.
+We would like to directly use the Tensor Train g as our
+policy network, by having two cores: a partner-strategy core
+and a state core. Then we set the output dimension k to be
+equal to the size of the action space |A|. But, we face two
+issues. First, the mode of the state core (e.g. the total number
+of states in the state space) may be too large. Second, we only
+
+#!(!)
+#"(")
+×
+Fig. 3.
+Given an observation s from
+a partner with ID y, the functional
+Tensor Train evaluates a matrix-valued
+outputs g1(y), g2(s). Then the Tensor
+Train performs matrix multiplication,
+and the resulting vector is the action
+logits for the policy.
+observe the partner identities y, and not the partner strategies
+φ, so we need to interpret tensor core for the partner strategies
+differently. We address these issues next.
+B. Functional Tensor Train
+Although the Tensor Train format scales favorable with
+respect to the dimensionality, the modes of each dimension
+I1, . . . , In can still be too large (and inﬁnite for continuous
+inputs) for some practical applications. For example, one of
+our dimensions of interest is the state s of a Markov Game,
+which would correspond to a mode equal to the total number
+of possible states. For most environments, storing a Tensor
+Train in this format is unmanageable.
+An appealing solution is that of the functional Tensor
+Train [4, 23]. The key insight is that, instead of representing
+cores with tensors of size ri−1×Ii×ri, we can generalize them
+to matrix-valued functions gi : Ii →Rri−1×ri. Indexing into
+a core to retrieve an ri−1 ×ri matrix now becomes evaluating
+the matrix-valued function in each dimension:
+g(x1, . . . , xn) = g1(x1) × . . . × gn(xn)
+Previous works limit themselves to piece-wise polynomials
+in these matrix-valued functions [23], in order to support
+operations such as integration and cross-approximation. In
+this work, we instead propose to parameterize each matrix-
+valued function with a neural network, forgoing support for
+these operations in order to maximizing ﬂexibility. Using the
+functional variant of Tensor Trains, we can handle dimensions
+with extremely large modes or even continuous inputs.
+C. Conditional Policies
+We next describe how to use the functional Tensor Train to
+ﬁt policies of different partners strategies. We want to represent
+the latent space over partner strategies using the ﬁrst core of
+our functional Tensor Train. For any given partner, we only
+observe its identity y and not its strategy φ. Therefore, we let
+the partner strategy core of our Tensor Train take in the (one-
+hot vector) identity y as input, and use the 1×r matrix-valued
+output as the partner strategy φ. This is not restrictive, since
+the neural network mapping φ = g1(y) is ﬂexible.
+The setup of our architecture is as follows (Figure 3). We
+have the neural network (strategy core) that maps the one-hot
+partner ID to a 1 × r vector φ – the latent representation of
+the partner strategy. We have another neural network (state
+core) that maps the state observation to a r × |A| matrix. The
+state encodes the role of the agent (ego or partner), so the
+same policy network is used for both the ego and the partner.
+The result of the matrix multiplication is used as the logits
+for the policies, and this enforces a low-rank prior in the log-
+probabilities of the actions.
+log π(A|s) = 1
+Z g1(y) × g2(s)
+(3)
+At train time we learn the parameters of g1, g2 via Maximum
+Likelihood Estimation (MLE) on both the ego and the partner
+actions. The objective is Equation 1 for both the ego and part-
+ner agent, plugging in their policies as deﬁned by Equation 3.
+At test time, given a new test partner, we set its partner ID
+to a random vector y0. This gives us a random initialization of
+the strategy vector φ = g1(y0). Then as we interact with the
+test partner, we can ﬁne-tune the strategy core g1 via MLE on
+the newly collected test partner’s actions (e.g. Equation 1 on
+the partner actions).
+The structure of the Tensor Train makes it easy to ﬁnetune
+to new partners at test time. Given a new partner with ID y0,
+we ﬁne-tune only the partner-strategy core of the Tensor Train,
+keeping the parameters of the state core ﬁxed. In essence, the
+learning phase during training is ﬁtting a low-rank subspace
+over policies for different partners, and the adaptation phase
+at test time is doing inference over the partner strategy and
+interpolating the output actions in that subspace. Moreover,
+we do not need to specify the number of testing partners in
+advance, since we can randomly initialize the ID vector y0
+and update the mapping g1(y0). Finally, our method avoids
+overﬁtting by enforcing a low-rank inductive bias.
+V. EXPERIMENTS
+We run a variety of experiments to evaluate our approach
+for adapting to new partners in multi-agent games, span-
+ning discrete/continuous actions, full/partial observability, and
+AI/human partners. For the ﬁrst set of experiments, we gener-
+ate partner distributions by training AI partners with different
+random seeds. We study a collaborative multi-armed bandit
+task, a particle environment with continuous actions, and
+the game of Hanabi using 4 players. For the second set of
+experiments, we explore the distribution over human partners
+instead. We focus on the game of Overcooked [7, 55] by
+training and performing static evaluation on human-human
+demonstrations collected from [7]. Then, we follow it up with
+online evaluation against real human partners, by deploying
+our adaptive agents in a user study to play Overcooked with
+crowd-sourced humans. Our experiments show the applicabil-
+ity of our framework to a broad range of different settings. We
+describe the tasks in detail in their corresponding sections.
+We compare our approach (lrp: low-rank partners) with four
+baselines: a meta-learning (maml) [16], a multi-task learning
+(mt) [8], and a modular policy (mod) [14, 51] approach, and
+a non-linear latent space approach (lt). We implement these
+methods using the Garage toolkit [21].
+The meta-learning approach optimizes for performance after
+taking inner gradient descent steps on a new sampled task. In
+our experiments we take one inner gradient step, which has
+been shown [42] to also give good performance. The multi-
+task approach aims to share representations across policies
+
+for different partners, by appending the partner ID to the
+state observations and predicting with a single network. The
+modular policy approach aims to separate task and partner
+representations with modular policy networks, in order to
+transfer the task representation to a new partner. Finally, the
+non-linear latent space method concatenates learned partner
+embeddings with state observations, and maps this joint input
+directly to the action space. These baseline methods can work
+well when the number of training tasks is large, but unlike our
+method, they do not have a strong (low-rank) inductive bias.
+This can make it difﬁcult for them to generalize well when
+the number of training tasks is small.
+A. Collaborative Bandits
+In our collaborative bandit environment, two players simul-
+taneously pick an action, scoring a point if and only if they
+chose the same action and the score for that action is 1. We
+design our bandit environment to have 1000 states, with an
+action space of 10. At each state, roughly 30% of the actions
+give a score of 1, and the rest give a score of 0. In other words,
+the coordination challenge is in breaking the tie between the
+equally optimal joint actions.
+We generate partners by training AI agents using different
+seeds. The AI agents are trained to output, at a given state,
+any one of the actions with a score of 1. We train a set of
+16 training partners and 4 testing partners using the same RL
+algorithm but each with a different seed. The random seed
+affects the sampled states of the environment, the network
+initialization for each agent, and the stochasticity in the
+optimization process.
+First, we can experimentally check that these partner poli-
+cies generated by self-play with different seeds are indeed low-
+rank. We tabularize the policy distribution of all the partners
+as a tensor T of size [1000,10,16] (states, actions, #partners),
+and ﬁt a low-rank Tensor Train to T (Table I). The experiment
+suggests that the tabularized policy tensor has a low rank (of
+4), which is in line with phenomena observed by [26, 38].
+TABLE I
+FITTING TENSOR TRAINS WITH VARIOUS RANKS TO PARTNER POLICIES
+TRAINED WITH DIFFERENT RANDOM SEEDS ON THE BANDIT ENV. THE
+MODEL FITS THE DATA WELL FROM A RANK OF 4 ONWARDS.
+rank
+1
+2
+3
+4
+5
+6
+7
+log-loss
+38.36
+38.28
+37.90
+22.09
+22.03
+22.11
+22.21
+In Figure 4, we plot the performance of different techniques
+for adapting to a new partner. The loss is the negative log-
+likelihood of the held-out expert actions for the test partners,
+which for the bandit task is equivalent to the partner actions.
+We see that our low-rank partner approach adapts best to new
+partners at test time from this partner distribution arising from
+self-play. This suggests that our low-rank partner approach is
+indeed capturing the low-rank subspace of the data-generating
+process, as revealed by Table I, and correctly inferring the
+strategy of the new partner. The underlying Tensor Train is
+able to leverage the correlation between actions at different
+Fig. 4. Collaborative bandit task. The partner policies are generated by self-
+play with different random seeds. We use 16 training and 4 testing partners.
+We set the rank of the Tensor Train to 4. We compute the loss of adapting to
+each new testing partner, and plot the average loss over all the testing partners.
+Fig. 5.
+We visualize the 2-player
+collaborative particle environment. The
+two players work together to move a
+particle on a 2D plane from from posi-
+tion xs, ys to xt, yt. The players input
+2D action vectors simultaneously, and
+the position of the particle moves ac-
+cording to the sum of the action vectors
+of the two players at each timestep.
+states (due to the low-rank structure), and adapt quickly instead
+of learning the action distributions at each state separately.
+B. Particle Environment
+To test our model on continuous actions, we consider a
+2D collaborative particle environment where the two players
+have to move a particle from a start location xs, ys to a target
+location xt, yt (Figure 5). Each player takes a 2D continuous
+action representing the velocity of the particle. The task is
+collaborative – at each timestep the particle moves according
+to the sum of the actions (i.e. velocities) given by the two
+players, with reward being the negative distance to the target.
+We follow a similar setup as earlier, training policies to play
+against 16 train partners obtained via self-play, and adapt to 4
+test partners, without any access to environment reward. As an
+upper bound, the self-play agents are able to achieve a reward
+of 313±7 when playing with themselves. In Table II we report
+the environment reward attained by the adaptive agents before
+and after adapting to a new partner using a trajectory of 200
+timesteps. We see that the low-rank partner approach achieves
+the best reward of the 5 compared methods.
+TABLE II
+REWARD IN PARTICLE ENV BEFORE/AFTER ADAPTING TO TEST PARTNERS.
+lrp
+mt
+mod
+maml
+lt
+before
+297 ± 4
+274 ± 4
+290 ± 5
+272 ± 11
+289 ± 4
+after
+303 ± 4
+300 ± 4
+300 ± 4
+275 ± 7
+294 ± 4
+C. Hanabi
+The Hanabi environment differs from the other environ-
+ments in that it has partial observability, and it involves more
+than two agents. Nonetheless, the framework of conditional
+multi-agent imitation learning can be applied to these settings
+
+Fig. 6.
+Results from the game of Hanabi with 4 players, where our ego
+agent is adapting to a new set of other 3 partners each time. Hanabi is a
+collaborative turn-based game with partial observability, as every player can
+only see other player’s cards but not their own. In our experiments, our low-
+rank model showed better adaptation performance after 1000 timesteps of
+demonstrations from a new partner.
+as well. In particular, we can handle the ego-agent as usual,
+and treat the other n −1 agents as one joint partner agent. Of
+course, more careful handling of the interaction between the
+n −1 players is possible, which we leave for future work.
+In Hanabi [3], a group of agents (4 in our case) work
+together to play cards from their hands in a speciﬁc order,
+almost akin to multi-agent Solitaire. The catch is that players
+can see everyone else’s cards except their own. Since their is
+no communication, the players must develop conventions with
+each other, hence adapting to a new conventions is critical to
+success with a new partner.
+We study a small version of the game with 1 color, 5 ranks,
+4 players, and hand sizes of 2. As before, we generate training
+and testing partner/expert pairs using self-play with different
+random seeds. In Figure 6 we plot the loss (negative log-
+likelihood) of the policies as they adapt to a new partner, with
+the x-axis denoting the size of the demonstration used for
+adaptation. Of the compared methods, our low-rank approach
+exhibits the best adaptation performance after 1000 samples.
+D. Overcooked
+Next, we study the task of Overcooked, a two-player game
+with the goal of working together to cook and serve food to
+customers. Players each control a separate avatar in 2D layouts
+(Figure 7), where ingredients and kitchenware are scattered
+in different locations. Players cannot occupy the same cell,
+and must interact with the kitchen objects in a certain order
+to score points (place an onion in the stove, wait, put the
+cooked onion on a plate, and serve the plate). Of the 5 layouts,
+Cramped Room is the simplest. Asymmetric Advantages and
+Forced Coordination split the partners into two islands. Lastly,
+Coordination Ring and Counter Circuit have narrow passages
+that prevent the partners from passing each other.
+We test our method on a dataset of human-human demon-
+strations [7], consisting of data for each of the 5 layouts shown
+in Figure 7, with around 8 training and 8 testing pairs of
+humans per layout (39 training pairs and 37 testing pairs in
+total). The roles of the players are not symmetric; for each
+demonstration pair we treat player 0 as the expert and player
+1 as the partner. The state is a feature vector of size 62, and
+there are 6 available actions for each player.
+In Figure 7, we show the results of ofﬂine evaluation on each
+of the ﬁve layouts from the dataset. Similar to before, we plot
+the negative log-likelihood loss over the held-out expert data in
+the test dataset. The demonstration for each human-human pair
+in the dataset contains about 1000 timesteps on average, which
+means the total available sample size is limited. Nevertheless,
+we can see our low-rank partner approach performs well, by
+inferring the strategy of the partner and predicting the expert
+actions that can complement this partner.
+TABLE III
+REWARD IN OVERCOOKED BEFORE/AFTER ADAPTING TO TEST PARTNERS,
+AVERAGED OVER THE 5 LAYOUTS SHOWN IN FIGURE 7.
+lrp
+mt
+mod
+maml
+lt
+before
+21 ± 2
+23 ± 2
+17 ± 2
+7 ± 1
+21 ± 2
+after
+24 ± 2
+21 ± 2
+19 ± 2
+9 ± 1
+22 ± 2
+Next, we look into static evaluation in Table III, where
+we examine the environment rewards attained by the policies
+when playing with new static partners (averaged over all 5 lay-
+outs). However, we are given only a dataset of demonstrations,
+and not the partner policies themselves. As a workaround, we
+ﬁrst run Behavioral Cloning over the demonstration dataset
+to obtain a set of BC partner policies, which we then use to
+evaluate with our adaptive policies. The rewards attained using
+this approach are generally poorer because the BC partner poli-
+cies struggle at novel states, which occur often for conditional
+MAIL. Still, the results from static evaluation align closely
+with the same trends we observe from ofﬂine evaluation, with
+the low-rank policy exhibiting good adaptation performance.
+VI. USER STUDY: ONLINE ADAPTATION TO HUMANS
+To see if our method translates well to collaboration with
+humans, we conduct a study with real humans via a web ver-
+sion of Overcooked. Unlike previous experiments that evaluate
+against ofﬂine datasets or static partners, the user study pairs
+our adaptive policies against (non-stationary) humans.
+A. Participants and Procedures
+We recruited 40 workers from the crowd-sourcing platform
+Proliﬁc and 10 local participants, for a total of 50 users (48%
+Female, median age: 28). The participants were paid at the
+standard minimum wage rate, and participants from Proliﬁc
+were prescreened to be from United States and Canada to limit
+the network latency of playing the online Overcooked game
+in real time. After providing informed consent, our users were
+provided text instructions along with a video demonstration
+of how to play the game. They were then asked to answer a
+3-question quiz to check that they understand the rules of the
+game. Our study is approved by IRB-49406.
+We use the Counter Circuit layout and the adaptive AI
+policies for Overcooked trained from the previous section.
+Each participant plays against all 5 of the adaptive policies
+
+Cramped Room
+Asymmetric
+Advantages
+Coordination Ring
+Forced Coordination
+Counter Circuit
+Fig. 7. Overcooked: we use the human-human dataset from [7]. For each of
+the 5 layouts in the dataset, we compute the loss of adapting to each new
+testing partner, and plot the average loss over all the testing partners. For each
+new partner we have around 1k samples of their actions.
+shown in Figure 8, in a randomized order, repeated twice for
+a total of 10 games (40 seconds per game). In each game,
+the human participant controls Player 2, and the AI agent
+controls Player 1. The AI agents adapt their policies based only
+on the human’s actions (without access to true or estimated
+environment rewards).
+- Independent Variables: We vary the policy used to control
+the AI agent. We choose from one of lrp, mt, mod, maml, lt
+in a random order for each user.
+- Dependent Measures: We measure the score (environment
+reward) attained by the human-AI pair. We report the score
+from the ﬁrst interaction (before adapt) and from the second
+interaction (after adapt) for each policy.
+- Hypothesis: Based on the results from ofﬂine/static experi-
+ments, we hypothesize that lrp policy best adapts to the human
+partners, as measured by after adapt score.
+- Results: In Figure 8 we plot the results of our online user
+study. Only the lrp and lt policies attain a reward of 20 after
+adaptation, with the lrp indeed giving the highest after adapt
+Fig. 8. User study: of the 5 policy types, lrp reaches the highest reward after
+adapting to human partners.
+score of 26 ± 2 (statistically signiﬁcant compared to all the
+baselines, p < 0.05). This aligns with the trends we observe
+from the static/ofﬂine evaluation of the Overcooked game, in
+which the lrp also adapted well to new partners.
+VII. CONCLUSION
+Summary. We study the problem of adapting to new partners
+in multi-agent tasks, under the imitation learning setting of
+predicting the expert’s actions from the partner’s actions. We
+formalize the problem setting, learning objective, and the
+different evaluation metrics for this framework of conditional
+multi-agent imitation learning. To address the challenges with
+learning from limited data, we then propose a low-rank tensor
+decomposition approach using Tensor Trains. Using a low-
+rank prior, our model infers the strategy of a new partner
+and predicts the corresponding expert actions based on the
+estimated strategy. We describe how to scale up Tensor Trains
+by parameterizing their functional variant with neural net-
+works, and demonstrate their ability to adapt to new partners
+on a variety of environments spanning ofﬂine, static, and
+online evaluation. We test on a collaborative bandit task,
+a continuous-action particle task, the Hanabi game with 4-
+players, and ﬁnally the game of Overcooked in a user study.
+Our work promotes the novel framework of conditional multi-
+agent imitation learning, and establishes a promising approach
+for this framework through incorporating low-rank structure.
+Limitations and Future Work. Our model conditions on a
+new partners actions, but does not actively steer the interaction,
+e.g., in a Bayesian active learning style. Exploring more
+active adaptation methods can lead to better convergence
+guarantees, which is important if a new partner defaults to
+some non-informative behavior. Moreover, for the non-human
+experiments, we currently generate the set of partners using
+self-play with random seeds. Incorporating techniques from
+literature of training diverse sets of agents can improve the
+adaptation to new partners.
+VIII. ACKNOWLEDGMENT
+The authors would like to acknowledge NSF awards
+2006388 and 2125511, the Air Force Ofﬁce of Scientiﬁc
+Research, and the Ofﬁce of Naval Research.

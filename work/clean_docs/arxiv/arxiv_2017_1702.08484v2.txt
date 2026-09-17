@@ -1,0 +1,925 @@
+Boosted Generative Models
+Aditya Grover, Stefano Ermon
+Computer Science Department
+Stanford University
+
+Abstract
+We propose a novel approach for using unsupervised boost-
+ing to create an ensemble of generative models, where models
+are trained in sequence to correct earlier mistakes. Our meta-
+algorithmic framework can leverage any existing base learner
+that permits likelihood evaluation, including recent deep ex-
+pressive models. Further, our approach allows the ensemble
+to include discriminative models trained to distinguish real
+data from model-generated data. We show theoretical condi-
+tions under which incorporating a new model in the ensemble
+will improve the ﬁt and empirically demonstrate the effec-
+tiveness of our black-box boosting algorithms on density es-
+timation, classiﬁcation, and sample generation on benchmark
+datasets for a wide range of generative models.
+1
+Introduction
+A variety of deep generative models have shown promising
+results on tasks spanning computer vision, speech recog-
+nition, natural language processing, and imitation learn-
+ing (Poon and Domingos 2011; Oord, Kalchbrenner, and
+Kavukcuoglu 2016; Kingma and Welling 2014; Goodfellow
+et al. 2014; Zhao, Song, and Ermon 2017; Li, Song, and Er-
+mon 2017). These parametric models differ from each other
+in their ability to perform various forms of tractable infer-
+ence, learning algorithms, and objectives. Despite signiﬁ-
+cant progress, existing generative models cannot ﬁt complex
+distributions with a sufﬁciently high degree of accuracy, lim-
+iting their applicability and leaving room for improvement.
+In this paper, we propose a technique for ensembling (im-
+perfect) generative models to improve their overall perfor-
+mance. Our meta-algorithm is inspired by boosting, a tech-
+nique used in supervised learning to combine weak clas-
+siﬁers (e.g., decision stumps or trees), which individually
+might not perform well on a given classiﬁcation task, into
+a more powerful ensemble. The boosting algorithm will at-
+tempt to learn a classiﬁer to correct for the mistakes made by
+reweighting the original dataset, and repeat this procedure
+recursively. Under some conditions on the weak classiﬁers’
+effectiveness, this procedure can drive the (training) error to
+zero (Freund, Schapire, and Abe 1999). Boosting can also
+be thought as a feature learning algorithm, where at each
+round a new feature is learned by training a classiﬁer on a
+Copyright c⃝2018, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+reweighted version of the original dataset. In practice, algo-
+rithms based on boosting perform extremely well in machine
+learning competitions (Caruana and Niculescu-Mizil 2006).
+We show that a similar procedure can be applied to gen-
+erative models. Given an initial generative model that pro-
+vides an imperfect ﬁt to the data distribution, we construct
+a second model to correct for the error, and repeat recur-
+sively. The second model is also a generative one, which
+is trained on a reweighted version of the original training
+set. Our meta-algorithm is general and can construct ensem-
+bles of any existing generative model that permits (approx-
+imate) likelihood evaluation such as fully-observed belief
+networks, sum-product networks, and variational autoen-
+coders. Interestingly, our method can also leverage powerful
+discriminative models. Speciﬁcally, we train a binary classi-
+ﬁer to distinguish true data samples from “fake” ones gen-
+erated by the current model and provide a principled way to
+include this discriminator in the ensemble.
+A prior attempt at boosting density estimation proposed a
+sum-of-experts formulation (Rosset and Segal 2002). This
+approach is similar to supervised boosting where at ev-
+ery round of boosting we derive a reweighted additive es-
+timate of the boosted model density. In contrast, our pro-
+posed framework uses multiplicative boosting which multi-
+plies the ensemble model densities and can be interpreted as
+a product-of-experts formulation. We provide a holistic the-
+oretical and algorithmic framework for multiplicative boost-
+ing contrasting with competing additive approaches. Unlike
+prior use cases of product-of-experts formulations, our ap-
+proach is black-box, and we empirically test the proposed
+algorithms on several generative models from simple ones
+such as mixture models to expressive parameteric models
+such as sum-product networks and variational autoencoders.
+Overall, this paper makes the following contributions:
+1. We provide theoretical conditions for additive and multi-
+plicative boosting under which incorporating a new model
+is guaranteed to improve the ensemble ﬁt.
+2. We design and analyze a ﬂexible meta-algorithmic boost-
+ing framework for including both generative and discrim-
+inative models in the ensemble.
+3. We demonstrate the empirical effectiveness of our algo-
+rithms for density estimation, generative classiﬁcation,
+and sample generation on several benchmark datasets.
+arXiv:1702.08484v2  [cs.LG]  22 Dec 2017
+
+2
+Unsupervised boosting
+Supervised boosting provides an algorithmic formalization
+of the hypothesis that a sequence of weak learners can cre-
+ate a single strong learner (Schapire and Freund 2012). Here,
+we propose a framework that extends boosting to unsuper-
+vised settings for learning generative models. For ease of
+presentation, all distributions are with respect to any arbi-
+trary x ∈Rd, unless otherwise speciﬁed. We use upper-case
+symbols to denote probability distributions and assume they
+all admit absolutely continuous densities (denoted by the
+corresponding lower-case notation) on a reference measure
+dx. Our analysis naturally extends to discrete distributions,
+which we skip for brevity.
+Formally, we consider the following maximum likelihood
+estimation (MLE) setting. Given some data points X =
+{xi ∈Rd}m
+i=1 sampled i.i.d. from an unknown distribu-
+tion P, we provide a model class Q parameterizing the dis-
+tributions that can be represented by the generative model
+and minimize the Kullback-Liebler (KL) divergence with re-
+spect to the true distribution:
+min
+Q∈Q DKL(P∥Q).
+(1)
+In practice, we only observe samples from P and hence,
+maximize the log-likelihood of the observed data X. Select-
+ing the model class for maximum likelihood learning is non-
+trivial; MLE w.r.t. a small class can be far from P, whereas
+a large class poses the risk of overﬁtting in the absence of
+sufﬁcient data, or even underﬁtting due to difﬁculty in op-
+timizing non-convex objectives that frequently arise due to
+the use of latent variable models, neural networks, etc.
+The boosting intuition is to greedily increase model ca-
+pacity by learning a sequence of weak intermediate models
+{ht ∈Ht}T
+t=0 that can correct for mistakes made by previ-
+ous models in the ensemble. Here, Ht is a predeﬁned model
+class (such as Q) for ht. We defer the algorithms pertain-
+ing to the learning of such intermediate models to the next
+section, and ﬁrst discuss two mechanisms for deriving the ﬁ-
+nal estimate qT from the individual density estimates at each
+round, {ht}T
+t=0.
+2.1
+Additive boosting
+In additive boosting, the ﬁnal density estimate is an arith-
+metic average of the intermediate models:
+qT =
+T
+X
+t=0
+αt · ht
+where 0 ≤αt ≤1 denote the weights assigned to the in-
+termediate models. The weights are re-normalized at every
+round to sum to 1 which gives us a valid probability density
+estimate. Starting with a base model h0, we can express the
+density estimate after a round of boosting recursively as:
+qt = (1 −ˆαt) · qt−1 + ˆαt · ht
+where ˆαt denotes the normalized weight for ht at round t.
+We now derive conditions on the intermediate models that
+guarantee “progress” in every round of boosting.
+Theorem 1. Let δt
+KL(ht, ˆαt) = DKL(P∥Qt−1) −DKL(P∥Qt)
+denote the reduction in KL-divergence at the tth round of
+additive boosting. The following conditions hold:
+1. Sufﬁcient: If EP
+h
+log
+ht
+qt−1
+i
+≥0, then δt
+KL(ht, ˆαt) ≥0
+for all ˆαt ∈[0, 1].
+2. Necessary: If ∃ˆαt ∈(0, 1] such that δt
+KL(ht, ˆαt) ≥0,
+then EP
+h
+ht
+qt−1
+i
+≥1.
+Proof. In Appendix A.1.
+The sufﬁcient and necessary conditions require that the
+expected log-likelihood and likelihood respectively of the
+current intermediate model, ht are better-or-equal than those
+of the combined previous model, qt−1 under the true distri-
+bution when compared using density ratios. Next, we con-
+sider an alternative formulation of multiplicative boosting
+for improving the model ﬁt to an arbitrary data distribution.
+2.2
+Multiplicative boosting
+In multiplicative boosting, we factorize the ﬁnal density es-
+timate as a geometric average of T + 1 intermediate models
+{ht}T
+t=0, each assigned an exponentiated weight αt:
+qT =
+QT
+t=0 hαt
+t
+ZT
+where the partition function ZT =
+R QT
+t=0 hαt
+t dx. Recur-
+sively, we can specify the density estimate as:
+˜qt = hαt
+t
+· ˜qt−1
+(2)
+where ˜qt is the unnormalized estimate at round t. The base
+model h0 is learned using MLE. The conditions on the inter-
+mediate models for reducing KL-divergence at every round
+are stated below.
+Theorem 2. Let δt
+KL(ht, αt) = DKL(P∥Qt−1) −DKL(P∥Qt)
+denote the reduction in KL-divergence at the tth round of
+multiplicative boosting. The following conditions hold:
+1. Sufﬁcient:
+If
+EP [log ht]
+≥
+log EQt−1[ht],
+then
+δt
+KL(ht, αt) ≥0 for all αt ∈[0, 1].
+2. Necessary: If ∃αt ∈(0, 1] such that δt
+KL(ht, αt) ≥0,
+then EP [log ht] ≥EQt−1[log ht].
+Proof. In Appendix A.2.
+In contrast to additive boosting, the conditions above
+compare expectations under the true distribution with expec-
+tations under the model distribution in the previous round,
+Qt−1. The equality in the conditions holds for αt = 0,
+which corresponds to the trivial case where the current in-
+termediate model is ignored in Eq. (2). For other valid αt,
+the non-degenerate version of the sufﬁcient inequality guar-
+antees progress towards the true data distribution. Note that
+the intermediate models increase the overall capacity of the
+ensemble at every round. As we shall demonstrate later, we
+ﬁnd models ﬁt using multiplicative boosting to outperform
+their additive counterparts empirically suggesting the condi-
+tions in Theorem 2 are easier to fulﬁll in practice.
+
+Algorithm 1 GenBGM(X = {xi}m
+i=1, T rounds)
+Initialize d0(xi) = 1/m for all i = 1, 2, . . . , m.
+Obtain base generative model h0.
+Set (unnormalized) density estimate ˜q0 = h0
+for t = 1, 2, . . . , T do
+- Choose βt and update dt using Eq. (4).
+- Train generative model ht to maximize Eq. (3).
+- Choose αt.
+- Set density estimate ˜qt = hαt
+t
+· ˜qt−1.
+end for
+Estimate ZT =
+R
+˜qT dx.
+return qT = ˜qT /ZT .
+From the necessary condition, we see that a “good” in-
+termediate model ht assigns a better-or-equal log-likelihood
+under the true distribution as opposed to the model distribu-
+tion, Qt−1. This condition suggests two learning algorithms
+for intermediate models which we discuss next.
+3
+Boosted generative models
+In this section, we design and analyze meta-algorithms for
+multiplicative boosting of generative models. Given any
+base model which permits (approximate) likelihood evalua-
+tion, we provide a mechanism for boosting this model using
+an ensemble of generative and/or discriminative models.
+3.1
+Generative boosting
+Supervised boosting algorithms such as AdaBoost typically
+involve a reweighting procedure for training weak learn-
+ers (Freund and Schapire 1995). We can similarly train
+an ensemble of generative models for unsupervised boost-
+ing, where every subsequent model performs MLE w.r.t a
+reweighted data distribution Dt:
+max
+ht EDt[log ht]
+(3)
+where dt ∝
+ p
+qt−1
+βt
+(4)
+and βt ∈[0, 1] is the reweighting coefﬁcient at round t. Note
+that these coefﬁcients are in general different from the model
+weights αt that appear in Eq. (2).
+Proposition 1. If we can maximize the objective in Eq. (3)
+optimally, then δt
+KL(ht, αt) ≥0 for any βt ∈[0, 1] with the
+equality holding for βt = 0.
+Proof. In Appendix A.3.
+While the objective in Eq. (3) can be hard to optimize in
+practice, the target distribution becomes easier to approxi-
+mate as we reduce the reweighting coefﬁcient. For the ex-
+treme case of βt = 0, the reweighted data distribution is
+simply uniform. There is no free lunch however, since a low
+βt results in a slower reduction in KL-divergence leading to
+a computational-statistical trade-off.
+The pseudocode for the corresponding boosting meta-
+algorithm, referred to as GenBGM, is given in Algorithm 1.
+Algorithm 2 DiscBGM(X = {xi}m
+i=1, T rounds, f-div)
+Initialize d0(xi) = 1/m for all i = 1, 2, . . . , m.
+Obtain base generative model h0.
+Set (unnormalized) density estimate ˜q0 = h0
+for t = 1, 2, . . . , T do
+- Generate negative samples from qt−1
+- Optimize rt to maximize RHS in Eq. (5).
+- Set ht = [f ′]−1 (rt).
+- Choose αt.
+- Set density estimate ˜qt = hαt
+t
+· ˜qt−1.
+end for
+Estimate ZT =
+R
+˜qT dx.
+return qT = ˜qT /ZT .
+In practice, we only observe samples from the true data dis-
+tribution, and hence, approximate p based on the empiri-
+cal data distribution which is deﬁned to be uniform over
+the dataset X. At every subsequent round, GenBGM learns
+an intermediate model that maximizes the log-likelihood of
+data sampled from a reweighted data distribution.
+3.2
+Discriminative boosting
+A base generative model can be boosted using a discrimina-
+tive approach as well. Here, the intermediate model is spec-
+iﬁed as the density ratio obtained from a binary classiﬁer.
+Consider the following setup: we observe an equal num-
+ber of samples drawn i.i.d. from the true data distribution
+(w.l.o.g. assigned the label y = +1) and the model distribu-
+tion in the previous round Qt−1 (label y = 0).
+Deﬁnition 1. Let f : R+ →R be any convex, lower semi-
+continuous function satisfying f(1) = 0. The f-divergence
+between P and Q is deﬁned as, Df(P∥Q) =
+R
+q·f (p/q) dx.
+Notable examples include the Kullback-Liebler (KL) di-
+vergence, Hellinger distance, and the Jenson-Shannon (JS)
+divergence among many others. The binary classiﬁer in dis-
+criminative boosting maximizes a variational lower bound
+on any f-divergence at round t:
+Df (P∥Qt−1) ≥sup
+rt∈Rt
+ EP [rt] −EQt−1[f ⋆(rt)]
+
+.
+(5)
+where f ⋆denotes the Fenchel conjugate of f and rt : Rd →
+domf ⋆parameterizes the classiﬁer. Under mild conditions
+on f (Nguyen, Wainwright, and Jordan 2010), the lower
+bound in Eq. (5) is tight if r⋆
+t = f ′ (p/qt−1).
+Hence, a solution to Eq. (5) can be used to estimate den-
+sity ratios. The density ratios naturally ﬁt into the multiplica-
+tive boosting framework and provide a justiﬁcation for the
+use of objectives of the form Eq. (5) for learning intermedi-
+ate models as formalized in the proposition below.
+Proposition 2. For any given f-divergence, let r⋆
+t denote the
+optimal solution to Eq. (5) in the tth round of boosting. Then,
+the model density at the end of the boosting round matches
+the true density if we set αt = 1 and ht = [f ′]−1 (r⋆
+t ) where
+[f ′]−1 denotes the inverse of the derivative of f.
+Proof. In Appendix A.4.
+
+(a) Target
+(b) Base model
+Figure 1: The mixture of Gaussians setup showing (a) true
+density and (b) base (misspeciﬁed) model.
+The pseudocode for the corresponding meta-algorithm,
+DiscBGM is given in Algorithm 2. At every round, we train
+a binary classiﬁer to optimize the objective in Eq. (5) for a
+chosen f-divergence. As a special case, the negative of the
+cross-entropy loss commonly used for binary classiﬁcation
+is also a lower bound on an f-divergence. While Algorithm 2
+is applicable for any f-divergence, we will focus on cross-
+entropy henceforth to streamline the discussion.
+Corollary 1. Consider the (negative) cross-entropy objec-
+tive maximized by a binary classiﬁer:
+sup
+ct∈Ct
+EP [log ct] + EQt−1[log(1 −ct)].
+(6)
+If a binary classiﬁer ct trained to optimize Eq. (6) is Bayes
+optimal, then the model density after round t matches the
+true density if we set αt = 1 and ht = ct/1−ct.
+Proof. In Appendix A.5.
+In practice, a classiﬁer with limited capacity trained on a
+ﬁnite dataset will not generally be Bayes optimal. The above
+corollary, however, suggests that a good classiﬁer can pro-
+vide a ‘direction of improvement’, in a similar spirit to gra-
+dient boosting for supervised learning (Freund and Schapire
+1995). Additionally, if the intermediate model distribution
+ht obtained using the above corollary satisﬁes the conditions
+in Theorem 2, it is guaranteed to improve the ﬁt.
+The weights αt ∈[0, 1] can be interpreted as our con-
+ﬁdence in the classiﬁcation estimates, akin to the step size
+used in gradient descent. While in practice we heuristically
+assign weights to the intermediate models, the greedy opti-
+mum value of these weights at every round is a critical point
+for δt
+KL (deﬁned in Theorem 2). For example, in the ex-
+treme case where ct is uninformative, i.e., ct ≡0.5, then
+δt
+KL(ht, αt) = 0 for all αt ∈[0, 1]. If ct is Bayes optimal,
+then δt
+KL attains a maxima when αt = 1 (Corollary 1).
+3.3
+Hybrid boosting
+Intermediate models need not be exclusively generators or
+discriminators; we can design a boosting ensemble with any
+combination of generators and discriminators. If an interme-
+diate model is chosen to be a generator, we learn a generative
+model using MLE after appropriately reweighting the data
+points. If a discriminator is used to implicitly specify an in-
+termediate model, we set up a binary classiﬁcation problem.
+Table 1: Average test NLL for mixture of Gaussians.
+Model
+NLL (in nats, with std. error)
+Base model
+4.69 ± 0.01
+Add model
+4.64 ± 0.02
+GenBGM
+4.58 ± 0.10
+DiscBGM-NCE
+4.42 ± 0.01
+DiscBGM-HD
+4.35 ± 0.01
+3.4
+Regularization
+In practice, we want boosted generative models (BGM) to
+generalize to data outside the training set X. Regularization
+in BGMs is imposed primarily in two ways. First, every in-
+termediate model can be independently regularized by incor-
+porating explicit terms in the learning objective, early stop-
+ping based on validation error, heuristics such as dropout,
+etc. Moreover, restricting the number of rounds of boost-
+ing is another effective mechanism for regularizing BGMs.
+Fewer rounds of boosting are required if the intermediate
+models are sufﬁciently expressive.
+4
+Empirical evaluation
+Our experiments are designed to demonstrate the superi-
+ority of the proposed boosting meta-algorithms on a wide
+variety of generative models and tasks. A reference im-
+plementation of the boosting meta-algorithms is available
+at https://github.com/ermongroup/bgm. Addi-
+tional implementation details for the experiments below are
+given in Appendix B.
+4.1
+Multiplicative vs. additive boosting
+A common pitfall with learning parameteric generative
+models is model misspeciﬁcation with respect to the true un-
+derlying data distribution. For a quantitative and qualitative
+understanding of the behavior of additive and multiplica-
+tive boosting, we begin by considering a synthetic setting
+for density estimation on a mixture of Gaussians.
+Density estimation on synthetic dataset.
+The true data
+distribution is a equi-weighted mixture of four Gaussians
+centered symmetrically around the origin, each having an
+identity covariance matrix. The contours of the underlying
+density are shown in Figure 1a. We observe 1, 000 train-
+ing samples drawn independently from the data distribution
+(shown as black dots in Figure 2), and the task is to learn
+this distribution. The test set contains 1, 000 samples from
+the same distribution. We repeat the process 10 times for
+statistical signiﬁcance.
+As a base (misspeciﬁed) model, we ﬁt a mixture of two
+Gaussians to the data; the contours for an example instance
+are shown in Figure 1b. We compare multiplicative and addi-
+tive boosting, each run for T = 2 rounds. For additive boost-
+ing (Add), we extend the algorithm proposed by Rosset and
+Segal (2002) setting ˆα0 to unity and doing a line search over
+ˆα1, ˆα2 ∈[0, 1]. For Add and GenBGM, the intermediate
+
+(a) Add model (1)
+(b) Add model (2)
+(c) GenBGM (1)
+(d) GenBGM (2)
+(e) DiscBGM-NCE (1)
+(f) DiscBGM-NCE (2)
+(g) DiscBGM-HD (1)
+(h) DiscBGM-HD (2)
+Figure 2: Multiplicative boosting algorithms such as GenBGM (c-d) and DiscBGM with negative cross-entropy (e-f) and
+Hellinger distance (g-h) outperform additive boosting (a-b) in correcting for model misspeciﬁcation. Numbers in parenthesis
+indicate boosting round t.
+models are mixtures of two Gaussians as well. The classi-
+ﬁers for DiscBGM are multi-layer perceptrons with two hid-
+den layers of 100 units each and ReLU activations, trained
+to maximize f-divergences corresponding to the negative
+cross-entropy (NCE) and Hellinger distance (HD) using the
+Adam optimizer (Kingma and Welling 2014).
+The test negative log-likelihood (NLL) estimates are
+listed in Table 1. Qualitatively, the contour plots for the es-
+timated densities after every boosting round on a sample in-
+stance are shown in Figure 2. Multiplicative boosting algo-
+rithms outperform additive boosting in correcting for model
+misspeciﬁcation. GenBGM initially leans towards maximiz-
+ing coverage, whereas both versions of DiscBGM are rela-
+tively more conservative in assigning high densities to data
+points away from the modes.
+Heuristic model weighting strategies.
+The multiplicative
+boosting algorithms require as hyperparameters the number
+of rounds of boosting and weights assigned to the interme-
+diate models. For any practical setting, these hyperparame-
+ters are speciﬁc to the dataset and task under consideration
+and should be set based on cross-validation. While automat-
+ically setting model weights is an important direction for fu-
+ture work, we propose some heuristic weighting strategies.
+Speciﬁcally, the unity heuristic assigns a weight of 1 to ev-
+ery model in the ensemble, the uniform heuristic assigns a
+weight of 1/(T + 1) to every model, and the decay heuristic
+assigns as a weight of 1/2t to the tth model in the ensemble.
+In Figure 3, we observe that the performance of the algo-
+rithms is sensitive to the weighting strategies. In particular,
+DiscBGM produces worse estimates as T increases for the
+“uniform” (red) strategy. The performance of GenBGM also
+degrades slightly with increasing T for the “unity” (green)
+strategy. Notably, the “decay” (cyan) strategy achieves sta-
+ble performance for both the algorithms. Intuitively, this
+0
+1
+2
+3
+4
+5
+T
+4.2
+4.4
+4.6
+4.8
+5.0
+NLL (in nats)
+Base
+Unity
+Uniform
+Decay
+(a) GenBGM
+0
+1
+2
+3
+4
+5
+T
+4.2
+4.4
+4.6
+4.8
+5.0
+NLL (in nats)
+(b) DiscBGM-NCE
+Figure 3: Train (dashed curves) and test (bold curves) NLL
+(in nats) for weighting heuristics on mixture of Gaussians.
+T is the number of rounds of boosting. The base model is
+shown as a black cross at T = 0.
+heuristic follows the rationale of reducing the step size in
+gradient based stochastic optimization algorithms, and we
+expect this strategy to work better even in other settings.
+However, this strategy could potentially result in slower con-
+vergence as opposed to the unity strategy.
+Density estimation on benchmark datasets.
+We now
+evaluate the performance of additive and multiplicative
+boosting for density estimation on real-world benchmark
+datasets (Van Haaren and Davis 2012). We consider two
+generative model families: mixture of Bernoullis (MoB) and
+sum-product networks (Poon and Domingos 2011). While
+our results for multiplicative boosting with sum-product net-
+works (SPN) are competitive with the state-of-the-art, the
+goal of these experiments is to perform a robust comparison
+of boosting algorithms as well as demonstrate their applica-
+bility to various model families.
+We set T = 2 rounds for additive boosting and GenBGM.
+
+Table 2: Experimental results for density estimation. Negative log-likelihoods reported in nats. Lower is better with best per-
+forming models in bold. Overall, multiplicative boosting outperforms additive boosting and baseline models speciﬁed as Mix-
+ture of Bernoullis (MoB, middle columns) and Sum Product Networks (SPN, right columns).
+Dataset
+#vars
+MoB Base
+Add
+GenBGM
+DiscBGM
+SPN Base
+Add
+GenBGM
+DiscBGM
+Accidents
+111
+42.23
+43.19
+41.43
+34.51
+31.08
+29.92
+29.55
+28.09
+Retail
+135
+11.27
+12.24
+11.20
+10.91
+14.94
+11.27
+11.21
+10.88
+Pumsbstar
+163
+55.67
+55.91
+50.66
+34.93
+26.70
+25.00
+25.00
+23.69
+DNA
+180
+99.42
+100.37
+99.23
+98.45
+92.60
+86.93
+87.79
+86.63
+Kosarek
+190
+11.72
+12.57
+12.41
+11.13
+12.71
+10.97
+10.73
+10.67
+Ad
+1556
+63.13
+63.73
+63.19
+54.79
+19.19
+18.12
+18.14
+17.82
+Table 3: Experimental results for classiﬁcation. Prediction accuracy for predicting one variable given the rest. Higher is better
+with best performing models in bold. Multiplicative boosting again outperforms additive boosting and baseline models speciﬁed
+as Mixture of Bernoullis (MoB, middle columns) and Sum Product Networks (SPN, right columns).
+Dataset
+#test
+MoB Base
+Add
+GenBGM
+DiscBGM
+SPN Base
+Add
+GenBGM
+DiscBGM
+Accidents
+283,161
+0.8395
+0.8393
+0.8473
+0.9043
+0.9258
+0.9266
+0.9298
+0.9416
+Retail
+595,080
+0.9776
+0.9776
+0.9776
+0.9792
+0.9780
+0.9790
+0.9789
+0.9791
+Pumsb-star
+399,676
+0.8461
+0.8501
+0.8819
+0.9267
+0.9599
+0.9610
+0.9611
+0.9636
+DNA
+213,480
+0.7517
+0.7515
+0.7531
+0.7526
+0.7799
+0.7817
+0.7828
+0.7811
+Kosarek
+1,268,250
+0.9817
+0.9816
+0.9818
+0.9831
+0.9824
+0.9838
+0.9838
+0.9838
+Ad
+763,996
+0.9922
+0.9923
+0.9818
+0.9927
+0.9982
+0.9981
+0.9982
+0.9982
+Since DiscBGM requires samples from the model density at
+every round, we set T = 1 to ensure computational fairness
+such that the samples can be obtained efﬁciently from the
+base model sidestepping running expensive Markov chains.
+Model weights are chosen based on cross-validation. The
+results on density estimation are reported in Table 2. Since
+multiplicative boosting estimates are unnormalized, we use
+importance sampling to estimate the partition function.
+When the base model is MoB, the Add model underper-
+forms and is often worse than even the baseline model for
+the best performing validated non-zero model weights. Gen-
+BGM consistently outperforms Add and improves over the
+baseline model in a most cases (4/6 datasets). DiscBGM per-
+forms the best and convincingly outperforms the baseline,
+Add, and GenBGM on all datasets. For results on SPNs, the
+boosted models all outperform the baseline. GenBGM again
+edges out Add models (4/6 datasets), whereas DiscBGM
+models outperform all other models on all datasets. These
+results demonstrate the usefulness of boosted expressive
+model families, especially the DiscBGM approach, which
+performs the best, while GenBGM is preferable to Add.
+4.2
+Applications of generative models
+Classiﬁcation.
+Here, we evaluate the performance of
+boosting algorithms for classiﬁcation. Since the datasets
+above do not have any explicit labels, we choose one of the
+dimensions to be the label (say y). Letting x¯y denote the
+remaining dimensions, we can obtain a prediction for y as,
+p(y = 1|x¯y) =
+p(y = 1, x¯y)
+p(y = 1, x¯y) + p(y = 0, x¯y)
+which is efﬁcient to compute even for unnormalized models.
+We repeat the above procedure for all the variables predict-
+ing one variable at a time using the values assigned to the re-
+maining variables. The results are reported in Table 3. When
+the base model is a MoB, we observe that the Add approach
+could often be worse than the base model whereas GenBGM
+performs slightly better than the baseline (4/6 datasets). The
+DiscBGM approach consistently performs well, and is only
+outperformed by GenBGM for two datasets for MoB. When
+SPNs are used instead, both Add and GenBGM improve
+upon the baseline model while DiscBGM again is the best
+performing model on all but one dataset.
+Sample generation.
+We compare boosting algorithms
+based on their ability to generate image samples for the bina-
+rized MNIST dataset of handwritten digits (LeCun, Cortes,
+and Burges 2010). We use variational autoencoders (VAE)
+as the base model (Kingma and Welling 2014). While any
+sufﬁciently expressive VAE can generate impressive exam-
+ples, we design the experiment to evaluate the model com-
+plexity approximated as the number of learnable parameters.
+Ancestral samples obtained by the baseline VAE model
+are shown in Figure 4a. We use the evidence lower
+bound (ELBO) as a proxy for approximately evaluating the
+marginal log-likelihood during learning. The conventional
+approach to improving the performance of a latent variable
+model is to increase its representational capacity by adding
+hidden layers (Base + depth) or increasing the number of
+hidden units in the existing layers (Base + width). These
+lead to a marginal improvement in sample quality as seen
+in Figure 4b and Figure 4c.
+In contrast, boosting makes steady improvements in sam-
+ple quality. We start with a VAE with much fewer parameters
+and generate samples using a hybrid boosting GenDiscBGM
+sequence VAE→CNN→VAE (Figure 4d) . The discrimi-
+nator used is a convolutional neural network (CNN) (Le-
+Cun and Bengio 1995) trained to maximize the negative
+cross-entropy. We then generate samples using independent
+
+(a) Base VAE
+(200-100)
+(b) Base + depth
+(200-100-100)
+(c) Base + width
+(300-100)
+(d) GenDiscBGM
+(100-50)
+Figure 4: The boosted model (d) demonstrates how ensembles of weak learners can generate sharper samples, compared to
+naively increasing model capacity (a-c). Note that we show samples of binarized digits and not mean values for the pixels. VAE
+hidden layer architecture given in parenthesis.
+Markov chain Monte Carlo (MCMC) runs. The boosted se-
+quences generate sharper samples than all baselines in spite
+of having similar model capacity.
+5
+Discussion and related work
+In this work, we revisited boosting, a class of meta-
+algorithms developed in response to a seminal question: Can
+a set of weak learners create a single strong learner? Boost-
+ing has offered interesting theoretical insights into the fun-
+damental limits of supervised learning and led to the devel-
+opment of algorithms that work well in practice (Schapire
+1990; Freund, Schapire, and Abe 1999; Friedman 2002;
+Caruana and Niculescu-Mizil 2006). Our work provides
+a foundational framework for unsupervised boosting with
+connections to prior work discussed below.
+Sum-of-experts.
+Rosset and Segal (2002) proposed an
+algorithm for density estimation using Bayesian networks
+similar to gradient boosting. These models are normalized
+and easy to sample, but are generally outperformed by mul-
+tiplicative formulations for correcting for model misspec-
+iﬁcation, as we show in this work. Similar additive ap-
+proaches have been used for improving approximate poste-
+riors for speciﬁc algorithms for variational inference (Guo et
+al. 2016; Miller, Foti, and Adams 2017) and generative ad-
+versarial networks (Tolstikhin et al. 2017). For a survey on
+variations of additive ensembling for unsupervised settings,
+refer to the survey by Bourel and Ghattas (2012).
+Product-of-experts.
+Our multiplicative boosting formula-
+tion can be interpreted as a product-of-experts approach,
+which was initially proposed for feature learning in energy
+based models such as Boltzmann machines. For example,
+the hidden units in a restricted Boltzmann machine can be
+interpreted as weak learners performing MLE. If the num-
+ber of weak learners is ﬁxed, they can be efﬁciently up-
+dated in parallel but there is a risk of learning redundant fea-
+tures (Hinton 1999; Hinton 2002). Weak learners can also
+be added incrementally based on the learner’s ability to dis-
+tinguish observed data and model-generated data (Welling,
+Zemel, and Hinton 2002). Tu (2007) generalized the latter
+to boost arbitrary probabilistic models; their algorithm is a
+special case of DiscBGM with all α’s set to 1 and the dis-
+criminator itself a boosted classiﬁer. DiscBGM additionally
+accounts for imperfections in learning classiﬁers through
+ﬂexible model weights. Further, it can include any classiﬁer
+trained to maximize any f-divergence.
+Related techniques such as noise-contrastive estimation,
+ratio matching, and score matching methods can be cast as
+minimization of Bregman divergences, akin to DiscBGM
+with unit model weights (Gutmann and Hirayama 2011).
+A non-parametric algorithm similar to GenBGM was pro-
+posed by Di Marzio and Taylor (2004) where an ensemble
+of weighted kernel density estimates are learned to approxi-
+mate the data distribution. In contrast, our framework allows
+for both parametric and non-parametric learners and uses a
+different scheme for reweighting data points than proposed
+in the above work.
+Unsupervised-as-supervised learning.
+The use of den-
+sity ratios learned by a binary classiﬁer for estimation was
+ﬁrst proposed by Friedman, Hastie, and Tibshirani (2001)
+and has been subsequently applied elsewhere, notably
+for parameter estimation using noise-contrastive estima-
+tion (Gutmann and Hyv¨arinen 2010) and sample generation
+in generative adversarial networks (GAN) (Goodfellow et
+al. 2014). While GANs consist of a discriminator distin-
+guishing real data from model generated data similar to Dis-
+cBGM for a suitable f-divergence, they differ in the learning
+objective for the generator (Nowozin, Cseke, and Tomioka
+2016). The generator of a GAN performs an adversarial
+minimization of the same objective the discriminator max-
+imizes, whereas DiscBGM uses the likelihood estimate of
+the base generator (learned using MLE) and the density ra-
+tios derived from the discriminator(s) to estimate the model
+density for the ensemble.
+Limitations and future work.
+In the multiplicative boost-
+ing framework, the model density needs to be speciﬁed
+only up to a normalization constant at any given round of
+boosting. Additionally, while many applications of gener-
+ative modeling such as feature learning and classiﬁcation
+can sidestep computing the partition function, if needed it
+can be estimated using techniques such as Annealed Impor-
+
+tance Sampling (Neal 2001). Similarly, Markov chain Monte
+Carlo methods can be used to generate samples. The lack of
+implicit normalization can however be limiting for applica-
+tions requiring fast log-likelihood evaluation and sampling.
+In order to sidestep this issue, a promising direction for
+future work is to consider boosting of normalizing ﬂow
+models (Dinh, Krueger, and Bengio 2014; Dinh, Sohl-
+Dickstein, and Bengio 2017; Grover, Dhar, and Ermon
+2018). These models specify an invertible multiplicative
+transformation from one distribution to another using the
+change-of-variables formula such that the resulting distri-
+bution is self-normalized and efﬁcient ancestral sampling is
+possible. The GenBGM algorithm can be adapted to nor-
+malizing ﬂow models whereby every transformation is in-
+terpreted as a weak learner. The parameters for every trans-
+formation can be trained greedily after suitable reweighting
+resulting in a self-normalized boosted generative model.
+6
+Conclusion
+We presented a general-purpose framework for boosting
+generative models by explicit factorization of the model
+likelihood as a product of simpler intermediate model den-
+sities. These intermediate models are learned greedily using
+discriminative or generative approaches, gradually increas-
+ing the overall model’s capacity. We demonstrated the effec-
+tiveness of these models over baseline models and additive
+boosting for the tasks of density estimation, classiﬁcation,
+and sample generation. Extensions to semi-supervised learn-
+ing (Kingma et al. 2014) and structured prediction (Sohn,
+Lee, and Yan 2015) are exciting directions for future work.

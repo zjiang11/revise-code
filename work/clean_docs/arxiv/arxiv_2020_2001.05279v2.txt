@@ -1,0 +1,741 @@
+DGCM-Net: Dense Geometrical Correspondence Matching
+Network for Incremental Experience-based Robotic Grasping
+Timothy Patten∗, Kiru Park∗, and Markus Vincze
+Vision for Robotics Laboratory, Automation and Control Institute, TU Wien, Vienna, Austria
+
+Abstract
+This article presents a method for grasping novel objects by learning from experience. Successful
+attempts are remembered and then used to guide future grasps such that more reliable grasping is
+achieved over time. To transfer the learned experience to unseen objects, we introduce the dense
+geometric correspondence matching network (DGCM-Net). This applies metric learning to encode
+objects with similar geometry nearby in feature space. Retrieving relevant experience for an unseen
+object is thus a nearest neighbour search with the encoded feature maps. DGCM-Net also reconstructs
+3D-3D correspondences using the view-dependent normalised object coordinate space to transform
+grasp conﬁgurations from retrieved samples to unseen objects. In comparison to baseline methods,
+our approach achieves an equivalent grasp success rate. However, the baselines are signiﬁcantly
+improved when fusing the knowledge from experience with their grasp proposal strategy. Ofﬂine
+experiments with a grasping dataset highlight the capability to transfer grasps to new instances as well
+as to improve success rate over time from increasing experience. Lastly, by learning task-relevant
+grasps, our approach can prioritise grasp conﬁgurations that enable the functional use of objects.
+1
+Introduction
+Grasping is an essential capability for robots in a large variety of ﬁelds, from warehouse operations to industrial assembly
+lines, applications in agriculture and many domestic service tasks. Grasping leads to the subsequent manipulation of
+objects, which is the most direct way for robots to interact with the world. Especially in human environments, where
+many man-made objects are designed to be handled by people, grasping with a robotic gripper or hand is necessary.
+A popular approach for robot grasping is to exploit known objects [31, 57, 8, 59, 60]. However, this can only be applied
+to a given set of objects and thus does not generalise to new objects, which reduces the usability for real-world operation.
+It is possible to grasp unknown objects by learning classiﬁers, predictive or generative models [55, 27, 17, 35, 52, 49,
+34, 63, 45] but large amounts of labelled data are required and this is time consuming when it is annotated by hand. The
+effort for annotating data is eased by restricting it to 2D grasp poses (i.e., assuming top-down grasps), but this limits the
+grasp conﬁgurations that are able to be applied. Training data is often generated without human annotation ofﬂine with
+collections of object models [41, 40] or online with real-world robot trials. However, many hundreds or thousands of
+hours are required to generate a sufﬁcient amount of data [49, 26]. Learning end-to-end strategies for grasping with
+reinforcement learning [5, 36, 29, 69] also suffers from substantial training time, with some work reporting training
+times in the order of months [36]. While the burden of learning time can be alleviated by leveraging physics-enabled
+simulation environments, e.g., [23, 16, 22, 24], this introduces the challenge of transferring from simulation to the real
+world.
+An alternative approach is to transfer grasps for known objects to familiar objects. This makes the assumption that when
+a new object is similar to another object for which a grasp is known, then the new object is likely to be successfully
+grasped in a similar way [4]. Prior work on experience-based grasping build a database of sensory observations with
+associated grasp information such as a pose or contact points. The experience is accumulated by trial and error with a
+robot platform [44, 21, 14], kinesthetically taught [33, 12, 32] or inferred by directly observing human behaviour [39].
+Grasping an unseen object requires a strategy to map the current observation to the samples in the database and
+execute (or extrapolate from) the most similar experience. This is typically done using global shape [44, 3, 32], local
+descriptors [39] or object regions [33, 21, 13, 12, 14]. In contrast to end-to-end learning approaches, experience-based
+∗Equal contribution.
+arXiv:2001.05279v2  [cs.RO]  17 Sep 2020
+
+grasping has the potential to learn from very few exemplars. Only few methods have been demonstrated in an end-to-end
+pipeline with a robotic platform and currently they rely on hand-crafted features for retrieving similar experiences and
+for transferring grasps to new objects.
+In this work we present a new method for incremental grasp learning from experience. The key to our approach is to
+apply dense geometrical correspondence matching. Familiar objects are identiﬁed through global geometric encoding
+and associated grasps are transferred through local correspondence matching. We introduce the dense geometrical
+correspondence matching network (DGCM-Net) that uses metric learning to encode the global geometry of objects
+in depth images such that similar geometries are represented nearby in feature space to allow accurate retrieval of
+experience. DGCM-Net additionally reconstructs dense geometrical correspondences between pairs of depth images
+using a variant of normalised object coordinate (NOC) values. These values are used to compute the rigid transformation
+between the local region around the grasp of a stored experience and the corresponding region on an object in a new
+scene. Precise 3D object models are not assumed, thus we deﬁne the view-dependent normalised object coordinates
+(VD-NOC) to extend NOC values to single views.
+DGCM-Net is applied in an incremental grasp learning pipeline, in which a robot self-supervises grasp learning from its
+own experience. We show that a robot learns to repeatably grasp the same object after one or two successful experiences
+and also to grasp novel objects that have comparable geometry to a known experience. As an extension, we show that
+the predictions from DGCM-Net improve the performance of baseline grasping methods by combining their quality
+measures with our experience-based measure. The incremental learning pipeline is also ﬂexible in that grasp success
+is not the only measure to constitute experience. Speciﬁc positions or conﬁgurations of grasps can be preferred and
+therefore used in future situations. In particular, semantic grasps, such as grasping the handle of a mug, are prioritised
+as they are more relevant for the subsequent manipulation of the object [56, 10, 16, 1]. As a result, task-oriented grasps
+are quickly learned, allowing a robot to perform meaningful actions with objects.
+Studies with a dataset showcase the ability of the presented grasp prediction method to transfer between objects. The
+results show strong within class transfer as well as between class generalisation. In addition, our analysis conﬁrms
+the intuition that the quality of grasp prediction improves with increasing experience. Real-world experiments with a
+mobile manipulator are performed to compare our grasping strategy against various other approaches. The experiments
+show that we achieve a comparable grasp success rate with the baselines and improve the baseline when integrating our
+predictions to achieve superior performance overall. Demonstrations of the full system show the continuous learning
+capability for completely novel objects from classes never before seen. Finally, the usability of our approach for
+semantic or task-oriented grasping is illustrated to grasp objects with handles.
+In summary, this article makes the following contributions:
+• The dense geometrical correspondence matching network to encode object geometry for nearest neighbour
+retrieval and to densely reconstruct 3D-3D correspondences in order to transfer grasps from stored experiences
+to unseen objects.
+• An experience-based 6D grasp learning pipeline that incrementally grows a database of exemplars to guide
+grasp selection for the same object or novel unseen objects.
+• Ofﬂine experiments with a new annotated dataset showing the capability of DGCM-Net to generalise grasps to
+unseen objects as well as to steadily improve over time with increasing accumulation of data.
+• Online grasping experiments showing that the grasp success of our approach is competitive with common
+baselines and improves the baselines when combining their predictions with our experience-based grasp
+predictions.
+• Demonstrations showing the extension of our method for semantic grasping by guiding grasp selection to the
+parts of objects that are relevant to the object’s functional use.
+The remainder of the paper is organised as follows. Section 2 discusses related work. In Section 3, we present the dense
+geometrical correspondence matching network and describe the incremental grasp learning pipeline. The results of the
+ofﬂine and robotic experiments are reported in Section 4 and Section 5. Finally, Section 6 concludes and discusses
+future work.
+2
+Related Work
+The signiﬁcant amount of attention given to robotic grasping has resulted in a large number and high diversity of
+techniques. A common strategy uses known object instances, which are provided as CAD models or are captured
+by a modelling process (e.g., [50, 61]). Given a known grasp conﬁguration for an object in its local coordinate
+2
+
+system, the task of grasping is simpliﬁed to recognising and estimating the pose of the object such that the grasp pose
+is transformed into the new scene. Traditional methods identify hand-crafted features to localise an object model
+within a scene [31, 57, 8] but more recently advances for pose estimation have been made by the application of deep
+learning [65, 48, 67, 37] and grasping pipelines achieve high success rate [59, 60]. The main limitation of this direction
+of research, however, is the closed-world assumption. The approach is restricted to only the objects for which a model
+is provided and thus cannot generalise to unknown objects.
+To address the problem of grasping unknown objects, local geometry can serve as a strong cue. For example, ﬁtting
+primitives and estimating grasps based on the geometrical structure of the primitives [54] or ﬁtting superquadratics
+and synthesising grasp poses at the points of minimum curvature [42] have been shown to work in certain cases. More
+often though, unknown object grasping is addressed by learning from data [4]. Along this line, methods predict the
+success of a proposed grasp by training a traditional classiﬁer [27, 17] or deep neural network [55, 35, 52, 49, 34, 63].
+Alternatively, grasp simulation or analytical grasp metrics are computed for objects in model databases to generate
+training data [28, 41, 40, 58, 38, 46, 6]. The task is then to learn a model that can predict the value of the grasp metric
+given a proposal and then select the grasp that is most likely to succeed. There is also work that avoids the sampling
+and scoring procedure by directly predicting a grasp pose with a quality measure [45]. The generative method has
+proven to be computationally superior and sufﬁciently fast to be integrated in a closed-loop system. While the work for
+unknown object grasping has made considerable achievements, they are limited by the diversity of the training data.
+Out of distribution objects may not receive accurate grasp quality predictions and may fail. Thus, it is necessary to
+continuously learn and add new examples to the training set. Unfortunately, the deep neural networks that are applied
+do not have the capacity to be updated online. Our approach, on the other hand, does not need to retrain for grasp
+prediction. By abstracting the learning component to correspondence matching, we simply add experience to a database
+and use the network to predict the closest matches for grasp transfer.
+Another approach to grasping is to leverage real robot experience and learn end-to-end strategies. One direction is to
+employ reinforcement learning [5, 36, 29, 69]. The advantage of an end-to-end approach is that complete grasping
+policies can be learned directly from visual input, which removes the need for a dedicated perception pipeline with an
+additional motion planner for execution. A disadvantage, however, is that the policies can only be applied to scenarios
+that are perceptually similar, and thus generalisation to novel environments is limited. Unsupervised methods, such
+as [25], better generalise to unseen scenarios and objects. They are more general to the task and less sensitive to
+the training scenes. These methods learn an embedding that can be used to retrieve manipulation policies for online
+execution. Despite these advances, the major drawback of both self- and unsupervised learning is that many attempts
+are needed for training. Our approach, in contrast, only needs a handful of experiences to reliably repeat past successes.
+Although physics simulation is now a popular alternative for training learning algorithms, the transfer from simulation
+to the real world requires additional attention [23, 16, 22, 24].
+Experience-based grasping is much more efﬁcient than reinforcement learning methods since far fewer examples are
+needed to learn grasps. The common approach is to accumulate samples of past success or failure to guide the grasp
+selection in new scenarios, under the assumption that objects with similar shape (or appearance) can be grasped in a
+similar way. Some work deﬁne global shape descriptors and train a discriminative classiﬁer to identify the similarity
+between object shapes to transfer grasps to familiar objects [44, 3, 32]. Other work leverage local features descriptors
+to identify the relevant local regions associated with contact points to transfer grasps between objects within the same
+class [39]. Another approach is to analyse object regions and to maintain a library of prototypical grasps for recurring
+object parts. This is accomplished by measuring the similarity between regions on the surface of objects such as with
+height maps [21] or by surface distributions or densities [33, 13, 12, 14]. A major assumption is that the observed parts
+are equivalent, which means grasp transfer is the application of a transformation from the prototype to the scene. They
+do not deal with the possibility of scale change or deformation. Such geometry variation would have to be stored as a
+new experience. Our approach deals with this challenge by aligning shapes through dense 3D-3D correspondences
+and thus also modiﬁes the shape of the grasp to ﬁt the new geometry. Another drawback of prior work is that they use
+hand-crafted features to encode shape information. We instead generate descriptive features through metric learning,
+which has been shown to be powerful for similar geometric matching tasks [68].
+Our approach for grasping relies on ﬁrst ﬁnding the nearest observation in a database and second predicting dense
+geometric correspondences to transform a successful grasp pose to a new observation. Retrieving similar samples has
+been addressed using learned feature descriptors from RGB-D images [64, 2, 47]. These employ the triplet loss to train
+a network to produce smaller feature distances for pairs of images with similar view points while producing larger
+feature distances for pairs of images with different view points or those that contain different object classes. However,
+retrieving a similar viewpoint is insufﬁcient when samples do not cover the entire object pose or when target objects
+are not constrained to a ﬁxed set of a classes. This motivates our method that predicts geometric correspondences
+between images to match local areas regardless of different scales or detailed shapes. A simple approach is to encode
+and match local feature descriptors that represent local shapes in 3D point clouds or depth images [68, 70]. Leveraging
+3
+
+Figure 1: Overview of storing and retrieving experience with the incremental grasp learning framework.
+this idea, determining pixel-wise correspondences has been demonstrated in a pipeline to predict local correspondences
+or key-points while considering global contexts of objects [18, 43]. The task of this line of research is to ﬁnd the
+corresponding points between an input and a known reference object, therefore, they are not applicable when the
+reference image has to be selected from various objects and view points based only on global shape.
+In order to make this extension, we employ the normalised object coordinate space that has been used to estimate the
+6D pose of instances [48, 37] and classes [62]. Since NOC values represents coordinate values in the object’s local
+frame and correspondences between the object model and the scene, predicting NOC values is sufﬁcient for computing
+the transformation between local points from one observation to another. However, it is difﬁcult to deﬁne NOC values
+without knowing the full 3D shape of an object or a common representation for a class. For our work, it is necessary to
+predict dense correspondences between pairs of images that have similar geometry. To that end, we represent NOC
+values in the reference frame of the camera view point instead of the object. This alteration to the NOC representation
+is referred to as the view-dependent normalised object coordinate space. The prediction of VD-NOC values is used to
+compute the transformation of local areas that are relevant to grasps in order to transform stored grasp poses to the
+object in the input image.
+3
+Method
+This section describes our methodology for incremental experience-based grasp learning. We begin with an overview of
+the framework. We then describe the dense geometrical correspondence matching network for retrieving experience
+samples and for generating dense 3D-3D correspondences. Lastly, we outline how grasps are transferred between local
+regions using the predicted correspondences.
+3.1
+Incremental Grasp Learning Framework
+The main components of the incremental experience-based grasp learning framework are shown in Figure 1. The input
+is a depth image Di ∈RW ×H and a segmentation mask Mi ∈RW ×H that has entries 1 for pixels belonging to the
+target object and 0 otherwise. The goal of the framework is to generate a pose for the gripper that will result in a
+successful grasp. This is represented as a rigid transformation T ∈SE(3) of the gripper pose in the camera coordinate
+frame.
+The ﬁrst step is to match the target object to samples stored in an experience database E. Matching is done using the
+global geometric encoding from DGCM-Net, where the feature map fi of the input image is compared to the feature
+maps of the database samples. Feature maps are the output of a geometry encoder that takes as input a surface normal
+image derived from the initial depth image. The set of samples with high matching score are used to propose a candidate
+grasp. For each database match in E, the output of the VD-NOC encoder ce and the geometry feature encoding fe as
+4
+
+well as fi from the input are passed to the decoder of DGCM-Net to reconstruct the VD-NOC values Vi ∈RW ×H×3.
+This represents a dense mapping between the pixels of the sample and the input and thus a transformation of the points
+in the 3D coordinates can be computed. Each experience has an associated grasp pose, therefore, the transformation
+between the images is applied to transform the experience grasp to the target object. Sensitivity to the difference in
+geometry between the input and sample is reduced by conﬁning the alignment to the region around the grasp pose. The
+region of interest (ROI) on the sample Re is determined from the overlap of the gripper with the 3D coordinates of the
+segmented object in the depth image. The corresponding ROI on the target object Ri is derived through the matches
+between the VD-NOC values. The ROIs are aligned by ﬁnding the optimal rotation and translation. The outcome is a
+proposal for a full 6D grasp pose for the target object.
+Incremental learning operates by executing a selected grasp proposal and updating the database online with a new
+exemplar if the grasp is successful. Speciﬁcally, the depth image, surface normal image, VD-NOC values, ROI and
+transformation of the grasp pose are stored. Unsuccessful grasp attempts do not provide any information for replicating
+past experience, therefore, no data is stored for failed grasps. As more experience is accumulated, the likelihood of
+ﬁnding a nearby match for a new input increases. The method is not restricted to only ﬁnding samples of exact object
+instances, but can match to new or unseen objects if they have geometry resembling those from experience.
+3.2
+Dense Geometrical Correspondence Matching
+3.2.1
+View-dependent Normalised Object Coordinate Space
+Predicting dense correspondences between two depth images (i.e., the depth image of the object to grasp and an
+experience in the database) is done by predicting a variant of NOC values. The traditional NOC values represent the
+correspondence between the target object and another one in the target object’s local frame. Typically this has been
+applied for object pose estimation where the target object is a reference model and the other object is an observation of
+the reference model in a scene.
+To apply the same methodology without object models, we introduce the view-dependent normalised object coordinate
+values. The depth images for a reference and an input are converted to surface normal images. The VD-NOC values for
+the input Vi are computed using the 3D coordinates of each pixel I3D
+i
+from the input segmentation mask in the camera
+coordinate frame. Normalisation is performed by setting the origin to the mean coordinate between the maximum and
+minimum values of I3D
+i
+according to,
+Vi =
+I3D
+i
+−I
+3D
+i
+max |I3D
+i
+−I
+3D
+i
+|
+, where ¯I3D
+i
+= max(I3D
+i
+) + min(I3D
+i
+)
+2
+.
+(1)
+Normalisation is performed separately for each dimension resulting in different normalisation factors for each axis. The
+direction of the z-axis is ﬂipped to produce positive values for points that are nearer.
+For grasping, the VD-NOC values are used to estimate the similarity between points on the target object in the input
+image and the points on the object in the experience database. A smaller distance between values in the VD-NOC
+values represents closer geometrical correspondence. These can be used to estimate the transformation of a set of points
+in the grasp pose ROI in order to transfer the grasp experience to the target object.
+3.2.2
+DGCM-Net Architecture
+An overview of the dense geometric correspondence network is shown in Figure 2. DGCM-Net consists of a geometry
+encoder, VD-NOC encoder and VD-NOC decoder. The purpose of the geometry encoder is to learn a representation
+that places images with similar geometry closer in feature space than images with dissimilar geometry. The purpose of
+the VD-NOC encoder-decoder is to reconstruct the VD-NOC values between a pair of images.
+The input to the geometry encoder is a cropped surface normal image derived from the input depth image and
+segmentation mask. The cropped image is created from a 2D bounding box that is centred at the 2D projected point of
+the segmentation mask’s centroid. The height and width of the image are adjusted to correspond to 30cm spatial size in
+3D space. The cropped image is then resized to 128x128. The ﬁrst three blocks of the Resnet-50 [20] architecture is
+employed and initialised with the pre-trained weights using the ImageNet dataset [11]. The output of the third block is
+passed to three convolution layers, kernel sizes = [3, 3, 2] and ﬁlter sizes = [256, 256, 128] with strides 2 for all, and
+two fully connected layers with 256 outputs. The LeakyReLU activation is applied to every layer output except the last
+layer that uses the tanh as an activation to transform feature descriptors to 256 dimensions.
+The input to the VD-NOC encoder is a cropped VD-NOC image. The input is passed to ﬁve convolution layers, kernel
+sizes = [5, 3, 3, 3, 3] and ﬁlter sizes = [128, 256, 256, 256, 256] with strides 2 for all, and one fully connected layer with
+5
+
+Figure 2: Overview of the DGCM-Net architecture and training objectives.
+256 outputs. The activation of each layer is the same for the geometry encoder. The VD-NOC decoder reconstructs the
+VD-NOC values for the input image with respect to its camera frame. The input to the decoder is the concatenated
+features from both geometry encodings of the images and the output of the VD-NOC encoder for the reference. Skip
+connections [53] are added by concatenating one half of the output channels of each intermediate layer of the encoders
+with corresponding layers in the decoder. This helps to predict ﬁne details in local areas. The decoder ends with a fully
+connected layer with 2048 outputs followed by ﬁve blocks of deconvolution and convolution layers. The output of
+the last convolution layer is the same size as the input image with three channels that represent the x, y and z of the
+VD-NOC values.
+3.2.3
+Training Objective
+DGCM-Net has two tasks and therefore consists of two objectives in the training process. The ﬁrst is the metric learning
+of feature descriptors to perform matching and the second is for reconstructing the VD-NOC values of an input image.
+For metric learning, the contrastive loss [19] is employed to minimise the Euclidean distance between features of similar
+geometry (positive pair) while increasing the distance for a pair of different geometry (negative pair) as formulated by,
+Lmetric = 1
+N
+N
+X
+i=1
+(1 −ωi)d2
+i + ωi max(10 −di, 0)2,
+(2)
+where ω denotes labels for pairs that are set to 0 for positive pairs and 1 for negative pairs. d denotes the Euclidean
+distance between encoded feature vectors (fi, fe ∈R256) of the target and experience images from the geometry
+encoder. The loss is computed for a mini-batch that consists of N pairs of training images.
+For the reconstruction of VD-NOC values, the standard L1 loss is applied for each pixel p. Since background pixels are
+masked out, their values are easy to predict. Hence, the loss values for pixels on the object masks Mi ∈RW ×H are
+weighted by a factor of 3 to more precisely predict the values of pixels in the object masks [48]. The reconstruction loss
+is thus given by,
+L3D =
+1
+N × W × H
+N
+X
+i=1
+
+3
+X
+p∈Mi
+||V p
+i −V p
+gt||1 +
+X
+p/∈Mi
+||V p
+i −V p
+gt||1
+
+.
+(3)
+The reconstruction loss is computed only if the pair of samples is positive. Finally, the objective of the training is the
+weighted sum of two loss functions,
+L = Lmetric + λL3D,
+(4)
+where λ is a weight balancing the two objectives. We set λ to 1 in our experiments.
+6
+
+Figure 3: Left: Object models from the YCB dataset used to train DGCM-Net. Middle: Examples of positive pairs with
+online augmentation, Gaussian noise and partial occlusion. Right: Examples of negative pairs. The pairs are used to
+train feature vectors to have smaller distance for similar geometries.
+Stage
+Data generation
+Online augmentation
+Parameters
+Scale (each axis)
+Distance to camera
+Frac. of occluded region
+Gaussian noise
+Range
+U(0.8, 1.5)
+U(1m, 1.7m)
+U(0.0, 0.25)
+N(µ=0,σ=0.01)
+Table 1: Overview of the parameters used to generate the training data and for the online data augmentation.
+3.2.4
+Training using Synthetic Images
+Synthetic depth images are created to train the network. 3D models are sampled such that no two models are the same
+even after a scale change2. Objects are selected from the YCB object and model set [7] and listed in Figure 3. Depth
+images are rendered in OpenGL3 for each object model by uniformly sampling a pose and randomly selecting scale
+factors for each axis. Five scenes are rendered with different scales for each sampled object pose. To avoid ambiguous
+views of symmetric objects, view angles are limited between 0 and 45 degrees on each axis. For cylindrical objects, no
+variation around the rotational axis is applied. Parameters used in the generation process are summarised in Table 1.
+The result for every training sample is a depth image, VD-NOC image, annotated pose, annotated scale factors for each
+dimension and a look-up table of visible vertices. Approximately 166k images are created and used for training.
+Metric learning requires positive and negative pairs. Positive pairs are obtained from samples of the same object in
+different poses when a pair of images share more than half of the visible vertices. Negative pairs are obtained from
+different objects or different poses of the same object when images share less than half of the visible vertices. Examples
+of training samples of both types are given in Figure 3 (middle and right). For positive pairs, the target VD-NOC values
+(i.e., the ground truth value) is computed using the relative pose of the object, which is known for the training samples.
+Thus, the VD-NOV values that are deﬁned in the camera frame of the ﬁrst element of the pair are transformed to the
+camera frame of the second element. For our grasping framework, this amounts to transforming the VD-NOC values
+from the object in the input image to the object in the experience database.
+Further augmentation is applied to the image samples to improve robustness against occlusion and noise. Occlusion is
+simulated by setting a partial area in the surface normal image and the corresponding entries in the VD-NOC values
+to zero (i.e., the value for the background). This enables the network to learn features that still return good matches
+between an input and samples in the database even when one is occluded. Gaussian noise is also applied to both images
+to cope with the expected noise from real sensors. Figure 3 (middle and right) presents examples after applying the
+augmentation. More details about the parameters used for augmentation are provided in Table 1.
+We train the network for 35 epochs using the ADAM optimiser [30] while assigning 25 positive pairs and 25 negative
+pairs for each batch. The learning rate is initially set to 0.0001 and divided by a factor of 10 every 5 epochs. After
+training the network once, the weights are ﬁxed for all experiments without any ﬁne-tuning.
+2The set of 3D models only contains one box because any other box can be constructed just by manipulating the scale in the
+different dimensions.
+3https://www.opengl.org
+7
+
+Figure 4: Overview of the process for generating grasp proposals from the nearest neighbour experience.
+3.3
+Generating Grasp Proposals
+The overview in Figure 1 shows the process of retrieving and generating grasps given an input depth image. First, the
+surface normal image of the input is encoded to a feature map fi by the geometry encoder. This is compared to all
+feature maps {fe} ∀e ∈E to ﬁnd a set of nearest neighbours Ni ⊂E. The stored VD-NOC values Ve of a sample
+e ∈Ni is loaded to compute the VD-NOC feature map ce. Given ce, fe and fi, the decoder predicts the VD-NOC
+values of the input depth image Vi;e (VD-NOC values of Di in the frame of De) as shown in Figure 4. The ROI of the
+experience Re is used to compute the corresponding ROI for the input Ri = {p ∈Vi : min
+e |p −pe| < θc ∀pe ∈Re},
+which is the subset of points whose distance to the nearest points in Re is below a threshold θc. The predicted VD-NOC
+ROI points is denoted V R
+i;e and are deﬁned in the camera frame of De. Each pixel of V R
+i
+forms a 3D-3D correspondence
+from the VD-NOC values V R
+i;e and V R
+i;i that are deﬁned in De and Di. Thus, an initial rotation from the camera frame
+of the experience to the camera frame of the input is derived by aligning the ROI VD-NOC images. The grasp pose
+Te is then aligned to Di by computing the rotation that minimises the summation of distances of the correspondences
+given by,
+Rinit, tinit = arg min
+R,t
+X
+Ri
+||(RV R
+i;e + t) −V R
+i;i ||2.
+(5)
+The optimised solution for Equation 5 is obtained using singular value decomposition. The unit of tinit does not
+correspond to the scale of the 3D space because the VD-NOC values are normalised. Therefore, the translation tinit is
+separately computed using the difference between the mean coordinates between the maximum and minimum values of
+the ROI points as was applied in Equation (1). The computed rotation and translation are used to transform all ROI
+points of the experience Re to the scene and the alignment is reﬁned by applying the iterative closest point algorithm.
+The grasp pose in the experience Te is transformed to create the grasp proposal Tg by applying the same reﬁned
+transformation. Finally, the gripper position is moved a ﬁxed distance from the object surface by translating along the
+approach direction with respect to the closest point in the input.
+Each match in the database has an associated score in the range (0, 1] that represents that similarity of the depth image
+to the input, which is used as a pseudo-measure for the quality of the grasp. This score is computed as,
+S(i, e) = e−||fi−fe||2.
+(6)
+The ﬁnal output is a set of grasps G = {(Tg, sg)} where each grasp proposal is composed of a transformation of the
+gripper into the scene Tg as well as a score value sg using Equation (6).
+4
+Ofﬂine Experiments
+This section analyses the grasp proposal method with a hand annotated dataset. Experiments are performed to ﬁrst
+investigate the quality of grasp pose prediction with respect to the size of the grasp experience database and secondly to
+evaluate the ability to transfer grasps between observations of objects within the same and to different classes. The
+threshold for matching ROI correspondences θc is set to 0.3 for all experiments. This value produces reasonable
+separation of ROI areas and other parts of objects. Every stored experience is duplicated with in-plane rotations at
+angles between -90 and +90 degrees with a step size of 45 degrees. This enables grasp transfer to objects in new poses.
+Code for DGCM-Net is publicly available at https://rgit.acin.tuwien.ac.at/v4r/dgcm-net.
+8
+
+Figure 5: Objects in the dataset used for the ofﬂine experiments and to supplement past experience during the online
+experiment.
+4.1
+Dataset
+A dataset is created to evaluate the quality of grasp prediction comprising depth images of the objects shown in
+Figure 5. These objects are organised into seven classes: can, mug, cup, bottle, bowl, box and clamp. Four
+instances are used for each class and a number of these instances are from the YCB object dataset [7], while other
+instances are objects commonly found in homes. The dataset is available at https://www.acin.tuwien.ac.at/en/
+vision-for-robotics/software-tools/lfed-6d-dataset/.
+Recordings are made by placing each object on a small table and capturing a depth image with an ASUS XTion Pro Live
+RGB-D camera. Each object is placed in various poses and locations, and the camera is moved between two different
+heights. The object is segmented in each depth image by detecting the table surface with RANSAC and selecting all
+points that remain above the table plane. The dataset does not require ground truth segmentation, but instead should be
+segmented by the same method that extracts the masks for the input images in order for the entries in the experience
+database to best resemble the inputs.
+Grasp poses for a parallel-jaw gripper are manually annotated in the depth images. Each depth image consists of
+possibly multiple grasp annotations according to their direction, for example, from the top or from the side. The full
+dataset used for testing consists of depth images, segmentation masks and grasp poses for 28 objects of interest.
+4.2
+Measuring Grasp Pose Quality
+Reporting quantitative statistics requires the quality of the estimated grasp poses to be measured. It is possible to
+execute physics simulation and to check for grasp success, however, to isolate the grasp prediction itself, we measure
+the difference in grasp pose for an input with respect to the annotated pose. The experiments are simpliﬁed by selecting
+only grasp annotations on the top of the objects when they are placed in their upright canonical pose. Even though the
+grasp proposals are limited to top down, multiple poses are available, especially for objects that are symmetric or are
+elongated in the x or y dimension such that translations of a top-down grasp are equivalent. Consistency of top-down
+grasp poses is ensured by testing with the subset of classes can, mug, cup and bottle.
+A grasp pose is regarded as correct when the translation error is less than 5cm and the rotational error around the x- and
+y-axes is less than 15 degrees. A rotation error around the z-axis in the gripper frame, which is parallel to the rotational
+axis of an object, is ignored since it should be a successful grasp regardless of the rotation with respect to this axis.
+9
+
+Figure 6: Results of the ofﬂine experiments. Left: Ratio of accurately estimated grasp pose with increasing number of
+experiences per instance. Solid lines show results when class speciﬁc experience is used for each test class. Dotted
+lines show results when experience from all classes is used. Right: Ratio of accurately estimated grasp poses using
+experience from each instance in all classes.
+4.3
+Increasing Experience
+The left plot of Figure 6 shows the ratio of correctly estimated grasp poses with increasing number of experience per
+instance. Solid lines show results when only the experience for the relevant class is considered and the dotted lines
+show the results when experience for all classes is considered. For each conﬁguration (class and number of experience
+per instance), we perform ten iterations using randomly selected samples in the iteration. The results with class speciﬁc
+experience demonstrate that the grasp poses are often correctly estimated even if only one experience is included per
+instance. For the can and bottle classes, the correct estimation is approximately 90%, while the worst performing
+class, cup, achieves 68%. However, as the number of experiences increases per instance in each class, the grasp pose
+estimation improves.
+The dotted lines show the variation in performance when including other classes for experience, which reﬂects more
+practical scenarios in the real world. Except for the mug class, the performance slightly drops because the retrieval of
+experiences from different classes can cause inaccurate prediction of VD-NOC values. However, the accuracy still
+achieves more than 79% when two experiences are included per instance. This implies that the feature space encoded
+by the geometry encoder is sufﬁcient to distinguish different geometrical shapes. The performance gap for the can
+class, which has the most simple shape, is comparably larger than for the other classes. This is because the mapping
+from more complex to simpler geometries produces inaccurate estimations by transferring detailed shapes into simpler
+geometries. We discuss more detail regarding this relationship between classes in the following section.
+Figure 7 shows qualitative results. The ﬁgure shows the three nearest experiences and the best transformed pose for
+different instances from different classes. The ﬁrst and second rows are obtained when the experience database contains
+samples from all classes and include the exact instance in the test image. The third and fourth rows are obtained after
+excluding the instance in the test image so that different instances in the same class must be retrieved to generate grasp
+proposals. The results reveal that the grasp poses are transformed to similar locations and directions even if object poses
+from experience are different (see the grasp poses for the can in the third row).
+4.4
+Transfer Between Instances and Classes
+These experiments show that experience can be transferred between instances and classes. The experiments are
+conducted by using all experience from a single object instance while testing on different instances. The evaluation
+metric and subset of target grasp poses are the same as in the previous experiment. The matrix on the right of Figure 6
+shows that the experience of instances transfer well to other instances within the same class. Furthermore, experience
+also transfers beyond the class. For example, many good grasps are found for bottle instances when provided by
+experience from can instances (both types of objects have a closed surface on the top) and that instances of the cup class
+10
+
+Figure 7: Examples of the three nearest experiences and estimated grasp poses for example input images. Top two rows
+show examples when the same instance is included in the experience database. Bottom two rows show examples when
+the instance is not in the experience database.
+provide sufﬁcient experience for grasping mug instances (both types of objects have no surface on the top). However,
+the results show that it is difﬁcult to transfer the experience of a class to an instance in the same class when the geometry
+and scale of the instance are different from the other instances in the class (e.g., Can4 and Cup4). Thus, better grasp
+poses are obtained when the experience is obtained from geometrically similar objects regardless of explicit classes.
+It is also observed that grasps for simpler geometries (e.g., from can to bottle and cup to mug) are more accurately
+transferred, while the other direction from complex geometry to simpler geometry is more difﬁcult. This is because the
+network tries to predict VD-NOC values of detailed shapes of objects in the experience set, such as handles of mug
+instances, which potentially causes errors by predicting corresponding points even if the shapes are missing in the new
+object.
+5
+Robot Experiments
+This section presents results of real-world grasping experiments with a mobile manipulator. First, we describe the
+hardware set up used for the experiments. Second, we compare our method to baseline approaches. Third, we evaluate
+the full pipeline of online incremental grasp learning. Finally, we demonstrate the extension to semantic grasp learning.
+5.1
+Experimental Details
+The robot experiments are performed with the Toyota Human Support Robot [66]. The platform consists of a 4-DOF
+arm but motions are computed including the omni-directional base, which effectively offers seven degrees of freedom.
+Motions for grasp execution are planned using MoveIt [9]4. The end-effector is a parallel-jaw gripper and grasp success
+is measured by checking the distance between the tips of the gripper after the target object is lifted. If the distance is
+non-zero, then the grasp is declared successful, otherwise, it is a failure. Depth images are captured with the onboard
+ASUS XTion Pro Live RGB-D sensor positioned on the head of the robot.
+4http://moveit.ros.org
+11
+
+For all grasping experiments, individual objects are placed on a small table that has a height of 45cm. The robot is
+approximately positioned 30cm from the table (edge of robot base to edge of table). The head of the robot is tilted such
+that the camera faces the centre of the table. The torso of the robot is raised to give an approximate distance from the
+camera to an objects of 1m to suit the optimal range of the sensor. Objects are segmented from the table with the same
+procedure for generating segmentation masks for the dataset.
+All code is written in C++ and Python, and is running on the robot in Ubuntu 16.04. ROS [51]5 is used for process
+communication. DGCM-Net is implemented in Tensorﬂow and is running on an external PC with an NVIDIA GTX
+1050 Ti.
+5.2
+Comparison to Baselines
+Experiments are conducted to measure the grasp performance of our framework. For comparison, experiments are also
+performed with a number of baselines. The full set of methods is as follows:
+• HAF: The approach introduced in [17], where height accumulated features are extracted from point clouds to
+abstract grasp-relevant structure. The features are computed on different regions of the input and a support
+vector machine is trained to predict the quality of the grasp for each feature. Both top-down and forward-facing
+grasps are enabled, and the output with highest score is executed. We use the original code provided6.
+• GPD: The approach introduced in [58], where grasps are sampled using the surface geometry of the input point
+cloud. Grasp success for each sample is classiﬁed using a convolutional neural network (CNN). This takes as
+input three images: an averaged height map of occupied points, averaged height map of the unobserved region
+and averaged surface normals. Given this input, the CNN generates a score value. Finally, grasps are clustered
+and the highest scoring cluster is selected. We use the original code provided7 and the full 15 channel version.
+• DGCM-Net: The grasp proposals from DGCM-Net using pre-collected experience for the relevant object
+classes in the experiments. Similar to GPD, the set of proposals from DGCM-Net are clustered and the highest
+scoring cluster is executed. Clustering is performed by grouping all grasps within 5cm translation and 15
+degrees rotation. The grasp of the cluster is the mean pose of the proposals that make up the cluster. The
+cluster with the highest summed score is executed. The number of nearest neighbours to be retrieved by
+DGCM-Net is set to 10.
+• GPD + DGCM-Net: Grasps are proposed using GPD and the scores are modiﬁed by the predictions from
+DGCM-Net. First, the grasps from the GPD method are computed and the scores are normalised to the
+range [0, 1]. Then DGCM-Net is run on the same input and for each GPD candidate, we ﬁnd all DGCM-Net
+proposals within 5cm translation and 15 degrees rotation. The experience score is the average of the scores
+for all DGCM-Net grasps deemed to be nearby. The ﬁnal score for each GPD candidate is the average of the
+normalised GPD score and the summed experience score. The grasp with the highest ﬁnal score is executed.
+Many robotic grasping approaches are successful for the bin-picking task, e.g., [40]. However, these are focused on 2D
+grasping and therefore expect a top-down view of the scene and only generate a grasp parallel to the camera axis. This
+are unsuitable for our robot platform due to the position of the arm on the front of the body that occludes the scene
+when facing the camera directly downwards. Additionally, bin-picking methods are at a disadvantage because they only
+generate grasps for a single approach direction. It is left to future work to extend the evaluation to this type of scenario.
+The experiments are performed for objects from the classes box, can, bottle, mug, cup, bowl and clamp. Three
+instances are chosen per class and ﬁve poses are considered per instance. The ﬁve poses for each instance are kept
+constant for the experiments with each grasping method. The objects selected for the experiments are shown in Figure 8.
+These include one object from the YCB set for each class from the objects used in Section 4, in particular, the sugar
+box, spam can, mustard bottle, red mug, orange cup, red bowl and XL clamp. The other two objects for
+each class are a mixture of YCB objects and common objects found in homes.
+The experience used for our method is an extension of the database from Section 4 that includes instances from the
+additional classes of box, bowl and clamp. Since we are interested in observing the grasp performance for unseen
+objects, the YCB objects selected as target objects are removed from the experience database.
+Performance is measured by grasp success rate, which is the number of successful grasps divided by the total number of
+attempts. Table 2 reports the average grasp success rate for each class and the average for all classes (bottom row). The
+results show that our method performs equivalently to GPD and that both methods outperform HAF (+8%). However,
+5https://www.ros.org/
+6https://github.com/davidﬁschinger/haf_grasping
+7https://github.com/atenpas/gpd
+12
+
+Figure 8: Test objects used for the online grasping experiments. Three instances in seven classes are used.
+HAF
+GPD
+DGCM-Net
+GPD + DGCM-Net
+Box
+0.87
+0.80
+0.67
+1.00
+Can
+0.87
+0.67
+0.93
+0.73
+Bottle
+0.87
+0.93
+0.93
+0.93
+Mug
+0.80
+0.80
+0.87
+1.00
+Cup
+0.80
+0.80
+0.73
+1.00
+Bowl
+0.40
+0.87
+0.80
+0.87
+Clamp
+0.40
+0.60
+0.60
+0.67
+Average
+0.71
+0.79
+0.79
+0.89
+Table 2: Grasp success rate of our framework and baseline methods for different target object classes. The bottom row
+shows the average for all classes.
+combining experience with GPD achieves a much higher grasp success rate overall. In comparison to the original GPD
+method, this is an increase of 10%.
+For most classes, the combined approach performs either the same as the best performing individual method or better.
+The only exception is the can class, which has 20% lower grasp success rate than our direct method. Our observation
+during the experiments is that GPD often proposed grasps on and orthogonal to the rim of the can objects, which
+resulted in failures. This exposes the ﬂaw that if the initial candidates are unfavourable, the combined approach cannot
+improve. For the cans, when grasp experience on the top of the can are stored, the grasps on the rim are still similar in
+position and orientation to warrant their selection.
+Surprisingly, the box class is the most difﬁcult for our approach despite having easy geometry to compute a grasp as
+shown by the high success rate of HAF. This can be explained by the fact that all boxes can be represented by a single
+box by changing the scale in the different dimensions. Thus, the network has to decide whether to regard a new box as
+a scaled version of an experience or as a transformed (i.e., rotated) box. The ambiguity causes noisy predictions of
+VD-NOC values. Furthermore, since grasp proposals are transformed from previous experiences and are ideally in
+a similar grasp location, a scale change may cause the prediction to exceed the range of the gripper, resulting in its
+rejection due to the collision.
+5.3
+Incremental Learning
+This set of experiments demonstrate the full incremental learning framework. The test objects chosen are the grey
+clamp from our dataset, the plastic drill from the YCB object dataset and a gaming controller. Past experience
+is stored in the database, however, not for the classes of the test objects. Therefore, experience for clamp class is
+removed. Since good grasps may not be generated for the unseen objects, GPD is used in the beginning until DGCM-Net
+makes reasonable predictions. A threshold of 0.9 is set as the minimum feature distance that must be achieved by the
+output of DGCM-Net, otherwise, the best grasp from GPD is executed. Typically it only takes one or two successful
+attempts for the system to switch from GPD to DGCM-Net. The objects are placed randomly on the table at the
+13
+
+Figure 9: Summary of results for the incremental learning experiment with the grey clamp.
+beginning of each experiment and the system runs autonomously, with the robot grasping the object from where it
+lies after a successful or failed attempt. The object is only handled by a person if it is unintentionally moved near the
+edge of the table and presents a risk of falling. After successful grasps, objects are placed on the table by the robot and
+receive a slight variation in pose; failed grasps typically cause considerable object movement. After any grasp attempt,
+the robot base returns to the start position and the localisation inaccuracy generates further viewpoint variation.
+Figures 9, 10 and 11 show the evolution of grasp success for the three objects. In these ﬁgures, the ﬁrst row shows the
+surface normal image of the input and the second to fourth rows show the nearest three matches in the database. Below
+this we plot the minimum feature distance of the nearest neighbour. Lastly, we show the best grasp proposal from
+DGCM-Net and the actual gripper position during the grasp captured by an external camera (red border indicates failure
+and green border indicates success). A video of the experiments is available at https://youtu.be/iI_P1UVXfjo.
+From these experiments, we make two observations. Firstly, after the ﬁrst successful attempt from GPD is recorded, the
+robot typically continues to grasp the target objects successfully. The predicted grasps for each attempt conﬁrms that
+our method reliably predicts the same successful experience so long as the object and its shape is correctly identiﬁed.
+The second observation is that the minimum feature distance drops below the threshold after as many as one sample is
+in the database. This is most apparent for the grey clamp in which the minimum feature distance is very small for all
+subsequent trials.
+The grasping for the plastic drill and gaming controller are less reliable than for the grey clamp. For the
+plastic drill, the system still exhibits some failures even after accumulating experience. In both cases, the nearest
+feature distance does not converge to the same low value as was observed for the grey clamp. The reason is that the
+plastic drill and gaming controller have less distinct shape and therefore are more difﬁcult to match. This is
+especially noticeable when the objects have rotated. The objects are often confused as an instance from the box class
+and the grasps for the matching box is executed. Fortunately for the gaming controller, the execution still results in
+success. However, for the plastic drill, the predicted grasp is not very good and the grasp fails.
+5.4
+Semantic Grasping
+A ﬁnal set of experiments demonstrate the extension of our method to generate semantic grasps for instances belonging
+to the same functional class. For these experiments, we investigate grasps on the handles of mug and drill objects. The
+experience is hand annotated for test exemplars of instances similar to the target object. It is possible for the robot to
+14
+
+Figure 10: Summary of results for the incremental learning experiment with the YCB plastic drill.
+Figure 11: Summary of results for the incremental learning with the gaming controller.
+self-learn semantic grasping by incorporating, for example, affordance detection to indicate whether the location of the
+grasp matches the affordance of the object part [15]. This is out of scope for the present article and left for future work.
+15
+
+Figure 12: Examples of semantic grasping for the YCB red mug and the YCB orange drill in four different poses.
+First row: Surface normal image. Second row: Grasp pose executed by the robot. Third row: Predicted grasp from
+DGCM-Net. Fourth row: Predicted grasp from GPD. Fifth row: Predicted grasp from HAF.
+Example grasp proposals generated by our method as well as GPD and HAF for a mug and a drill in various poses are
+shown in Figure 12. Our method reliably generates grasp poses on the relevant object part, while both GPD and HAF
+fail to do so. Although the grasps from GPD and HAF may result in success, they do not support the functional use of
+the object. For the mug, it is understandable that the handle is not grasped because the quality of the depth data on that
+part of the object is very poor and does not characterise a stable grasp. Our method, on the other hand, does not only
+rely on the local structure to estimate the grasp. So long as there is some cue about the handle, as is present in these
+selected examples, the handle grasp is generated. The drill offers more depth data on the handle but the baselines
+still prefer to grasp the head. HAF is executed to ﬁnd both top and front grasps, and the best scoring grasp is shown.
+Nonetheless, a top grasp or a front grasp on the head is preferred instead of the handle. A video of the grasps executed
+by the robot is available at https://youtu.be/iI_P1UVXfjo.
+6
+Conclusion
+This article presented an approach for incrementally learning grasps by leveraging past experience. In our system,
+every successful grasp is stored in a database and retrieved to guide future grasps. This is accomplished with the dense
+geometric correspondence network that is trained to predict the similarity between newly acquired input depth images
+and stored experiences as well as to predict 3D-3D correspondences to transform grasp poses. A descriptive feature
+space is constructed for the retrieval task using metric learning and correspondences are established by predicting
+view-dependent normalised object coordinate values.
+Ofﬂine studies with a dataset showed that our approach precisely recovers grasps from experiences with the same
+object and also transfers well to unseen objects from the same or different class. Furthermore, results showed that
+more experience leads to more reliable grasp proposals. Hardware experiments with a mobile manipulator showed that
+our experience-based grasping method performs equally successful as the baseline and integration with the baseline
+shows overall superior performance. Additional experiments demonstrated the full online capability to efﬁciently learn
+grasps for unseen objects, often needing only one or two successful grasps to reliably re-grasp the same object. Finally,
+an extension was demonstrated whereby speciﬁc grasps, such as those on handles, can be desired in order to achieve
+semantically meaningful grasps.
+16
+
+One direction for future work is to include more instances per class when training DGCM-Net to better generalise over
+varied shapes of a class instead of simply manipulating scales of an object for each class. Furthermore, it has been
+observed that points on the bottom of objects are missing from the object masks since the points are regarded as table
+or background. Thus, more detail about objects would be extracted by applying a segmentation method that reﬁnes
+the mask using colour information. Another avenue of future work is to include failed experience during the learning
+phase. Particularly for objects that are difﬁcult to grasp, it may take a large number of attempts to ﬁnally succeed.
+By also considering failures, it would be possible to reject grasp candidates and thus more quickly guide grasping to
+successful regions. Currently, our method was only tested with a parallel-jaw gripper. It would be interesting to extend
+this work to other hardware, such as three-ﬁnger grippers or anthropomorphic hands. It would be even more interesting
+to investigate how to transfer grasps between grippers so that experience learned by one platform can be exploited by
+another platform with different hardware.

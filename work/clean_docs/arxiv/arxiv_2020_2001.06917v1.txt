@@ -1,0 +1,1525 @@
+Correcting Knowledge Base Assertions
+Jiaoyan Chen
+University of Oxford
+
+Xi Chen
+Jarvis Lab Tencent
+
+Ian Horrocks
+University of Oxford
+
+Ernesto Jimenez-Ruiz
+City, University of London
+University of Oslo
+
+Erik B. Myklebus
+Norwegian Institute for Water
+Research
+University of Oslo
+
+ABSTRACT
+The usefulness and usability of knowledge bases (KBs) is often
+limited by quality issues. One common issue is the presence of er-
+roneous assertions, often caused by lexical or semantic confusion.
+We study the problem of correcting such assertions, and present
+a general correction framework which combines lexical matching,
+semantic embedding, soft constraint mining and semantic consis-
+tency checking. The framework is evaluated using DBpedia and an
+enterprise medical KB.
+KEYWORDS
+Knowledge Base Quality, Assertion Correction, Semantic Embed-
+ding, Constraint Mining, Consistency Checking
+1
+INTRODUCTION
+Knowledge bases (KBs) such as Wikidata [42] and DBpedia [2]
+are playing an increasingly important role in applications such as
+search engines, question answering, common sense reasoning, data
+integration and machine learning. However, they still suffer from
+various quality issues, including constraint violations and erroneous
+assertions [11, 31], that negatively impact their usefulness and us-
+ability. These may be due to the knowledge itself (e.g., the core
+knowledge source of DBpedia, Wikipedia, is estimated to have an
+error rate of 2.8% [44]), or may be introduced by the knowledge
+extraction process.
+Existing work on KB quality issues covers not only error detec-
+tion and assessment, but also quality improvement via completion,
+canonicalizaiton and so on [31]. Regarding error detection, erro-
+neous assertions can be detected by various methods, including
+consistency checking with defined, mined or external constraints
+[18, 33, 39], prediction by machine learning or statistics methods
+[7, 22, 32], and evaluation by query templates [19]; see Section 2.1
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than ACM
+must be honored. Abstracting with credit is permitted. To copy otherwise, or republish,
+to post on servers or to redistribute to lists, requires prior specific permission and/or a
+
+WWW, April 2020, Taipei
+© 2020 Association for Computing Machinery.
+ACM ISBN 978-x-xxxx-xxxx-x/YY/MM.
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+for a more details. However, the detected erroneous assertions are of-
+ten eliminated [6, 27], and few robust methods have been developed
+to correct them.
+Lertvittayakumjorn et al. [20] and Melo et al. [21] found that most
+erroneous assertions are due to confusion or lexical similarity leading
+to entity misuse; for example confusion between Manchester_United
+and Manchester_City, two football clubs based in Manchester, UK,
+can lead to facts about Manchester_United being incorrectly asserted
+about Manchester_City. Such errors are common in not only those
+general KBs like DBpedia and Wikidata but also those domain KBs
+like the medical KB used in our evaluation. Both studies proposed
+to find an entity to replace either the subject or the object of an
+erroneous assertion; however, subject replacement used a simple
+graph metric and keyword matching, which fails to capture the
+contextual semantics of the assertion, while object replacement relies
+on Wikipedia disambiguation pages, which may be inaccessible or
+non-existent, and again fail to capture contextual semantics.
+Other work has focused on quality improvement, for example by
+canonicalizing assertions whose objects are literals that represent
+entities (i.e., entity mentions); for example, the literal object in the
+assertion ⟨Yangtze_River, passesArea, “three gorges district”⟩. Re-
+placing this literal with the entity Three_Gorges_Reservoir_Region
+enriches the semantics of the assertion, which can improve query
+answering. Such literal assertions are pervasive in wiki-based KBs
+such as DBPedia [2] and Zhishi.me [29], and in open KBs extracted
+from text; they may also be introduced when two KBs are aligned
+or when a KB evolves. According to the statistics in [15], DBpedia
+(ca. 2016) included over 105,000 such assertions using the property
+dbp:location alone. Current methods can predict the type of the
+entity represented by the literal [15], which is useful for creating
+a new entity, and can sometimes identify candidate entities in the
+KB [4], but they do not propose a general correction method; see
+Section 2.2 for a more details.
+In this paper, we propose a method for correcting assertions whose
+objects are either erroneous entities or literals. To this end, we have
+developed a general framework that exploits related entity estima-
+tion, link prediction and constraint-based validation, as shown in
+Figure 1. Given a set of target assertions (i.e., assertions that have
+been identified as erroneous), it uses semantic relatedness to identify
+candidate entities for substitution, extracts a multi-relational graph
+from the KB (sub-graph) that can model the context of the target
+assertions, and learns a link prediction model using both semantic
+arXiv:2001.06917v1  [cs.AI]  19 Jan 2020
+
+WWW, April 2020, Taipei
+Jiaoyan Chen, Xi Chen, Ian Horrocks, Ernesto Jimenez-Ruiz, and Erik B. Myklebus
+embeddings and observed features. The model predicts the asser-
+tion likelihood for each candidate substitution, and filters out those
+that lead to unlikely assertions. The framework further verifies the
+candidate substitutions by checking their consistency w.r.t. property
+range and cardinality constraints mined from the global KB. The
+framework finally makes a correction decision, returning a corrected
+assertion or reporting failure if no likely correction can be identified.
+Briefly this paper makes the following main contributions:
+• It proposes a general framework that can correct both erro-
+neous entity assertions and literal assertions;
+• It utilizes both semantic embeddings and observed features to
+capture the local context used for correction prediction, with
+a sub-graph extracted for higher efficiency;
+• It complements the prediction with consistency checking
+against “soft” property constraints mined from the global
+KB;
+• It evaluates the framework with erroneous entity assertions
+from a medical KB and literal assertions from DBpedia.
+2
+RELATED WORK
+We survey related work in three areas: assertion validation which
+includes erroneous assertion detection and link prediction with se-
+mantic embeddings and observed features, canonicalization, and
+assertion correction.
+2.1
+Assertion Validation
+In investigating KB quality, the validity of assertions is clearly an
+important consideration. One way to identify likely invalid assertions
+is to check consistency against logical constraints or rules. Explic-
+itly stated KB constraints can be directly used, but these are often
+weak or even non-existent. Thus, before using the DBpedia ontology
+to validate assertions, Topper et al. [39] enriched it with class dis-
+jointness, and property domain and range costraints, all derived via
+statistical analysis. Similarly, Paulheim and Gangemi [33] enriched
+the ontology via alignment with the DOLCE-Zero foundational on-
+tology. Various constraint and rule languages, including the Shapes
+Constraint Language (SHACL) [18], Rule-Based Web Logics [1]
+and SPARQL query templates [19], have also been proposed so that
+external knowledge can be encoded and applied in reasoning for
+assertion validation.
+With the development of machine learning, various feature ex-
+traction and semantic embedding methods have been proposed to
+encode the semantics of entities and relations into vectors [43]. The
+observed features are typically indicators (e.g., paths) extracted for
+a specific prediction problem. They often work together with other
+learning and prediction algorithms, including supervised classifi-
+cation (e.g., PaTyBRED [21]), autoencoder (e.g., RDF2Vec [36]),
+statistical distribution estimation (e.g., SDValidate [32]) and so on.
+PaTyBRED and SDValidate directly detect erroneous assertions,
+while RDF2Vec utilizes graph paths to learn intermediate entity
+representations that can be further used to validate assertions via
+supervised classification.
+In contrast to observed features, which often rely on ad-hoc fea-
+ture engineering, semantic embeddings (vectors) can be learned by
+minimizing an overall loss with a score function for modeling the
+assertion’s likelihood. They can be directly used to estimate the
+assertion likelihood with the score function. State-of-the-art meth-
+ods and implementations include DistMult [46], TransE [3], Neural
+Tensor Network [37], IterE [47], OpenKE [16] and so on. They can
+also be combined with algorithms such as outlier detection [7] and
+supervised classification [25] to deal with assertion validation in
+specific contexts.
+On the one hand, the aforementioned methods were mostly devel-
+oped for KB completion and erroneous assertion detection, and few
+have been applied in assertion correction, especially the semantic
+embedding methods. On the other hand, they suffer from various
+shortcomings that limit their application. Consistency checking de-
+pends on domain knowledge of a specific task for constraint and
+rule definition, while the mined constraints and rules are often weak
+in modeling local context for disambiguation. Semantic embedding
+methods are good at modeling contextual semantics in a vector space,
+but are computationally expensive when learning from large KBs
+[30] and suffer from low robustness when dealing with real world
+KBs that are often noisy and sparse [35].
+2.2
+Canonicalization
+Recent work on KB canonicalization is relevant to related entity
+estimation in our setting. Some of this work focuses on the cluster-
+ing and disambiguation of entity mentions in an open KB extracted
+from textual data [12, 41, 45]; CESI [41], for example, utilizes side
+information (e.g., WordNet), semantic embedding and clustering to
+identify equivalent entity mentions. However, these methods can-
+not be directly applied in our correction framework as they focus
+on equality while we aim at estimating relatedness, especially for
+assertions with erroneous objects. The contexts are also different as,
+unlike entity mentions, literals have no neighbourhood information
+(e.g., relationships with other entities) that can be utilized.
+Chen et al. [4] and Gunaratna et al. [15] aimed at the canoni-
+calization of literal objects used in assertions with DBpedia object
+properties (whose objects should be entities). Instead of correct-
+ing the literal with an existing entity, they focus on the typing of
+the entity that the literal represents, which is helpful when a new
+entity needs to be created for replacement. Although the work in
+[4] also tried to identify an existing entity to substitute the literal,
+their approach suffers from a number of limitations: the predicted
+type is used as a constraint for filtering, which is not a robust and
+general correction method; the related entity estimation is ad-hoc
+and DBpedia specific; and the type prediction itself only uses entity
+and property labels, without any other contextual semantics.
+2.3
+Assertion Correction
+We focus on recent studies concerning the automatic correction of
+erroneous assertions. Some are KB specific. For example, Dimou et
+al. [9] refined the mappings between Wikipedia data and DBpedia
+knowledge such that some errors can be corrected during DBpedia
+construction, while Pellissier et al. [34] mined correction rules from
+the edit history of Wikidata to create a model that can resolve con-
+straint violations. In contrast, our framework is general and does not
+assume any additional KB meta information or external data.
+Regarding more general approaches, some aim at eliminating
+constraint violations. For example, Chortis et al. [5, 38] defined and
+added new properties to avoid violating integrity constraints, while
+
+Correcting Knowledge Base Assertions
+WWW, April 2020, Taipei
+Melo [6] removed sameAs links that lead to such violations. These
+methods ensure KB consistency, but they can neither correct the
+knowledge itself nor deal with those wrong assertions that satisfy the
+constraints. Lertvittayakumjorn et al. [20] and Melo et al. [21] both
+aimed at correcting assertions by replacing the objects or subjects
+with correct entities. The former found the substitute by either key-
+word matching or a simple graph structure metric (i.e., the number
+of commonly connected objects of two entities), while the latter first
+retrieved candidate substitutes from the Wikipedia disambiguation
+page (which may not exist, especially for KBs that are not based
+on Wikipedia) and then ranked them by a lexical similarity score.
+Both methods, however, only use simple graph structure or lexical
+similarity to identify the substitute, and ignore the linkage incom-
+pleteness of a KB. In contrast, our framework utilizes state-of-the-art
+semantic embedding to model and exploit the local context within a
+sub-graph to predict assertion likelihood, and at the same time uses
+global property constraints to validate the substitution.
+3
+BACKGROUND
+3.1
+Knowledge Base
+In this study we consider a knowledge base (KB) that follows Se-
+mantic Web standards including RDF (Resource Description Frame-
+work), RDF Schema, OWL (Web Ontology Language)1 and the
+SPARQL Query Language [10]. A KB is assumed to be composed of
+a TBox (terminology) and an ABox (assertions). The TBox usually
+defines classes (concepts), a class hierarchy (via rdfs:subClassOf),
+properties (roles), and property domains and ranges. It may also use
+a more expressive language such as OWL to express constraints such
+as class disjointness, property cardinality, property functionality and
+so on [14].
+The ABox consists of a set of assertions (facts) describing con-
+crete entities (individuals), each of which is represented by an Uni-
+form Resource Identifier. Each assertion is represented by an RDF
+triple ⟨s,p,o⟩, where s is an entity, p is a property and o is either an
+entity or a literal (i.e., a typed or untyped data value such as a string
+or integer). s, p and o are known as the subject, predicate and object
+of the triple. An entity can be an instance of one or more classes,
+which is specified via triples using the rdf:type property. Sometimes
+we will use class assertion to refer to this latter kind of assertion and
+property assertion to refer to assertions where p is not a property
+from the reserved vocabulary or RDF, RDFS or OWL.
+Such a KB can be accessed by SPARQL queries using a query
+engine that supports the relevant entailment regime (e.g., RDFS or
+OWL) [13]; such an engine can, e.g., infer ⟨e0 rdf:type c2⟩, given
+⟨e0 rdf:type c1⟩and ⟨c1 rdfs:subClassOf c2⟩. In addition, large-scale
+KBs (aka knowledge graphs) often have a lookup service that en-
+ables users to directly access its entities by fuzzy matching; this
+is usually based on a lexical index that is built with entity labels
+(phrases defined by rdfs:label) and sometimes entity anchor text
+(short descriptions). DBpedia builds its lookup service2 using the
+lexical index of Spotlight [23], while entities of Wikidata can be
+retrieved, for example, via the API developed for OpenRefine and
+OpenTapioc [8].
+1There is a revision of the Web Ontology Language called OWL 2, for simplicity we
+also refer to this revision as OWL.
+2https://wiki.dbpedia.org/lookup
+3.2
+Problem Statement
+In this study, we focus on correcting ABox property assertions
+⟨s,p,o⟩where o is a literal (literal assertion) or an entity (entity asser-
+tion). Note that in the former case correction may require more than
+simple canonicalization; e.g., the property assertion ⟨Sergio_Agüero,
+playsFor, “Manchester United”⟩should be corrected to ⟨Sergio_Agüero,
+playsFor, Manchester_City⟩.
+Literal assertions can be identified by data type inference and reg-
+ular expressions as in [15], while erroneous entity assertions can be
+detected either manually when the KB is applied in downstream ap-
+plications or automatically by the methods discussed in Section 2.1.
+It is important to note that if the KB is an OWL ontology, the set of
+object properties (which connect two entities) and data properties
+(which connect an entity to a literal) should be disjoint. In practice,
+however, KBs such as DBpedia often do not respect this constraint.
+We assume that the input is a KB K, and a set E of literal and/or
+entity assertions that have been identified as incorrect. For each
+assertion ⟨s,p,o⟩in E, the proposed correction framework aims at
+either finding an entity e from K as an object substitute, such that
+e is semantically related to o and the new triple ⟨s,p,e⟩is true, or
+reporting that there is no such an entity e in K.
+4
+METHODOLOGY
+4.1
+Framework
+As shown in Figure 1, the main components of our assertion correc-
+tion framework consist of related entity estimation, link prediction,
+constraint-based validation and correction decision making. Related
+entity estimation identifies those entities that are relevant to the ob-
+ject of the assertion. Given a target assertion t = ⟨s,p,o⟩, its related
+entities, ranked by the relatedness, are denoted as REt . They are
+called candidate substitutes of the original object o, and the new
+assertions when o is replaced are called candidate assertions. We
+adopt two techniques — lexical matching and word embedding — to
+measure relatedness and estimate REt . Note that the aim of this step
+is to ensure high recall; precision is subsequently taken care of via
+link prediction and constraint-based validation over the candidate
+assertions.
+Link prediction estimates the likelihood of each candidate as-
+sertion. For each entity ei in REt , it considers a target assertion
+t = ⟨s,p,o⟩and outputs a score that measures the likelihood of
+⟨s,p,ei⟩. To train such a link prediction model, a sub-graph that con-
+tains the context of the correction task (i.e., E) is first extracted, with
+the related entities, involved properties and their neighbourhoods;
+positive and negative assertions are then sampled for training. State-
+of-the-art semantic embeddings (TransE [3] and DistMult [46]), as
+well as some widely used observed features (path and node) are used
+to build the link prediction model.
+Constraint-based validation checks whether a candidate assertion
+violates constraints on the cardinality or (hierarchical) range of the
+property, and outputs a consistency score which measures its degree
+of consistency against such constraints. Such constraints can be
+effective in filtering out unlikely assertions, but modern KBs such
+as DBpedia and Wikidata often include only incomplete or weak
+constraints, or do not respect the given constraints as no global
+consistency checking is performed. Therefore, we do not assume
+that there are any property cardinality or range constraints in the
+
+WWW, April 2020, Taipei
+Jiaoyan Chen, Xi Chen, Ian Horrocks, Ernesto Jimenez-Ruiz, and Erik B. Myklebus
+KB TBox,3 but instead use mined constraints, each of which is
+associated with a supporting degree (probability).
+Correction decision making combines the results of related entity
+estimation, link prediction and constraint-based validation; it first
+integrates the assertion likelihood scores and consistency scores,
+and then filters out those candidate substitutes that have low scores.
+Finally, it either reports that no suitable correction was found, or
+recommends the most likely correction.
+4.2
+Related Entity Estimation
+For each target assertion t = ⟨s,p,o⟩in E, related entity estimation
+directly adopts o as the input if o is a literal, or extracts the label of o
+if o is an entity. It returns a list REt containing up to k most related
+entities; i.e., |REt | ≤k. Our framework supports both a lexical
+matching based approach and a word embedding based approach;
+this allows us to compare the effectiveness of the two approaches on
+different KBs (see Section 5.2).
+For those KBs with a lexical index, the lexical matching based
+approach can directly use a lookup service based on the index, which
+often returns a set of related entities for a given phrase. Direct lookup
+with the original phrase, however, often misses the correct entity,
+as the input phrase, either coming from the erroneous entity or the
+literal, is frequently noisy and ambiguous. For example, the DBpedia
+Lookup service returns no entities with the input “three gorges dis-
+trict” which refers to the entity dbr:Three_Gorges_Reservoir_Region.
+To improve recall, we retrieve a list of up to k entities by repeating en-
+tity lookup using sub-phrases, starting with the longest sub-phrases
+and continuing with shorter and shorter sub-phrases until either k
+entities have been retrieved or all sub-phrases have been used. The
+list of each lookup is ordered according to the relatedness (lexical
+similarity) to the original phrase, while all the lists are concatenated
+according to the above lookup order. To extract the sub-phrases,
+we first tokenize the original phrase, remove the stop words and
+then concatenate the tokens in their original order for sub-phrases of
+different lengths. For those KBs without an existing lexical index,
+the lexical matching based approach adopts a string similarity score
+named Edit Distance [26] in order to calculate the relatedness of an
+entity with its label.
+The word embedding based approach calculates the similarity
+of o against each entity in the KB, using vector representations of
+their labels (literals). It (i) tokenizes the phrase and removes the stop
+words, (ii) represents each token by a vector with a word embedding
+model (e.g., Word2Vec [24]) that is trained using a large corpus,
+where tokens that are out of the model’s vocabulary are ignored, (iii)
+calculates the average of the vectors of all the tokens, which is a
+widely adopted strategy to embed a phrase, and (iv) computes the
+distance-based similarity score of the two vectors by e.g., the cosine
+similarity.
+Compared with lexical matching, word embedding considers the
+semantics of a word, which assigns a high similarity score to two syn-
+onyms. In the above lookup example, “district” becomes noise as it
+is not included in the label of dbp:Three_Gorges_Reservoir_Region,
+but can still play an important role in the word embedding based
+approach due to the short word vector distance between “district”
+3Any property range and cardinality constraints that are defined in the TBox, or that
+come from external knowledge, can be easily and directly injected into the framework.
+and “region”. However, in practice entity misuse is often not caused
+by semantic confusion, but by similarity of spelling and token com-
+position, where the lexical similarity is high but the semantics might
+be quite different. Moreover, lexical matching with a lexical index
+makes it easy to utilize multiple items of textual information, such as
+labels in multiple languages and anchor text, where different names
+of an entity are often included.
+4.3
+Link Prediction
+Given related entities REt of a target assertion t = ⟨s,p,o⟩, link
+prediction is used to estimate a likelihood score for the candidate
+assertion ⟨s,p,ei⟩, for each entity ei in REt . For efficiency in dealing
+with very large KBs, we first extract a multi-relational sub-graph for
+the context of the task, and then train the link prediction model with
+a sampling method as well as with different observed features and
+semantic embeddings.
+4.3.1
+Sub-graph. Given a KB K and a set of target assertions
+E, the sub-graph corresponding to E is a part of K, denoted as
+KE = ⟨E, P,T⟩, where E denotes entities, P denotes object prop-
+erties (relations) and T denotes assertions (triples). As shown in
+Algorithm 1, the sub-graph is calculated with three steps: (i) extract
+the seeds — entities and properties involved in the target assertions
+E, as well as related entities of each assertion in E; (ii) extract the
+neighbourhoods — directly associated assertions of each of the seed
+properties and entities; (iii) re-calculate the properties and entities
+involved in the assertions. Note that |= means an assertion is either
+directly declared in the KB or can be inferred by the KB. The state-
+ments with |= can be implemented by SPARQL: Line 13 needs |P|
+queries each of which retrieves the associated assertions of a given
+property, while Line 14 needs 2 × |E| queries each of which retrieves
+the associated assertions of a given subject or object.
+Algorithm 1: Sub-graph Extraction (K, E, REt )
+1 Input: (i) The whole KB: K, (ii) The set of target assertions: E, (iii)
+The related entities of each target assertion: REt , t ∈E
+2 Result: The sub-graph: KE = ⟨E, P, T ⟩
+3 begin
+4
+% Step 1: Extract the seeds
+5
+SE = {s |⟨s, p, o⟩∈E} % extract subject entities
+6
+P = {p |⟨s, p, o⟩∈E} % extract target properties
+7
+RE = ∪t ∈EREt % The union of related entities
+8
+E = SE ∪RE
+9
+foreach ⟨s, p, o⟩in E do
+10
+if o is an entity then
+11
+E = E ∪{o} % add object entity
+12
+% Step 2: Extract the neighbourhoods
+13
+T = {⟨s, p, o⟩|p ∈P ∧K |= ⟨s, p, o⟩}
+14
+T = T ∪{⟨s, p, o⟩|o ∈E ∧s ∈E ∧K |= ⟨s, p, o⟩}
+15
+% Step 3: Re-calculate entities and properties
+16
+E = E ∪{s |⟨s, p, o⟩∈T } ∪{o |⟨s, p, o⟩∈T }
+17
+P = P ∪{p |⟨s, p, o⟩∈T }
+18
+return KE = ⟨E, P, T ⟩
+
+Correcting Knowledge Base Assertions
+WWW, April 2020, Taipei
+Target Assertions
+e.g.,
+<Yangtze_River, passesArea,
+“three gorges district">
+<Sergio_Agüero, playsFor, 
+Manchester_United>
+Related Entities
+(Candidate Substitutes)
+Sub-graph & Samples
+Soft Property Constraints
+(Cardinality and Range)
+SPARQL 
+Query
+Related Entity 
+Estimation
+Link Prediction 
+Model
+Embeddings & 
+Observed Features
+Assertion
+Likelihood Scores
+Consistency
+Scores
+Candidate 
+Assertions
+Correction Decisions
+e.g.,
+<Yangtze_River, passesArea, 
+Three_Gorges_Reservoir_Region>
+< Sergio_Agüero, playsFor, 
+Manchester_City>
+Decision Making 
+(Filtering & 
+Ensemble)
+Consistency 
+Checking
+Knowledge Base
+Constraint
+Mining
+Figure 1: The Overall Framework for Assertion Correction
+4.3.2
+Sampling. Positive and negative samples (assertions)
+are extracted from the sub-graph KE = ⟨E, P,T⟩. The positive
+samples are composed of two parts: Tpos = Tsp ∪Tpr , where
+Tsp refers to assertions whose subjects and properties are among
+SE (i.e., those subject entities involved in E) and P respectively
+(Tsp = {⟨s,p,o⟩|s ∈SE ∧p ∈P ∧⟨s,p,o⟩∈T }), while Tpr refers
+to those assertions whose objects and properties are among RE
+(i.e., those related entities involved in E) and P respectively (Tpr =
+{⟨s,p,o⟩|p ∈P ∧o ∈RE ∧⟨s,p,o⟩∈T }).Tsp andTpr are calculated
+by two steps: (i) extract all the associated assertions of each property
+p in P from T; (ii) group these assertions according to SE and RE.
+Compared with an arbitrary assertion in T, the above samples are
+more relevant to the candidate assertions for prediction. This can
+help release the domain adaption problem — the data distribution
+gap between the training and predicting assertions.
+The negative samples are composed of two parts as well: Tneд =
+˜Tsp ∪˜Tpr , where ˜Tsp is constructed according toTsp by replacing the
+object with a random entity in E, while ˜Tpr are constructed according
+toTpr by replacing the subject with a random entity in E. TakeTsp as
+an example, for each of its assertion ⟨s,p,o⟩, an entity ˜e is randomly
+selected from E for a synthetic assertion ˜t = ⟨s,p, ˜e⟩such that K ⊭˜t,
+where ⊭represents that an assertion is neither declared by the KB
+nor can be inferred, and ˜t is added to ˜Tsp. In implementation, we
+can get K ⊭˜t if ˜t < T, as T is extracted from the KB with inference.
+Tpr is constructed similarly. Note that the size of Tpos and Tneд is
+balanced.
+4.3.3
+Observed Features. We extract two kinds of observed
+features — the path feature and the node feature. The former rep-
+resents potential relations that can connect the subject and object,
+while the latter represents the likelihood of the subject being the
+head of the property, and the likelihood of the object being the tail of
+the property. For the path feature, we limit the path depth to two, for
+reducing computation time and feature size, both of which are expo-
+nential w.r.t. the depth. In fact, it has been shown that paths of depth
+one are already quite effective. They outperform the state-of-the-art
+KB embedding methods like DistMult, TransE and TransH, together
+with the node feature on some benchmarks [40]. Meanwhile the
+predictive information of a path will vanish as its depth increases.
+In calculation, we first extract paths of depth one: FP1so and FP1os,
+where FP1so represents properties froms too (i.e., {p0|⟨s,p0,o⟩∈T }),
+while FP1os represents properties from o to s (i.e., {p0|⟨o,p0,s⟩∈T }).
+Next we calculate paths of depth two (ordered property pairs) in two
+directions as well: FP2so = {(p1,p2)|⟨s,p1,e⟩∈T ∧⟨e,p2,o⟩∈T },
+FP2os = {(p1,p2)|⟨o,p1,e⟩∈T ∧⟨e,p2,s⟩∈T }. Finally we merge
+these paths: FP = FP1so ∪FP1os ∪FP2so ∪FP2os, and encode them into
+a multi-hot vector as the path feature, denoted as f p. Briefly we col-
+lect all the unique paths from the training assertions as a candidate
+set, where one path corresponds to one slot in encoding. When an
+assertion is encoded into a vector, a slot of the vector is set to 1 if
+the slot’s corresponding path is among the assertion’s paths and 0
+otherwise.
+The node feature includes two binary variables: f n = [vs,vo],
+where vs denotes the likelihood of the subject while vo denotes the
+likelihood of the object. Namely, vs = 1 if there exists some entity
+o′ such that ⟨s,p,o′⟩∈T and vs = 0 otherwise. vo = 1 if there exists
+some entity s′ such that ⟨s′,p,o⟩∈T and vo = 0 otherwise.
+Finally we calculate f p and f n, and concatenate them for each
+sample in Tpos ∪Tneд, and train a link prediction model with a basic
+supervised classifier named Multiple Layer Perception (MLP):
+Mpn
+classifier e.g., MLP
+←−−−−−−−−−−−−−−−
+Tpos∪Tneд
+
+f p, f n
+.
+(1)
+We also adopt the path-based latent feature learned by the state-
+of-the-art algorithm RDF2Vec [36], as a baseline. RDF2Vec first
+extracts potential outstretched paths of an entity by e.g., graph walks,
+and then learns embeddings of the entities through the neural lan-
+guage model Word2Vec. In training, we encode the subject and object
+of an assertion by their RDF2Vec embeddings, encode its property
+by a one-hot vector, concatenate the three vectors, and use the same
+classifier MLP. The trained model is denoted as Mr2v.
+4.3.4
+Semantic Embeddings. A number of semantic embed-
+ding algorithms have been proposed to learn the vector representa-
+tion of KB properties and entities. One common way is to define a
+scoring function to model the truth of an assertion, and use an overall
+loss for learning. We adopt two state-of-the-art algorithms — TransE
+[3] and DistMult [46]. Both are simple but have been shown to be
+competitive or outperform more complex alternatives [3, 17, 46].
+For high efficiency, we learn the embeddings from the sub-graph.
+
+WWW, April 2020, Taipei
+Jiaoyan Chen, Xi Chen, Ian Horrocks, Ernesto Jimenez-Ruiz, and Erik B. Myklebus
+TransE tries to learn a vector representation space such that o is
+a nearest neighbor of s + p if an assertion ⟨s,p,o⟩holds, and o is
+far away from s + p otherwise. + denotes the vector add operation.
+To this end, the score function of t = ⟨s,p,o⟩, denoted as д(t),
+is defined as d(es + ep,eo), where d is a dissimilarity (distance)
+measure such as L2 norm, while es, ep and eo are embeddings of s,
+p and o respectively. The embeddings have the same dimension that
+is configured, and are initialized by one-hot encoding. In learning, a
+batch stochastic gradient descent algorithm is used to minimize the
+the following margin-based ranking loss:
+L =
+Õ
+t ∈T,t→˜t
+
+γ + д(t) −д(˜t)
+
++
+(2)
+whereγ > 0 is a hyper parameter, [·]+ denotes extracting the positive
+part, and ˜t represents a negative assertion of t, generated by randomly
+replacing the subject or object with an entity in E.
+DistMult is a special form of the bilinear model where the non-
+diagonal entries in the relation matrices are assumed to be zero.
+The score function of an assertion ⟨s,p,o⟩is defined as eTp (es ◦
+eo), where ◦denotes the operation of pairwise multiplication. As
+TransE, the embeddings are initialized by one-hot encoding, with
+the a dimension configured. A similar margin-based ranking loss as
+(2) is used for training with batched stochastic gradient descent.
+In prediction, the likelihood score of an assertion can be calculated
+with the corresponding scoring function and the embeddings of its
+subject, property and object. We denote the link prediction model by
+TransE and DistMult as Mte and Mdm respectively.
+4.4
+Constraint-based Validation
+We first mine two kinds of soft constraints — property cardinality
+and hierarchical property range from the KB, and then use a consis-
+tency checking algorithm to validate those candidate assertions.
+4.4.1
+Property Cardinality. Given a property p, its soft cardi-
+nality is represented by a probability distribution Dp
+car (k) ∈[0, 1],
+where k ≥1 is an integer that denotes the cardinality. It is calculated
+as follows: (i) get all the property assertions whose property is p,
+denoted as T(p), and all the involved subjects, denoted as S(p), (ii)
+count the number of the object entities associated with each subject
+s in S(p) and p: ON(s,p) = |{o|⟨s,p,o⟩∈T(p)}|, (iii) find out the
+maximum object number: ONp
+max = max {ON(s,p)|s ∈S(p)}, and
+(iv) calculate the property cardinality distribution as:
+Dp
+car (k) = |{s ∈S(p)|ON(s,p) = k}|
+|S(p)|
+,k = 1, ...,ONp
+max,
+(3)
+where |·| denotes the size of a set. Specially ONp
+max = 0 if T(p)
+is empty. Dp
+car (k > n) is short for ÍON p
+max
+i=n+1
+Dp
+car (k = i), denoting
+the probability that the cardinality is larger than n. In implementa-
+tion, T(p) can be accessed by one time SPARQL query, while the
+remaining computation has linear time complexity w.r.t. |T(p)|.
+The probability of cardinality k is equal to the ratio of the subjects
+that are associated with k different entity objects. For example,
+considering a property hasParent that is associated with 10 different
+subjects (persons) in the KB, if one of them has one object (parent)
+and the remaining have two objects (parents), then the cardinality
+distribution is: Dcar (k = 1) = 1/10 and Dcar (k = 2) = 9/10. Note
+that although such constraints follow Closed Word Assumption and
+Unique Name Assumption, they behave well in our method. On
+the one hand, probabilities are estimated to represent the supporting
+degree of a constraint by the ABox. One the other hand, they are used
+in an approximate model to validate candidate assertions instead of
+as new and totally true knowledge for KB TBox extension.
+4.4.2
+Hierarchical Property Range. Given a property p, its
+range constraint consists of (i) specific range which includes the
+most specific classes of its associated objects, denoted as Cp
+sp, and
+(ii) general range which includes ancestors of these most specific
+classes, denoted as Cp
+дe, with top classes such as owl:Thing being
+excluded. A most specific class of an entity refers to one of the most
+fine grained classes that the entity is an instance of according to class
+assertions in the KB. Note that there could be multiple such classes
+as the entity could be asserted to be an instance of multiple classes
+for which there is no sub-class relationship. General classes of an
+entity are those that subsume one or more of the specific classes as
+specified in the KB via rdfs:subClassOf assertions.
+Each range class c in Cp
+sp (Cp
+дe resp.) has a probability in [0, 1]
+that represents its supporting degree by the KB, denoted as Dp
+sp(c)
+(Dp
+дe(c) resp.). Cp
+sp, Cp
+дe and the supporting degrees are calculated by
+the following steps: (i) get all the object entities that are associated
+with p, denoted as OE(p); (ii) infer the specific and general classes of
+each entity oe in OE(p), denoted as Csp(p,oe) and Cдe(p,oe) respec-
+tively, and at the same time collect Cp
+sp as ∪oe ∈OE(p)Csp(p,oe) and
+Cp
+дe as ∪oe ∈OE(p)Cдe(p,oe); (iii) compute the supporting degrees:
+
+
+Dp
+sp(c) = |{oe |oe ∈OE(p),c ∈Csp(p,oe)}|
+|OE(p)|
+,c ∈Cp
+sp,
+Dp
+дe(c) = |{oe |oe ∈OE(p),c ∈Cдe(p,oe)}|
+|OE(p)|
+,c ∈Cp
+дe.
+(4)
+The degree of each range class is the ratio of the objects that are
+instances of the class, as either directly declared in the ABox or
+inferred by rdfs:subClassOf. The implementation needs one time
+SPARQL query to get OE(p), and |OE(p)| times SPARQL queries
+to get the specific and ancestor classes. The remaining computation
+has linear time complexity w.r.t. |OE(p)|. As property cardinality,
+the range cardinality is also used for approximating the likelihood
+of candidate assertions, using a consistency checking algorithm
+introduced bellow.
+4.4.3
+Consistency Checking. As shown in Algorithm 2, con-
+straint checking acts as a model, to estimate the consistency of an
+assertion against soft constraints of hierarchical property range and
+cardinality. Given a candidate assertion t = ⟨s,p,e⟩, the algorithm
+first checks the property cardinality, with a parameter named maxi-
+mum cardinality exceeding rate σ ∈(0, 1]. Line 5 counts the number
+of entity objects that are associated with s and p in the KB, assuming
+that the correction is made (i.e., t has been added into the KB). Note
+that 1 ≤n ≤ONp
+max + 1. Line 6 calculates its exceeding rate r
+w.r.t. ONp
+max, where r ∈(−∞, 1]. In Line 8, ONp
+max = 0 indicates
+that p is highly likely to used as a data property in the KB. This is
+common in correcting literal assertions: one example is the property
+hasName whose objects are phrases of entity mentions but should
+not be replaced by entities. In this case, it is more reasonable to
+report that the object substitute does not exist, and thus the algorithm
+sets the cardinality score ycar to 0.
+
+Correcting Knowledge Base Assertions
+WWW, April 2020, Taipei
+Another condition of setting ycar to 0 is r ≥σ. Specially, when σ
+is set to 1.0, r ≥σ (i.e., ONp
+max = 1 , n = 2) means that p is a object
+property with functionality in the KB but the correction violates this
+constraint. Note that n can exceed ONp
+max by a small degree which
+happens when ONp
+max is large. For example, when σ is set to 0.5,
+r = 0.25 (i.e., ONp
+max = 4 and n = 5) is allowed. Line 11 to 16
+calculate the property cardinality score ycar as the probability of
+being a functional property (n = 1), or as the probability of being
+a none-functional property (n > 1). Specially, we punish the score
+when n > ONp
+max (i.e., r > 0) by multiplying it with a degrading
+factor 1 −r: the higher exceeding rate, the more it degrades.
+Line 17 to 21 calculate the property range score yran, by comb-
+ing the specific range score yran,c and the general range score
+yran,д with their importance weights ωc and ωд. Usually we make
+the specific range more important by setting ωc and ωд to e.g.,
+0.8 and 0.2 respectively. Line 19 computes yran,c and yran,д: the
+score is higher if more classes of the objects are among the range
+classes, and these classes have higher range degrees. For example,
+considering the property bornIn with the following range cardinal-
+ity: Cp
+sp = {City,Town, Place}, Cp
+дe = {Place}, Dp
+sp(City) = 0.5,
+Dp
+sp(Town) = 0.4, Dp
+sp(Place) = 0.05 and Dp
+дe(Place) = 0.95, we
+will have (i)yran,c = 1−(1−0.5)(1−0.05) = 0.525 andyran,д = 0.95
+if C(e) = {City, Place}, (ii) yran,c = 0.05 and yran,д = 0.95 if
+C(e) = {Villaдe, Place}, and (iii) yran,c = 0 and yran,д = 0 if
+C(e) = {Prof essor, Person}. The order of the consistency degree
+against the property range is: {City, Place} > {Villaдe, Place} >
+{Prof essor, Person}.
+The algorithm finally returns the property cardinality score ycar
+and the property range score yran. The former model is denoted
+as Mcar while the letter is denoted as Mran. According to some
+empirical analysis, we can multiply or average the two scores, as the
+final model of consistency checking, denoted as Mcar+ran.
+4.5
+Correction Decision Making
+Given a target assertion t in E, and its top-k related entities REt , for
+each entity ei in REt , the correction framework (i) calculates the
+assertion likelihood score yl
+i with a link prediction model (Mpn,
+Mte or Mdm), and the consistency score yc
+i with Mcar , Mran or
+Mcar+ran; (ii) separately normalizes yl
+i and yc
+i into [0, 1] according
+to all the predictions by the corresponding model for E; (iii) ensem-
+bles the two scores by simple averaging: yi = (yl
+i + yc
+i )/2; (iv) filters
+out ei from REt if yi < τ. Note ei is always kept if t is a literal
+assertion and its literal is exactly equal to the label of ei. The related
+entities after filtering keep their original order in REt , and are de-
+noted as RE′
+t . τ is a parameter in [0, 1] that needs to be adjusted with
+a developing data set. It eventually returns none, which means there
+is no entity in the KB that can replace the object of t, if RE′
+t is empty,
+and the top-1 entity in RE′
+t as the object substitute otherwise. The
+ensemble of the link prediction score and constraint-based validation
+score is not a must. Either of them can make a positive impact inde-
+pendently, while their ensemble can make the performance higher in
+most cases, as evaluated in Section 5.4.
+Algorithm 2: Consistency Checking (Mran, Mcar )
+1 Input: (i) A candidate assertion: t = ⟨s, p, e ⟩, (ii) property cardinality
+constraint: ⟨Dp
+car, ON p
+max ⟩, (iii) the maximum cardinality
+exceeding rate: σ ∈(0, 1], (iv) hierarchical property range
+constraint: ⟨Dp
+sp, Dp
+дe, Cp
+sp, Cp
+дe ⟩, (v) weights of the specific
+range and general range: ⟨ωc, ωд ⟩
+2 Result: ycar : score that t is consistent with the property cardinality;
+yran: score that t is consistent with the property range
+3 begin
+4
+% count the number of object entities
+5
+n = |{o |K |= ⟨s, p, o⟩, o is entity} ∪{e }|;
+6
+r = (n−O N p
+max )
+O N p
+max
+; % calculate the exceeding rate
+7
+% no object entities are associated with p in the KB, or the
+cardinality exceeds the maximum by a specific rate
+8
+if ON p
+max = 0 ∥r ≥σ then
+9
+ycar = 0;
+10
+else
+11
+if n = 1 then
+12
+% probability as a functional property
+13
+ycar = Dp
+car (k = 1);
+14
+else
+15
+% probability as a none-functional property
+16
+ycar =
+(
+Dp
+car (k > 1),
+if r ≤0
+(1 −r) · Dp
+car (k > 1),
+else
+17
+C(e) = {c |K |= ⟨e, rdf:type, c ⟩}; % get the object’s classes
+18
+% calculate the constraint score of specific and general ranges
+19
+
+
+yran,c = 1 −Î
+c∈Cp
+sp ∩C(e)(1 −Dp
+ran(c)),
+yran,д = 1 −Î
+c∈Cp
+дe ∩C(e)(1 −Dp
+ran(c));
+20
+% calculate the overall range constraint score
+21
+yran = ωc · yran,c + ωд · yran,д;
+22
+return ycar , yran
+5
+EVALUATION
+5.1
+Experiment Settings
+5.1.1
+Data. In our experiment, we correct assertions in DBpe-
+dia [2] and in an enterprise medical KB whose TBox is defined by
+clinic experts and ABox is extracted from medical articles (text) by
+some open information extraction tools (cf. more details in [28]). DB-
+pedia is accessed via its official Lookup service, SPARQL Endpoint4
+and entity label dump (for related entity estimation with Word2Vec).
+The medical KB contains knowledge about disease, medicine, treat-
+ment, symptoms, foods and so on, with around 800 thousand entities,
+7 properties, 48 classes, 4 million property assertions. The data are
+representative of two common situations: errors of DBpedia are
+mostly inherited from the source while errors of the medical KB are
+mostly introduced by extraction.
+Regarding DBpedia, we reuse the real world literal set proposed
+by [4, 15]. As our task is not typing the literal, but substituting it with
+an entity, literals containing multiple entity mentions are removed,
+while properties with insufficient literal objects are complemented
+with more literals from DBpedia. We annotate each assertion with
+4http://dbpedia.org/sparql
+
+WWW, April 2020, Taipei
+Jiaoyan Chen, Xi Chen, Ian Horrocks, Ernesto Jimenez-Ruiz, and Erik B. Myklebus
+a ground truth (GT), which is either a correct replacement entity
+from DBpedia (i.e., Entity GT) or none (i.e., Empty GT). Ground
+truths are carefully checked using DBpedia, Wikipedia, and multi-
+ple external resources. Regarding the medical KB, we use a set of
+assertions with erroneous entity objects that have been discovered
+and collected during deployment of the KB in enterprise products;
+the GT annotations have been added with the help of clinical experts.
+For convenience, we call the above two target assertion sets DBP-Lit
+and MED-Ent respectively.5 More details are shown in Table 1.
+Assertions (with Entity GT) #
+Properties #
+Subjects #
+DBP-Lit
+725 (499)
+127
+668
+MED-Ent
+272 (225)
+7
+200
+Table 1: Some statistics of DBP-Lit and MED-Ent.
+5.1.2
+Settings. In the evaluation, we first analyze related entity
+estimation (Section 5.2) and link prediction (Section 5.3) indepen-
+dently. For related entity estimation, we report the recall of Entity
+GTs of different methods with varying top-k values, based on which
+a suitable method and a k value are selected for the framework. For
+link prediction, we compare the performance of different semantic
+embeddings and observed features, using those target assertions
+whose Entity GTs are recalled in related entity estimation. The re-
+lated entities of a target assertion are first ranked according to the
+
+and MRR (Mean Reciprocal Rank)6 are calculated.
+Next we evaluate the overall results of the assertion correction
+framework (Section 5.4), where the baselines are compared with,
+and the impact of link prediction and constraint-based validation is
+analyzed. Three metrics are adopted: (i) Correction Rate which is the
+ratio of the target assertions that are corrected with right substitutes,
+among all the target assertions with Entity GTs; (ii) Empty Rate
+which is the ratio of the target assertions that are corrected with none,
+among all the target assertions with Empty GTs; (iii) Accuracy which
+is the ratio of the truly corrected target assertions by either substitutes
+or none, among all the target assertions. Note that accuracy is an
+overall metric considering both correction rate and empty rate. Either
+high (low resp.) correction rate or empty rate can lead to high (low
+resp.) accuracy. With the overall results, we finally analyze the
+constraint-based validation with more details.
+The reported results are based on the following setting (unless
+otherwise specified). In related entity estimation, Word2Vec [24]
+trained using the Wikipedia article dump in June 2018 is used for
+word embedding. In link prediction, the margin hyper parameter γ
+is set by linear increasing w.r.t. the training step, the embedding size
+of both entities and properties is set to 100, and the other training
+hyper parameters such as the number of epochs and MLP hidden
+layer size are set such that the highest MRR is achieved on an eval-
+uation sample set. Regarding the baseline RDF2Vec, pre-trained
+versions of DBpedia entities with different settings by Mannheim
+University7 are tested, and the results with the best MRR are re-
+ported. In constraint-based validation, σ, ωc and ωд are set to 1.0,
+5DBP-Lit data and its experiment codes: https://github.com/ChenJiaoyan/KG_Curation
+6https://en.wikipedia.org/wiki/Mean_reciprocal_rank
+7https://bit.ly/2M4TQOg
+0.8 and 0.2 respectively, according to the algorithm insight. Some
+other reasonable settings explored can achieve similar results. The
+embeddings are trained by GeForce GTX 1080 Ti with OpenKE
+[16], while the remaining is computed by Intel(R) Xeon(R) CPU
+
+5.2
+Related Entity Estimation
+We compare different methods and settings used in related entity
+estimation with the results presented in Figure 2, where the recall
+of Entity GTs by top-k related entities are presented. First, we find
+that the lexical matching based methods (Lookup, Lookup∗and Edit
+Distance) have much higher recall than Word2Vec, on both DBP-
+Lit and MED-Ent. The reason for DBP-Lit may lie in the Lookup
+service provided by DBpedia, which takes not only the entity label
+but also the anchor text into consideration. The latter provides more
+semantics, some of which, such as different names and background
+description, is very helpful for recalling the right entity. The reason
+for MED-Ent, according to some empirical analysis, is that the
+erroneous objects are often caused by lexical confusion, such as
+misspelling and misusing of an entity with similar tokens. Second,
+our Lookup solution with sub-phrases, i.e., Lookup∗, as expected,
+outperforms the original Lookup. For example, when both curves
+are stable, their recalls are around 0.88 and 0.81 respectively,
+The target of related entity estimation in our framework is to
+have a high recall with a k value that is not too large (so as to avoid
+additional noise and limit the size of the sub-graph for efficiency).
+In real application, the method and k value can be set by analyzing
+the recall. According to the absolute value and the trend of the recall
+curves in Figure 2, our framework uses Lookup∗with k = 30 for
+DBP-Lit, and Edit Distance with k = 76 for MED-Ent.
+0.5
+0.55
+0.6
+0.65
+0.7
+0.75
+0.8
+0.85
+0.9
+0.95
+0
+5
+10
+15
+20
+25
+30
+Lookup
+Lookup*
+Word2Vec
+top-𝒌
+Recall
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+Edit Distance
+Word2Vec
+top-𝒌
+Recall
+DBP-Lit
+MED-Ent
+Figure 2: The recall of Entity GTs by top-k related entities
+5.3
+Link Prediction
+5.3.1
+Impact of Models. The results of different link predic-
+tion methods are shown in Table 2, where the sub-graph is used
+for training. The baseline Random means randomly ranking the re-
+lated entities, while AttBiRNN refers to the attentive bidirectional
+Recurrent Neural Networks that utilize the labels of the subject,
+property and object. AttBiRNN was used in [4] for literal object
+typing, with good performance achieved. First of all, the results
+verify that either latent semantic embeddings (TransE and DistMult)
+or observed features with Multiple Layer Perception are effective
+
+Correcting Knowledge Base Assertions
+WWW, April 2020, Taipei
+
+dramatically improved in comparison with Random and AttBiRNN.
+We also find that concatenating the node feature and path feature
+(Node+Path) achieves higher performance than the node feature
+and the path feature alone, as well as the baseline RDF2Vec which
+is based on graph walks. For DBP-Lit, the outperformance over
+
+respectively.
+Meanwhile, Node+Path performs better than TransE and Dist-
+Mult for DBP-Lit, while for MED-Ent, TransE and DistMult out-
+performs Node+Path. For example, considering the metric of MRR,
+Node+Path is 71.3% higher than DistMult for DBP-Lit, but DistMul
+is 108.8% higher than Node+Path for MED-Ent. One potential reason
+is the difference in the number of properties and sparsity of the two
+sub-graphs. DBP-Lit has 127 properties in its target assertions and
+1958 properties in its sub-graph; while MED-Ent has 7 properties
+in its target assertions and 19 properties in its sub-graph. The small
+number of properties for MED-Ent leads to quite poor path feature,
+which is verified by its independent performance (e.g., the MRR
+is only 0.09). In the sub-graph of DBP-Lit, the average number of
+connected entities per property (i.e., density) is 150.7, while in the
+sub-graph of MED-Ent, it is 2739.0. Moreover, a larger ratio of prop-
+erties to entities also leads to richer path features. According to these
+results, we use Node+Path for DBP-Lit and DistMult for MED-Ent
+in our correction framework.
+Methods
+DBP-Lit
+MED-Ent
+MRR
+
+MRR
+
+Random
+0.199
+0.100
+0.275
+0.027
+0.013
+0.066
+AttBiRNN
+0.251
+0.126
+0.348
+0.255
+0.111
+0.414
+TransE
+0.342
+0.173
+0.518
+0.744
+0.652
+0.862
+DistMult
+0.424
+0.300
+0.536
+0.752
+0.694
+0.806
+RDF2Vec
+0.419
+0.320
+0.492
+—
+—
+—
+Node
+0.495
+0.379
+0.604
+0.338
+0.171
+0.514
+Path
+0.473
+0.356
+0.578
+0.090
+0.028
+0.133
+Node+Path
+0.586
+0.461
+0.716
+0.360
+0.200
+0.525
+Table 2: Link prediction results based on the sub-graph.
+5.3.2
+Impact of The Sub-graph. We further analyze the im-
+pact of sub-graph usage in training the link prediction model. The
+results of some of the methods that can be run over the whole KB
+with limited time are shown in Table 3, where Node+Path (DBP-Lit)
+uses features extracted from the whole KB but samples from the
+sub-graph. One the one hand, in comparison with Node+Path trained
+purely with the sub-graph, Node+Path with global features actually
+performs worse. As all the directly connected properties and entities
+of each subject entity, related entity and target property are included
+in the sub-graph, using the sub-graph makes no difference for node
+features and path features of depth one. Thus the above result is
+mainly due to the fact that path features of depth two actually makes
+limited contribution in this link prediction context. This is reason-
+able as they are weak, duplicated or even noisy in comparison with
+node features and path features of depth one. One the other hand,
+learning the semantic embeddings with the sub-graph has positive
+impact on TransE and negative impact on DistMult for MED-Ent.
+However the impact in both cases is quite limited. Considering that
+the sub-graph has only 36.9% (11.2% resp.) of the entities (assertions
+resp.) of the whole medical KB, which reduces the training time of
+DistMult embeddings from 46.7 minutes to 19.0 minutes, the above
+performance drop can be accepted.
+Cases
+MRR
+
+TransE (MED-Ent)
+0.713 (-.031)
+0.608 (-.044)
+0.834 (-.028)
+DistMult (MED-Ent)
+0.766 (+.014)
+0.721 (+.027)
+0.822 (+.016)
+Node+Path (DBP-Lit)
+0.504 (-.082)
+0.384 (-.077)
+0.611 (-.105)
+Table 3: Link prediction results based on the whole KB, and their out-
+performance (gap) over those based on the sub-graph
+5.4
+Overall Results
+Figure 3 presents the correction rate, empty rate and accuracy of our
+assertion correction framework with a ranging filtering threshold
+τ. Note that lexical matching without any filtering is similar to the
+existing method discussed in related work [20]. On the one hand,
+we find that filtering with either link prediction (LP) or constraint-
+based validation (CV) can improve the correction rate when τ is
+set to a suitable range. This is because those candidate substitutes
+that are lexically similar to the erroneous object but lead to unlikely
+assertions are filtered out, while those that are not so lexically similar
+but lead to true assertions are ranked higher. As the empty rate is
+definitely increased after filtering (e.g., improved from 0.252 to
+0.867 by Lookup∗+ LP + CV for DBP-Lit), the accuracy for both
+DBP-Lit and MED-Ent is improved in the whole range of τ. On the
+other hand, we find that averaging the scores from link prediction
+and constraint-based validation is effective. It leads to both higher
+correction rate and accuracy than either of them for some values of
+τ, such as [0.05, 0.1] for DBP-Lit and [0.85, 0.95] for MED-Ent.
+Table 4 presents the optimum correction rate and accuracy for
+several settings. Note that they are achieved using a suitable τ setting;
+in real applications this can be determined using an evaluation data
+set. Based on these results, we make the following observations.
+First, the optimum results are consistent with our above conclusions
+regarding the positive impact of link prediction, constraint-based
+validation and their ensemble. For example, the optimum accuracy of
+DBP-Lit is improved by 32.6% using constraint-based validation in
+comparison with the original related entities using lexical matching.
+The correction rate of MED-Ent provides another example: REE
++ LP + CV is 1.5% higher than REE + LP, and 121.4% higher than
+REE + CV.
+Second, lexical matching using either Lookup (for DBP-Lit) or
+Edit Distance (for MED-Ent) has a much higher correction rate
+and accuracy than Word2Vec, while our Lookup with sub-phrases
+(Lookup∗) has even higher correction rate than the original Lookup
+of DBpedia. These overall results verify the recall analysis on related
+entity estimation in Section 5.2. Meanwhile, we find that the overall
+results on observed features (Mnp) and latent semantic embeddings
+(Mdm and Mte) are also consistent with the link prediction analysis
+
+WWW, April 2020, Taipei
+Jiaoyan Chen, Xi Chen, Ian Horrocks, Ernesto Jimenez-Ruiz, and Erik B. Myklebus
+0.4
+0.45
+0.5
+0.55
+0.6
+0.65
+0.7
+0.75
+0
+0.2
+0.4
+0.6
+0.8
+1
+Correction Rate
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+0
+0.2
+0.4
+0.6
+0.8
+1
+Empty Rate
+0.4
+0.45
+0.5
+0.55
+0.6
+0.65
+0.7
+0.75
+0
+0.2
+0.4
+0.6
+0.8
+1
+Accuracy
+Lookup*
+Lookup* + LP
+Lookup* + CV
+Lookup* + LP + CV
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0
+0.2
+0.4
+0.6
+0.8
+1
+Correction Rate
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0
+0.2
+0.4
+0.6
+0.8
+1
+Empty Rate
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0
+0.2
+0.4
+0.6
+0.8
+1
+Accuracy
+EditDistance
+EditDistance + LP
+EditDistance + CV
+EditDistance + LP + CV
+Figure 3: Overall results of the correction framework for DBP-Lite
+[Above] and MED-Ent [Below]. + LP and + CV represent filtering with
+link prediction and constraint-based validation respectively, with the
+filtering threshold τ ranging from 0 to 1 with a step of 0.05.
+in Section 5.3: Mnp has a better filtering effect than Mdm and Mte
+for DBP-Lit, but worse filtering effect for MED-Ent.
+Methods
+DBP-Lit
+MED-Ent
+C-Rate
+Acc
+C-Rate
+Acc
+Lexical Matching
+0.597
+0.611
+0.149
+0.123
+Lookup∗
+0.635
+0.516
+—
+—
+Word2Vec
+0.553
+0.410
+0.089
+0.076
+REE + LP (Mnp)
+0.677
+0.677
+0.360
+0.327
+REE + LP (Mdm)
+0.635
+0.628
+0.600
+0.588
+REE + CV (Mran)
+0.671
+0.668
+0.271
+0.239
+REE + CV (Mcar )
+0.639
+0.622
+0.164
+0.147
+REE + CV (Mran+car )
+0.677
+0.684
+0.271
+0.246
+REE + LP + CV
+0.701
+0.690
+0.609
+0.599
+Table 4: Optimum correction rate (C-Rate) and accuracy (Acc). For
+Lexical Matching, DBP-Lit uses the original DBpedia Lookup while
+MED-Ent uses Edit Distance. REE denotes Related Entity Estimation:
+DBP-Lit uses Lookup∗while MED-Ent uses Edit Distance.
+5.5
+Constraint-based Validation
+Besides the positive impact on the overall results mentioned above,
+we get several more detailed observations about constraint-based
+validation from Table 4. On the one hand, the property range con-
+straint plays a more important role than the property cardinality
+constraint, while their combination is more robust than either of
+them, as expected. Considering the assertion set of MED-Ent, fil-
+tering by Mran, for example, leads to 62.6% higher accuracy than
+filtering by Mcar , while filtering by Mran+car has 2.9% higher
+accuracy and equal correction rate in comparison with Mran.
+On the other hand, we find constraint-based validation performs
+well for DBP-Lit, with higher accuracy and equal correction rate
+in comparison with link prediction, but performs much worse for
+MED-Ent. This is mainly due to the gap between the semantics of the
+two target assertion sets and their corresponding KBs: (i) the mined
+property ranges of DBP-Lit include 404 hierarchical classes, while
+those of MED-DB have only 8 classes in total and these classes have
+no hierarchy; (ii) 23 out of 127 target properties in DBP-Lit have pure
+functionality (i.e., Dp
+car (k = 1) = 1.0) which plays a key role in the
+consistency checking algorithm, while none of the target properties
+of MED-Ent has such pure functionality. The second characteristic
+is also a potential reason why filtering by constraint-based validation
+with property cardinality only achieves a very limited improvement
+over Edit Distance for MED-Ent as shown in Table 4.
+We additionally present some examples of the mined soft property
+constraints in Table 5. Most of them are consistent with our common
+sense understanding of the properties, although some noise is evident
+(e.g., the range Person and Agent of dbp:homeTown), most likely
+caused by erroneous property and class assertions.
+Property
+Cardinality
+Specific Range
+General Range
+dbp:homeTown
+1 : 0.415
+2 : 0.422
+3 : 0.163
+Location: 0.801,
+City: 0.280,
+Country: 0.268,
+Person: 0.228, ...
+PopulatedPlace:
+0.821, Place:
+0.821, Settlement:
+0.299, Agent:
+0.259, ...
+dbp:finalteam
+1 : 1.000
+BaseballTeam:
+0.493,
+SportsTeam:
+0.154,
+SoccerClub:
+0.015, ...
+Agent: 0.688,
+Organization:
+0.665,
+SportsTeam:
+0.510, ...
+Table 5: Soft constraints of two property examples
+6
+DISCUSSION AND OUTLOOK
+In this paper we present a study of assertion correction, an important
+problem for KB curation, but one that has rarely been studied. We
+have proposed a general correction framework, which does not rely
+on any KB meta data or external information, and which exploits
+both both deep learning and consistency reasoning to correct erro-
+neous objects and informally annotated literals (entity mentions).
+The framework and the adopted techniques have been evaluated
+by correcting assertions in two different KBs: DBpedia with cross-
+domain knowledge and an enterprise KB from the medical domain.
+We discuss below several more observations of the study as well as
+possible directions for the future work.
+Entity relatedness. Our method follows the principle of correct-
+ing the object by a related entity rather than an arbitrary entity that
+
+Correcting Knowledge Base Assertions
+WWW, April 2020, Taipei
+leads to a correct assertion. Relatedness can be due to either lexical or
+semantic similarity. Currently, the recall for DBP-Lit and MED-Ent
+is 0.882 and 0.797 respectively, which is promising, but still leaves
+space for further improvement. One extension for higher recall but
+limited noise and sub-graph size is incorporating external resources
+like Wikipedia disambiguation pages or domain knowledge about
+the errors.
+KB variation. Although both constraint-based validation and
+link prediction improve overall performance, their impact varies
+from DBpedia to the medical KB. The effectiveness of constraint-
+based validation depends on the richness of the KB schema, such as
+property functionality, the complexity of property range, etc. The
+more complex the schema is, the better performance constraint-
+based validation achieves. The impact of link prediction is more
+complicated: the path and node features perform better on DBpedia
+which has many more properties than the medical KB, while the
+semantic embeddings by DistMult and TransE are more suitable
+for the medical KB which has less properties but higher density.
+Integrating link prediction and constraint-based validation, even
+with simple score averaging, can improve performance, but further
+study is needed for a better integration method that is adapted to the
+structure of the given KB.
+Property constraints. On the one hand, the evaluation indicates
+that the mined property constraints are effective for assertion vali-
+dation and can be independently used in other contexts like online
+KB editing. On the other hand, unlike the link prediction model,
+the constraints as well as the consistency checking algorithm are
+interpretable. One benefit is that explicitly defined or external TBox
+constraints can easily be injected into our framework by overwriting
+or revising the constraints. For example, the mined specific range
+Person: 0.228 in Table 5, which is inappropriate for the property
+dbp:homeTown, can be directly removed.

@@ -1,0 +1,1647 @@
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+Benjamin Hilprecht
+TU Darmstadt
+Carsten Binnig
+TU Darmstadt
+Abstract
+In this paper, we introduce zero-shot cost models which enable
+learned cost estimation that generalizes to unseen databases. In
+contrast to state-of-the-art workload-driven approaches which re-
+quire to execute a large set of training queries on every new data-
+base, zero-shot cost models thus allow to instantiate a learned cost
+model out-of-the-box without expensive training data collection.
+To enable such zero-shot cost models, we suggest a new learning
+paradigm based on pre-trained cost models. As core contributions
+to support the transfer of such a pre-trained cost model to unseen
+databases, we introduce a new model architecture and represen-
+tation technique for encoding query workloads as input to those
+models. As we will show in our evaluation, zero-shot cost estima-
+tion can provide more accurate cost estimates than state-of-the-art
+models for a wide range of (real-world) databases without requiring
+any query executions on unseen databases. Furthermore, we show
+that zero-shot cost models can be used in a few-shot mode that
+further improves their quality by retraining them just with a small
+number of additional training queries on the unseen database.
+1
+Introduction
+Motivation. Accurate physical cost estimation (i.e., estimating
+query latencies) is crucial for query optimization in DBMSs. Classi-
+cally, cost estimation is performed using models that make several
+simplifying assumptions. As a result, such models often over- or
+underestimate runtimes, leading to suboptimal planning decisions
+that degrade the overall query performance [15]. Recently, machine
+learning has thus been used for learned cost models that do not
+need to make such simplifying assumptions [28].
+While it was shown that the cost estimates of such learned cost
+models are significantly more accurate than those of the traditional
+cost models, the existing approaches rely on workload-driven learn-
+ing where models have to observe thousands of queries on the same
+database1 for which the cost prediction should be performed. This
+workload execution is required to gather the training data which
+can take hours (or days) since tens of thousands of queries need to
+be executed on potentially large databases.
+In Figure 1, we show the cost estimation accuracy depending
+on how many hours we allow for gathering the training data for a
+workload-driven model. As we can see, even for a medium-sized
+database such as IMDB, it takes more than 5 hours of running
+queries on this database to gather enough training data such that
+the cost estimation model can provide a decent accuracy.
+Unfortunately, collecting training data by running queries is
+not a one-time effort. In fact, the training data collection has to
+be repeated for every new database a learned model should be
+deployed for. This is due to the fact that current model architectures
+1Throughout this paper, we use the term database to refer to a particular dataset with
+certain data characteristics.
+0
+20
+40
+60
+Observed Workload Hours
+1.2
+1.4
+1.6
+1.8
+Cost Estimation Errors
+(Median Q-Error)
+Workload-Driven
+Zero-Shot
+Few-Shot
+Figure 1: Cost Estimation Errors on the IMDB database.
+While workload-driven approaches [28] require many
+hours of workload executions as training data, our zero-shot
+cost model supports the unseen IMDB database out-of-the-
+box and provides highly accurate cost estimates. If a work-
+load is observed however, these queries can be used to fine-
+tune a zero-shot model resulting in few-shot models which
+further improve the performance.
+for workload-driven learning tie a trained model to a particular
+database instance. Consequently, for every (new) unseen database
+we not only have to train a model from scratch but also gather
+training data in the form of queries. And even for the same database,
+in case of changed data characteristics due to updates, training data
+collection needs to be repeated. Overall, these repeated high costs
+for obtaining training data for unseen databases render workload-
+driven learning unattractive for many practical deployments.
+Contributions. In this paper, we thus suggest a new learning
+paradigm for cost estimation called zero-shot cost models that
+reduces these high efforts. The general idea behind zero-shot cost
+models is motivated by recent advances in transfer learning of
+models. Similar to other approaches such as GPT-3 [3] which enable
+zero-shot learning for NLP, a zero-shot cost model is trained on
+a wide collection of different databases and workloads and can
+thus generalize out-of-the-box to a completely unseen database
+without the need to be trained particularly on that database. In
+fact as depicted in Figure 1, zero-shot cost models can provide a
+high accuracy and often even outperform existing workload-driven
+approaches that have been trained on large sets of training queries.
+Moreover, as we also show in Figure 1, zero-shot cost models can
+additionally be fine-tuned on the unseen database with just a few
+training queries and the resulting few-shot models further improve
+the accuracy.
+One could now argue that it might be a significant effort to
+collect sufficient training data across databases for pre-training a
+zero-shot model. However, in contrast to workload-driven models
+which require training data for every unseen database, training data
+collection is a one-time effort; i.e., once trained the zero shot model
+can be used for any new unseen database. In fact, in our evaluation
+we show that zero-shot models can provide high accuracies for
+a wide-variety of real-world databases. Moreover, for historical
+traces can be used which eliminates the need to collect any training
+arXiv:2201.00561v1  [cs.DB]  3 Jan 2022
+
+Benjamin Hilprecht and Carsten Binnig
+data. For example, cloud providers such as AWS, Microsoft, or
+Google, typically anyway keep logs of their customer workloads
+which could directly be used as training data for zero-shot learning
+without collecting any further training data.
+A key aspect to enable zero-shot learning is that a cost model can
+be transferred to new (unseen) databases, i.e., the models leverage
+observed query executions on a variety of different databases to
+predict runtimes on new (unseen) databases. However, state-of-
+the-art model architectures used for workload-driven learning do
+not support this training and inference mode since they are tied to
+a particular database. As a core novel contribution for zero-shot
+cost models we thus devise a new model architecture based on a
+representation of queries that generalizes across databases using a
+transferable representation with features such as the tuple width
+that can be derived from any database. Moreover, zero-shot models
+separate concerns; i.e., data characteristics of a new database (e.g.,
+rows of tables) are not implicitly learned as in classical workload-
+driven learning (which hinders generalization), but are provided as
+input to the model.
+Another core question for zero-shot models is at which point
+a sufficient amount of different training databases and workloads
+was observed to generalize robustly to unseen databases. To answer
+this question, as a second contribution in this paper we derive a
+method to estimate how accurate the runtime estimations of zero-
+shot models will be for unseen databases. We also discuss how to
+address cases of workload drifts where the zero-shot models are
+expected to generalize less robustly. Furthermore, we also show
+that zero-shot models are widely applicable beyond cost models for
+query optimizers for single-node DBMSs which is the main focus
+of this paper. For instance, we believe that zero-shot cost models
+can be naturally extended to to distributed DBMS or even other use
+cases such as providing cost estimates for design advisors where
+the goal is to automatically find a suitable database design (e.g., a
+set of indexes) for a given workload.
+Finally, in our extensive experimental evaluation, we verify that
+zero-shot cost models generalize robustly to unseen databases and
+workloads while providing cost estimates which are more accurate
+than those of workload-driven models. As part of this evaluation,
+we also provide a new benchmark (beyond JOB) which is necessary
+to evaluate cost estimation models more broadly on a variety of
+(real-world) databases. We will make this benchmark including
+query executions for training cost models publicly available and
+hope that it will benefit future research in learned cost estimation
+and potentially beyond.
+Outline In Section 2, we give an overview of our approach and
+describe the model architecture in more detail in Section 3. We then
+derive formal methods to recognize when sufficient training data is
+available for the model to generalize in Section 4 and then discuss
+our extensions to show the broader applicability of zero-shot cost
+models in Section 5. Before discussing the evaluation in Section 7,
+we describe the design decisions for our proposed benchmark to
+evaluate cost models. Finally, we present related work (Section 8)
+and conclude in Section 9.
+2
+Overview
+In this section, we introduce the problem of zero-shot cost estima-
+tion and then present an overview of our approach.
+2.1
+Problem Statement
+The overall goal of zero-shot cost estimation is to predict query
+latencies (i.e., runtimes) on an unseen database without having ob-
+served any query on this unseen database. Throughout this paper
+we use the term database to refer to a particular dataset (i.e., a set
+of tables with a given data distribution). Note that the problem of
+zero-shot cost estimation is thus in sharp contrast to the problem
+addressed by state-of-the-art workload-driven cost models which
+train a model per database. Finally, while we believe that zero-shot
+learning for DBMSs is more generally applicable, we restrict our-
+selves in this paper to cost estimations for relational DBMSs (both
+single-node and distributed). In particular, zero-shot cost models
+for other types of systems such as graph-databases or streaming
+systems are interesting avenues of future work.
+2.2
+Our Approach
+A key challenge for developing zero-shot cost models is the question
+how to design a model that allows to generalize across databases.
+Here, we draw inspiration from the way classical cost models in
+DBMSs are designed. Typically, these consist of two models: a
+database-agnostic model to estimate the runtime cost and a database-
+dependent model (e.g., histograms) to capture data characteristics.
+When predicting the cost of a query, the estimated cardinalities
+and other characteristics (i.e., outputs of the database-dependent
+models) serve as input to the general database-agnostic cost model
+which captures the general system behavior (e.g., the costs of a
+sequential scan grows linearly w.r.t. the number of rows). While
+the classical models are lightweight, they often largely under- or
+overestimates the true costs of a query since models are too simple
+to capture complex interactions in the query plan and data.
+Hence, in our approach, we also separate concerns but use a
+much richer learned model which similarly takes data characteris-
+tics of the unseen database as input to predict query runtimes in
+a database-agnostic manner. As depicted in Figure 2 (upper part),
+for training such a zero-shot cost model we provide different query
+plans along with the runtime as well as the data characteristics of
+the plan (such as tuple width as well as intermediate cardinalities)
+to the zero-shot cost model. Once trained, the model can be used on
+unseen databases to predict the query runtime as shown in Figure 2
+(lower part).
+As mentioned before, to predict the runtime of a query plan on a
+new (unseen) database, we feed the query plan together with its data
+characteristics into a zero-shot model. While data characteristics
+such as the tuple width can be derived from the database catalogs,
+other characteristics such as intermediate cardinalities require more
+complex techniques. To derive intermediate cardinalities of a query
+plan in our approach we thus make use of data-driven learning
+[10, 32] that can provide exact estimates on a given database. Note
+that this does not contradict our main promise of zero-shot learning
+since data-driven models to capture data characteristics can be
+learned without queries as training data.
+
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+Join
+Scan T1
+Scan T2
+DB1
+DB2
+2100ms
+Join
+Scan T1
+420ms
+Join
+Scan T1
+Scan T2
+270ms
+Transferable Representation
+Training a Zero-Shot Cost Model
+(one-time-effort)
+Variety of Databases
+Queries and Runtimes
+Training
+Data
+annotate
+Data
+Characteristics
+...
+...
+DBx
+Data
+Characteristics
+Zero-Shot
+Cost Model
+Inference on Unseen Database
+(for every new database)
+Prediction
+Unseen Database and Query
+Figure 2: Overview of Zero-Shot Cost Estimation. The zero-
+shot cost model is trained once using a variety of queries and
+databases. At inference time, the model can then provide
+cost estimates for an unseen database and queries without
+requiring additional training queries. Enabling zero-shot
+cost estimation is based on two key ideas: (1) a new trans-
+ferable query representation and model architecture is used
+to enable cost predictions on unseen databases and (2) we
+separate concerns, i.e., a zero-shot model learns a general
+database-agnostic cost model which takes database-specific
+characteristics as input.
+Another core challenge of enabling zero-shot cost models that
+can estimate the runtime of a plan given its data characteristics is
+how to represent query plans which serve as input to the model.
+While along with workload-driven cost models, particular represen-
+tation methods for query plans have already been proposed, those
+are not applicable for zero-shot learning. The reason is that the
+representations are not transferable across databases. For instance,
+literals in filter predicates are provided as input to the model (e.g.,
+2021 for the predicate movie.production_year=2021). However,
+the selectivity of literals will vary largely per database since the
+data distribution will likely be different (e.g., there might not even
+exist movies produced in 2021 in the test database).
+Hence, as a second technique in this paper, we propose a new
+representation for queries that completely relies on features that
+can be derived from any database to allow the model to generalize
+to unseen databases. For example, predicates for filter operations
+in a query are encoded by the general predicate structure (e.g.,
+which data types and comparison operators are used in a predicate)
+instead of encoding the literals. In addition, data characteristics of
+a filter operator (e.g., input and output cardinality to express the
+selectivity) are provided as additional input to a zero-shot model.
+That way, a zero-shot model can learn the runtime overhead of
+a filter operation based on database-agnostic characteristics. We
+present details of our query representation in Section 3.
+Finally, a last important aspect of zero-shot cost models is that
+they can easily be extended to few-shot learning. Hence, instead
+of using the zero-shot model out-of-the box (which already can
+provide good performance), one can fine-tune the model with only
+a few training queries on an unseen database.
+3
+Zero-Shot Cost Models
+As mentioned in Section 2, a zero-shot cost model (once trained) is
+able to predict the runtime of a query on an entirely new database
+without retraining. A core building block needed to enable a zero-
+shot model is a new representation of queries that can generalize
+across databases. In the following, we thus first explain how we
+devised such a transferable query representation and then discuss
+how inference and training of a zero-shot model that uses this
+representation works.
+3.1
+Query Representation
+State-of-the-art workload-driven models [12, 28] for cost estimation
+do not use transferable query representations and can thus only be
+used on the database they were trained on. To better understand
+why current query representations are not transferable, we first
+explain how they typically encode queries.
+3.1.1
+Query Representation for Workload-Driven Models. At the
+core, query representations used for workload-driven approaches
+hard-code the model against a single database. For example, at-
+tribute names (e.g., those used in filter predicates) are typically
+encoded using a one-hot encoding assigning each attribute present
+in the database a specific position in a feature vector. For instance,
+the attribute production_year of the IMDB dataset might be en-
+coded using the vector (0, 1, 0) (assuming that there are only three
+attributes in total). If the same model should now be used to predict
+query costs for the SSB dataset, some attributes might not even
+exist or even worse they might exist but have very different data
+distributions or even a different data type. In fact, non-transferable
+feature encodings are not only used for attributes but in various
+places of the query representation such as encoding table names or
+literals in filter predicates.
+3.1.2
+Query Representation for Zero-Shot Cost Models. Hence, for
+zero-shot cost models we require a new query representation that
+is transferable across databases. The main idea of the transferable
+representation we suggest in this paper is shown in Figure 3. At
+the core, a query plan and the involved tables and attributes are
+represented using a graph where graph nodes use transferable
+features 1 (i.e., features that provide meaningful information to
+predict runtime on different databases). This representation then
+serves as input for the training and inference process of zero shot
+cost models 2 - 4 that we explain in the subsequent sections. In
+the following, we discuss the graph encoding of the transferable
+featurization in detail.
+Graph Encoding of Query Plans. While graph-based represen-
+tations have been already used to represent query operators of a
+query plan [28], our representation has significant differences. First,
+as shown in Figure 3 1 , our representation not only encodes phys-
+ical plan operators as nodes (gray) in the graph as in previous work
+[28], but it also covers all query plan information more holistically
+using different nodes types for attributes (green), tables (blue) as
+well as predicate information (red). Second, as discussed before,
+previous approaches also covered such information, however, they
+used one-hot-encodings (which are non-transferable) while our
+representation captures the query complexity in a transferable way.
+For instance, to encode filter predicates, different from previ-
+ous approaches we encode the predicate structure as nodes (red)
+
+Benjamin Hilprecht and Carsten Binnig
+Aggregate
+Hash Join
+Seq Scan
+Hash
+Seq Scan
+Table
+Table
+Attribute
+MIN(...)
+=
+Attribute
+Attribute
+Attribute
+SELECT MIN(t.production_year) FROM title t, movie_companies mc WHERE t.id=mc.movie_id AND mc.company_type_id=2;
+Graph Encoding with Transferable Features
+2100ms
+Message Passing
+Input Query
+1
+3
+4
+Node Encoding
+2
+Runtime Prediction
+Estimation MLP
+Initialize Hidden
+States using MLP
+per Node Type
+=
+features x8
+opname: scan
+cardout: 550k*
+width: 4
+*Input from Data-
+Driven Model
+features x1
+relpages: 21
+features x5
+data_type: integer
+features x7
+operator: =
+h13
+h11
+h8→h'8
+h10
+h9
+h'0
+h'1
+h'2
+h12
+h'6
+h'3
+h'4
+h'5
+h'7
+Combine Child Hidden
+States and propagate up e.g.,
+h'8=MLP'operator(h8⊕(h'1+h'7))
+Bottom-Up
+Message Passing
+title
+movie_companies
+0
+e.g., h8=MLPoperator(x8)
+=MLPoperator([0 1 550 4]),
+where opname=scan is
+encoded as [0 1]
+Input: Hidden State of Root
+Node (Captures entire Plan)
+Join Predicates
+Table Node with Transf.
+Features instead of One-
+Hot-Encoding
+Figure 3: Using Zero-Shot Models for Cost Estimation (i.e., for Inference) on a unseen Database. (1) A query is represented as a
+graph with different node types (to represent plan operators, predicates, tables, attributes etc.) and nodes are annotated with
+transferable features which generalize across databases. (2) Afterwards, the resulting feature vectors of the nodes are fed into
+node-type-specific Multi-Layer-Perceptrons (MLPs) to obtain a hidden state which is (3) propagated through the query-tree
+using bottom-up message passing to account for interactions among connected nodes. (4) Finally, the hidden state of the root
+node (encoding the entire graph) is fed into a final model — the estimation MLP — which predicts the query runtime.
+without literals. In particular, we encode information such as data
+types of the attributes and operators used for comparisons. For
+example, the filter predicate company_type_id=2 for the query 0
+in Figure 3, is encoded using an attribute node (𝑥5) with the com-
+parison node = (𝑥7). As such, a zero-shot cost model provided with
+the transferable features (e.g., intermediate cardinalities which are
+given by the data-driven models) can infer the complexity of the
+predicates to estimate the query runtime.
+Transferable Featurization. While our graph representation al-
+lows to flexibly encode query plans across databases, we similarly
+have to make sure that the features used to represent nodes in the
+graph 1 (e.g., plan operators as shown in gray) are transferable.
+In particular, when used on different databases, features should
+not encode any implicit information that hinder the transfer of the
+model to a new unseen database. The set of such features used for
+the different node types in our query representation is depicted
+in Table 1. For instance, attribute nodes (green) use features such
+as the data type or the width in bytes. Similarly, for tables (blue
+nodes), we use other transferable features (e.g., the number of rows
+as well as the number of pages on disk).
+Importantly, transferable features can either characterize the
+query plan (e.g., operator types) or represent the data characteris-
+tics (e.g., intermediate cardinalities) and together allow a zero-shot
+cost model to generalize to an unseen database. For transferable fea-
+tures that represent data characteristics many can be derived from
+the metadata of a database (such as the the number of rows of a
+table node). However, some other features that represent data char-
+acteristics — e.g., the estimated output cardinality of an operator
+node — require more involved techniques. In Section 3.4, we discuss
+alternatives of how we provide estimated output cardinalities to
+zero-shot cost models.
+3.2
+Inference on Zero-Shot Models
+Once a query graph with the transferable features on a unseen
+database is constructed for a query plan, it can be used as input for
+a (trained) zero-shot cost model to predict the runtime. Predicting
+the runtime of a new query plan with a zero-shot cost model is
+Node Type
+Feature
+Description
+Plan Operator
+cardout
+Estimated output cardinality of operator
+width
+Tuple width
+workers
+Number of parallel workers
+opname
+Name of physical operator
+card_prod
+Estimated product of children output cardinalities
+Predicate
+operator
+Operator type (e.g., =)
+literal_feat
+Feature capturing literal complexity, e.g., number
+of values for IN operator or regex complexity
+Table
+relpages
+Number of pages
+reltuples
+Number of rows
+Attribute
+width
+Avg. number of bytes to represent a value
+correlation
+Attribute correlation with row number
+data_type
+Data type of column
+ndistinct
+Number of distinct attribute values
+null_frac
+Fraction of NULL values
+Output Column
+aggregation
+Which aggregation type is used
+Table 1: Zero-Shot Features. All features are transferable and
+have the same semantics for different databases.
+executed in three steps which we depict as pseudocode in Algorithm
+1: First, we compute a hidden state for every node of the query graph
+2 given the node-wise input features. Second, the information of
+different graph nodes is combined using message passing 3 before
+a Multi-Layer-Perceptron (MLP) predicts the runtime of the query
+plan 4 . The same steps are also reflected in Figure 3 2 to 4 .
+In particular, in step 2 , the feature vectors 𝑥𝑣of each graph
+node 𝑣are encoded using a node-type specific MLP, i.e., nodes
+of the same type (e.g., all plan operators) use the same MLP to
+initialize their hidden state ℎ𝑣(line 5). For instance, in Figure 3, the
+hidden state ℎ8 of the node representing the sequential scan on the
+movie_companies table is obtained by feeding the feature vector
+𝑥8 (containing transferable features) into an MLP which is shared
+among all plan operators (gray nodes).
+Afterwards, in step 3 , a message passing scheme is applied
+which is prominently used in graph neural networks (GNNs) [6]
+to model the interactions between nodes in graphs (i.e., to cap-
+ture interactions of query operators in the plan such as effects
+of a pipelined query execution). Different from message passing
+schemes for general graph encodings, for the message passing in
+zero-shot models we can exploit the fact that queries can be rep-
+resented as directed acyclic graphs (DAGs) since query-plans are
+tree-structured. We thus use a novel bottom-up message passing
+
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+Algorithm 1 Inference on Zero-Shot Models
+1: Input: Query graph encoding with nodes 𝑣and input features 𝑥𝑣
+2: Output: Cost estimate ˆ𝑐
+3:
+4: for 𝑣∈graph encoding do
+⊲Compute hidden state per node 2
+5:
+ℎ𝑣←MLP𝑇(𝑣) (𝑥𝑣)
+6: for 𝑣∈in topological ordering do
+⊲Bottom-up pass in graph 3
+7:
+ℎ′𝑣←𝑀𝐿𝑃′
+𝑇(𝑣)
+Í
+𝑢∈children(v) ℎ′𝑢⊕ℎ𝑣
+
+8: ˆ𝑐←𝑀𝐿𝑃est (ℎ′𝑟)
+⊲Estimate costs using root node state 4
+9: return ˆ𝑐
+scheme through the graph (i.e., in topological ordering) to obtain
+an updated hidden state ℎ′𝑣of a node 𝑣that contains all information
+of the child nodes. During this pass, the updated hidden states ℎ′𝑢of
+the children 𝑢are combined by summation [33] and concatenated
+with the initial hidden state ℎ𝑣of a node and fed into a node-type-
+specific MLP (line 7). For instance, in Figure 3, the updated hidden
+state ℎ′
+8 of the scan node is obtained by summing up the updated
+hidden states of the child nodes (representing the table and predi-
+cate operator of the scan) concatenated with the initial hidden state
+(capturing properties of the scan) which is then fed into an MLP
+which is again shared among all plan operators.
+Finally, as a result of step 3 the updated hidden state ℎ′𝑟of
+the root node 𝑟of a query plan captures the properties of the
+entire query. For the cost prediction in step 4 , we thus feed this
+hidden state into a final estimation MLP to obtain the cost estimate
+ˆ𝑐= 𝑀𝐿𝑃est (ℎ𝑟) (line 8). Hence, in Figure 3 4 , the updated hidden
+state ℎ′
+13 is fed into the final estimation MLP to obtain the cost
+estimate since it captures information of the entire plan.
+3.3
+Training Zero-Shot Models
+As mentioned before, a zero-shot cost model is trained on several
+databases and queries to learn the runtime complexity of query
+plans given the input features. To be more precise, a zero-shot
+cost model is trained in a supervised fashion using pairs (𝑃,𝑐) that
+consists of a plan 𝑃with the respective features and the actual
+runtime cost 𝑐. Importantly, all steps described in the inference
+procedure (node encoding, message passing and finally runtime
+estimation) are differentiable, which allows us to train the model
+parameters of the MLPs used for all zero-shot model components
+jointly in an end-to-end fashion. As loss function to compare the
+actual costs 𝑐of a featurized query plan 𝑃with the estimated costs
+ˆ𝑐, we use the Q-error loss max( 𝑐
+ˆ𝑐, ˆ𝑐
+𝑐) [12, 28] since this worked best
+for zero-shot models compared to other alternatives.
+3.4
+Deriving Data Characteristics
+As discussed before, an important aspect of a zero-shot model is
+that the model is not tied to a particular data distribution of a single
+database. For enabling this, we provide data characteristics such
+as attribute widths in bytes, number of pages and tuples of tables
+but also output cardinalities of operators as input to those models.
+To be more precise, given a particular query plan for which the
+runtime should be estimated, those features have to be annotated
+for each graph node in the query encoding.
+While the majority of those features can simply be derived from
+the database catalog, intermediate cardinalities in a query plan are
+notoriously hard to predict and simple statistics are known to be
+Zero-Shot
+Compatible
+Accurate
+Estimates
+Training Over-
+head
+Arbitrary
+Queries
+Traditional
+✓
+No
+✓
+Workload-Driven
+✓
+High
+Data-Driven
+✓
+✓
+Low
+Table 2: Trade-offs of different Cardinality estimators used
+with Zero-shot Models. Data-driven models are a promising
+choice offering low overhead and high accuracy.
+often imprecise [15]. Hence, learned approaches to tackle cardinal-
+ity estimation have been proposed to derive accurate intermediate
+cardinalities. While in principle such learned approaches can be
+used to predict intermediate cardinalities which are then used as
+input for the zero-shot models, there are important trade-offs when
+choosing which techniques are suitable for zero-shot learning (cf.
+Table 2). In the following, we discuss these aspects.
+First, a zero-shot cost model should be able to predict query run-
+times on databases that were not seen before without relying on an
+observed workload on that database. Since workload-driven models
+for cardinality estimation require such queries as training data,
+they are not suited for our purpose of predicting cardinalities for
+zero-shot models. Second, traditional histogram-based approaches
+have the advantage that no additional efforts are required since
+the query optimizers anyway have built-in techniques. However,
+they are often imprecise. Third, data-driven models are more pre-
+cise but also need to be trained. However, the training does not
+rely on query executions and is thus usually just in the order of
+minutes. Unfortunately, state-of-the-art data-driven cardinality es-
+timators do not yet support the same variety of different queries as
+traditional approaches.
+Depending on whether the effort to train a data-driven model
+for an unseen database is acceptable and the workload is supported,
+one can either opt for traditional approaches or data-driven models.
+Hence, we propose to use zero-shot models with data-driven cardi-
+nality models if possible and use optimizer cardinality estimates
+only as a fallback. In our evaluation, we see that zero-shot models
+can still produce reasonable estimates even if only cardinalities
+estimates from traditional models are available.
+4
+Robustness of Zero-Shot Models
+An important question for zero-shot models is at which point a
+sufficient amount of different training databases (and workloads)
+was observed to generalize robustly to unseen databases. To answer
+this question, we first derive a method to estimate how robust the
+runtime estimates of zero-shot models will be for unseen databases.
+We then discuss a simple method to detect cases of workload drifts
+(i.e., the queries at runtime have substantially different characteris-
+tics than the training queries) as well as strategies how to tackle
+this problem.
+4.1
+Estimating the Generalization Performance
+We first formalize the problem, before we derive a method to esti-
+mate the generalization error. For training a zero-shot model, we
+have observed 𝑛databases and workloads. In particular, for each of
+the databases 𝐷𝑖we have access to training data 𝑇𝑖in the form of
+query plans and their runtimes𝑇𝑖= {(𝑃1,𝑐1), (𝑃2,𝑐2), . . . (𝑃𝑚,𝑐𝑚)}.
+We are now interested in how accurately the zero-shot cost model 𝑍
+
+Benjamin Hilprecht and Carsten Binnig
+will predict the runtimes for plans 𝑇∗on some unseen database 𝐷∗.
+In particular, if the expected error is acceptable, we have observed
+a sufficient amount of databases and workloads. More formally, we
+will define some error metric 𝐸(𝑇𝑖) with which we can compare
+the true runtimes and model predictions for some database 𝐷𝑖. An
+example for such a metric could be the prominently used median
+Q-error. We are now interested in estimating this error metric for
+an unseen database 𝐸(𝑇∗), i.e., the expected generalization error.
+We now make use of statistical techniques to estimate the gener-
+alization error. For instance, in ML it is standard practice to train the
+model on a subset of the data and then use the remaining samples
+to estimate the error for future unseen datasets. Analogously, we
+can train the zero-shot model on a subset of the training databases
+𝑇1,𝑇2, . . . ,𝑇𝑖(i.e., for a subset of databases) and evaluate the trained
+model on the remaining databases 𝑇𝑖+1, . . . ,𝑇𝑛. Similar to cross
+validation, we can repeat this procedure with different splits and
+average the test errors to estimate the generalization error 𝐸(𝑇∗),
+i.e., how accurate the model is expected to be on an unseen data-
+base. Interestingly, this is an unbiased estimator of the test error
+𝐸(𝑇∗) under the independent identically distributed (i.i.d.) assump-
+tion which we will discuss shortly. Hence, using only the observed
+databases and queries, we can estimate how accurate the model
+predictions for unseen databases will be.
+In order to now evaluate whether the model has observed a
+sufficient amount of databases and workloads, we can use two tech-
+niques. First, we can simply estimate the generalization error as
+described above and stop the training if it is sufficient. However, in
+this case we have to decide which generalization error is accept-
+able. A second technique (which we actually use in this paper) is to
+estimate if additional training databases will improve the general-
+ization performance. For this, we train the model on subsets of all
+training databases. If the estimated generalization error 𝐸(𝑇∗) does
+not improve significantly for a larger number of training databases,
+we can conclude that additional databases will not improve the
+generalization capabilities of the zero-shot cost model and thus
+stop the training data collection.
+4.2
+Tackling Workload Drifts
+The performance of zero-shot cost models will deteriorate if the new
+database and workload is significantly different from the training
+data. For instance, if there are significantly larger joins in the unseen
+database than for the training databases, the zero-shot model might
+not be able to predict the runtime with the same high accuracy. As
+we will show in our experimental evaluation, however, zero-shot
+cost models can often still generalize robustly in practice and can
+provide more accurate estimates than other baselines in case of
+workload drifts. In addition, we suggest a strategy to detect cases of
+workload drifts by monitoring the test error and propose to tackle
+workload-drifts using few-shot learning.
+Note that in cases of workload drifts the i.i.d. assumption does not
+hold and the Q-error on the unseen database is larger than implied
+by the generalization error. More technically, the i.i.d. assumption is
+a common assumption in ML that requires that the training datasets
+and test datasets are independent samples of some distribution D.
+Due to a workload drift, the samples are no longer independent and
+thus the generalization error 𝐸(𝑇∗) might be increased. A simple
+Broadcast
+Hash
+Seq Scan
+Hash Join
+Distribute
+Seq Scan
+Table
+Table
+...
+Operator Nodes:
+represent Network
+Distribution 
+Scanned Column
+Scanned Column
+Nodes: account for
+Columnar Storage
+Scanned Column
+Figure 4: Extension of Zero-shot Models to Distributed
+Cloud Data Warehouses. The columnar storage is accounted
+for by adding only nodes representing scanned columns
+to the graph whereas network shuffle operations (such as
+broadcast, partition by key etc.) required for distributed join
+execution are represented as physical plan nodes.
+yet effective strategy to recognize those cases is thus to monitor
+the error for unseen databases during inference. In cases where the
+error exceeds a certain threshold, one could decide to fine-tune the
+zero-shot model using the additional observed queries as training
+data (resulting in few-shot models). We will demonstrate in the
+experimental evaluation that zero-shot cost models fine-tuned on a
+small number of additional queries can significantly improve the
+accuracy on the unseen database in such cases.
+5
+Extensions of Zero-Shot Cost Models
+We now describe how zero-shot cost estimation can be extended in
+various directions.
+5.1
+Distributed DBMSs
+While the zero-shot cost models we discussed so far are centered
+around single-node DBMSs, we argue that zero-shot models can
+also be adapted to other types of DBMS. An important class of
+DBMSs are distributed DBMSs that are often found in the cloud to
+support scalable data processing. To show the general feasibility, we
+now discuss some concrete extension of our approach to support a
+(commercial) cloud DBMS for OLAP . Overall, we think that this
+demonstrates the potential of our approach to be adapted to new
+domains with the zero-shot paradigm in mind.
+For supporting zero-shot cost estimates on the concrete cloud
+DBMS we used, two extensions were needed: First, as mentioned
+before, cloud DBMSs are typically distributed and thus frequently
+shuffle the data during query execution (e.g., for distributed join
+processing). Second, independent of the fact that the processing is
+distributed there are often other optimizations to reduce the query
+execution costs of reading large amounts of data such as using a
+column store layout instead of a row store layout.
+To support these two aspects in zero-shot cost models, we ex-
+tended the encoding of queries which serves as input to the zero-
+shot model as depicted in Figure 4. In particular, we included opera-
+tor nodes for data shuffling as well as encode data formats (column
+or row) as a feature of the table node.
+5.2
+Physical Design Tuning
+Another interesting direction is to use these models to estimate
+the runtime of query workloads for different (potential) physical
+designs. This is helpful to automate physical design tuning which
+needs to enumerate different alternative designs and estimate which
+
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+design to pick based on cost estimates (representing the runtime of
+a workload on a unseen physical design).
+To show that zero-shot cost models support this, we extended the
+zero-cost models to be able to predict the runtime for queries with
+and without certain indexes on an unseen database. For this, the
+query representation was extended such that the model can learn
+the trade-offs between different operations (e.g., how expensive a
+sequential scan is vs. an index scan). Moreover, when training a
+zero-shot cost model, the training databases should include tables
+with and without indexes such that the model can learn how the
+cost for these two cases differ based on data characteristics.
+In our experimental evaluation, we show that the zero-shot cost
+models can thus generalize robustly to unseen physical designs
+(i.e., to estimate the cost of a query with and without an index).
+However, there is clearly more to be done. For example, it could
+be beneficial to also introduce additional (transferable) features to
+capture other aspects of a physical designs (such as the expected
+height of indexes) or even support other options of physical designs
+(e.g., materialized views) in zero-cost models.
+5.3
+Other Directions
+We believe that many more aspects such as hardware parameters
+(e.g., amount of available memory) and database knob configura-
+tions could be captured using zero-shot models. Since those features
+are naturally transferable, e.g., knobs such as buffer sizes carry the
+same semantics across databases, an extension of our models will be
+possible. That way zero-shot models could inform also automated
+knob tuning. However, while all these directions are interesting,
+they are beyond the scope of this paper and represent avenues of
+future work.
+6
+A New Benchmark
+In order to properly train and evaluate cost models, we require
+both a diverse set of databases and executed workloads on these
+databases. Since currently there is no suitable benchmark with such
+properties, we created a new benchmark (that includes existing
+benchmarks such as JOB) which we discuss in this section. Fur-
+thermore, we will make this benchmark publicly available to foster
+future research in this area.
+6.1
+Design Decisions
+For many years, DBMS systems were evaluated using synthetic
+benchmarks such as TPC-H [1], TPC-DS [24] or SSB [25]. While
+such benchmarks allow to evaluate the general system performance
+and scalability, they are in isolation insufficient to evaluate cost
+prediction models since the predicted cardinalities of the query op-
+timizer are significantly more accurate than in practice. The reason
+is that the data is synthetic and thus no interesting correlations
+have to be captured making cardinality estimation challenging in
+practice. Hence, Leis et al. [15] suggested the JOB-workload on the
+IMDB dataset that comes with challenging correlations and has
+become the standard method (along with the simplified JOB-light
+workload [12]) to evaluate learned cost and cardinality estimation
+approaches.
+While the IMDB benchmark is useful to evaluate workload-
+driven cost estimators that need to work on a single database only,
+it cannot be used for the evaluation of zero-shot cost models since
+these have to be trained on a variety of different databases. More-
+over, even for workload-driven cost estimators a benchmark that
+spans a more diverse set of databases would definitively be helpful
+to evaluate the prediction quality. Hence, we decided to create a
+new benchmark that covers established datasets such as IMDB but
+also additional datasets that have other characteristics.
+6.2
+Datasets
+As discussed before, it is insufficient to just add synthetic datasets
+since correlations hardly resemble data distributions found in the
+real-world. We thus decided to leverage publicly available real-
+world datasets [23] together with the datasets used in established
+benchmarks such as JOB. Since certain database were very small in
+size, we additionally scaled them to larger sizes to be interesting
+for cost estimation (s.t. a sample of queries takes a predefined
+threshold of time). In addition to the datasets mentioned before, we
+also included standard benchmarks such as SSB and TPC-H to the
+benchmark. As these benchmarks rely on synthetic data, this further
+increases the variety of data characteristics our benchmark covers
+for testing learned cardinality estimators. Overall, the benchmark
+comprises of 20 databases that vary largely in the number of tables,
+columns and foreign-key relationships.
+6.3
+Workloads and Traces
+Furthermore, for benchmarking learned cost models, workloads
+are required for training and testing. To simplify the comparison
+with prior work we first include predefined benchmark queries
+for databases that come with such workloads (e.g., JOB for IMDB).
+However, since for the majority of the databases mentioned before
+no workloads are available, we implemented a workload generator
+that generates different types of queries. For creating the work-
+load, the generator supports three modes: a standard mode where
+Select-Project-Aggregate-Join (SPAJ) queries with conjunctive pred-
+icates on numeric and categorical columns similar to the ones used
+by Kipf et al. [12] are generated, a more complex mode which in-
+cludes predicates involving disjunctions, string comparisons with
+regex predicates, IS (NOT) NULL comparisons and IN operators
+(resembling the complexity of the JOB-workload) and finally an
+index workload where random indexes (both foreign key and for
+predicate columns) are created throughout the execution of the
+standard workload which is challenging due to the varying physi-
+cal designs. Since the benchmark will be publicly available it can
+be easily extended to support an even broader class of queries in
+the future.
+In addition to the datasets and the workload generator, the bench-
+mark comes with workload traces (e.g., executions of the queries
+and their runtime) for all 20 databases that can be used directly by
+other researchers as training / testing data (which we also used in
+our evaluation). To be more precise, we generated 15, 000 queries
+per database and executed those queries on a Postgres DBMS (v12)
+on c8220 nodes on the cloudlab platform. Overall, this also al-
+lows for a better reproducibility since this platform can be used by
+other researchers as well. To limit the already excessive resource
+consumption required to produce this trace, we excluded queries
+running longer than 30 seconds from the benchmark. In total, the
+execution of these more than 300k queries takes 10 days if executed
+on a single node. As part of the traces, we not only provide the
+
+Benjamin Hilprecht and Carsten Binnig
+Accidents
+Airline
+Baseball
+Basketball
+Carcinogenesis
+Consumer
+Credit
+Employee
+Fhnk
+Financial
+Geneea
+Genome
+Hepatitis
+IMDB
+Movielens
+SSB
+Seznam
+TPC-H
+Tournament
+Walmart
+0
+2
+4
+6
+8
+Median Q-Error
+Scaled Optimizer Costs (Postgres)
+Zero-Shot
+(DeepDB Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+Figure 5: Zero-Shot Generalization across Databases. The
+zero-shot models are trained using workloads on 19/20
+databases and tested on the remaining unseen database.
+Overall, zero-shot models are significantly more accurate
+than the scaled estimates of the optimizer cost model.
+runtime of the query but also the physical plan used to run the
+query along with actual cardinalities.
+7
+Experimental Evaluation
+In this Section, we evaluate zero-shot cost estimation with a set of
+different experiments:
+• Exp 1. Zero-Shot Accuracy. We evaluate how accurately
+zero-shot cost models can predict costs for unseen databases.
+• Exp 2. Zero-Shot vs. Workload-Driven. In addition, we
+compare the training overhead and accuracy with state-of-
+the-art workload driven approaches.
+• Exp 3. Generalization. In this experiment, we study how
+our models generalize under workload drifts (i.e., under data-
+base updates and larger unseen joins).
+• Exp 4. Extensions. We then study the broad applicability
+of zero-shot cost models beyond single-node cost estimation
+(i.e., for distributed DBMSs and different physical designs).
+• Exp 5. Training and Inference Performance. Further-
+more, we evaluate the training and inference performance
+of zero-shot cost models and compare training efforts to
+workload-driven models.
+• Exp 6. Ablation Study. Finally, we show the effects of dif-
+ferent design alternatives of zero-shot models as well as a
+study where we determine how many database are sufficient
+for zero-shot cost models to generalize.
+For all experiments, we use the traces of the benchmark discussed
+before (for training and testing).
+7.1
+Exp 1: Zero-Shot Accuracy
+First, in order to evaluate the accuracy of zero-shot cost models,
+we trained a zero-shot model using workloads on 19 out of the
+20 datasets of the benchmark as training data and evaluated the
+model on the workload of the unseen (remaining) database. In
+particular, we use the trained model to predict the runtimes of the
+queries on the unseen database and report the median Q-error. In
+the first experiment, we focus on the standard workloads and defer
+the results of the complex and index workloads of our benchmark
+to follow-up experiments. For this experiment, we repeat the cost
+estimation for every unseen database with three runs using different
+seeds
+For showing the performance of zero-shot cost models on unseen
+databases, we used two variants of providing intermediate cardinal-
+ities - we either used predictions of learned cardinality estimators
+or the actual cardinalities which are not available in practice prior
+to execution but serve as an interesting upper baseline for zero-shot
+learning (i.e., how accurate the predictions become with perfect
+cardinality estimates). For the data-driven cardinality estimator, we
+trained DeepDB [10] models, which worked best in preliminary
+experiments.
+To the best of our knowledge, we are the first to propose zero-
+shot cost estimation and thus no other learned approaches are
+included as a direct baseline in this first experiment where we
+aim to analyze the accuracy on unseen databases. For instance,
+workload-driven approaches would need query executions on the
+unseen database which we do not provide in the zero-shot setting.
+However, we compare our approach with workload-driven models
+in Section 7.2.
+As a sanity check that zero-shot models provide better perfor-
+mance than classical cost estimation models that rely on simple
+(non-learned) techniques (and as such could also count as zero-shot
+cost models), we use cost estimates coming from the Postgres query
+optimizer as a baseline similar to previous work [28]. Moreover, for
+the distributed setup we later on also employ the cost estimates
+of a commercial cloud DBMS. Since Postgres cost estimates are
+provided as abstract cost units, we use a simple linear model on
+top of Postgres estimates (and hence the results are called Scaled
+Optimizer) which provides actual query runtimes. Different from
+[28] which directly take the cost units as runtime (in ms), using a
+linear model on top results in a much lower Q-error for Postgres.
+For training the simple linear model we are using the same training
+data from the other 19 databases as for zero-shot models to be fair.
+The results can be seen in Figure 5. In general, the zero-shot
+models offer robust performances for all of the databases despite
+the varying complexity. In fact, all median Q-errors are below 1.54
+for the version using DeepDB cardinality estimates (vs. 8.62 in
+the worst case for the Scaled Optimizer cost). Finally, we can see
+that zero-shot cost models using DeepDB cardinalities are almost
+matching the performance with perfect cardinalities. This suggests
+that the models can cope with partially inaccurate cardinalities.
+Indeed, as we will see in a follow-up experiment, this even holds
+when we use potentially inaccurate cardinality estimates coming
+from a classical the optimizer instead.
+Overall, we can see that the zero-shot cost models are signifi-
+cantly more accurate than the scaled optimizer estimates outper-
+forming these on 18 out of 19 datasets and being on par for the
+last remaining dataset (Airline). The reason is that zero-shot cost
+models capture subtleties in operator performance and interactions
+of operators in the plan more accurately than simplistic cost models.
+The results are just on par for the remaining database since the
+optimizer costs are relatively accurate because it is merely a star
+schema, i.e., a relatively simple schema structure.
+7.2
+Exp 2: Zero-Shot vs. Workload-Driven
+In the following, we contrast the performance of zero-shot cost
+models with workload-driven approaches.
+
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+102
+103
+104
+1.25
+1.50
+2.00
+3.00
+Q-Error (Median)
+Scale
+102
+103
+104
+1.25
+1.50
+2.00
+3.00
+Synthetic
+102
+103
+104
+1.25
+1.50
+2.00
+3.00
+JOB-light
+102
+103
+104
+2.00
+5.00
+10.00
+15.00
+Q-Error (p95)
+102
+103
+104
+2.00
+5.00
+10.00
+15.00
+102
+103
+104
+2.00
+5.00
+10.00
+15.00
+102
+103
+104
+Training Queries
+0
+25
+50
+Execution Time (h)
+Scaled Optimizer Costs (Postgres)
+MSCN (Workload-Driven)
+E2E (Workload-Driven)
+Zero-Shot (DeepDB Est. Cardinalities)
+Zero-Shot (Exact Cardinalities)
+Few-Shot (DeepDB Est. Cardinalities)
+Few-Shot (Exact Cardinalities)
+Figure 6: Estimation Errors of Workload-Driven Models for
+a varying Number of Training Queries compared with Zero-
+Shot Cost Models. Even the most accurate workload-driven
+model (E2E) requires approximately 50k query executions
+on an unseen database for a comparable performance with
+zero-shot models which is roughly equivalent to 66 hours of
+executed workload. Since zero-shot models do not require
+any additional queries it is significantly cheaper to deploy
+them for a new database. However, zero-shot models can
+be fine-tuned to obtain few-shot models which further im-
+prove the accuracy.
+Training Overhead. An interesting question is how many training
+queries are required for workload-driven learning on an unseen
+database to match the performance of zero-shot learning which we
+will study next. In particular, in this experiment we evaluate the Q-
+errors for the standard workloads (scale, synthetic, and JOB-light)
+on the IMDB database. As before zero-shot models are not trained
+on IMDB at all (but on the other 19 databases) while workload-
+driven models are trained on a varying number of training queries
+on IMDB.
+For the workload-driven approaches we use the E2E model pro-
+posed by Sun and Li [28] as well as the MSCN model by Kipf et al.
+[12]. The idea of the E2E models is to featurize the physical query
+plans and feed them into a neural model to predict the runtime.
+However, in contrast to zero-shot cost models the query plan rep-
+resentation is not transferable and thus the train and test databases
+have to be identical. The MSCN model which was initially developed
+for cardinality estimation uses a more high level representation and
+encodes the sets of joins, predicates and tables of a query which are
+then fed into a neural architecture which is thus oblivious of the
+physical plans used. Both models are trained on a varying number
+of training queries which are generated for the IMDB dataset similar
+to the original training setup used by Sun and Li [28]. Furthermore,
+as a last baseline, we again employ the scaled costs of the Postgres
+query optimizer.
+In Figure 6, we depict the median Q-error of comparing our
+zero-shot performance to the baselines as discussed before for the
+IMDB benchmark workloads for a varying number of training
+queries. As we can see the zero-shot cost models can estimate
+the runtimes accurately even though queries on the IMDB dataset
+102
+103
+104
+Number of Training Queries
+1.25
+1.50
+2.00
+4.00
+Median Q-Error
+Scaled Optimizer Costs (Postgres)
+E2E (Workload-Driven)
+Zero-Shot
+(Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+Few-Shot
+(Est. Cardinalities)
+Few-Shot
+(Exact Cardinalities)
+Figure 7: JOB-Full Workload. Zero-shot models are signifi-
+cantly more accurate than the workload-driven model (E2E)
+and the scaled optimizer estimates even for the complex JOB
+benchmark. Again few-shot learning can further improve
+the performance of zero-shot models.
+were not observed in the training data. In particular, E2E requires
+about 50k training queries on the IMDB database to be on-par with
+zero-shot cost models. As we can see in the lower right plot in
+Figure 6 this amount of queries takes approximately 66 hours to
+run which is a significant effort given that it has to be repeated
+for every new database. Another interesting comparison is to use
+the training queries also to fine-tune the zero-shot models on the
+IMDB database; i.e., we use zero-shot models in the few-shot mode
+discussed in the paper. As we can see, few-shot cost models that
+are fine-tuned on the IMDB database can further improve the cost
+estimation accuracy of zero-shot models. It is thus beneficial to
+also leverage fine-tuning in case training queries for the unseen
+database are available.
+Finally, we can see that the MSCN models are not equally accu-
+rate which is likely due to the fact that they do not consider the
+physical plan that was run to execute a given query. Still, all learned
+approaches are more accurate than the scaled optimizer in the me-
+dian after only a few queries. Furthermore, we can observe that
+zero-shot and few-shot cost models not only outperform workload-
+driven models in the median but also in the tail performance, i.e.,
+on the 95th percentile Q-error. We can observe similar effects for
+the maximum Q-error.
+Complex Queries. In this experiment, we next focus on the perfor-
+mance for complex queries. For this, we again train on 19 datasets
+and test on the IMDB database (this time using the complex bench-
+mark queries) using the JOB-Full benchmark which (different from
+the other workloads on IMDB) contains also queries with a higher
+number of joins and more complex predicates including pattern-
+matching queries on strings. Note that data-driven models do not
+support complex predicates and we thus resort to the cardinality
+estimates of the query optimizer (Postgres) to inform the zero-shot
+model. As baselines, we again compare to the scaled optimizer costs
+and E2E which in contrast to MSCN supports complex predicates.
+To be fair, we use training queries with complex predicates on
+IMDB for the workload-driven models. In addition, we also report
+the accuracy of zero-shot models fine-tuned on the IMDB database
+using the few-shot learning.
+As we can see in Figure 7, again zero-shot models outperform
+the other approaches. In particular, even the version using just
+optimizer cardinality estimates is more accurate than E2E using
+50𝑘queries which emphasizes that zero-shot cost models are ro-
+bust w.r.t. imprecise cardinality estimates. The E2E models in this
+case need 50𝑘queries just to match the performance of the scaled
+optimizer costs which is inferior to the previous experiment with a
+
+Benjamin Hilprecht and Carsten Binnig
+100%
+200%
+400%
+800%
+Database Size After Updates
+2
+4
+Median Q-Error
+(Synthetic)
+Scaled Optimizer Costs (Postgres)
+MSCN (Workload-Driven)
+E2E (Workload-Driven)
+Zero-Shot
+(DeepDB Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+Figure 8: Zero-Shot Models are robust w.r.t. Updates. With-
+out any retraining we do not see regressions in cost es-
+timation accuracy even for massive update rates. In con-
+trast, workload-driven models require additional training
+queries.
+Small
+Joins
++50
+Large
++100
+Large
++1k
+Large
+Full
+Training Data
+1.0
+1.5
+2.0
+2.5
+Q-Errors
+Train on 0-2 Way/
+Test on 3+ Way Joins
+Small
+Joins
++50
+Large
++100
+Large
++1k
+Large
+Full
+Training Data
+1.0
+1.5
+2.0
+Q-Errors
+Train on 0-3 Way/
+Test on 4+ Way Joins
+Figure 9: Zero-shot cost models generalize robustly to larger
+Joins. Compared to zero-shot models trained also on larger
+joins (Full), the zero-shot models trained only on smaller
+joins (Small Joins) have only minor regressions in accuracy.
+In addition, fine-tuning the zero-shot cost models on a low
+number of additional queries with larger joins (resulting in
+few-shot models) further improves the performance.
+lower query complexity. The reason is that the E2E model has to
+learn the data distribution of strings as well and support complex
+predicates including wildcards while only observing queries. We
+hope that in future, data-driven models support string predicates
+and disjunctions as well to be used in conjunction with zero-shot
+cost models also for complex queries. Similar to the previous ex-
+periment, few-shot learning can further improve the accuracy.
+7.3
+Exp 3: Generalization
+In this experiment, we investigate how robustly zero-shot cost
+models react to changes in the data characteristics and workload.
+Generalization to Updates. For the first aspect, we analyze the
+effects of updates on the accuracy of cost estimation. For this, we
+only train on a fraction of the full data and then update the database
+(without retraining the prediction models). After the update of the
+database, we then predicted the query runtimes using zero-shot
+cost models as well as the other baselines (workload-driven models
+and the scaled optimizer). Note, that workload-driven models are
+expected to result in inferior performance for a higher fraction
+of updates since they cannot capture database updates without
+collecting new training data. This is very different from zero-shot
+models that get informed by data-driven models that can thus adjust
+to data updates without the need to retrain. In particular, the data-
+driven models from DeepDB [10] as well as classical statistics such
+as histograms that are compatible with zero-shot cost models are
+directly updateable with low overhead and hence can provide also
+accurate estimates after the update.
+We depicted the results in Figure 8. As we can see, there is al-
+most no performance degradation for the zero-shot cost models
+Scale
+Synthetic
+JOB-light
+Scaled Optimizer Costs (Cloud DW)
+3.90
+4.64
+4.31
+Zero-Shot (DeepDB Est. Cardinalities)
+2.06
+1.74
+1.91
+Zero-Shot (Exact Cardinalities)
+1.78
+1.56
+1.59
+Table 3: Q-errors for IMDB benchmarks on a commercial dis-
+tributed cloud data warehouse.
+with a higher update fraction. Note that we did not retrain the
+zero-shot cost models at all to achieve the performance but simply
+relied on the ability to generalize to different data characteristics.
+In contrast, for workload-driven models we observe a performance
+degradation since those models would require additional training
+queries on the updated database to be adapted. The reason is that
+the models also internalize the data distribution (i.e., table sizes
+and correlations) implicitly during the training and can only be in-
+formed about changes by observing additional query runtimes. This
+is especially problematic for more update-heavy workloads were
+frequently additional training queries have to be run to update the
+models. Note that the scaled optimizer costs do not experience such
+a degradation but are again less accurate than zero-shot models.
+Generalization to Workload Drifts. In this experiment, we investi-
+gate how zero-shot models react to workload drifts, in particular to
+larger joins that appear after training a cost prediction model. To
+this end, we trained the zero-shot models using only queries with
+up to 2 or 3-way joins on the 19 training datasets and evaluate the
+model using 3-way or 4-way joins (or larger) on the IMDB dataset,
+respectively. Since we suggest to address workload-drifts using
+few-shot learning, we also introduce variants that are fine-tuned
+on a small amount of large joins on the IMDB database. As we can
+see in Figure 9, the performance of the model with a training set
+constrained to small joins does not degrade heavily compared to
+the model that was also trained on larger joins on the remaining 19
+datasets (Full) indicating a robust generalization to larger joins. In
+addition, few-shot models fine-tuned on a small amount of larger
+joins (≈50) observed on the IMDB dataset is sufficient to achieve
+the same median Q-error. An even larger amount of retraining
+queries allows to outperform the original zero-shot model which
+is consistent with previous experiments showing that few-shot
+learning further improves the accuracy.
+7.4
+Exp 4: Extensions
+We now investigate how zero-shot models can be extended to sup-
+port distributed DBMSs and different physical designs.
+Distributed DBMSs. In this experiment, we executed the standard
+queries on a commercial cloud DBMS and use the models to predict
+query runtimes of the IMDB benchmarks on this system. To this
+end, we adapted our zero-shot model architecture as described in
+Section 5.1 and compare it with the scaled cost estimates of the in-
+ternal query optimizer of the system. To the best of our knowledge,
+workload-driven approaches for cost estimation do not support
+distributed DBMSs as of today which is why we could not employ
+them as a baseline. The results are given in Table 3. As we can
+see, zero-shot cost models are already able to outperform the cost
+estimates of the internal query optimizer of the DBMS. We believe
+that with more targeted features, the performance could even be
+improved further.
+Physical Designs. Second, we investigate how robustly zero-shot
+cost models generalize to unseen physical designs - in particular
+
+Zero-Shot Cost Models for
+Out-of-the-box Learned Cost Prediction
+5
+10
+15
+20
+Number of Databases
+250k
+500k
+750k
+1M
+Training
+Queries
+E2E (Workload-Driven)
+Zero-Shot
+(a) Required Training Queries.
+Training
+Inference
+0
+1000
+Throughput
+(Plans/sec)
+MSCN (Workload-Driven)
+E2E (Workload-Driven)
+Zero-Shot
+(DeepDB Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+(b) Train and Test Throughput.
+Figure 10: Training and Inference and Performance. Even
+though zero-shot models generalize across databases they
+almost match the inference and training throughput of
+the most accurate workload-driven alternative (E2E) and
+quickly amortize in terms of required training queries.
+using an unseen set of indexes. We again train the zero-shot cost
+model on 19 databases and evaluate it using the IMDB database
+where this time indexes are created during the execution of the
+training workload. For training, we use index workloads of our
+benchmark that involves query executions using indexes on the
+other 19 databases. On the IMDB database with different indexes, we
+observed median Q-errors of 1.21, 1.28 and 1.34 using the zero-shot
+variants using exact, DeepDB-estimated and cardinalities estimated
+by the Postgres optimizer, respectively which is comparable to the
+Q-errors reported before without indexes.
+7.5
+Exp 5: Efficiency of Training and Inference
+In this experiment, we evaluate the efficiency of training and infer-
+ence of zero-shot models compared to workload-driven models.
+Training Overhead. In a first experiment, we compare the num-
+ber of training queries required for zero-shot models as well as
+for workload-driven models. Importantly, workload-driven mod-
+els need to be trained on every single database while zero-shot
+models can (once trained) be applied to many different databases
+out-of-the-box. For showing this effect we analyze how many train-
+ing queries would be required for supporting a varying number
+of unseen databases for which new cost estimates are required
+The results are shown in Figure 10a. As we can see since work-
+load execution is a one-time effort for zero-shot models (since they
+generalize across databases) this quickly amortizes compared to
+workload-driven learning since for workload-driven models, we
+need to collect training data for every new database.
+Training and Inference Throughput. In a second experiment, we
+compare the training and inference throughput of zero-shot cost
+models with state-of-the-art workload-driven approaches. In this
+experiment, we aim to show that zero-shot models are not imposing
+higher overhead for training and inference and thus can be used
+efficiently in real DBMSs. As we can see in Figure 10b, zero-shot
+models achieve a comparable throughput and thus do not impose
+higher overhead comapred to workload-driven models. As we can
+see, the MSCN models achieve higher throughput compared to all
+other models (zero-shot and E2E). The reason is that these models
+Scale
+Synthetic JOB-light
+Workload
+1.0
+1.5
+Median Q-Error
+Flattened Plans
+Zero-Shot
+(Est. Cardinalities)
+Zero-Shot
+(DeepDB Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+Figure 11: Ablation Study. Using a flattened representation
+of the plans instead of our graph-based encoding yields less
+accurate models. Zero-shot models using the cardinality es-
+timates of the query optimizer are still reasonably accurate.
+5
+10
+15
+Number of
+Training Datasets
+1.25
+1.50
+1.75
+Median Q-Error
+Scale
+5
+10
+15
+Number of
+Training Datasets
+1.5
+2.0
+Synthetic
+5
+10
+15
+Number of
+Training Datasets
+1.25
+1.50
+1.75
+JOB-light
+Zero-Shot
+(DeepDB Est. Cardinalities)
+Zero-Shot
+(Exact Cardinalities)
+Figure 12: Zero-Shot Generalization by Number of Training
+Databases. If we use more than 15 training databases we start
+to see diminishing returns in accuracy suggesting that the
+variety of databases in the benchmark is sufficient.
+featurize the physical query plan resulting in larger graphs com-
+pared to MSCN models which only encode the joins, tables and
+predicates in a query. However, this comes at the cost of an inferior
+predictive performance as shown before.
+7.6
+Exp. 6: Ablation Study
+In this experiment, we present the results of our ablation study
+showing the effects of the different design choices as well as the ef-
+ficiency of our estimator to determine how many different databases
+are needed for training a zero-shot model.
+Zero-Shot Design Space. We first explore the different design
+space options of zero-shot cost estimation. In particular, we focus
+on the questions how different cardinality estimation techniques
+impact the model accuracy and whether our new model architecture
+using graph encodings is actually required or a simpler architecture
+suffices.
+To address the latter question, we implemented a different ver-
+sion of zero-shot cost estimation that represents a single query plan
+as a flat vector (instead of using a graph). In particular, the chosen
+representation is similar to Ganapathi et al. [5] that represents a
+query plan using a vector where each physical operator corresponds
+to two entries in the vector: one that counts how often the operator
+appears in the plan and one that sums up the cardinality estimates
+for that operator. For instance, if we only had sequential scans and
+nested loop joins in the query plans and one plan would scan two
+relations of 1M tuples each and join them resulting in 1M tuples, the
+vector representing the query plan could be (2, 2𝑀, 1, 1𝑀). Given
+this representation, we train a state-of-the-art regression model
+[11] to predict the runtime given a vector. Similar to the zero-shot
+models, we train on the remaining 19 datasets and evaluate the
+performance on the IMDB benchmarks.
+As we can see in Figure 11, the flattened version of zero-shot cost
+models is significantly less accurate than our proposed transferable
+
+Benjamin Hilprecht and Carsten Binnig
+graph-based representation. The reason is that the interactions of
+physical operators in the plan can only be modeled approximately
+if represented as a vector while our graph-based encoding allows
+the neural model to capture such interactions more accurately.
+Second, regarding cardinality estimates, we can see that data-driven
+cardinality estimates improve the accuracy of zero-shot cost models
+compared to models using optimizer cardinality estimates. However,
+the estimates are still very accurate even if cardinality estimates are
+annotated from simple cardinality estimation models that are used
+in DBMSs today. This is especially useful for query types that data-
+driven models do not support as of today and where the optimizer
+cardinality estimates hence serve as a fallback.
+Number of Training Databases. As described in Section 4.1, in
+order to assess whether a zero-shot cost model has seen a suffi-
+cient number of training databases and workloads, we estimate
+the expected generalization error for a varying number of train-
+ing databases. The generalization error is estimated by computing
+the test error on an unseen holdout database. If the model perfor-
+mance plateaus for a certain number of training databases, we can
+conclude that the number of training databases is sufficient.
+In this experiment, we show how the generalization error de-
+velops for a growing number of training databases (i.e., from just
+using one up to all 19 databases). For estimating the generalization
+error, we use the standard benchmark queries as defined on the
+IMDB dataset (i.e., we use the synthetic, scale and JOB-light [12]
+workloads). As we can observe in Figure 12, as expected the gener-
+alization errors reduce with a growing number of databases. This is
+the case because with an increased number of databases the model
+can observe a larger variety of different data characteristics and can
+thus more robustly predict the runtimes for an unseen database,
+i.e., IMDB in this case. Interestingly, we can already achieve a rea-
+sonably small generalization error after just five different databases
+indicating that a moderate number of databases can be sufficient
+for zero-shot learning. Moreover, we clearly observe diminishing
+returns between 15 to 19 databases.
+We can thus conclude that the number of training datasets from
+the benchmark is indeed sufficient to allow a zero-shot model to
+generalize robustly to unseen databases from the benchmark and
+that further datasets will likely not improve the model performance.
+8
+Related Work
+Learned Cost Estimation. Closest to our work are workload-
+driven approaches for cost estimation. Neural predictions mod-
+els [22, 28] have been proposed for cost estimation by featuriz-
+ing the physical query plan as a tree. However, the models are
+workload-driven and thus require thousands of query executions
+for an unseen database. Recently, a framework has been proposed
+to efficiently gather this training data [30]. In contrast, zero-shot
+learning completely alleviates the need to run a representative
+workload for new databases. Moreover, workload-driven models
+were extended by improving inference and training performance
+[35] and to concurrent query latency prediction [36]. These ideas
+are orthogonal and could potentially be applied to zero-shot learn-
+ing as well. An alternative to reduce the required training queries
+for cost estimation is DBMS fitting [8] where the idea is to model
+the operator complexity and adjust this basic model by fitting the
+parameters using differentiable programming. However, the opera-
+tor complexity has to be modeled explicitly which can be impossible
+for complex queries.
+Earlier work proposes to use statistical methods to predict the
+costs of queries. For instance, it was proposed to learn models at
+a per-operator level [2, 16] to predict the overall query runtime.
+However, since interactions of operators cannot be learned and
+the models are thus too simplistic, the performance is inferior to
+workload-driven approaches [22]. An alternative idea is to repre-
+sent query plans as flat vectors [5] to treat cost estimation using
+supervised regression which we have shown to be less accurate
+than zero-shot cost estimation (cf. Section 7.1).
+In addition, it was suggested to leverage query executions on
+smaller data samples or different hardware instantiations [4, 29] or
+queries sharing common subexpressions [27, 31] to more accurately
+predict the costs. In both cases, the test workload needs to closely
+resemble the train workload for the models to be effective again
+limiting the applicability. In contrast, we have shown that zero-shot
+models generalize to a diverse set of workloads.
+Learned DBMS components and Design Advisors Machine learn-
+ing has been applied more broadly to optimize DBMS systems by
+replacing traditional approaches for tasks such as query optimiza-
+tion [13, 19–21] or query scheduling [18, 26]. In addition, it was
+applied to knob tuning [34], materialized view selection [7, 17], in-
+dex selection [14] or partitioning [9]. Note that all these approaches
+are workload-driven since query executions on the test database
+are required to train the models. We believe that zero-shot cost
+estimation could be used to support a variety of these tasks since
+they crucially depend on accurate cost estimates.
+9
+Conclusion and Future Work
+In this paper, we have demonstrated that it is possible to accurately
+and robustly predict query runtimes on entirely unseen databases,
+i.e., in a zero-shot setting. In addition, fine-tuning the zero-shot
+models to obtain few-shot models can further improve the perfor-
+mance if training queries are available on the new database. We
+enabled this by deriving a transferable representation of queries that
+generalizes across databases and a specialized model architecture.
+As a future direction, we argue that zero-shot learning has even
+a much broader applicability and could be applied to a large set of
+learned DBMS components including design advisors etc. Further-
+more, we believe that the underlying principles can be applied to
+an even broader set of data systems (e.g., data streaming systems).
+10

@@ -1,0 +1,865 @@
+An Active Learning Framework for Efficient Robust Policy
+Search
+Sai Kiran Narayanaswami∗
+The University of Texas at Austin
+
+Nandan Sudarsanam
+Robert Bosch Centre for Data Science
+and AI
+Indian Institute of Technology Madras
+
+Balaraman Ravindran
+Robert Bosch Centre for Data Science
+and AI
+Indian Institute of Technology Madras
+
+ABSTRACT
+Robust Policy Search is the problem of learning policies that do
+not degrade in performance when subject to unseen environment
+model parameters. It is particularly relevant for transferring poli-
+cies learned in a simulation environment to the real world. Several
+existing approaches involve sampling large batches of trajectories
+which reflect the differences in various possible environments, and
+then selecting some subset of these to learn robust policies, such as
+the ones that result in the worst performance. We propose an active
+learning based framework, EffAcTS, to selectively choose model
+parameters for this purpose so as to collect only as much data as nec-
+essary to select such a subset. We apply this framework using Linear
+Bandits, and experimentally validate the gains in sample efficiency
+and the performance of our approach on standard continuous con-
+trol tasks. We also present a Multi-Task Learning perspective to the
+problem of Robust Policy Search, and draw connections from our
+proposed framework to existing work on Multi-Task Learning.
+KEYWORDS
+deep reinforcement learning, robust learning, active learning, ro-
+botics
+1
+INTRODUCTION
+Recent advances in Deep Reinforcement Learning (DRL) algorithms
+have achieved remarkable performance on continuous control tasks
+[12, 22, 24, 33]. Traditionally, these algorithms are used to learn
+policies to perform a given task in simulation. However, it has been
+found that policies learned in simulation often do not perform well
+in, or transfer to, a real-world system that the simulation models
+[18, 19]. Indeed, the prospect of being able to deploy policies learned
+in simulation on real-world systems such as physical robots is one
+of the major drivers for research in Reinforcement Learning.
+One class of approaches towards this goal that has gained trac-
+tion is to learn from multiple simulated domains that approximate
+the real “target” domain[10, 16, 18, 19, 34]. These usually correspond
+to an ensemble of environment models with various parameters
+such as the mass of a part of a robot or the coefficient of friction
+between the robot’s foot and the ground. Given such an ensemble,
+the problem of robust policy search is to learn policies that perform
+well across this ensemble.
+One prominent group of approaches in this class involves sam-
+pling model parameters from the ensemble and collecting batches
+∗Work performed when author was at the Robert Bosch Centre for Data Science and
+AI, IIT Madras.
+0Preprint: This is the authors’ own version of their work that is published in the 5th
+Joint International Conference on Data Science and Management of Data (9th ACM
+IKDD CODS and 27th COMAD) (CODS-COMAD 2022). DOI:10.1145/3493700.3493712
+of trajectories simulated using these parameters [18, 32, 34], which
+are then used for training a policy, typically by a model-free RL
+algorithm. These approaches differ mainly in the way in which they
+choose subsets of these trajectories to focus on for policy learning.
+Although robust policy search is inevitably a harder learning prob-
+lem than standard policy search, the amount of data collected by
+these methods is still quite large, up to almost 2 orders of magnitude
+more than is typically required by the usual policy optimization al-
+gorithms, regardless of the method used to choose a subset of these
+trajectories for learning. Therefore, although these approaches are
+shown to be effective for learning robust policies, and offer other
+advantages such as reduced modeling burden, the requirement for
+an abundance of data makes them computationally expensive.
+In this work, we demonstrate a novel way to improve their sam-
+ple complexity while maintaining the performance and robustness
+of the learned policy through the use of Active Learning for intelli-
+gently selecting model parameters for which to sample trajectories
+for learning. Active Learning is used to directly acquire some de-
+sired subset of the trajectories (such as the subset resulting in the
+worst performance), while collecting as little additional data as pos-
+sible. In contrast, existing methods sample parameters directly from
+the ensemble[18, 32, 34], and possibly discard large portions of the
+collected trajectories [18]. The resulting framework, EffAcTS, offers
+greatly improved scalability, thus broadening its applicability to
+real-world problems. The structure of the framework and the use of
+active learning for trajectory sampling results in some connections
+between Robust Policy Search and Multi-Task Learning. We discuss
+the relation between the two problems, as well as the differences
+in their solution approaches.
+Thus, the contributions of this paper are as follows: (1) We in-
+troduce a novel Active Learning framework that performs more
+judicious collection of trajectories for training robust policies, re-
+sulting in low sample complexity; (2) We present an instantiation
+of the framework using Linear Bandits, and perform experimental
+validation on environment ensembles from standard continuous
+control benchmarks to empirically demonstrate significant reduc-
+tions in sample complexity while still being able to learn robust
+policies; (3) We explore connections to Multi-Task Learning that
+are revealed upon casting Robust Policy Search as a Multi-Task
+Learning problem and discuss its relation to existing work in the
+area.
+2
+RELATED WORK
+[32] learn controllers with a specific functional form using trajecto-
+ries sampled for parameters drawn from an ensemble, and optimize
+for the average case performance. [18] propose EPOpt, which learns
+arXiv:1901.00117v2  [cs.LG]  21 Nov 2021
+
+Narayanaswami et. al.
+a Neural Network (NN) policy using a model-free DRL algorithm,
+but on simulated domains sampled from an ensemble of models. An
+adversarial approach to training is taken that involves selectively
+exposing to the model-free learner only data from those sampled
+models on which the learner exhibits the least performance. EPOpt
+optimizes the Conditional Value at Risk[28], which has also been
+used for learning robust options[8]. Even though this is a more so-
+phisticated approach than the former and is demonstrated to have
+greater performance and robustness, the number of trajectories
+collected is still very large. A form of adversarial training is also
+employed in [17] and [14], but in these works, external (adversarial)
+disturbances are applied to the agent, rather than the model itself
+changing.
+[34] propose an approach that optimizes the average case perfor-
+mance, but additionally performs explicit system identification, and
+the estimated model parameters are fed to a NN policy as additional
+context information alongside the original observations. [19] also
+uses system identification on data from the real world to decide the
+parameters on which to train. [10] also perform system identifica-
+tion, but operate in a belief space over the model parameters. Again,
+the data requirements are quite large, both for policy learning as
+well as system identification.
+A recent work that learns from an ensemble of models is [9], but
+the ensemble here consists of learned DNN models of the dynamics
+for use in Model Based RL, rather than being induced by changing
+physical properties of the environment. A similar ensemble gener-
+ated by perturbing an already learned model is used for planning
+through in [13]. This work also does not deal with model uncertain-
+ties with physical meaning. Approaches related to learning from
+an ensemble of models have also been studied under Dynamics
+Randomization [16] and Domain Randomization [30].
+Although [18] uses only an appropriate subset of models to train
+on, none of the above approaches consider ways to sample trajec-
+tories only as necessary. Our proposed framework employs active
+learning to decide with data from only a few model parameters the
+models for which the agent requires more training. Active sampling
+approaches have also been explored for task selection in Multi-Task
+learning by [26], a viewpoint we discuss in more detail in section 5.
+3
+BACKGROUND
+3.1
+RL on an Ensemble of Models
+We work with the same setting described in [18] where the model
+ensemble is represented as a family of parametrized MDPs on a fixed
+state and action space. Following the same notation, this is the set
+M (𝑝) =
+
+S, A, T𝑝, R𝑝,𝛾, S0,𝑝
+
+for each parameter 𝑝in the space of
+parameters P, whose elements are respectively the state and action
+spaces, transition functions, reward functions, discount factor and
+the initial state distribution. Those items that are subscripted with 𝑝
+depend on𝑝, i.e., different parameters induce different dynamics and
+rewards. We note here that we say “parameter” even if it is a vector
+rather than a real number. Further, there is a source distribution P
+that indicates the likelihood of any particular 𝑝∈P in the model
+ensemble.
+We denote the typical trajectory from any of these MDPs by
+𝜏= {𝑠𝑡,𝑎𝑡,𝑟𝑡}𝑇
+𝑡=0, where 𝑇is the time horizon, and the discounted
+return from the start state 𝑅(𝜏) = Í𝑇
+𝑡=0 𝛾𝑡𝑟𝑡. These trajectories
+are generated by following a policy which are parameterized by
+a vector 𝜃, which we denote by 𝜋𝜃. We define the performance at
+parameter 𝑝as the expected discounted return from the start state
+in M (𝑝)
+𝜂(𝜃, 𝑝) = E𝜏
+" 𝑇
+∑︁
+𝑡=0
+𝛾𝑡𝑟𝑡
+𝑝
+#
+(1)
+3.2
+Robust policy learning via CVaR
+optimization
+Robust Policy Search seeks policies that perform well across all
+parameters in P, and do so without knowing the parameter for the
+MDP on which they are being tested. This translates to being able to
+perform well on some unknown target domain, and also potentially
+handle variations not accounted for in P. The intuitive objective for
+this is to consider the average performance of the policy over the
+source distribution 𝜂𝐷(𝜃) = E𝑝∼P [𝜂(𝜃, 𝑝)]. However, this objec-
+tive could be close to the maximum even if there are sharp drops
+in performance in some regions of P. A different objective used by
+approaches such as [18] is the Conditional Value at Risk (CVaR)
+formulation from [28], which considers the performance across
+only the subset of P that corresponds to the bottom 𝜖percentile
+of returns from P, for a given 𝜖∈(0, 1]. This has the effect that
+policies which have such sharp drops in performance (i.e bad worst
+case performance) are no longer considered good solutions.
+3.3
+Linear Stochastic Bandits
+Here, we provide a quick overview of Linear Stochastic Bandits
+(LSB) since they play an important role as solutions to the Active
+Learning problem in section 4.
+The LSB problem is one of finding the optimal arm from a given
+set of arms X similar to the standard Multi-Armed Bandit (MAB)
+problem, but with the average reward from each arm being an
+unknown linear function of the features associated with that arm.
+That is, if 𝑥∈X is an arm, and we also denote its features by 𝑥, the
+reward is given by 𝑟(𝑥) = 𝑥𝑇𝜃∗+ 𝜉, where 𝜉is some zero-mean
+noise, and 𝜃∗gives the parameters for said linear function. Thus,
+finding the optimal arm amounts to estimating 𝜃∗. Although it may
+seem restrictive to assume a linear dependence on the arms, more
+expressiveness can be achieved by using a feature transformer, in a
+manner similar to the practice for Linear Regression. The feature
+transformer is a function 𝑓: X →R𝑑that maps each arm 𝑥∈X
+to a feature vector 𝑓(𝑥), and the LSB learner would be estimating
+𝜃∗so that 𝑟(𝑥) = 𝑓(𝑥)𝑇𝜃∗+ 𝜉.
+There have been several approaches to solving the LSB problem
+under various objectives. One group of works [1, 11] are based on
+the principles of the Upper Confidence Bound Algorithm for MAB
+problems. The other popular class of approaches [2, 3] is based on
+Thompson Sampling.
+4
+ACTIVE LEARNING FOR EFFICIENT
+TRAJECTORY SAMPLING
+Existing approaches for Robust Policy Search are based on col-
+lecting trajectories at various parameters from P, and using some
+subset of these trajectories to optimize the policy being learned.
+
+An Active Learning Framework for Efficient Robust Policy Search
+Use active learner to
+learn about policy
+performance by
+collecting trajectories
+as necessary
+Sample parameters
+according to given
+objective based on
+learned performance
+proﬁle
+Use active learner to
+learn about policy
+performance by
+collecting trajectories
+as necessary
+Perform policy update
+using trajectories
+collected at each of
+these parameters.
+Figure 1: Main loop of the EffAcTS framework.
+As mentioned before, the number of trajectories required can be
+very large, up to 2 orders of magnitude more than required for a
+standard RL problem. Although Robust Policy Search is expected
+to require more data than standard RL, improvements to its sample
+efficiency are still necessary in order for it to be viable in complex
+real-world systems.
+To motivate our developments to improve on the sample effi-
+ciency, we start with the observation that there is some functional
+dependence of the performance of a given policy on the model
+parameter corresponding to a task under consideration. Existing
+approaches all disregard this dependence when evaluating their
+objective, leading to increased sample complexity. The increase in
+sample complexity is more severe when using the CVaR objective
+such as in [18], due to having to discard most of the trajectories
+collected in order to estimate the CVaR. In fact, for a standard value
+of 𝜖= 0.1, 90% of the collected trajectories need to be discarded
+(more generally, a 1 −𝜖fraction). Here, we wish to devise a strat-
+egy to utilize the information from the aforementioned functional
+dependence effectively so as to minimize such wastage.
+4.1
+Active Learning and the EffAcTS
+framework
+Active Learning is a paradigm where the agent chooses data to learn
+from based on its previous experience (see [25] for a comprehensive
+survey). It has been used to speedup learning tasks, especially in
+situations with limited data. An active learner not only needs to
+work with as few samples as possible, it also needs to account for
+the uncertainty in whatever data it has collected. These are exactly
+the desiderata of the required strategy, as it must be able to fit the
+performance function across P by collecting as few trajectories as
+possible, which come with noisy evaluations of the performance.
+Thus, quite clearly, the problem of efficiently performing such sam-
+pling is connected to active learning. The case of active learning
+that is of interest to us is when the agent is allowed to sample output
+for arbitrary points in the input space (instead of having to choose
+points from a finite dataset). The input here is some parameter 𝑝
+from P, and the output is the return from one trajectory collected
+at 𝑝.
+We now outline our active learning framework for learning
+robust policies. Each policy update involves selectively generating
+Algorithm 1 The EffAcTS framework
+1: for 𝑖= 0 . . . 𝑁𝑖𝑡𝑒𝑟𝑠−1 do
+2:
+ˆ𝜂𝜃𝑖←LearnPerf(𝜃𝑖)
+3:
+P ←SelectParams(ˆ𝜂𝜃𝑖)
+4:
+𝝉←{}
+5:
+for each 𝑝∈P do
+6:
+𝜏𝑝←Trajectory collected at 𝑝using 𝜋𝜃𝑖
+7:
+𝝉←𝝉∪𝜏𝑝
+8:
+end for
+9:
+𝜃𝑖+1 ←BatchPolOpt(𝝉, 𝜃𝑖)
+10: end for
+11: return 𝜃𝑁𝑖𝑡𝑒𝑟𝑠
+trajectories to be sent to the batch policy optimization algorithm.
+This is done in two phases as follows:
+Performance Assessment: In the first phase, active learning is
+used to assess the performance of the current policy. To do this,
+an active learner sequentially picks some parameters and trajecto-
+ries are sampled for each of them by setting the environment to
+these parameters and running the current policy. After a particular
+number of trials, it is in theory expected to have a reasonably good
+approximation of the performance as a function of the parame-
+ters, say ˆ𝜂𝜃𝑖(𝑝). Note that we have used 𝜃𝑖as a subscript since this
+function is specific to the current policy with parameters 𝜃𝑖.
+The active learner and this process are encapsulated in a subrou-
+tine LearnPerf that takes as input some policy parameters, 𝜃and
+returns the function ˆ𝜂𝜃as described above. LearnPerf could be
+equipped with persistent memory (e.g. to store data from previous
+iterations), and no assumptions are made about the form of the
+output ˆ𝜂𝜃other than that it can be evaluated at any given 𝑝∈P.
+Parameter Selection: The second phase uses this assessment to
+decide which parameters from P trajectories need to be collected
+for. This selection is guided by some given objective that enforces
+robustness. Another subroutine, SelectParams carries out this
+selection, taking as input a performance profile ˆ𝜂𝜃. Based on this
+performance profile, it returns a set P of parameters at which the
+policy needs to be trained.
+The policy update is then performed using trajectories collected
+for each parameter in P, and this is done for a given number (𝑁𝑖𝑡𝑒𝑟𝑠)
+of iterations. We call the resulting framework EffAcTS (Efficient
+Active Trajectory Sampling), and summarize it in Algorithm 1 and
+Figure 1. Any particular instantiation of EffAcTS is defined by
+the choice of active learning algorithm and also the scheme used
+to select which parts of P to sample from, i.e by specifying the
+LearnPerf and SelectParams subroutines.
+4.2
+Applying EffAcTS
+We analyze one such instantiation based on the CVaR objective for
+parameter selection. To generate samples of the bottom 𝜖percentile
+of trajectories, a batch of parameters is sampled from P, and trajec-
+tories are collected only for those that are in the worst 𝜖percentile
+of performance according to ˆ𝜂𝜃. The use of Bandit algorithms for
+active learning is well studied in both Multi-Armed Bandit [4, 6]
+as well as Linear Stochastic Bandit [27] settings. The parameter
+
+Narayanaswami et. al.
+spaces involved in Robust RL are invariably continuous. LSBs and
+Gaussian Process Regression are two well-known approaches that
+can perform active regression on continuous spaces. LSBs, however,
+are specialized in the sense that they quickly seek out areas that
+lead to high reward, a property that we make use of as described
+shortly. Considering that Gaussian Processes are more computa-
+tionally expensive, and also that LSBs are simpler to implement
+and can be very efficient, especially when data is scarce, we turn to
+LSBs as the active learner in our experiments.
+Its arms are simply a large enough collection of parameters
+spread across P. Pulling an arm 𝑝∈P results in a trajectory being
+sampled at 𝑝. Feedback is given to the bandit in an adversarial
+manner, being proportional to the negative of the return obtained on
+that sampled trajectory. This causes it to seek out regions with low
+performance, and in the process learn about the performance across
+P. This behaviour is especially useful for identifying the worst-case
+parameters that are used in optimizing the CVaR objective.
+We note that although the bandit’s learning phase is inherently
+serial, it is still possible to collect the trajectories for the estimated
+worst 𝜖percentile of parameters in parallel.
+We call this algorithm EffAcTS-C-B and its LearnPerf and Se-
+lectParams subroutines described in Algorithm 2. The following
+hyperparameters are introduced: 𝑁𝐵, the number of trajectories
+sampled by the bandit in the course of its learning, 𝑁𝐶, the total
+number of parameters chosen (this means that
+l 𝑁𝐶
+𝜖
+m
+parameter
+values are drawn from the source distribution and their perfor-
+mance is estimated using the bandit, but only the bottom 𝑁𝐶of
+those are used to collect trajectories). The most critical component
+is the LSB learner 𝐵which incorporates internally a feature trans-
+former 𝑓that takes in a parameter from the source distribution’s
+support and applies some transformation on it (including possibly
+standardization), and also scales the negative returns given to it
+appropriately.
+4.3
+Sample Efficiency
+Due to the fact that EffAcTS-C-B strategically chooses parameters
+at which to collect trajectories, we expect it to be able to maintain
+robustness and performance while collecting fewer samples than
+existing approaches. Consider for instance EPOpt[18], which dis-
+cards a 1 −𝜖fraction of the trajectories it collects. If EPOpt collects
+𝑁trajectories, and EffAcTS-C-B’s bandit learner is allowed 𝑁𝐵
+“arm pulls”, with the same number of trajectories being used for
+learning as EPOpt (i.e 𝑁𝐶= 𝜖𝑁), the ratio of the total amount of
+data collected by the two algorithms is
+ 𝑁𝐵+𝜖𝑁
+𝑁
+
+. For a nominal
+setting of 𝑁= 240, 𝜖= 0.1 and 𝑁𝐵= 24, this results in a dramatic
+80% reduction in the amount of data collected. We later show that
+efficiency gains of this order are indeed attainable in practice.
+5
+CONNECTIONS TO MULTI-TASK
+LEARNING
+The problem of robust policy search on an ensemble of models
+can also be viewed as a form of transfer learning from simulated
+domains to an unseen real domain (possibly without any training on
+the real domain, which is referred to as direct-transfer or jumpstart
+[29]). Further, the process of learning from an ensemble of models
+can be viewed as a Multi-Task Learning (MTL) problem with the set
+of tasks corresponding to the set of parameters that constitute the
+source domain distribution. Learning a robust policy corresponds to
+maintaining performance across this entire set of tasks, as is usually
+the goal in MTL settings. MTL, which is closely related to transfer
+learning, has been studied in the DRL context in a number of recent
+works [15, 20, 21, 26]. However, these works consider only discrete
+and finite task sets, whereas model parameters form a (usually
+multi-dimensional) continuum. More generally, we can think of
+MTL with the task set being generated by a set of parameters, and
+refer to such problems as parameterized MTL problems, with Robust
+Policy Search being an instance of this setting.
+[26] has employed a bandit based active sampling approach sim-
+ilar to what we have described here to intelligently sample tasks
+(from a discrete and finite task set) to train on for each iteration.
+The feedback to the bandit is also given in an adversarial manner.
+However, we note several differences when it comes to a parameter-
+ized MTL setting. The first is the functional dependence of the task
+performance to an underlying parameter as discussed earlier. In the
+discrete MTL settings usually studied (such as Atari Game playing
+tasks), there is no such visible dependency that can be modeled.
+This means that any algorithm that is adapted to the parameter-
+ized setting need to be reworked to utilize such dependencies as
+EffAcTS does. The task selection procedure in EffAcTS differs from
+the one in [26] in that the performance is sampled for several tasks
+in between iterations of policy training. Additionally, one single
+task is not chosen in the end, rather the active learner is used to
+inform the selection of a group of tasks as necessary for the given
+objective.
+6
+EXPERIMENTS
+As EPOpt[18] uses the CVaR objective, it is a very suitable baseline
+against which to compare EffAcTS-C-B for demonstrating the ben-
+efits of introducing the active learner. We conduct experiments to
+answer the following questions, which we will reference as RQ1,
+RQ2 etc. in later discussions:
+(1) Do the policies learned using EffAcTS-C-B suffer any degra-
+dation in performance from that of EPOpt? Is robustness
+preserved across the same range of model parameters as in
+EPOpt?
+(2) Does the bandit active sampler identify with reasonable ac-
+curacy the region corresponding to the worst 𝜖percentile
+of performance, and does it achieve a reasonable fit to the
+performance across the range of parameters (i.e has it ex-
+plored enough to avoid errors due to the noisy evaluations
+it receives)?
+(3) How much can the sample efficiency be improved upon?
+This mainly boils down to asking how few trajectories are
+sufficient for the bandit to learn well enough.
+6.1
+Implementation Details and
+Hyperparameters
+The experiments are performed on the standard Hopper and Half-
+Cheetah continuous control tasks available in OpenAI Gym [5],
+simulated with the MuJoCo Physics simulator [31]. As in [18], some
+subset of the following parameters of the robot can be varied: Torso
+
+An Active Learning Framework for Efficient Robust Policy Search
+Algorithm 2 Definitions of LearnPerf and SelectParams subroutines for EffAcTS-C-B
+1: function LearnPerf(𝜃)
+2:
+for 𝑖= 1 . . . 𝑁𝐵do
+3:
+𝑝𝑖←Optimal arm estimate by 𝐵.
+4:
+𝜏𝑖←Trajectory collected at 𝑝using 𝜋𝜃
+5:
+𝑅𝑖←Return from 𝜏𝑖
+6:
+Update 𝐵with (𝑝𝑖, −𝑅𝑖)
+7:
+end for
+8:
+ˆ𝜂𝜃←Function
+parameterized
+by
+𝐵’s
+current
+weights
+9:
+return ˆ𝜂𝜃
+10: end function
+1: function SelectParams(ˆ𝜂𝜃)
+2:
+P ←{}, ˆR ←{}
+3:
+for 𝑗= 1 . . .
+l 𝑁𝐶
+𝜖
+m
+do
+4:
+𝑝𝑗←Parameter sampled from P
+5:
+ˆ𝑅𝑗←ˆ𝜂𝜃(𝑝𝑗)
+6:
+Add ˆ𝑅𝑗to ˆR and 𝑝𝑗to P
+7:
+end for
+8:
+P𝐶←Subset of P giving rise to the bottom 𝜖per-
+centile of returns in ˆR
+9:
+return P𝐶
+10: end function
+Parameter
+𝜇
+𝜎
+Low
+High
+Mass
+6.0
+1.5
+3.0
+9.0
+Friction
+2.0
+0.25
+1.5
+2.5
+Damping
+2.5
+2.0
+1.0
+4.0
+Inertias
+1.0
+0.25
+0.5
+1.5
+Parameter
+𝜇
+𝜎
+Low
+High
+Mass
+6.0
+1.5
+3.0
+9.0
+Friction
+0.5
+0.1
+0.3
+0.7
+Damping
+1.5
+0.5
+0.5
+2.5
+Inertias
+0.125
+0.04
+0.05
+0.2
+Table 1: Description of the source domain distribution for the Hopper (Left) and Half-Cheetah (Right) tasks. The values given
+here specify the means (𝜇) and standard deviations (𝜎) for normal distributions truncated at the low and high points mentioned
+here. This is equivalent to the probability density of a normal distribution with parameters (𝜇, 𝜎) being zeroed outside the
+interval [Low, High], and being normalized so that it integrates to 1.
+Figure 2: Performance (y-axis) as a function of torso mass (x-axis) for 𝜖= 0.1 for the Hopper (Left) and Half-Cheetah (Right)
+tasks. The bands indicate the confidence intervals of the performance measured across 5 runs of the entire training procedure.
+All of the configurations tested use at least 75% fewer trajectories than EPOpt, and with the exception of 𝑁𝐶= 15 and 𝑁𝐵= 15
+in the Hopper task alone, perform to the same extent and are as robust as EPOpt (acccording to results reported in [18]).
+Mass, Friction with the ground, Foot Joint Damping and Joint Iner-
+tias. We also use the same statistics for the source distributions of
+the parameters which are described in Table 1.
+We emphasize that because we are using the same environments
+in [18] and also the same policy parameterization, results reported
+there can be used directly to compare against EffAcTS-C-B.
+We use the hyperparameter settings for TRPO suggested in Ope-
+nAI Baselines [7] on which our implementation is also based. These
+are shown in Table 3.
+One difference from EPOpt’s implementation is that we use
+Generalized Advantage Estimation [23] instead of subtracting a
+baseline from the value function. For value function estimation
+
+Narayanaswami et. al.
+Hyperparameters
+Median %tile
+Avg %tile
+Std. Dev.
+Max %tile
+𝑁𝐶=15, 𝑁𝐵=15
+14.6
+15.9
+7.7
+32.2
+𝑁𝐶=15, 𝑁𝐵=30
+14.9
+23.4
+24.0
+98.0
+𝑁𝐶=30, 𝑁𝐵=15
+13.7
+23.0
+19.4
+74.7
+𝑁𝐶=30, 𝑁𝐵=30
+11.6
+14.9
+10.6
+47.8
+Table 2: Statistics for the percentiles described in section 6.6 for the Hopper task’s 1-D model ensemble with 𝜖= 0.1, which are
+measured every fifth iteration from the 100th to the 150th iterations.
+Hyperparameter
+Value
+Timesteps per batch
+1024
+Max KL
+0.01
+CG Iters
+10
+CG Damping
+0.1
+𝛾
+0.99
+𝜆
+0.98
+VF Iterations
+5
+VF Stepsize
+1e-3
+Table 3: Hyperparameters for TRPO
+Hyperparameter
+Value
+𝑅
+5.0
+𝛿
+0.1
+𝜆
+0.5
+Table 4: Thompson Sampling Hyperparameters
+using a critic, we use the same NN architecture as the policy, 2
+hidden layers of 64 units each. Policies are parameterized with NNs
+and have two hidden layers with 64 units each, and use tanh as the
+activation function.
+6.2
+Bandit Algorithm
+For all our experiments, we implement the bandit learner using
+Thompson Sampling due to its simplicity, following the version
+described in [2]. The hyperparameters introduced by this are as in
+Table 4 (they have the same names as in the paper).
+The first two parameters control the amount of exploration per-
+formed during Thompson Sampling, while 𝜆is a regularization
+parameter for the parameter estimates.
+The arms of the bandit are model parameters taken uniformly
+across the domain and converted to feature values. In order to allow
+for some degree of expressiveness for the fit, we apply polynomial
+transformations of some particular degree to the model parameters.
+The features input to the bandit are 4th degree polynomial terms
+generated from the model parameters. This amounts to 5 terms in
+the 1-D case and 15 in the 2-D case. These arm “representations”
+are then standardized before being used by the bandit. The negative
+returns given as feedback to the bandit are scaled by a factor of
+10−3.
+6.3
+(RQ1) Performance and Robustness
+In this section, we perform the following experiment to evaluate
+EffAcTS-C-B for the objectives of RQ1. In this experiment, only
+one environment parameter (torso mass) is varied, creating a 1-D
+model ensemble on which to evaluate the algorithm.
+The torso mass is varied in both the Hopper and the Half-Cheetah
+domains keeping the rest of the parameters fixed at their mean
+values. The performance of the EffAcTS-C-B learned policy is then
+tested across this range, and the results are shown in Figure 2. We
+use Trust Region Policy Optimization (TRPO) [22] for batch policy
+optimization and run it for 150 iterations. For this part, we use 4th
+degree polynomial transformations.
+We see that the policy is indeed robust as it maintains its perfor-
+mance across the range of values of the torso mass, and it achieves
+near or better than the best performance for both tasks as reported
+in [18] in all but one case, with 𝑁𝐶= 15 and 𝑁𝐵= 15 for Hopper.
+This setting samples the least number of trajectories per iteration,
+30, which is just one eighth of the 240 drawn in EPOpt. Although
+there is one region where it is unstable, it is still able to maintain
+its performance everywhere else, thus attaining the same level of
+robustnes as EPOpt. Further, the performance achieved is almost
+as good as, and possibly better than EPOpt[18].
+For the other settings which use more trajectories, this does not
+happen, and even at 𝑁𝐶= 30 and 𝑁𝐵= 30 which samples the most
+trajectories, a 75% reduction in samples collected is achieved over
+EPOpt (the total number of iterations is the same). The other two
+settings which perform almost as well in both tasks collect 45 each,
+which amounts to an even larger reduction of 81.2%. In the case of
+𝑁𝐶= 15 and 𝑁𝐵= 15 with the Half-Cheetah Task, this number is
+pushed even further to 87.5% while still retaining performance and
+robustness.
+6.4
+(RQ1) Performance on a 2-D Model
+Ensemble
+In this question, we further investigate the scalability of the algo-
+rithm to larger model ensembles, again in the context of RQ1. In
+this experiment, we vary the friction with the ground in addition
+to the torso mass, thus creating a two dimensional ensemble of
+parameters. Here, we run TRPO for 200 iterations, and again use
+4th degree polynomial transformations. Figure 3 shows the results
+obtained.
+Full performance is maintained over almost all of the parameter
+space in both domains, again being comparable to or better than
+in [18]. Notably, with 𝑁𝐶=30, 𝑁𝐵=30, the same 75% reduction in
+
+An Active Learning Framework for Efficient Robust Policy Search
+Figure 3: Performance as a function of torso mass and
+ground friction on the Hopper (left half) and Half-Cheetah
+(right half) tasks for 𝜖= 0.1 for one run or EffAcTS-C-B. In
+each row, Left: 𝑁𝐶=30, 𝑁𝐵=30. Right: 𝑁𝐶=30, 𝑁𝐵=50.
+collected trajectories is obtained even in a higher dimensional model
+ensemble. This is also despite the added challenge of an increased
+number of parameters for the bandit to fit (15 as opposed to 5 in
+the previous experiment).
+6.5
+Visualizing the Bandit Active Learner
+In Figure 4, we present the outcome from one particular iteration
+of training. The true performance profile is estimated by collecting
+100 trajectories to calculate the mean return at each parameter
+(again, these trajectories are not used for learning). Along with this
+is shown the bandit’s fit, the trajectories it collects while learning
+and the trajectories that are sampled based on its estimate of the
+bottom 𝜖= 0.1 percentile (output used for training the policy).
+We see that the bandit takes exploratory actions (points to the
+left and in the middle) that don’t lead to the worst returns. However,
+it quickly moves towards the region with low returns, and the final
+fit is close to the true mean performance. From comparison with
+the output trajectories, the trajectories in the learning phase are
+quite clearly not representative of the bottom 𝜖= 0.1 percentile
+according to the source distribution. Thus, we cannot reuse these
+to perform learning with the CVaR objective.
+We also note that a perfectly learned performance profile is not
+necessary to sample from the worst trajectories. As long as the fit
+is reasonably accurate in that region, the output trajectories will be
+of good quality. In practice, we expect LSB algorithms to be capable
+of doing this as they tend to focus on these regions.
+6.6
+(RQ2) Analysis of the Bandit Active Learner
+Here we validate one of our key assumptions, that the active learner
+learns well enough about the performance that it can produce a
+decent approximation of a sample batch of the bottom 𝜖percentile
+Figure 4: The bandit’s operation in the 115th iteration of
+training in the Hopper task. Individual trajectories are
+shown as dots or crosses, with the position indicating the
+parameter value and the return obtained.
+of trajectories. For this, we first evaluate the average return for a
+batch of samples from P by collecting a large number of trajectories
+at each parameter. We note that these trajectories are solely for the
+purpose of analysis and are not used to perform any learning. Then,
+the percentile of the trajectory deemed to have the greatest return
+among those chosen based on the bandit learner is computed using
+the returns in this batch by using a nearest-neighbor approximation.
+This is done across several iterations during the training, and the
+median percentiles along with other statistics are reported in Table
+2 for the Hopper task.
+Ideally, we would like this value to come out to around 100𝜖
+(when written as proper percentiles), i.e the parameter with the
+greatest performance among the worst 𝜖percentile should be at
+the 𝜖𝑡ℎpercentile. In our estimates, there are some outliers that
+cause the average to become large, but as the median value shows,
+it is indeed reasonably close to the desired value of 10 for 𝜖= 0.1.
+6.7
+(RQ3) Non-stationary Bandits for Data
+Reuse
+In this section, we attempt to answer RQ3 by considering modifica-
+tions that can be made to EffAcTS-C-B, so that it uses lesser data,
+while also achieving a level of performance and robustness that is
+close to the results above.
+Particularly, we investigate the use of a modified version of
+the Thompson Sampling algorithm above that is suited for non-
+stationary scenarios. This is done in order to reuse performance
+history from previous iterations to estimate the bandit’s parameters
+with the aim of achieving a further reduction in sample complexity.
+To implement this, past data is weighted down in the Linear Re-
+gression step of Thompson Sampling, and the weight decays after
+each iteration by a factor 𝛼. That is, at the 𝑖𝑡ℎiteration, the data
+from the 𝑖𝑡ℎ, (𝑖−1)𝑡ℎ. . .(𝑖−𝑘)𝑡ℎiterations would have weights 1,
+𝛼. . .𝛼𝑘respectively.
+We compare this version with the original setup in Figure 5.
+We see that the setting with the smallest number of trajectories
+
+Narayanaswami et. al.
+Figure 5: Results (performance vs. torso mass) for the
+non-stationary-bandit version (labeled “With history”) of
+EffAcTS-C-B, along with the original EffAcTS-C-B results
+(labeled “Without history”) on the Hopper 1-D ensemble. A
+value of 𝛼= 0.25 was used, with the other hyperparameters
+remaining unchanged. As before, the plot shows the perfor-
+mance as a function of torso mass for 𝜖= 0.1, and the bands
+indicate the confidence intervals of the performance mea-
+sured across 5 runs of the entire training procedure. This
+time, with 92% fewer trajectories than EPOpt, the configura-
+tion 𝑁𝐶= 15, 𝑁𝐵= 5 with history is able to perform compa-
+rably to EPOpt, as well as EffAcTS without history and using
+more trajectories.
+collected with history (𝑁𝐶= 15, 𝑁𝐵= 5) is more robust than
+the vanilla case with 𝑁𝐶= 15, 𝑁𝐵= 15 and performs nearly as
+well (despite cutting down on 10 more trajectories). With more
+data, some loss of robustness is encountered, but the performance
+improves, and becomes comparable to the best original case (𝑁𝐶=
+30, 𝑁𝐵= 30).
+6.8
+Other Remarks
+We note that we do not perform “pre-training” as in EPOpt where
+the entire batch of trajectories is used for policy learning for some
+iterations at the beginning (corresponding to optimizing for the
+average return over the ensemble). This has been reported to be
+necessary, possibly due to problems with initial exploration if using
+the CVaR objective from the beginning. EffAcTS-C-B on the other
+hand works without any such step. However, at the very beginning,
+we collect trajectories for parameters sampled directly from P
+until 2048 time steps have elapsed in that iteration. This is because
+algorithms like TRPO have been known to require at least that
+much data per iteration.
+7
+CONCLUSIONS AND FURTHER
+POSSIBILITIES
+We developed the EffAcTS framework for using active learning to
+make an informed selection of model parameters based on agent per-
+formance, which can subsequently be used to judiciously generate
+trajectories for robust RL. With an illustration of this framework
+based on Linear Bandits and the CVaR objective, we have both
+demonstrated its applicability for robust policy search as well as
+established its effectiveness in reducing sample complexity by way
+of empirical evaluations on standard continuous control domains.
+We also discussed our work in the context of Multi-Task Learning
+along with the similarities and differences between these settings.
+Our work opens up requirements for active learning algorithms
+that can work well with even lesser data than we need here. Methods
+like Gaussian Process Regression are known to be efficient, but not
+in high dimensional spaces. For robust policy search methods to be
+effective for transfer from simulation to reality, they need to be able
+to handle the complexities of the real world, which necessitates
+methods that work with high dimensional model ensembles, which
+in turn entail frameworks such as EffAcTS to help reduce the sample
+complexity. Another possibility for robust policy search itself is to
+develop objectives that can speedup learning as well as make use
+of the features of EffAcTS to maintain sample efficiency.
+With our interpretation of robust policy search as a parameter-
+ized version of Multi-Task Learning, a natural next step would be
+to adapt developments in the usual discrete MTL setting to robust
+policy search. It would also be worthwhile to similarly investigate
+the applicability of Meta Learning, as it would prove useful for both
+dealing with large disparities between the source domains and the
+real world, as well as coping with unmodeled dynamics (which are
+unavoidable since it is not feasible to model the real world with
+complete accuracy).
+8

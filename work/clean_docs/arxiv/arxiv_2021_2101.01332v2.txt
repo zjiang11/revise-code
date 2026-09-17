@@ -1,0 +1,1261 @@
+EQUALITY SATURATION FOR TENSOR GRAPH SUPEROPTIMIZATION
+Yichen Yang * 1 Phitchaya Mangpo Phothilimthana 2 Yisu Remy Wang 3 Max Willsey 3 4 Sudip Roy 2
+Jacques Pienaar 2
+ABSTRACT
+One of the major optimizations employed in deep learning frameworks is graph rewriting. Production frameworks
+rely on heuristics to decide if rewrite rules should be applied and in which order. Prior research has shown that one
+can discover more optimal tensor computation graphs if we search for a better sequence of substitutions instead of
+relying on heuristics. However, we observe that existing approaches for tensor graph superoptimization both in
+production and research frameworks apply substitutions in a sequential manner. Such sequential search methods
+are sensitive to the order in which the substitutions are applied and often only explore a small fragment of the
+exponential space of equivalent graphs. This paper presents a novel technique for tensor graph superoptimization
+that employs equality saturation to apply all possible substitutions at once. We show that our approach can
+ﬁnd optimized graphs with up to 16% speedup over state-of-the-art, while spending on average 48x less time
+optimizing.
+1
+INTRODUCTION
+Deep learning frameworks and compilers have enabled di-
+verse kinds of machine learning models to run efﬁciently
+on numerous compute platforms. Neural network models in
+these frameworks are typically represented as tensor com-
+putation graphs. To improve the runtime performance of
+a tensor graph, these frameworks perform various impor-
+tant optimizations, among which is graph rewriting. Graph
+rewriting takes in a tensor graph g and a set of semantics-
+preserving graph rewrites R. By applying rewrites to g,
+it seeks to ﬁnd a semantically equivalent g′ with a lower
+cost according to some objectives. The current industry-
+standard approach adopted by most frameworks is to use a
+manually curated set of rewrite rules and rely on a heuristic
+strategy to determine the order in which to apply the rewrite
+rules. However, this approach often leads to sub-optimal
+results both due to the non-comprehensive set of rewrite
+rules, as well as the sub-optimal graph substitution heuristic
+(Jia et al., 2019a;b).
+This paper aims to address the sub-optimality problem
+of graph rewrite strategies, while leveraging the existing
+rewrite rules generation technique (Jia et al., 2019a). Prior
+* Work done during internship at Google
+1MIT EECS &
+CSAIL
+2Google, Mountain View, CA, USA
+3University of
+Washington, Seattle, USA 4OctoML, Seattle, USA. Correspon-
+
+Proceedings of the 4 th MLSys Conference, San Jose, CA, USA,
+2021. Copyright 2021 by the author(s).
+Search time (s)
+Runtime speedup (%)
+TASO
+TENSAT
+TASO
+TENSAT
+NasRNN
+177.3
+0.5
+45.4
+68.9
+BERT
+13.6
+1.4
+8.5
+9.2
+ResNeXt-50
+25.3
+0.7
+5.5
+8.8
+NasNet-A
+1226
+10.6
+1.9
+7.3
+SqueezeNet
+16.4
+0.3
+6.7
+24.5
+VGG-19
+8.9
+0.4
+8.9
+8.9
+Inception-v3
+68.6
+5.1
+6.3
+10.0
+Table 1. Comparison of optimization time and runtime speedup
+of the optimized computation graphs over the original graphs,
+TASO (Jia et al., 2019a) v.s. TENSAT.
+research has shown that searching for sequences of substi-
+tutions (Jia et al., 2019a;b; Fang et al., 2020) outperforms
+heuristic approaches. However, both heuristic- and search-
+based solutions rely on sequential application of substitu-
+tions. Since rewrites often depend on or enable one another,
+optimization depends heavily on the order in which rewrites
+are applied; this classically tricky problem is known in the
+compilers community as the “phase-ordering” or “rewrite-
+ordering” problem.
+This paper presents TENSAT, a tensor graph superoptimiza-
+tion framework that employs equality saturation (Tate et al.,
+2009; Stepp et al., 2011; Willsey et al., 2020), a recent
+technique that mitigates the phase-ordering problem by ap-
+plying all possible rewrites at once. Equality saturation
+splits program optimization into two phases: exploration
+and extraction. The exploration phase uses a data structure
+called e-graph to compactly generate and store all rewritings
+arXiv:2101.01332v2  [cs.AI]  17 Mar 2021
+
+Equality Saturation for Tensor Graph Superoptimization
+of the input program. The exploration can continue until sat-
+uration, where the e-graph stores all possible ways to write
+the input program using a given set of rewrites. Finally, the
+extraction phase selects from the e-graph the equivalent pro-
+gram with the lowest cost according to a given cost model.
+The compact representation of the exponentially large search
+space using e-graphs enables extraction algorithms to ﬁnd
+the globally optimal equivalent program quickly.
+Applying equality saturation to tensor graph rewriting re-
+quires non-trivial extensions in both the exploration and
+extraction phases. We extend the exploration phase to sup-
+port complex, non-local rewrite rules that are necessary to
+produce highly efﬁcient tensor graphs. Additionally, we in-
+troduce a novel method to ﬁlter out invalid subgraphs from
+an e-graph, which enables our extraction procedure based
+on Integer Linear Programming (ILP) to quickly ﬁnd the
+optimal solution.
+We evaluated TENSAT on a number of well-known machine
+learning models executing on a GPU1. As highlighted in
+Table 1, TENSAT can synthesize optimized graphs that are
+up to 16% faster in runtime than state-of-the-art (Jia et al.,
+2019a) (up to 68.9% faster than the unoptimized graph),
+while reducing the optimization time by up to 300x. By hav-
+ing the e-graph compactly representing an exponential num-
+ber of equivalent graphs, TENSAT is able to cover a larger
+search space more efﬁciently than the sequential search
+methods. As a result, our search approach is both extremely
+effective and fast enough to be used as part of a normal
+compilation ﬂow.
+2
+EQUALITY SATURATION BACKGROUND
+Term rewriting is a time-tested approach to program opti-
+mizations. TENSAT employs equality saturation, a recent
+technique that provides a search-based approach to term
+rewriting that can avoid problems encountered by the tradi-
+tional approach.
+2.1
+Term Rewriting
+In the term rewriting paradigm, the input to the optimizer is
+an initial program expression (term) e and a set of rewrite
+rules R. Each rewrite in R takes the form l →r, where l and
+r are both patterns – terms from the program grammar with
+placeholder variables. Each rewrite rule states the semantic
+equivalence between l and r. To apply a rewrite l →r to e,
+the optimizer searches for the pattern l in e, yielding a list of
+matches, where a match σ maps variables in l to subterms
+of e. The matches can then be applied to the right-hand side,
+denoted r[σ], to produce the subterms to be replaced in e.
+1Code is available at: https://github.com/uwplse/
+tensat
+Example
+Let e = (a × 2)/2 and the rewrite l →r be
+x × 2 →x ≪1. To apply l →r to e, the optimizer ﬁrst
+searches for l in e, yielding a single match σ = {x 7→a}.
+Then, the term r[σ] = a ≪1 replaces the matched subterm
+in e, giving the ﬁnal result: (a ≪1)/2.
+As the above example suggests, term rewriting for optimiza-
+tion suffers from the problem of choice: applying the wrong
+rewrite at the wrong time can “hide” optimizations from
+other rewrites. In our example, the classical strength re-
+duction x × 2 →x ≪1 is beneﬁcial in some contexts,
+but in this case will prevent the ultimate goal of rewriting
+(a × 2)/2 to a. The problem stems from the fact the term
+rewriting is typically destructive; i.e., applying a rewrite
+“forgets” the initial term.
+2.2
+E-graphs
+An e-graph is a data structure originally devised for use in
+theorem provers (Nelson, 1980; Detlefs et al., 2005) that
+compactly encodes an equivalence relation over many terms.
+An e-graph is a set of equivalence classes (e-classes), each
+of which is a set of equivalent e-nodes. An e-node is an
+operator from the language paired with a list of children
+e-classes. An e-graph represents the terms that can be seen
+by choosing a representative e-node for each e-class. More
+formally,
+• An e-graph represents a term if any of its e-classes do.
+• An e-class represents a term if any of its equivalent
+e-nodes do. All terms represented by an e-class are
+equivalent.
+• An e-node f(c1, ..., cn) represents a term f(t1, ..., tn)
+if each e-class ci represents ti. A childless e-node a
+represents a constant term a.
+Figure 1 shows an e-graph that represents the term (a×2)/2.
+The e-class containing the division e-node is called the root
+e-class since it represents our initial term. Figure 1 also
+demonstrates how e-graphs can support rewriting. Similar
+to traditional term rewriting, applying a rewrite l →r to an
+e-graphs ﬁrst entails searching for instances of the left-hand
+pattern l. This yields matches, but now each match σ maps
+pattern variables to e-classes instead of subterms. Then r[σ]
+is added to the matched e-class, only adding information
+to the e-graph, instead of destructively replacing the term.
+Applying the rule x × 2 →x ≪1 in Figure 1 only adds
+information (white e-nodes on the right).
+2.3
+Equality Saturation
+A recent technique called equality saturation (Tate et al.,
+2009; Stepp et al., 2011; Willsey et al., 2020) mitigates the
+rewrite-choice problem by allowing rewrites to be applied
+simultaneously. Na¨ıvely generating all possible rewritings
+
+Equality Saturation for Tensor Graph Superoptimization
+/
+a
+*
+2
+/
+a
+*
+2
+1
+<<
+Figure 1. Left: An e-graph representing the term (a×2)/2. Dotted
+boxes show e-classes, and arrows connect e-nodes to their e-class
+children. Right: The e-graph after applying the rewrite x × 2 →
+x ≪1. Only a few e-nodes were added (highlighted in white),
+and the result represents both the initial and rewritten terms.
+of a term would require exponential space and time, so
+equality saturation uses e-graphs to efﬁciently represent the
+massive space of equivalent terms.
+Equality saturation takes in a term to optimize and a set of
+rewrites. First, an initial e-graph is created from the input
+term. Then, the rewrites are applied until either saturation
+is reached, meaning the rewrites added no new information
+to the e-graph, or until a speciﬁed timeout. The resulting
+e-graph encodes an equivalence relation over a large set of
+terms, all of which were built by applying rewrites to the
+initial term. Finally, a procedure called extraction selects
+the best represented term from the root e-class according
+to a user-provided cost function. Extraction procedures
+can vary in their speed and the cost functions they support;
+both simple greedy algorithms (Panchekha et al., 2015) and
+more complex ILP-powered solutions (Tate et al., 2009;
+Wang et al., 2020) have been used. The extracted term
+is guaranteed (if the rewrites themselves are sound) to be
+equivalent to the input term, and is thus returned as the
+optimized program.
+Equality saturation effectively breaks down optimization
+into two phases: the exploration phase grows an e-graph by
+applying rewrites, and then the extraction phase selects the
+best term from the search space. This decomposition avoids
+the rule choice problem in conventional term rewriting;
+instead of having to choose which rewrite to apply to end up
+at the best term, the algorithm ﬁrst generates all rewritten
+terms, leaving the choice of which term to select to the
+extraction procedure.
+Equality saturation can handle rules that could lead to non-
+termination in other rewriting settings, such as x+y →y+x
+and a →a × 1. These rules may not be useful on their own,
+but applying them may allow other, more useful rewrites
+to ﬁre. Equality saturation allows fewer, smaller rules to
+compose to prove large equalities, where other rewriting
+systems have to use many larger, similar rewrite rules to
+avoid problematic, non-terminating rewrites.
+Equality saturation can also prove things that directed rewrit-
+ing could not, even with an oracle to choose the correct
+rewrite at the correct time.
+Consider the two rewrites
+f(a, b) →c and a →b, and let the input term be
+f(b, a). Directed rewriting could only rewrite the term to
+f(b, b), but applying a →b in a e-graph would prove that
+f(a, b) = f(b, a) = f(a, a) = f(b, b), i.e., those would all
+be represented in the same e-class. Once the ﬁrst rewrite
+is applied, c would also be added to the e-class. While
+contrived, this example demonstrates that rewriting with e-
+graphs can give strictly more proving power; in other words,
+if equality saturation can rewrite e to e′ with ruleset R, there
+may not be a way to do the same with R using traditional
+rewriting.
+3
+TENSAT’S REPRESENTATIONS
+This section describes how TENSAT represents tensor com-
+putation graphs and rewrite rules.
+3.1
+Representing Tensor Computation Graphs
+We use a representation based on the one in TASO (Jia et al.,
+2019a), with modiﬁcations to make it suitable for equality
+saturation. Table 2 shows the set of operators we consider.
+Each operator oi corresponds to a node ni in the graph; the
+node represents the output tensor of the operator. The nodes
+corresponding to the inputs of oi are the children nodes of
+ni. Each tensor computation graph is a DAG under this
+representation.
+The formulations in equality saturation becomes simpler if
+a graph is single-rooted. Therefore, we combine all the ﬁnal
+output nodes of a graph with noops to make the graph single-
+rooted. The noop nodes do not have any actual operators
+associated with them, and they will not be altered during
+the exploration phase, so there is no side effects.
+3.2
+Representing Rewrite Rules
+A rewrite rule for tensor computation graph speciﬁes that
+some local subgraph pattern (source pattern) is equivalent to
+another subgraph pattern (target pattern). The input tensors
+to the source and target patterns are variable nodes, which
+can be substituted with any concrete nodes (or e-class in
+equality saturation) in the current graph. Each output tensor
+in the source pattern corresponds to an output tensor in the
+target pattern. The two corresponding output nodes are
+called a pair of matched outputs. A rewrite rule states the
+equivalence between each pair of matched outputs.
+We represent each source (and target) pattern using symbolic
+expressions (S-exprs) with variables. Patterns with a single
+output is represented with an S-expr rooted on the output.
+Rewrite rules with such patterns are called single-pattern
+rewrite rules. Patterns with multiple outputs are represented
+
+Equality Saturation for Tensor Graph Superoptimization
+Table 2. Operators supported by TENSAT. There are four types for the nodes in our representation: tensor type (T), string type (S), integer
+type (N), and tensor tuple type (TT). The integer type is used to represent parameters of the operators, such as stride, axis, and also
+padding and activation modes (by representing different modes using different integers). The more complex, variable-length parameters
+(e.g. shape, axes permutation) are represented using the string type according to the speciﬁed formats.
+Operator
+Description
+Inputs
+Type signature
+ewadd
+Element-wise addition
+input1, input2
+(T, T) →T
+ewmul
+Element-wise multiplication
+input1, input2
+(T, T) →T
+matmul
+Matrix multiplication
+activation, input1, input2
+(N, T, T) →T
+conv a
+Grouped convolution
+strideh, stridew, pad., act., input, weight
+(N, N, N, N, T, T) →T
+relu
+Relu activation
+input
+T →T
+tanh
+Tanh activation
+input
+T →T
+sigmoid
+Sigmoid activation
+input
+T →T
+poolmax
+Max pooling
+input, kernel{h,w}, stride{h,w}, pad., act.
+(T, N, N, N, N, N, N) →T
+poolavg
+Average pooling
+input, kernel{h,w}, stride{h,w}, pad., act.
+(T, N, N, N, N, N, N) →T
+transpose b
+Transpose
+input, permutation
+(T, S) →T
+enlarge c
+Pad a convolution kernel with zeros
+input, ref-input
+(T, T) →T
+concatn
+d
+Concatenate
+axis, input1, . . . , inputn
+(N, T, . . . , T) →T
+split e
+Split a tensor into two
+axis, input
+(N, T) →TT
+split0
+Get the ﬁrst output from split
+input
+TT →T
+split1
+Get the second output from split
+input
+TT →T
+merge f
+Update weight to merge grouped conv
+weight, count
+(T, N) →T
+reshape g
+Reshape tensor
+input, shape
+(T, S) →T
+input
+Input tensor
+identiﬁer h
+S →T
+weight
+Weight tensor
+identiﬁer h
+S →T
+noop i
+Combine the outputs of the graph
+input1, input2
+(T, T) →T
+a Same representation as TASO (Jia et al., 2019a). Normal and depth-wise convolutions are special cases of grouped convolutions.
+b Axis permutation for transpose is speciﬁed using a string with format: axis1 axis2 . . . .
+c Pad a convolution kernel (input) with zeros to make it the same size as ref-input.
+d Since each type of node needs to have a ﬁxed number of inputs, we have a separate concat for each number of inputs.
+e Split the tensor in the given axis. The position of the split is at the place of the most recent concat.
+f Merge every count number of groups in the grouped convolution. See TASO (Jia et al., 2019a) for more details.
+g Specify the target shape using a string with format: dim1 dim2 . . . .
+
+i For combining the outputs of the graph to make the graph single-rooted. No actual operator is associated with noop.
+matmul
+input_1
+input_2
+input_3
+matmul
+matmul
+input_1
+input_2
+input_3
+concat_2
+1
+split
+split_0
+split_1
+Source: (matmul ?input1 ?input2), (matmul ?input1 ?input3)
+Target: (split0 (split 1 (matmul ?input1 (concat2 1 ?input2 ?input3)))),
+(split1 (split 1 (matmul ?input1 (concat2 1 ?input2 ?input3))))
+Figure 2. Example rewrite rule and its representation in S-
+expressions. Identiﬁers starting with ”?” denote variable nodes.
+For clarity, we omit the activation mode inputs to matmul. Ar-
+rows point from parent nodes to children nodes. 1 is the axis for
+split and concat operators.
+as a list of S-exprs rooted on each output. Rewrite rules with
+multiple matched outputs are called multi-pattern rewrite
+rules. Figure 2 shows an example rewrite rule and its repre-
+sentation.
+4
+TENSAT’S EXPLORATION PHASE
+We initialize the e-graph with the original tensor computa-
+tion graph. In each iteration of the exploration phase, we
+search for matches of all rewrite rules in the current e-graph,
+and add the target patterns and equivalence relations to the
+e-graph. This process continues until either the e-graph
+saturates or a user-speciﬁed limit (in terms of time, e-graph
+size, or number of iterations) is reached. Before applying
+a rewrite at a found match, we perform a shape checking
+to verify if the tensor shapes in the target pattern are com-
+patible. This is necessary since some rewrite rules requires
+input tensor shapes to satisfy speciﬁc preconditions, in addi-
+tion to the syntactic match. We perform shape checking in
+the same way as TASO (Jia et al., 2019a).
+Multi-Pattern Rewrite Rules
+Multi-pattern rewrite rules
+are an important type of rules for tensor graph superopti-
+mization (Jia et al., 2019a). However, most equality satura-
+tion toolkits only support efﬁcient search methods to ﬁnd
+matches for single-pattern rewrite rules (Willsey et al., 2020;
+de Moura & Bjørner, 2007). We introduce an algorithm for
+
+Equality Saturation for Tensor Graph Superoptimization
+Algorithm 1 Applying multi-pattern rewrite rules
+Input: starting e-graph G, set of multi-pattern rewrite rules Rm.
+Output: updated e-graph G.
+1: canonicalized S-expr ec = Set({})
+2: for rule r ∈Rm do
+3:
+for i = 0, . . . , |r| −1 do
+▷|r|: #S-exprs in source pattern
+4:
+(e, rename map) = CANONICAL(r.source[i])
+5:
+ec.insert(e)
+6:
+r.map[i] = rename map
+7:
+end for
+8: end for
+9: for iter = 0, . . . , MAX ITER do
+10:
+M = SEARCH(G, ec)
+▷all matches for all patterns
+11:
+for rule r ∈Rm do
+12:
+for i = 0, . . . , |r| −1 do
+13:
+canonical matches mci = M[r.source[i]]
+14:
+matches mi = DECANONICAL(mci, r.map[i])
+15:
+end for
+16:
+for (σ0, . . . , σ|r|−1) ∈m0 × · · · × m|r|−1 do
+17:
+if COMPATIBLE((σ0, . . . , σ|r|−1)) then
+18:
+APPLY(G, r, σ0, . . . , σ|r|−1)
+19:
+end if
+20:
+end for
+21:
+end for
+22: end for
+23: return G
+applying multi-pattern rewrites, as shown in Algorithm 1.
+Our algorithm leverages the existing efﬁcient search routine
+for single-pattern rewrites as a subroutine.
+At the beginning of the exploration phase, we collect the
+set of unique S-exprs present in the source patterns of the
+rewrite rules after canonicalization. Here, if one S-expr
+can be transformed into another S-expr by variable renam-
+ing only, they will be mapped to the same canonicalized
+S-expr. In each iteration of the exploration phase, we use
+the single-pattern search subroutine to search for matches
+of the canonical S-exprs. Then for each multi-pattern rule,
+we take the Cartesian product of the matches found, de-
+canonicalize the variable-to-e-class map into the original
+variables (using the variable renaming map stored during
+canonicalization), and check if the matches are compati-
+ble at the shared variables between the S-exprs (i.e., if the
+shared variables refer to the same e-class after the mapping).
+We apply the matches that are compatible.
+In our experience, one feature of multi-pattern rules for
+tensor graph is that they can grow the e-graph extremely
+rapidly. Let’s consider again the example rewrite rule in
+Figure 2. This rule can be matched with any two matmul
+nodes with a shared input (input1). By applying this rule
+once on some match, a new matmul node will be created
+and added to the e-graph (the one on the RHS of Figure 2),
+which also has input1 as its input. If the e-graph contains N
+matmul nodes that has some input1 at the beginning, then
+after iteration 1, O(N 2) new matmul nodes sharing input1
+will be created. In iteration 2, each pair in these O(N 2)
+nodes will be a match, which will create O(N 4) new nodes.
+Such double exponential growth can quickly explode the
+e-graph.
+Based on this feature, we set a separate limit kmulti on the
+number of iterations to apply the multi-pattern rules. After
+kmulti iterations, we only apply the single-pattern rules until
+saturation or some user-speciﬁed limit.
+5
+TENSAT’S EXTRACTION PHASE
+During extraction, the goal is to pick one e-node from each
+e-class in the e-graph to obtain an optimized graph. The
+optimized graph should minimize the total cost with respect
+to a given cost model. In tensor graph superoptimization,
+the cost model reﬂects the inference time taken by the graph.
+Cost model
+We use the same cost model as TASO (Jia
+et al., 2019a). Each operator has a separate and independent
+cost, which is the measured runtime of that operator (with
+the speciﬁc input sizes and parameters) on hardware. The
+total cost of a graph is the sum of costs of each of its nodes.
+This cost model is suitable for GPUs, since GPUs typically
+run one operator at a time when executing a graph 2. Note
+that an operator can be a fused operator, consisting of mul-
+tiple primitive operators, such as a fused convolution and
+ReLU.
+5.1
+Extraction Algorithms
+Greedy extraction
+We ﬁrst experiment with a greedy ex-
+traction strategy that has been shown to be effective for
+certain domains (Panchekha et al., 2015; Wang et al., 2020;
+Willsey et al., 2020). For each e-class, the greedy strategy
+computes the total cost of the subtrees rooted on each of the
+e-nodes, and picks the e-node with the smallest subtree cost.
+Greedy extraction is not guaranteed to extract the graph
+with the minimum cost, even under our independent cost
+model. For example, if two children of an e-node share a
+subgraph, greedy extraction would ignore the sharing and
+overestimate the cost.
+ILP extraction
+The second approach we experiment with
+is formulating the extraction problem as an Integer Linear
+Program (ILP).
+Let i = 0, ..., N −1 be the set of e-nodes in the e-graph. Let
+m = 0, ..., M −1 be the set of e-classes in the e-graph. Let
+em denote the set of e-nodes within e-class m: {i|i ∈em}.
+2There could be more complex hardware that may execute
+multiple kernels in parallel, which means an accurate cost model
+might involve many non-local dependencies. For such cases, one
+may need a different extraction approach, for example using a
+learned approach to perform extractions. We leave this for future
+work.
+
+Equality Saturation for Tensor Graph Superoptimization
+Let hi denote the set of children e-classes for e-node i. Let
+g(i) denote the e-class of e-node i, i.e. i ∈eg(i). Let m = 0
+be the root e-class. Each e-node is associated with a cost ci.
+We then formulate our problem as follows:
+Minimize: f(x) =
+X
+i
+cixi
+Subject to:
+xi ∈{0, 1},
+(1)
+X
+i∈e0
+xi = 1,
+(2)
+∀i, ∀m ∈hi, xi ≤
+X
+j∈em
+xj,
+(3)
+∀i, ∀m ∈hi, tg(i) −tm −ϵ + A(1 −xi) ≥0,
+(4)
+∀m, 0 ≤tm ≤1,
+(5)
+Here we introduce a binary integer variable xi for each
+e-node i; node i is selected if xi = 1, and not selected
+otherwise. Constraint (2) ensures that one node is picked
+in the root e-class. Constraint (3) ensures that if a node
+is picked, then at least one node in each of its children e-
+classes needs to be picked. We rely on the fact that at the
+optimal solution, each e-class can have at most one picked
+node (otherwise we can remove more picked nodes in this
+e-class to reduce the objective while still satisfying all the
+constraints). Constraints (1)–(3) and the objective encode
+the main extraction logic.
+A more subtle requirement on the extraction phase is that the
+extracted graph cannot contain cycles. While the e-graph
+can (and likely will) contain cycles, the extracted graph is
+meant to map directly to an executable tensor DAG. The
+extraction procedure must therefore take care to respect the
+acyclic invariant of DAGs.
+Figure 3 shows an example to illustrate how valid rewrites
+can produce cycles in the e-graph. To ensure the extracted
+graph does not contain cycles, we introduce a real variable
+tm for each e-class m in the ILP. Constraint (4) ensures that
+the order deﬁned by tm’s is a valid topological order for
+the extracted graph. Here ϵ < 1/M is a small constant for
+effectively encoding strict inequalities in ILP. A is a large
+enough constant such that A > 1 + ϵ. Constraint (5) is to
+limit the range for the topological order variables tm’s.
+We also experiment with using integer variables for tm’s.
+In this case, tm’s are constrained to take integer values
+between 0 to M −1. Constraint (4) changes accordingly to:
+∀i, ∀m ∈hi, tg(i) −tm + A(1 −xi) ≥1, where A ≥M.
+Unlike greedy extraction, the optimal solution to the ILP is
+guaranteed to give a valid graph (no cycles) with the lowest
+cost.
+matmul
+X
+Y
+matmul
+matmul
+X
+Y
+matmul
+split
+split_0
+split_1
+matmul
+concat_2
+1
+Figure 3. Example on how a valid rewrite can introduce cycles into
+the e-graph. RHS is the resulting e-graph after applying the rewrite
+rule from Figure 2 to the LHS. Dotted lines circles the e-classes.
+We omit the e-classes with a single node for clarity. If the node
+split1 is picked in the right e-class, then the resulting graph will
+have a cycle (indicated by the red edges).
+5.2
+Cycle Filtering
+Similar to previous work that uses ILP extraction (Tate et al.,
+2009; Wang et al., 2020), we ﬁnd that as the size of the e-
+graph grows bigger, the ILP solver takes a long time and
+becomes the main bottleneck. This is mainly due to the cycle
+constraint (4): ILP solver struggles to ﬁnd a feasible solution
+with these constraints. Therefore, we explore an alternative
+approach by ﬁltering cycles during the exploration phase to
+make sure that the e-graph does not contain any cycles at
+the end of the exploration phase. This way, we can get rid
+of the cycle constraints in the ILP.
+Vanilla cycle ﬁltering
+The ﬁrst method is to check if ap-
+plying a substitution introduces cycles to the e-graph, and
+discard such a substitution. This check is run every time be-
+fore applying a substitution. Each check requires a pass over
+the entire e-graph. For one iteration during the exploration
+phase, this vanilla cycle ﬁltering has complexity O(nmN),
+where N is the current size of the e-graph and nm is the
+total number of matches of the rewrite rules on the e-graph.
+Efﬁcient cycle ﬁltering
+As the number of matches nm is
+typically large and scales with N, vanilla cycle ﬁltering can
+be slow. We therefore design a novel and more efﬁcient cy-
+cle ﬁltering algorithm, consisting of a pre-ﬁltering step and
+a post-processing step. Algorithm 2 shows the pseudocode
+for the exploration phase with efﬁcient cycle ﬁltering.
+At the start of each iteration, we do one pass over the e-graph
+to record the set of descendent e-classes for each e-node
+(stored in a descendants map). During the iteration, for each
+match of the rewrite rules, we use the pre-stored descendants
+map to check if applying a rule introduces cycles to the e-
+graph; if so, we skip this match. Line 3–9 implements the
+pre-ﬁltering step. Notice that this check is sound but not
+complete: a match that passes this check can still introduce
+cycles to the e-graph. This is because new descendants
+relations introduced by the previous rewrite in this iteration
+are not included in the pre-stored descendants map.
+
+Equality Saturation for Tensor Graph Superoptimization
+Algorithm 2 Exploration phase with efﬁcient cycle ﬁltering
+Input: starting e-graph G, set of rewrite rules R.
+Output: updated e-graph G, ﬁlter list l
+1: l = {}
+2: for iter = 0, . . . , MAX ITER do
+3:
+descendants map d = GETDESCENDANTS(G, l)
+4:
+matches = SEARCH(G, R, l)
+5:
+for match ∈matches do
+6:
+if not WILLCREATECYCLE(match, d) then
+7:
+APPLY(G, match)
+8:
+end if
+9:
+end for
+10:
+while true do
+11:
+cycles = DFSGETCYCLES(G, l)
+12:
+if len(cycles) == 0 then
+13:
+break
+14:
+end if
+15:
+for cycle ∈cycles do
+16:
+RESOLVECYCLE(G, l, cycle)
+17:
+end for
+18:
+end while
+19: end for
+20: return G, l
+To resolve the cycles we missed in the pre-ﬁltering step,
+we add a post-processing step at the end of each iteration
+(line 10-18). We make a pass over the e-graph in DFS order
+and collect a set of cycles in the e-graph. For each cycle,
+we choose the last node that is added to the e-graph, and
+add that node to a ﬁlter list. The nodes in the ﬁlter list are
+considered as removed from the e-graph. We make sure
+those nodes are not picked during extraction by explicitly
+adding constraints ∀i ∈l, xi = 0 to the ILP.
+By constructing a descendants map once before each itera-
+tion, each of the checking in the pre-ﬁltering step takes con-
+stant time. The worst case complexity of the post-processing
+step is O(ncN), where nc is the number of cycles in the
+e-graph. Since nc is typically much smaller than nm, this
+algorithm is much faster than the vanilla cycle ﬁltering. In
+practice, each DFS pass over the e-graph can ﬁnd many
+cycles, making O(ncN) a very conservative upper bound.
+6
+EVALUATION
+We implement TENSAT in Rust using egg (Willsey et al.,
+2020), an open source equality saturation library. For the
+extraction phase, we use SCIP (Gamrath et al., 2020) as
+the ILP solver, wrapped by Google OR-tools (Perron &
+Furnon).
+We utilize egg’s e-class analysis feature for the shape check-
+ing discussed in Section 4. An e-class analysis associates
+data with each e-class to support rewrites that are not purely
+syntactic. We store all the relevant information of the ten-
+sors (shape, layout, split locations) in the analysis data and
+use these information for shape checking.
+6.1
+Experimental Setup
+We compare TENSAT with TASO (Jia et al., 2019a) to evalu-
+ate our equality saturation based search. We use the same set
+of rewrite rules as TASO for our experiments 3. We evaluate
+on the inference graphs of 7 models: BERT (Devlin et al.,
+2019), ResNeXt-50 (Xie et al., 2017), NasNet-A (Zoph
+et al., 2018), NasRNN (Zoph & Le, 2017), Inception-
+v3 (Szegedy et al., 2016), VGG-19 (Liu & Deng, 2015),
+and SqueezeNet (Iandola et al., 2017). This benchmark
+set covers a wide range of commonly used state-of-the-art
+models, including both models for computer vision tasks
+and models for NLP tasks, both human-designed models
+and automatically-discovered models by neural architecture
+search. We perform all experiments on a Google Cloud
+instance with one NVIDIA Tesla T4 GPU, a 16-core CPU,
+and 60 GB of memory. We also experiment with ResNet-50
+(He et al., 2016), but ﬁnd that on T4 GPU, the rewrite rules
+from TASO cannot provide any speedup to the graph.
+For TENSAT, our full approach uses the efﬁcient cycle ﬁl-
+tering algorithm (Section 5.2) during the exploration phase
+and the ILP method without the cycle constraints (Section
+5.1) for extraction. We set a limit on the number of nodes in
+the e-graph Nmax = 50000 and the number of iterations for
+exploration kmax = 15. We terminate the exploration phase
+when any of the limit is reached, or the e-graph is saturated.
+We set a separate limit kmulti on the number of iterations to
+apply the multi-pattern rules. We use a default of kmulti = 1
+for the main results in Section 6.2 and 6.3, and study the
+effect of varying kmulti in Section 6.4. We set a timeout of 1
+hour for the ILP solver.
+For TASO’s backtracking search, we use their default set-
+tings from their artifact evaluation code on the number of
+iterations4 n = 100 and the hyperparameter α = 1.0 for
+each benchmark. We also test α = 1.05 as mentioned in
+their paper, and ﬁnd that the difference is tiny (difference
+in speedup percentage is less than 0.1% on average over
+the benchmarks). Increasing to n = 1000 leads to less
+than 1% speedup gain with the cost of over 11x longer in
+optimization time on average.
+6.2
+Program Speedup
+We compare the speedup percentage of the optimized graph
+with respect to the original graph between TENSAT and
+TASO. We use TASO’s cuDNN backend to measure the
+runtime of the full computation graphs. Figure 4 shows the
+results. We can see that TENSAT discovers better optimized
+3TENSAT supports ﬂexible choices of rewrite rules. All rewrite
+rules from TASO are supported by TENSAT. egg (the equality
+saturation library we use) also supports conditional rewrite rules
+(applying a rule only when a condition is met).
+4The number of iterations of the outer loop, see Algorithm 2 in
+(Jia et al., 2019a) for more details.
+
+Equality Saturation for Tensor Graph Superoptimization
+NasRNN
+BERT
+ResNeXt
+NasNet-A
+Squeeze.
+VGG
+Incept.
+Incept. k=2
+0
+10
+20
+30
+40
+50
+60
+70
+Speedup percentage
+TASO
+Tensat
+Figure 4. Speedup percentage of the optimized
+graph with respect to the original graph: TASO v.s.
+TENSAT. Each setting (optimizer × benchmark)
+is run for ﬁve times, and we plot the mean and
+standard error for the measurements.
+NasRNN
+BERT
+ResNeXt
+NasNet-A
+Squeeze.
+VGG
+Incept.
+Incept. k=2
+100
+101
+102
+103
+Optimizer time (seconds)
+379.4x
+9.5x
+34.6x
+115.7x
+59.9x
+20.0x 127.4x
+13.4x
+TASO total
+TASO best
+Tensat
+Figure 5. Optimization time (log scale): TASO
+v.s. TENSAT. “TASO total” is the total time of
+TASO search. “TASO best” indicates when TASO
+found its best result; achieving this time would
+require an oracle telling it when to stop.
+0
+20
+40
+60
+Optimizer time (seconds)
+0
+2
+4
+6
+8
+10
+TASO
+Tensat
+Speedup percentage
+Figure 6. Speedup over opti-
+mization time for TASO and
+TENSAT, on Inception-v3. We
+use a timeout of 60 seconds.
+graphs compared with TASO’s backtracking search in most
+benchmarks, with the largest speedup improvements on
+NasRNN and SqueezeNet. This improvement comes from
+the fact that equality saturation covers a much larger space of
+equivalent graphs than sequential backtracking search. By
+using e-graph as a compact representation of an exponential
+number of equivalent graphs, TENSAT is able to cover orders
+of magnitude more equivalent graphs than TASO.
+Note that for Inception-v3, TENSAT with kmulti = 1 gives
+a smaller speedup than TASO, but increasing kmulti to 2
+achieves a better speedup than TASO while still being 13.4×
+faster than TASO’s search (see Figure 5). In general, an
+optimizer can achieve a better speedup given longer op-
+timization time. Therefore, to compare the performance
+between TASO and TENSAT on Inception-v3 more clearly,
+we plot the tradeoff curves of how speedup varies with opti-
+mization time in Figure 6. We can see that TENSAT achieves
+a better tradeoff curve.
+We inspect the optimized graphs from TENSAT and recorded
+some rewrite patterns that is used in them. We present
+several examples of useful patterns in the Appendix.
+6.3
+Optimization Time
+Another important metric is the time taken by the optimizer
+itself. For TENSAT, this is the sum of time of the exploration
+phase and the extraction phase. For TASO, we record two
+times: the ﬁrst is the total time of the backtracking search
+with the default number of iterations (Ttotal); the second is
+the time taken to ﬁrst reach the best graph found during its
+search (Tbest). Tbest is the best possible time for TASO’s se-
+quential search. In practice, it is difﬁcult (if not impossible)
+to achieve Tbest since the sequential search algorithm would
+Time (s)
+Exploration
+Extraction
+NasRNN
+0.10
+0.37
+BERT
+0.83
+0.60
+ResNeXt-50
+0.68
+0.05
+NasNet-A
+8.81
+1.79
+SqueezeNet
+0.16
+0.12
+VGG-19
+0.42
+0.02
+Inception-v3
+4.38
+0.75
+Table 3. Optimization time breakdown for TENSAT.
+have no way to know that it can stop at that point.
+Figure 5 shows the time taken by the optimizers across
+benchmarks. We can see that TENSAT runs 9.5x to 379x
+faster than TASO’s Ttotal, and 1.8x to 260x times faster than
+Tbest. This shows that TENSAT can not only cover a much
+larger search space, but also achieve this in drastically less
+time. Furthermore, TENSAT’s optimization time is small
+enough that we believe our approach can be integrated into
+a default compilation ﬂow instead of running the search as
+an additional ofﬂine autotuning process. Table 3 shows the
+optimization time breakdown for TENSAT.
+6.4
+Varying Iterations of Multi-Pattern Rewrites
+As we discuss in Section 4, multi-pattern rewrite rules can
+grow the e-graph in a extremely rapid manner. Here we
+study the effect of varying the number of iterations for multi-
+pattern rewrites kmulti. Figure 7 shows the results. We can
+see the explosion of the number of nodes in the e-graph as
+kmulti increases (due to the double exponential growth). For
+NasRNN, Inception-v3, BERT, NasNet-A, and ResNeXt-50,
+by increasing kmulti, TENSAT discovers better graphs with
+larger speedups. But for SqueezeNet, speedup decreases
+
+Equality Saturation for Tensor Graph Superoptimization
+60
+70
+80
+90
+0
+1
+2
+3
+#iter of multi pattern rewrites
+0
+10
+20
+30
+Speedup percentage
+0
+1
+2
+3
+#iter of multi pattern rewrites
+10
+1
+100
+101
+102
+103
+Optimizer time (seconds)
+0
+1
+2
+3
+#iter of multi pattern rewrites
+102
+103
+104
+105
+106
+107
+#enodes
+NasRNN
+BERT
+ResNeXt
+NasNet-A
+Squeeze.
+VGG
+Incept.
+Figure 7. Effect of varying the number of iterations of multi-pattern rewrites kmulti. For BERT, NasNet-A, NasRNN, Inception-v3, the ILP
+solver times out at one hour for kmulti = 3. Left: speedup of the optimized graphs (the y-axis is split for clarity). Middle: time taken by
+TENSAT. Right: ﬁnal e-graph size (number of e-nodes). The middle and right ﬁgures are in log scale.
+with kmulti. This is due to the discrepancy between the
+cost model and the real graph runtime. As kmulti increases
+for SqueezeNet, the cost model suggests that certain new
+rewrites can reduce the cost, while they in fact increase
+full graph runtime. Despite this special case where the
+discrepancy has an effect, TENSAT on SqueezeNet with
+kmulti = 3 still achieves a better speedup than TASO. By
+increasing kmulti, TENSAT can explore a larger search space
+and ﬁnd better optimized graphs for most benchmarks, at
+the cost of longer time taken by the optimizer.
+For larger and more complex networks, the current tech-
+nique can only explore up to a certain number of iterations of
+multi-pattern rewrites, beyond which the e-graph becomes
+too big for the extraction phase. A potential approach to
+further improve the scalability of TENSAT is to selectively
+apply rules during exploration that are more likely to pro-
+vide speedup. One potential direction for future work is to
+explore using ML techniques to learn the decisions on when
+and where to apply certain rules.
+6.5
+Ablation Study
+In this section, we study the effect of the important design
+choices in our approach.
+Greedy v.s. ILP extraction
+Table 4 shows the compar-
+ison between greedy extraction and ILP extraction. Al-
+though greedy extraction works ﬁne on some benchmarks
+(e.g. NasRNN), it fails to extract an optimized graph on
+others (e.g. BERT and NasNet-A). This is due to the nature
+of greedy extraction: it makes the choices on which node to
+pick separately and greedily, without considering the inter-
+dependencies between the choices. Consider the rewrite in
+Figure 2 (merging two matmuls by concat and split)
+as an illustrative example. After applying this rewrite to
+the e-graph, there will be two e-classes that have multiple
+e-nodes: one e-class per each output. This rewrite can re-
+duce the cost only if both e-classes choose the split node,
+since the RHS subgraph can be reused by the two outputs.
+However, greedy extraction will never pick the split nodes,
+Graph Runtime (ms)
+Original
+Greedy
+ILP
+BERT
+1.88
+1.88
+1.73
+NasRNN
+1.85
+1.15
+1.10
+NasNet-A
+17.8
+22.5
+16.6
+Table 4. Comparison between greedy extraction and ILP extrac-
+tion, on BERT, NasRNN, and NasNet-A. This table shows the
+runtime of the original graphs and the optimized graphs by greedy
+extraction and ILP extraction. The exploration phase is run with
+kmulti = 1.
+since it does not know the RHS subgraph is shared between
+the two split nodes.
+ILP with or without cycle constraints
+Here we study
+the effect of whether or not to include the cycle constraints
+in ILP. Table 5 presents the effect on extraction time as
+kmulti (thus e-graph size) varies. With the cycle constraints,
+ILP solver time quickly increases with the e-graph size, and
+reaches timeout when kmulti = 2. In our experiments, the
+ILP solver has not yet found a feasible solution at time-
+out. Removing the cycle constraints leads to approximately
+10x–1000x speedup on ILP solving time on larger e-graphs.
+These results show that the main difﬁculty for the ILP solver
+is to satisfy the cycle constraints. Thus, removing the cycle
+constraints makes it possible for our approach to scale to
+larger e-graphs.
+Efﬁcient cycle ﬁltering
+To remove the cycle constraints
+from ILP, we need to perform cycle ﬁltering during the
+exploration phase. Here we compare the two cycle ﬁltering
+techniques introduced in Section 5.2. Table 6 shows the
+effect on the exploration phase time, as kmulti varies. We
+can see that the efﬁcient cycle ﬁltering algorithm achieves
+up to 2000x speedup compared with the vanilla algorithm,
+making it possible to explore a larger e-graph.
+
+Equality Saturation for Tensor Graph Superoptimization
+Extraction
+kmulti
+With cycle
+Without
+time (s)
+real
+int
+cycle
+BERT
+1
+0.96
+0.98
+0.16
+2
+>3600
+>3600
+510.3
+NasRNN
+1
+1116
+1137
+0.32
+2
+>3600
+>3600
+356.7
+NasNet-A
+1
+424
+438
+1.81
+2
+>3600
+>3600
+75.1
+Table 5. Effect of whether or not to include cycle constraints in ILP
+on extraction time (in seconds), on BERT, NasRNN, and NasNet-
+A. For the cycle constraints, we compare both using real variables
+and using integer variables for the topological order variables tm.
+Exploration time (s)
+kmulti
+Vanilla
+Efﬁcient
+BERT
+1
+0.18
+0.17
+2
+32.9
+0.89
+NasRNN
+1
+1.30
+0.08
+2
+2932
+1.47
+NasNet-A
+1
+3.76
+1.27
+2
+>3600
+8.62
+Table 6. Comparison between vanilla cycle ﬁltering and efﬁcient
+cycle ﬁltering, on the exploration phase time (in seconds) for BERT,
+NasRNN, and NasNet-A.
+7
+RELATED WORK
+Graph Rewrite Optimizations
+Our work improves the
+search mechanism for ﬁnding the most optimal tensor graph
+substitutions upon existing work (Jia et al., 2019a;b; Fang
+et al., 2020). TASO (Jia et al., 2019b;a) uses a backtrack-
+ing search algorithm with a hard threshold for allowing
+substitutions that increase runtime. Compared to TASO, a
+subsequent work (Fang et al., 2020) presents a more efﬁcient
+sampling-based search algorithm that prunes redundant sub-
+stitutions. While the sampling-based approach is faster than
+TASO, it does not lead to discovering more optimized pro-
+grams, unlike our approach.
+An optimization via graph substitutions is also critical to
+other domains outside deep learning. NeuRewriter (Chen
+& Tian, 2019) exploits reinforcement learning to iteratively
+select which rewrite rule to apply on which region of the
+graph for multiple problem domains, including algebraic ex-
+pression simpliﬁcation, job scheduling, and vehicle routing.
+This technique is complement to our approach. In particular,
+we can enhance our approach by applying machine learn-
+ing to select more promising multi-pattern rules to apply in
+each iteration when we cannot apply multi-pattern rules to
+saturation.
+Unlike our approach, these prior techniques suffer from the
+reliance on iteratively applying substitutions in sequences.
+Superoptimization
+Superoptimization is a program opti-
+mization technique that searches for a correct and optimal
+program with respect to a cost model. Most superoptimizers
+optimize relatively short sequences of low-level instructions
+(Massalin, 1987; Joshi et al., 2002; Bansal & Aiken, 2006;
+Schkufza et al., 2013; 2014; Phothilimthana et al., 2016a;b;
+Sasnauskas et al., 2017). While most of them do not rely on
+rewrite rules, Denali (Joshi et al., 2002) takes the approach
+of using rewrite rules for scalability but sacriﬁcing some
+optimality guarantee. Similar to ours, Denali (Joshi et al.,
+2002) employs e-graphs and extracts optimal programs us-
+ing a constrain solver. Unlike our work, none of these prior
+research focuses on tensor graph superoptimization.
+Equality Saturation Applications
+The core of TEN-
+SAT’s approach is the application of equality saturation,
+which has been successfully applied in other domains as
+well. The ﬁrst works (Tate et al., 2009; Stepp et al., 2011)
+focused on traditional compiler optimizations, but more re-
+cent applications include CAD simpliﬁcation, numerical
+accuracy, and code search (Nandi et al., 2020; Panchekha
+et al., 2015; Premtoon et al., 2020).
+Wang et al. (2020) also use equality saturation to optimize
+machine learning programs. However, they optimize lin-
+ear algebra kernels consisting of few simple operations like
+matrix multiplication and summation, whereas TENSAT op-
+timizes at the computation graph level. We contribute the
+multi-pattern extension to better explore the search space
+of deep learning models, as well as the cycle-ﬁltering algo-
+rithm to make ILP extraction efﬁcient.
+8
+CONCLUSIONS
+We have presented a new approach to tensor graph opti-
+mization using equality saturation. We explained necessary
+extensions to equality saturation to make it work for our
+problem domain: supporting multi-pattern rewrite rules, and
+introducing a new extraction algorithm with an efﬁcient cy-
+cle ﬁltering for scalability. We show that our approach can
+ﬁnd optimized graphs with up to 16% speedup over state-of-
+the-art, while spending on average 48x less time optimizing.
+Our approach is able to ﬁnd graphs that are globally optimal,
+and is fast enough that it can be integrated into the normal
+compilation ﬂow for inference graphs.

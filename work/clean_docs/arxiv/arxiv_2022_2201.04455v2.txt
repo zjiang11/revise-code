@@ -1,0 +1,1806 @@
+SLISEMAP: Supervised dimensionality reduction through
+local explanations
+Anton Bj¨orklund · Jarmo M¨akel¨a · Kai Puolam¨aki
+Abstract Existing methods for explaining black box learning models often focus on build-
+ing local explanations of model behaviour for a particular data item. It is possible to create
+global explanations for all data items, but these explanations generally have low ﬁdelity for
+complex black box models.
+We propose a new supervised manifold visualisation method, SLISEMAP, that simulta-
+neously ﬁnds local explanations for all data items and builds a (typically) two-dimensional
+global visualisation of the black box model such that data items with similar local expla-
+nations are projected nearby. We provide a mathematical derivation of our problem and an
+open source implementation implemented using the GPU-optimised PyTorch library.
+We compare SLISEMAP to multiple popular dimensionality reduction methods and ﬁnd
+that SLISEMAP is able to utilise labelled data to create embeddings with consistent local
+white box models. We also compare SLISEMAP to other model-agnostic local explanation
+methods and show that SLISEMAP provides comparable explanations and that the visualisa-
+tions can give a broader understanding of black box regression and classiﬁcation models.
+Keywords Manifold visualisation · Explainable AI · Local approximation
+1 Introduction
+In the past 20 years, manifold visualisation methods are a major development in the area
+of unsupervised learning. The trend that started from ISOMAP in 2000 (Tenenbaum et al.,
+2000) has resulted in hundreds of methods to be developed, popular examples of which
+include methods such as t-SNE (van der Maaten and Hinton, 2008) and UMAP (McInnes
+et al., 2020). Manifold visualisation methods can be used to embed data into typically two or
+three dimensions while preserving some of the relevant features of the data. These methods
+have proven to be invaluable and central to exploring and understanding complex datasets
+in ﬁelds from genetics (Kobak and Berens, 2019; Diaz-Papkovich et al., 2021) to astronomy
+(Anders et al., 2018) and linguistics (Levine et al., 2020).
+Another recent development is explainable artiﬁcial intelligence (XAI), where the objec-
+tive is to understand and explore black box supervised learning algorithms; see Guidotti et al.
+A. Bj¨orklund · J. M¨akel¨a · K. Puolam¨aki
+University of Helsinki, Helsinki, Finland
+arXiv:2201.04455v2  [cs.LG]  18 May 2022
+
+2
+A. Bj¨orklund et al.
+3
+2
+1
+0
+1
+2
+3
+3
+2
+1
+0
+1
+2
+3
+PCA
+4
+2
+0
+2
+3
+2
+1
+0
+1
+2
+3
+4
+SLISEMAP
+c
+1
+2
+3
+Fig. 1 PCA (left) and SLISEMAP (right) embeddings of a toy dataset described in the text. The toy data matrix
+consists of 4-dimensional Gaussian noise in X ∈R99×4, and the response vector y ∈R99 comes from a black
+box model f(x) = maxx1:3. The legend in the plots corresponds to the value of ci = argmax j∈{1,2,3} Xij. We
+have added some jitter to the SLISEMAP embeddings to make the points in the clusters stand out.
+(2019) for a recent survey. The explanation methods can roughly be divided into global and
+local methods. Global methods try to explain the global behaviour of a supervised learning
+method by constructing a global understandable (white box) surrogate model that approx-
+imates the complex black box model. The drawback of the global approach is that for a
+sufﬁciently complex model, there is no simple surrogate model that would replicate the full
+model with a reasonable ﬁdelity.
+The alternative is local explanations that focus on how individual data items are classi-
+ﬁed or regressed. The advantage is that it is often possible to give high-ﬁdelity interpretable
+local explanations, and the obvious disadvantage is that an explanation that is good for one
+data item may be useless for the other data items. A common model-agnostic approach for
+local explanations is to locally approximate the black box model with an interpretable white
+box model. These white box models are used to better understand the decision process by,
+e.g., showing which variables affect the outcome and how to achieve a different outcome.
+In this paper, we combine the above two developments, namely, manifold visualisations
+and local explanations, to obtain global supervised manifold visualisations of the space of
+local explanations by using outputs of various black box supervised learning algorithms. We
+call the algorithm SLISEMAP.
+The idea of SLISEMAP is straightforward: we want to ﬁnd an embedding of data points
+into a (typically) two-dimensional plane such that the supervised learning model of the data
+points that are nearby in the embedding are explained by the same interpretable model.
+The embedding of the data points and the local models associated with each point in the
+embedding form a global explanation of the supervised learning model as a combination of
+the local explanations. At the same time, our method produces a visualisation of the data
+where the data points that are being classiﬁed (or regressed) with the same rules are shown
+nearby.
+Example 1 First, consider a toy regression example where we have 99 data points composed
+of 4-dimensional covariates represented by rows of matrix X ∈R99×4 and a pretrained black
+box regression model given by function f : R4 →R, which we want to study. The response
+
+SLISEMAP
+3
+vector y ∈R99 is given by the regression estimates as yi = f(Xi·), where Xi· denotes the
+ith row of the matrix X. Unknown to the user, the elements of matrix X have been sampled
+at random from a normal distribution with zero mean and unit variance, and the regression
+function f is given by f(x) = maxx1:3 = max j∈{1,2,3} x j, where x ∈R4. In other words, the
+regression utilises the ﬁrst three attributes in a nonlinear manner while ignoring the fourth
+attribute altogether.
+Now, assume the user wishes to study the black box regression function and the dataset
+by embedding this 4-dimensional toy dataset into two dimensions. Any dimensionality re-
+duction method that only take the covariate matrix X into account, and ignore the response
+variables in y, would see only Gaussian noise and result in a limited insight about the data
+and the regression function, as shown in the PCA visualisation of Figure 1 (left).
+Then, consider a variant of SLISEMAP, where ordinary least squares linear regression is
+used as an interpretable white box model. SLISEMAP will produce an embedding where the
+data are split into three clusters indexed by ci = argmax j∈{1,2,3} Xij, as shown in Figure 1
+(right). Each of the clusters corresponds to a different white box model denoted by gi : R4 →
+R for all i ∈{1,...,99} and are in this example simply given by gi(x) = xci.
+For these toy data, SLISEMAP is therefore able to partition the data into three clus-
+ters, each modelled locally to a good accuracy by a separate linear white box model. The
+SLISEMAP embedding, together with the white box models, produces a global explanation
+of the black box model. The SLISEMAP embedding can be used to help the user to reverse-
+engineer the black box model and to ﬁnd “functional groups” of data points, with each group
+modelled by a simple linear model.
+Uninformative directions in the data space, such as the 4th attribute in this example, are
+automatically ignored; SLISEMAP follows the possibly nonlinear manifold that is relevant
+for the supervised learning task. Note that in each of the three clusters in the SLISEMAP
+embedding, the value of the response variable yi obeys an identical distribution: nearby
+points in the SLISEMAP embedding have similar white box models, not necessarily similar
+values of the response variables!
+Example 2 A property of local explanations is that there may be several explanations, with
+roughly equally good ﬁdelity, for any given data point. Consider the toy dataset described
+above, but let us assume that the user wants to add a new point x′ where some of the maximal
+variables are identical, x′
+i = x′
+j = maxx′
+1:3, where i, j ∈{1,2,3} and i ̸= j. This new point
+would ﬁt equally well into both of the clusters i and j and, hence, has two potential local
+explanations. As shown later in the experiments, this also occurs with real datasets, and
+SLISEMAP can be used to reveal this ambiguity, unlike more traditional local explanation
+methods that output only one white box model.
+Example 3 As a more realistic and complex example, Figure 2 shows the visualisation of
+a black box model that classiﬁes 2 versus 3 in the classic MNIST (Lecun et al., 1998)
+dataset of hand-written digits. Here, the black box model is a convolutional neural network,
+and the white box model is a logistic regression classiﬁer that takes the ﬂattened image
+pixels as an input vector. The images are projected onto a two-dimensional plane such that
+the black box classiﬁer for nearby images can, with good ﬁdelity, be approximated by the
+same logistic regression model. The digits are split into roughly four visually separable
+clusters, with digits in each of the clusters classiﬁed by different sets of pixels. The logistic
+regression coefﬁcients for different image pixels are shown in Figure 2 (right). For example,
+the classiﬁer separates the 2s and 3s at the bottom left mainly by identifying the ”lower
+curve” in 3s, while in the top left, the classiﬁer is looking for black pixels in the centre
+
+4
+A. Bj¨orklund et al.
+6
+4
+2
+0
+2
+4
+6
+8
+6
+4
+2
+0
+2
+4
+6
+Embedding
+2
+3
+6
+4
+2
+0
+2
+4
+6
+8
+6
+4
+2
+0
+2
+4
+6
+Local Models
+2
+3
+Fig. 2 SLISEMAP visualisation of 2 s and 3 s in the MNIST dataset with a black box deep learning classiﬁer
+that tries to classify the digits into 2 s and 3 s. The left shows the embedding of the digits in two dimensions,
+with a random selection of digits shown as images. The white box models are logistic regressions that use
+the image pixels as attributes. The right shows the same embedding, but the images show the regression
+coefﬁcients associated with each pixel for the same selection of digits. The colour intensity indicates the
+magnitude of the coefﬁcient. We can see from the right image that nearby digits are described by similar
+white box models.
+versus slightly below the centre. Seeing this visualisation enables us to ﬁnd points that are
+similar in terms of the supervised learning problem and understand how the model classiﬁes
+the data items.
+The beneﬁts of SLISEMAP compared to prior manifold visualisation or explanation
+methods include the following: (i) SLISEMAP ﬁnds visual patterns, like clusters, such that
+all data items within the same cluster are explained by the same simple model. For example,
+in Figure 1 SLISEMAP reveals three clusters, while Figure 2 shows roughly four clusters of
+digits that can be separated by a given subset of pixels. (ii) Unlike existing local explanation
+methods, SLISEMAP provides both global and local explanations of the data. For example,
+Figure 2 compactly shows the explanations for all digits, in addition to the fact that roughly
+four linear models are sufﬁcient to explain the classiﬁcation of all digits to a reasonable ﬁ-
+delity. (iii) SLISEMAP can be used to discover a nonlinear structure in a dataset, as shown in
+Figure 2 and later in Section 4.4.
+1.1 Contributions
+The contributions of this paper are as follows: (i) We deﬁne a criterion for a supervised
+manifold embedding that shows local explanations and give an efﬁcient algorithm to ﬁnd
+such embeddings. (ii) We show experimentally that our method results in informative and
+useful visualisations and local white box models can be used to explain and understand
+supervised learning models. (iii) We compare our contribution to manifold visualisation
+methods and comparable local explanation methods.
+
+SLISEMAP
+5
+2 Related work
+In this section, we brieﬂy review the explainable AI and dimensionality reduction methods.
+2.1 Explainable AI
+The explanations of black box models can be generally divided into the exploration of global
+aspects, i.e., the entire model (Baehrens et al., 2010; Henelius et al., 2014, 2017; Adler et al.,
+2018; Datta et al., 2016), or inspection of local attributes, i.e., individual decisions (Ribeiro
+et al., 2016, 2018; Fong and Vedaldi, 2017; Lundberg and Lee, 2017); See Guidotti et al.
+(2019) for a recent survey and references. On a global level, the scope of the explanations is
+on understanding how the model has produced predictions, where the why is usually beyond
+human comprehension due to model complexity. On this level, we can examine which fea-
+tures affect the predictions most (Fisher et al., 2019) and what interactions there are between
+features (Goldstein et al., 2015; Henelius et al., 2014, 2017).
+However, we are interested in local explanation methods, speciﬁcally those that can be
+used for any type of model (model-agnostic) and do not require any model modiﬁcations
+(post hoc). A common approach in this niche is to locally approximate the black box model
+with a simpler white box model. One of the ﬁrst such methods, LIME (Ribeiro et al., 2016),
+generates interpretations for user-deﬁned areas of interest by perturbing the data and training
+a linear model based on the predictions. Another similar method is SHAP (Lundberg and
+Lee, 2017), which ﬁnds the weights based on Shapley value estimation (Shapley, 1951).
+Nonlinear white box models can also be used, such as decision rules (Guidotti et al., 2018;
+Ribeiro et al., 2018).
+Many of these methods generate local explanations based on perturbed data, but de-
+signing a good data generation process is nontrivial (Guidotti et al., 2019; Laugel et al.,
+2018; Molnar, 2019), e.g., replacing pixels in an image with random noise seldom re-
+sults in natural-looking images. One method that only utilises existing data is called SLISE
+(Bj¨orklund et al., 2019, 2022b), which ﬁnds the largest subset of data items that can be ap-
+proximated (up to a given accuracy) by a sparse linear model. The work presented here can
+be seen as a global extension of SLISE.
+2.2 Dimensionality reduction
+Another way of assessing high-dimensional data is to reduce the number of covariates by,
+e.g., removing noninformative and redundant features or combining multiple features into
+single elements and thus making the data more interpretable. There are advantages of utilis-
+ing dimensional reduction, as it removes correlated features in the data and allows for easier
+visualisation, e.g., in two dimensions, but combined features can also become less inter-
+pretable, and some information will inevitably be lost. The simplest dimensional reduction
+techniques are unsupervised methods operating on the whole dataset by keeping the most
+dominant features with, e.g., backward elimination and forward selection, or by ﬁnding a
+combination of new features.
+These methods include principal component analysis (PCA) and other linear methods
+(Cunningham and Ghahramani, 2015). Other approaches include locally linear embedding
+(LLE, MLLE) (Roweis and Saul, 2000; Zhang and Wang, 2006), spectral embedding (Belkin
+and Niyogi, 2003) and multidimensional scaling (MDS) (Kruskal, 1964), global-distance
+
+6
+A. Bj¨orklund et al.
+preserving MDS (Mead, 1992), ISOMAP (Tenenbaum et al., 2000), t-SNE (van der Maaten
+and Hinton, 2008), and UMAP (McInnes et al., 2020). Recently, some supervised methods
+have also become available, based on t-SNE (Kang et al., 2021; Hajderanj et al., 2019) and
+UMAP (McInnes et al., 2018).
+There are some recent developments towards combining dimensionality reduction with
+explainable AI. Anbtawi (2019) presents an interactive tool, which embeds data with stan-
+dard t-SNE and the user is able to examine the explanations of individual data-items created
+by LIME. However, there are no interactions between t-SNE and LIME. Meanwhile, Bibal
+et al. (2020) use LIME to explain the t-SNE embedding, with no supervised learning method
+involved.
+2.3 Local linear models
+Local linear models, such as Nelles et al. (2000), estimate a response variable by ﬁtting linear
+models to neighbourhoods of data items. Cheng and Wu (2013) improves the computational
+efﬁciency by using dimensionality reduction, after which they apply local linear models on
+the embedding. These methods use local models, similar to SLISEMAP. However, they are
+regression methods and do not produce visualisations nor explanations.
+3 Deﬁnitions and algorithms
+3.1 Problem deﬁnition
+A dataset consists of n data points (x1,y1),...,(xn,yn), where xi ∈X are the covariates and
+yi ∈Y are responses for one data point and i ∈[n] = {1,...,n}. X and Y are the domains
+of the covariates and responses, respectively. In this paper and in our software implementa-
+tion, we restrict ourselves to real spaces, X = Rm and Y = Rp, but the derivations in this
+subsection are general and would be valid, for example, for categorical variables as well.
+The goal is to ﬁnd a local white box model gi : X →Y for every data point (xi,yi),
+where i ∈[n]. We use ˜yij = gi(x j) to denote the estimate of y j obtained by a white box
+model associated with data point xi. Again, while the derivation is general, in this paper, we
+focus on cases where the white box model, gi, is either a linear projection (for regression
+problems) or multinomial logistic regression (for classiﬁcation problems), as deﬁned later
+in Section 3.3.
+If we have access to a trained black box supervised learning algorithm f : X →Y , then
+we can use estimates given by the model ˆyi = f(xi) instead of yi. This will make the local
+models gi local approximations of the black box model. These approximations can then also
+be used to explain the predictions of the black box model as in Bj¨orklund et al. (2019).
+Additionally, we want to ﬁnd a lower-dimensional embedding Zi·, where Z ∈Rn×d for
+every data point i ∈[n] and where Zi· denotes the ith row of matrix Z. Our objective is that
+neighbouring data items in the embedding space have similar local models gi. Since we
+focus on visualisation, in our examples, Zi· is typically 2-dimensional (d = 2).
+We denote by Dij the Euclidean distance between the points Zi· and Zj· in the embed-
+ding, where
+Dij =
+
+∑
+d
+k=1
+ Zik −Zjk
+21/2
+.
+(1)
+
+SLISEMAP
+7
+We deﬁne the soft neighbourhood by using a softmax function as follows:
+Wij =
+e−Dij
+∑n
+k=1 e−Dik .
+(2)
+We deﬁne the radius of the d-dimensional embedding to be the square root of the variance
+of the embedding or
+radius(Z) =
+ 
+1
+n
+n
+∑
+i=1
+d
+∑
+k=1
+Z2
+ik
+!1/2
+.
+(3)
+We further deﬁne a loss function l : Y ×Y →R≥0 for the white box models. Here, we
+use the shorthand notation
+Lij = l(˜yij,y j) = l(gi(x j),yj).
+(4)
+In this work, we use quadratic losses (for regression) and Hellinger distances between multi-
+nomial distributions (for classiﬁcation), which we deﬁne later in Section 3.3.
+The local white box model gi can optionally have a regularisation term, which we denote
+by Gi. Since SLISEMAP consists of local models, regularisation can be important to handle
+small neighbourhoods. In this paper, we will use Lasso regularisation (Robert Tibshirani,
+1996) to be later deﬁned in Equations (9) and (12) in Section 3.3.
+Recall that the goal is that all points in the (soft) neighbourhood of point Zi· to be
+modelled well by the local white box model gi. Mathematically, this can be formalised as
+minimising the following weighted loss:
+Li = ∑
+n
+j=1 WijLij +Gi,
+(5)
+Each local model gi has its own set of weights Wi·, of which Wii is the largest (due to
+Dii = 0). This is what makes the models local. If the embedding, and therefore W, is ﬁxed,
+we can obtain the local models simply by minimising the loss of Equation (5).
+Our ﬁnal loss function is obtained by summing all losses given by Equation (5). We
+summarise everything in the main problem deﬁnition:
+Problem 1 SLISEMAP Given dataset (x1,y1),...,(xn,yn), white box functions gi and reg-
+ularisation terms Gi for i ∈[n], loss function l, and the desired radius of the embedding
+zradius > 0, ﬁnd the parameters for g1,...,gn and embedding Z ∈Rn×d that minimise the
+loss given by
+L =
+n
+∑
+i=1
+n
+∑
+j=1
+WijLij +
+n
+∑
+i=1
+Gi.
+(6)
+where Lij = l(gi(x j),y j), Wij = e−Di j/∑n
+k=1 e−Dik, and Dij = (∑d
+k=1 (Zik −Zjk)2)1/2, with
+the constraint that radius(Z) = zradius.
+The loss function is invariant with respect to the rotation, which means that the em-
+bedding is invariant under rotation. The zradius parameter essentially ﬁxes the sizes of the
+neighbourhoods. At the limit of small zradius, all points will be compressed close to the ori-
+gin, and hence, all points will be described by the same local model. On the other hand, if
+zradius is very large, the points are far away from each other, and the neighbourhood of each
+of the points consists only of the point itself.
+
+8
+A. Bj¨orklund et al.
+3.2 Adding new data points to an existing solution
+Often, it is useful to add new data points to an existing embedding without recomputing the
+whole embedding. Here, we deﬁne an auxiliary problem to this end.
+Assume that we have a new data point denoted by (xn+1,yn+1). Deﬁne parameters for a
+new local model gn+1 and a new embedding matrix by Z′ ∈R(n+1)×d, such that the ﬁrst n
+rows are the solution to Problem 1. We formulate the problem of adding a new point to an
+existing SLISEMAP solution as follows:
+Problem 2 SLISEMAP-NEW Given the deﬁnitions above and a new data point (xn+1,yn+1),
+ﬁnd the parameters for gn+1 and Z′
+n+1,· ∈Rd such that the loss of Equation (6) is minimised;
+when is added to the set of local models and Z is replaced by Z′.
+Solving Problem 2 is much easier than solving the full Problem 1 because in Problem
+2, only the parameters for the new point need to be found, as opposed to the parameters for
+the n points in the full Problem 1. As a drawback, solving the full problem should result in
+slightly smaller loss. However, the difference should asymptotically vanish at the limit of
+large n. We study this difference experimentally in Section 4.6.
+3.3 Slisemap for regression and classiﬁcation
+While the deﬁnitions in Section 3.1 were general, in this paper, we focus on regression
+and classiﬁcation problems where the covariates are given by m-dimensional real vectors,
+or X = Rm. We denote the data matrix by X ∈Rn×m, where the rows correspond to the
+covariates or Xi· = xi. If necessary, we include in the data matrix a column of ones to account
+for the intercept terms.
+Regression In regression problems, we use linear regression as the white box model. More
+speciﬁcally, we assume that the dependent variables are real numbers or Y = R. The white
+box regression model is given by a linear function
+gR(x,b) = xTb,
+(7)
+where b ∈Rm, and the loss is quadratic,
+lR(˜y,y) = (˜y−y)2 .
+(8)
+The linear regression model gR is parametrised by the vector b ∈Rm. If we gather the
+parameter vectors from all the local models in Problem 1 into one matrix B ∈Rn×m such
+that the row Bi· gives the parameter vector of the local model gi, then the parameters being
+optimised in Problem 1 are B and Z.
+We use Lasso regularisation, see Equation (5), for any i ∈[n] given by
+GR
+i = λ ×
+m
+∑
+j=1
+Bij
+,
+(9)
+where λ is a parameter setting the strength of the regularisation. We can then write Equation
+(6) to be optimised explicitly as LR(X,y,B,Z) with Lij =
+ (XBT)ij −yj
+2.
+
+SLISEMAP
+9
+Classiﬁcation In classiﬁcation problems, we assume that the black box classiﬁer outputs
+class probabilities for p classes. We use multinomial logistic regression as the white box
+model. The dependent variables are multinomial probabilities in p-dimensional simplex or
+Y = {y ∈Rp
+≥0 | ∑p
+i=1 yi = 1}. Multinomial logistic regression can be parametrised by b ∈
+R(p−1)m. The white box classiﬁcation model is that of the multinomial logistic regression
+(Hastie et al., 2009),
+˜yi = gC(x,b)i =
+
+
+
+
+
+exp(xT b((i−1)m+1):(im))
+1+∑p−1
+j=1 exp(xT b((j−1)m+1):(jm))
+if i < p
+1
+1+∑p−1
+j=1 exp(xT b((j−1)m+1):(jm))
+if i = p
+,
+(10)
+We used ba:b to denote an (b −a + 1)-dimensional vector (ba,ba+1,...,bb)T. When using
+gC as the white box model in Problem 1, we can express the parameters for all the local
+models using a matrix B ∈Rn×(p−1)m, where the ith row Bi· corresponds to the parameter
+vector of the ith data point.
+The loss function could be any distance measure between multinomial probabilities,
+such as Kullback-Leibler (KL) divergence. Here, however, we choose the more numerically
+stable squared Hellinger distance (Ali and Silvey, 1966; Liese and Vajda, 2006),
+lC(˜y,y) = 1
+2
+p
+∑
+i=1
+p
+˜yi −√yi
+2
+= 1−
+p
+∑
+i=1
+p
+˜yiyi.
+(11)
+The squared Hellinger distance is symmetric and bounded in interval [0,1], unlike the KL,
+which is not symmetric or upper bounded. The squared Hellinger distance has convenient
+information-theoretic properties; for example, it is proportional to a tight lower bound for
+the KL divergence.
+Note that when there are only two classes (p = 2), the multinomial logistic regression
+reduces to the standard logistic regression.
+As in the regression formulation, we use Lasso regularisation for i ∈[n] given by
+GC
+i = λ ×
+(p−1)m
+∑
+j=1
+Bij
+.
+(12)
+where λ is a parameter setting the strength of the regularisation.
+We can then write Equation (6) to be explicitly optimised as LC(X,y,B,Z) with Lij =
+lC(gCi(x j),yj) expressed by using the Hellinger loss lC of Equation (11) and multinomial
+logistic regression gC of Equation (10).
+Alternative formulation for binary classiﬁcation In case the targets are given by a black
+box model, we can also use an alternative formulation for binary classiﬁcation (p = 2).
+Here, we simply transform the probability ˆy1 with a logit function, ˆy′
+1 = log(ˆy1/(1 −ˆy1)),
+from the interval [0,1] to the interval [−∞,∞] and then run SLISEMAP for regression with
+quadratic loss, as above. Using a logit transformation followed by a linear model matches
+the behaviour of SHAP (Lundberg and Lee, 2017) and SLISE (Bj¨orklund et al., 2019).
+
+10
+A. Bj¨orklund et al.
+1 Function Slisemap(X, y, zradius, d)
+/* Use the d first principal components as the initial embedding
+*/
+2
+Z ←PCA(X)·,1:d
+3
+Z ←Z/radius(Z)
+/* Normalise Z using Equation (3) */
+/* Optimise B (only) as the initial parameter matrix
+*/
+4
+B ←argminB[L (X,y,B,Z×zradius)]
+5
+do
+/* Shuffle points to escape local minima
+*/
+6
+B′
+i·,Z′
+i· ←Escape(Xi·,yi,B,Z×zradius/radius(Z)) for all i ∈[n]
+7
+B,Z ←B′,Z′
+/* Use L-BFGS to optimise Equation (6)
+*/
+8
+B,Z ←argminB,Z
+
+L (X,y,B,Z×zradius/radius(Z))+(radius(Z)−1)2
+9
+while not converged
+10
+Z ←Z×zradius/radius(Z)
+/* Set the radius of Z using Equation (3) */
+Result: B, Z
+11 Function Escape(x′,y′, B, Z)
+12
+Compute the weight matrix W from Z by using Equations (1) and (2)
+13
+li ←l(gi(x′),y′) for all i ∈[n]
+/* Equation (4) */
+14
+k ←argmink ∑n
+j=1 Wk jl j
+Result: Bk·,Zk·
+15 Function Slisemap-new(xnew, ynew, Xold, yold, Bold, Zold, zradius)
+16
+b′,z′ ←Escape(xnew,ynew,Bold,Zold)
+17
+bnew,znew ←argminb′,z′L (
+h
+Xold
+xnew
+i
+,
+h
+yold
+ynew
+i
+,
+h
+Bold
+b′
+i
+,
+h
+Zold
+z′
+i
+×zradius/radius(
+h
+Zold
+z′
+i
+))
+Result: bnew, znew
+Algorithm 1: The SLISEMAP algorithm, where L is given in Equation (6), W in Equa-
+tion (2) and radius(Z) in Equation (3). See the text for discussion.
+3.4 Algorithm
+Pseudocode for SLISEMAP is given in Algorithm 1. As the initial values for the embedding
+Z, we use the principal component projection of the data (PCA). Then, we optimise the
+values of B and Z by minimising the loss given by Equation (6).
+In our algorithm, we keep the radius of the embedding Z constant by always dividing
+it by radius(Z) during the optimisation. Due to this normalisation, the loss term L () does
+not depend on the radius of Z. Thus, for numerical stability, we add a small penalty term
+(radius(Z)−1)2 to the loss (line 8 of Algorithm 1).
+For the implementation of “argmin” in Algorithm 1, we use PyTorch (Paszke et al.,
+2019), which enables us to optionally take advantage of GPU acceleration. The optimisa-
+tion of B and Z is performed using the L-BFGS (Nocedal, 1980) optimiser of PyTorch. As
+explained earlier, in this paper, we assume that the data are real valued and use the white
+box models and losses of Section 3.3 to study regression and classiﬁcation problems.
+In addition to the L-BFGS gradient search, we use an additional heuristic (function
+Escape in Algorithm 1) to help with escaping local optima. The heuristic consists of mov-
+ing each item (embedding and local model) to the soft neighbourhood, given by W in Equa-
+tion (2), that have the most suitable local models. This process is repeated until no further
+improvement is found. We empirically validate the advantage of using the escape heuristic
+in Appendix B.
+The pseudocode for Problem 2 (adding new data points to a SLISEMAP solution) is also
+given in Algorithm 1 (function Slisemap-new). Here, we use the same escape heuristic to
+
+SLISEMAP
+11
+ﬁnd a suitable neighbourhood as a starting point and then optimise the embedding and local
+model for the new data item(s) with PyTorch and L-BFGS.
+The source code, published under an open source MIT license, as well as the code
+needed to replicate all of the experiments in this paper, is available via GitHub (Bj¨orklund
+et al., 2022a).
+3.5 Computational complexity
+Evaluation of the loss function of Equation (6) requires at least O(n2m) iterations for lin-
+ear regression and O(n2mp) for multinomial logistic regression. Because, for every local
+model O(n), the prediction and loss O(mp) must be calculated for every data item O(n).
+The calculation of the soft neighbourhoods requires O(n2d) (from calculating the Euclidean
+distances), but d < mp in most circumstances.
+However, this is an iterative algorithm, where Equation (6) has to be evaluated multiple
+times. While it is difﬁcult to provide strict running time limits for iterative optimisation
+algorithms such as L-BFGS—we study this experimentally in Section 4—it is obvious that
+the algorithm may not scale well for very large (n) datasets.
+However, usually it is sufﬁcient to subsample min(n,n0) data points, where n0 is a suit-
+ably chosen constant, optimise for the loss function (Problem 1), and then add points to the
+existing solution (Problem 2). By this procedure, the asymptotic complexity of SLISEMAP
+is linear with respect to the number of data points n. Especially for visualisation purposes, it
+often makes no sense to compute exact projection for a huge number of data points: visuali-
+sations cannot show more data points than there are pixels, so having an extremely accurate
+solution to the full optimisation problem instead of an approximate solution usually brings
+little additional beneﬁt. Instead, ﬁnding a quick solution for sub-sampled data and adding
+the necessary number of data points to the embedding works well in practice, as shown in
+the experiments of Section 4.6.
+4 Experiments
+In the experiments, we usually embed the data into two dimensions (d = 2) and normalise
+data attributes, columns of the data matrix X, to zero mean and unit variance as well as add
+an intercept term (column of ones) before running SLISEMAP. Furthermore, unless otherwise
+mentioned, we subsample the large datasets into 1000 data items and run all experiments ten
+times.
+Most datasets have been used in two scenarios, ﬁrst as normal regression or classiﬁca-
+tion using the deﬁnitions from Section 3.3, and second in an XAI-inspired scenario where
+the targets are predictions from black box models, using the alternative formulation from
+Section 3.3 in the case of classiﬁcation. When the white box model is a linear regression,
+we use λ = 10−4 as the regularisation coefﬁcient and λ = 10−2 for logistic regression. An
+overview of the datasets and black box models can be seen in Table 1.
+As explained earlier, we used PyTorch version 1.11 (Paszke et al., 2019). The runtime
+experiments were run on a server having an AMD Epyc processor at 2.4 GHz with 4 cores
+and 16 GB of memory allocated and an NVIDIA Tesla V100 GPU. The code to run the
+experiments is available via GitHub (Bj¨orklund et al., 2022a).
+
+12
+A. Bj¨orklund et al.
+Table 1 An overview of the datasets and black box models used in the experiments.
+Dataset
+Size
+Task
+Black box model
+RSYNTH
+n×m
+Regression
+-
+Air Quality
+7355×11
+Regression
+Random Forest
+Boston
+506×13
+Regression
+SVM
+Spam
+4601×57
+Classiﬁcation
+Random Forest
+Higgs
+98 049×28
+Classiﬁcation
+Gradient Boosting
+Covertype
+581 011×54
+Classiﬁcation
+Logit Boost
+MNIST
+70 000×784
+Classiﬁcation
+Convolutional Neural Network
+4.1 Datasets
+In this section, we describe the datasets used in the experiments. The datasets and the black
+box models are available from OpenML (Vanschoren et al., 2014). A quick summary can be
+seen in Table 1.
+Synthetic data We create synthetic regression data (RSYNTH) as follows: given parameters
+dataset size n (number of data items) and m (number data attributes), as well as k = 3 (num-
+ber of clusters) and s = 0.25 (standard deviation of the clusters). We ﬁrst sample j ∈[k]
+coefﬁcient vectors βj ∈Rm from a normal distribution with zero mean and unit variance and
+cluster centroids cj ∈Rm from a normal distribution with zero mean and standard deviation
+of s. We then create data items i ∈[n] by sampling the cluster index ji ∈[k] uniformly and
+then generating a data vector xi by sampling from a normal distribution with a mean of c ji
+and unit variance. The dependent variable is given by yi = xT
+i β ji +εi, where εi is Gaussian
+noise with zero mean and standard deviation of 0.1.
+Air Quality data, cleaned and ﬁltered as in Oikarinen et al. (2021), contains 7355 hourly
+instances of 12 different air quality measurements, one of which is used as a dependent
+variable and the others as covariates.
+Boston Housing Dataset collected by the U.S. census service from the Boston Standard
+Metropolitan Statistical Area in 1970. The size of the dataset is 506 items with 14 attributes,
+including the median value of owner-occupied homes that is used as the dependent variable.
+Spam (Cranor and LaMacchia, 1998) is a UCI dataset containing both spam, i.e., unsolicited
+
+with 57 attributes (mostly word frequencies) in the dataset.
+Higgs (Baldi et al., 2014) is a UCI dataset containing 11 million simulated collision events
+for benchmarking classiﬁcation algorithms. The dependent variable is whether a collision
+produces Higgs bosons. There are 28 attributes, the ﬁrst 21 featuring kinematic properties
+measured by the particle detectors, and the last seven are functions of the ﬁrst 21.
+Covertype is a UCI dataset with over half a million instances, used to classify forest cover
+type (seven different types, but we only use the ﬁrst two) from 54 attributes. The areas
+represent natural forests with minimal human-caused disturbances.
+
+SLISEMAP
+13
+MNIST (Lecun et al., 1998) is the classic machine learning dataset of handwritten digits
+from 0 to 9. Each digit is represented by a 28x28 greyscale image (784 pixels with integer
+pixel values between 0 and 255). Due to the large number of pixels, we create a binary
+classiﬁcation task by limiting the available digits to 2 and 3 and subsample them to 5000
+data items.
+4.2 Metrics
+To compare different SLISEMAP solutions, we want to be able to objectively measure the
+performance. To accomplish that, we consider the following metrics.
+Loss The most obvious thing to measure is the loss we are trying to minimise; see Equa-
+tion (6). However, the loss will change based on the parameters and the size of the dataset.
+Cluster Purity For the synthetic dataset, we know the ground truth, which means that we can
+compare the original clusters to the embedding found by SLISEMAP. If we denote the true
+cluster id:s as c1,...,cn, we can measure how well low-dimensional embeddings reconstruct
+the true clusters:
+1
+n ∑
+n
+i=1 |k-NN(i)∩{j | ci = c j}|/k,
+(13)
+where k-NN(i) is the set of k nearest neighbours (of item i) in the embedding space, using
+Euclidean distance, and j ∈[n]. A larger value (closer to one) indicates that the dimension-
+ality reduction has found the true clusters.
+Fidelity The ﬁdelity of a local model (Guidotti et al., 2019) measures how well it can predict
+the correct outcome. Using the losses deﬁned in Section 3.3, we obtain:
+1
+n ∑
+n
+i=1 l(gi(xi),yi).
+(14)
+We are interested not only in how the local models perform on the corresponding data items
+but also in how well they work for the neighbours in the embedding space, using, e.g., the k
+nearest neighbours:
+1
+n ∑
+n
+i=1
+1
+k ∑j∈k-NN(i) l(gi(x j),y j).
+(15)
+A smaller value indicates better ﬁdelity.
+Coverage We also want local models that generalise to other data points. Otherwise, it
+would be trivial to ﬁnd solutions. The coverage (Guidotti et al., 2019) of a local model
+can be measured by counting the number of data items that have a loss less than a threshold
+l0:
+1
+n ∑
+n
+i=1
+1
+n ∑
+n
+j=1(l(gi(x j),y j) < l0).
+(16)
+This requires us to select the loss threshold l0. Unless otherwise mentioned, in this paper,
+we choose the threshold to be the 0.3 quantile of the losses of a global model (without the
+distance-based weights). Furthermore, we also want this behaviour to be reﬂected in the
+low-dimensional embedding. To verify this information, we limit the coverage testing to
+only the k nearest neighbours:
+1
+n ∑
+n
+i=1
+1
+k ∑j∈k-NN(i)(l(gi(x j),y j) < l0).
+(17)
+A larger coverage value (closer to one) is better.
+
+14
+A. Bj¨orklund et al.
+0.00
+0.05
+0.10
+0.15
+0.20
+0.25
+Fidelity
+Boston
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+0.12
+0.14
+Boston (XAI)
+0.000
+0.025
+0.050
+0.075
+0.100
+0.125
+0.150
+Air Quality
+0.00
+0.02
+0.04
+0.06
+0.08
+Air Quality (XAI)
+0.02
+0.04
+0.06
+0.08
+Fidelity
+Spam
+0
+2
+4
+6
+8
+Spam (XAI)
+0.00
+0.05
+0.10
+0.15
+0.20
+0.25
+Higgs
+0.0
+0.2
+0.4
+Nearest Neighbours
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+Higgs (XAI)
+0.0
+0.2
+0.4
+Nearest Neighbours
+0.01
+0.02
+0.03
+0.04
+0.05
+0.06
+0.07
+Fidelity
+Covertype
+0.0
+0.2
+0.4
+Nearest Neighbours
+0.0
+0.1
+0.2
+0.3
+0.4
+Covertype (XAI)
+0.0
+0.2
+0.4
+Nearest Neighbours
+0
+1
+2
+3
+4
+5
+6
+RSynth
+zradius
+2.0
+3.0
+3.5
+4.0
+5.0
+6.0
+Fig. 3 Fidelity of the local models versus the fraction of nearest neighbours (in the ﬁdelity calculation) for
+different values of zradius. Smaller ﬁdelity is better, especially for the nearest neighbors. Here, 3 ≤zradius ≤4
+results in the best coverage.
+4.3 Parameter selection
+SLISEMAP has one unusual parameter that needs to be selected: zradius. If zradius is too small,
+then all data items are in the same cluster, resulting in underﬁtting local models that are
+almost identical to the global model. However, if zradius is too large, then the neighbourhoods
+become singular, which causes the local models to overﬁt.
+In Figure 3, we investigate how different values of zradius affect the ﬁdelity of the local
+models. Unless the local model is underﬁtting, the ﬁdelity for the corresponding data item
+should be close to zero. Then, as the number of nearest neighbours grows, the ﬁdelity should
+stay as low as possible for as long as possible to avoid overﬁtting. Based on these results,
+zradius values from three to four seem to work well for all datasets.
+We also consider how the coverage of the local models depends on the zradius. The cover-
+age plots can be seen in Appendix A and support the same conclusion as the ﬁdelity results.
+Thus, we use zradius = 3.5 as the default value for all the other experiments in this paper.
+4.4 Visualisations of the datasets
+While ﬁdelity and coverage can be used for the quantitative analysis of zradius, there is still
+room for a qualitative comparison to account for subjective preferences. In Figure 4, we
+plot the low-dimensional embeddings for different zradius values. At small values of zradius,
+all points converge to the same cluster, as expected. With large values, the points form
+
+SLISEMAP
+15
+10
+5
+0
+5
+10
+15
+zradius = 2
+zradius = 3
+zradius = 3.5
+10
+5
+0
+5
+10
+10
+5
+0
+5
+10
+15
+zradius = 4
+10
+5
+0
+5
+10
+zradius = 5
+10
+5
+0
+5
+10
+zradius = 6
+Fig. 4 The low-dimensional embedding of the BOSTON dataset with different values for zradius. Large values
+(bottom right) lead to sparse solutions with small clusters and potentially overﬁt local models. Small values of
+zradius (top left) create a single dense cluster in the centre, with all (non-)local models being almost identical.
+10
+5
+0
+5
+10
+SLISEMAP 1
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+10.0
+SLISEMAP 2
+Embedding
+Clusters
+0
+1
+2
+3
+4
+1.0
+0.5
+0.0
+0.5
+1.0
+Coefficients
+LSTAT
+DIS
+RM
+NOX
+INDUS
+Local Models
+Fig. 5 Clustering the local models (right) to see if they correspond to clusters in the embedding (left). This
+also shows that the clusters in the embedding (left) have distinct local models (right). The barplot (right) only
+shows the ﬁve most important attributes of the BOSTON dataset.
+smaller and smaller clusters, potentially leading to overﬁtting. Based on Figure 4, zradius
+values between three and four seem optimal, which matches the conclusions from above.
+With SLISEMAP, we obtain not only an embedding but also local models for the data
+items. Data items that are nearby in the embedding space should have similar local models.
+We can verify this by clustering the local models independently of the embeddings and
+comparing these clusters to the structure in the embedding. Furthermore, models far apart
+in the embedding should look different due to the different local weights.
+In Figure 5, we cluster the coefﬁcients of the local models using k-means clustering (on
+the BOSTON dataset). Here, we see that the clusters in the local models clearly match clus-
+ters in the embedding and that the clusters have different local models. Looking at the local
+models, we notice something curious: industry (INDUS) generally has a weak positive coef-
+ﬁcient, except for one cluster where it is strongly negative. Investigating this cluster reveals
+
+16
+A. Bj¨orklund et al.
+5
+0
+5
+10
+Z2
+5
+0
+5
+10
+Z1
+5
+0
+5
+10
+Z1
+5
+0
+5
+10
+Z2
+5
+0
+5
+10
+Z1
+5
+0
+5
+10
+Z1
+Loss
+0.00
+0.14
+0.29
+0.43
+0.58
+0.72
+Selected
+Fig. 6 A SLISEMAP embedding for the BOSTON dataset. The embedding is plotted seven times with different
+data items selected. The points in the embedding are coloured based on how well the corresponding local
+model ﬁts the selected data item. Some data items only ﬁt local models that are nearby in the embedding (the
+same neighbourhood), while some data items are more general.
+that this cluster has higher amounts of industry than the dataset in general (see density plots
+in Appendix C). Using SLISEMAP, we can learn that industry has a nonlinear effect on the
+value of homes; some industrial zoning might be good, but too much is detrimental.
+A plot of the MNIST data is shown in Figure 2 in the introduction, where we can see
+that some local models focus heavily on the bottom curve of 3:s, while others compare the
+differences between the pixels in the centre and the pixels just below the centre.
+4.5 Uniqueness
+In SLISEMAP, the embedding is inﬂuenced by the local models. Thus, if multiple local mod-
+els are suitable for a particular data item, then the optimal embedding might be ambiguous.
+Some overlap between the local models is expected, and neighbouring (in the embedding)
+local models should be especially similar, due to the distance-based kernels in the loss func-
+tion, Equation (6). We also expect the hyperplanes of the local models to intersect, and any
+data items at these intersections will ﬁt both models equally well.
+In Figure 6, we select seven data items from the BOSTON dataset and plot scatterplots
+of the embedding, where the colour of each dot represents how suitable that local model is
+for the selected data item. We see that not all local models suit all data items, i.e., the local
+models are actually local. Furthermore, neighbouring points tend to have the most suitable
+local models, as expected. However, some data items ﬁt well into multiple neighbourhoods.
+These data items with multiple potential neighbourhoods make the solutions non-unique,
+since there are multiple local optima with almost equally good losses. However, as shown in
+Figure 5, the local models in the different neighbourhoods are different, and this is important
+for the data items in Figure 6 matching only a single neighbourhood.
+4.6 Subset sampling
+With large datasets, the quadratic scaling of SLISEMAP, see Section 3.5, can become prob-
+lematic. One solution is to run SLISEMAP on a random subset of the data, and then, post hoc,
+
+SLISEMAP
+17
+0.000
+0.002
+0.004
+0.006
+0.008
+Fidelity
+Air Quality
+0.000
+0.001
+0.002
+0.003
+0.004
+Fidelity
+Air Quality (XAI)
+0.0090
+0.0095
+0.0100
+0.0105
+0.0110
+Fidelity
+Spam
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+Fidelity
+Spam (XAI)
+0
+500
+1000
+1500
+2000
+n
+0.010
+0.012
+0.014
+0.016
+0.018
+Fidelity
+Higgs
+0
+500
+1000
+1500
+2000
+n
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+Fidelity
+Higgs (XAI)
+0
+500
+1000
+1500
+2000
+n
+0.0110
+0.0112
+0.0114
+0.0116
+0.0118
+0.0120
+0.0122
+0.0124
+Fidelity
+Covertype
+0
+500
+1000
+1500
+2000
+n
+0.000
+0.005
+0.010
+0.015
+0.020
+0.025
+0.030
+Fidelity
+Covertype (XAI)
+Train
+Test
+Fig. 7 Adding new data items to SLISEMAP solutions trained on subsampled datasets. With a sufﬁciently
+large training dataset, the ﬁdelity of unseen test data matches that of the training data. For most of these
+datasets, only a couple of hundreds of initial data items are required. Lower ﬁdelity for the test data is better.
+add unseen data items whenever necessary (see Section 3.2). With larger subsets, we expect
+better results, but with diminishing returns after the dataset is sufﬁciently covered.
+To investigate how much data are needed, we randomly select 1000 data items from the
+large datasets to be unseen test data and train SLISEMAP solutions on increasing numbers
+of data items sampled from the remaining data. Then, we add the unseen data items, using
+Slisemap-new from Algorithm 1. We repeat this process ten times for each dataset and
+compare the ﬁdelity, Equation (14), between the training data and the test data.
+The results can be seen in Figure 7. If the training dataset is too small, then the lo-
+cal models tend to overﬁt, but for most datasets, only a couple of hundred data items are
+needed to stabilise the results. This also coincides with the ﬁdelities of the unseen test data
+approaching the ﬁdelities of the training data.
+4.7 Higher dimensional embeddings
+In most experiments discussed in this paper, we use a two-dimensional embedding (d = 2).
+This is because a two-dimensional embedding is easy to visualise, which we consider to be
+an important use-case for the embedding. However, SLISEMAP is not limited to only two
+dimensions, which we demonstrate in this section.
+Using the same ﬁdelity and coverage metrics as in Section 4.3, we can ﬁnd the best zradius
+value for higher dimensional embeddings. In Figure 8 and Appendix D, we demonstrate that
+the same default parameter value of zradius = 3.5, which works well for two-dimensional
+embeddings, is also suitable for higher dimensions.
+With two-dimensional embeddings, the intercluster distances are only independent for
+up to three clusters. This means that we expect higher dimensional embeddings to produce
+slightly lower losses if there are more than three clusters. In Figure 9, we compare the losses
+for different numbers of dimensions. For some datasets, we indeed see minor improvements
+in the loss with increasing dimensionality. But, for example, in RSYNTH we know that there
+are only three clusters, so higher dimensional embeddings offer no advantage.
+
+18
+A. Bj¨orklund et al.
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Coverage
+Boston, d = 2
+Boston, d = 3
+Boston, d = 5
+Boston, d = 10
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+Coverage
+Air Quality (XAI), d = 2
+Air Quality (XAI), d = 3
+Air Quality (XAI), d = 5
+Air Quality (XAI), d = 10
+0.1
+0.2
+0.3
+0.4
+0.5
+Nearest Neighbours
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Coverage
+Higgs (XAI), d = 2
+0.1
+0.2
+0.3
+0.4
+0.5
+Nearest Neighbours
+Higgs (XAI), d = 3
+0.1
+0.2
+0.3
+0.4
+0.5
+Nearest Neighbours
+Higgs (XAI), d = 5
+0.1
+0.2
+0.3
+0.4
+0.5
+Nearest Neighbours
+Higgs (XAI), d = 10
+radius
+2.0
+2.5
+3.0
+3.5
+4.0
+Fig. 8 Coverage of the local models versus the fraction of nearest neighbours (in the coverage calculation)
+for different values of zradius and different numbers of embedding dimensions d. As the threshold for the
+coverage, we use the 0.3 quantile of the losses from a global model. Larger coverage is better, especially
+for the nearest neighbors. Here, 3 ≤zradius ≤3.5 results in the best coverage, even for higher dimensional
+embeddings. The full plot is available in Appendix D.
+0
+2
+4
+6
+8
+Loss
+Boston
+0
+1
+2
+3
+4
+5
+Boston (XAI)
+0
+2
+4
+6
+8
+Air Quality
+2
+3
+4
+5
+10
+d
+0
+1
+2
+3
+4
+Air Quality (XAI)
+2
+3
+4
+5
+10
+d
+0
+100
+200
+300
+400
+500
+Loss
+Spam (XAI)
+2
+3
+4
+5
+10
+d
+0
+20
+40
+60
+80
+100
+120
+Higgs (XAI)
+2
+3
+4
+5
+10
+d
+0
+20
+40
+60
+80
+100
+RSynth
+Fig. 9 Comparing losses for different numbers of embedding dimensions d. With higher-dimensional em-
+beddings, we expect either minor improvements to the loss due to more ﬂexible distances between multiple
+clusters or that the loss stays roughly the same.
+
+SLISEMAP
+19
+100
+1000
+10000
+n
+100
+1000
+Time (s)
+m = 10
+10
+100
+m
+n = 1000
+Device
+cpu
+cuda
+Fig. 10 Runtimes for different dataset sizes (using the RSYNTH dataset). GPU acceleration (cuda) brings
+some overhead but offers better parallelisation on large datasets. Note the logarithmic scale of the axis.
+4.8 GPU acceleration
+Since we implement SLISEMAP using PyTorch, the calculations can be accelerated using a
+GPU. Running SLISEMAP on a GPU should be faster than running on a CPU, especially for
+larger datasets. In Figure 10, we apply SLISEMAP on RSYNTH datasets with different sizes,
+both with and without GPU acceleration. The GPU implementation has some overhead,
+making it slower for small datasets (less than 400 × 10) but substantially faster for larger
+datasets.
+4.9 Comparison to dimensionality reduction methods
+The feature that differentiates SLISEMAP from other dimensionality reduction methods is
+that SLISEMAP provides both a low-dimensional embedding and local models. To demon-
+strate that doing this optimisation simultaneously is necessary, we take the embeddings from
+other dimensionality reduction methods and ﬁt local models post hoc (essentially running
+SLISEMAP with a ﬁxed Z given by the dimensionality reduction methods).
+We use the following dimensionality reduction methods from the Scikit-learn pack-
+age (Pedregosa et al., 2011) for the comparison: PCA, LLE (Roweis and Saul, 2000), MLLE
+(Zhang and Wang, 2006), MDS (Kruskal, 1964), ISOMAP (Tenenbaum et al., 2000), and
+t-SNE (van der Maaten, 2014). We also consider UMAP (McInnes et al., 2020).
+A selection of the results can be seen in Table 2 (results for all datasets can be found
+in Appendix E). Since none of the other methods consider the relationship between X and
+y (most do not even use y), their post hoc local models are, unsurprisingly, nonoptimal.
+However, the downside of using SLISEMAP is the additional time required for convergence.
+4.10 Comparison to local explanation methods
+If we have access to a black box model, we can use SLISEMAP to ﬁnd local and interpretable
+approximations of that black box model. In this section, we investigate how good the ap-
+proximations are by checking both how local and how general the local models are. We also
+compare against other model-agnostic, local explanation methods. Furthermore, SLISEMAP
+ﬁnds all local models simultaneously, which could provide a speed beneﬁt.
+
+20
+A. Bj¨orklund et al.
+Table 2 Comparing SLISEMAP against other dimensionality reduction methods. The embeddings Z are given
+by the dimensionality reduction methods while the local model coefﬁcients B are optimised post-hoc (using
+the SLISEMAP loss). Here we use 20% as the number of nearest neighbours, and the running times are without
+GPU-acceleration. The best results are in bold. The full table is available in Appendix E.
+Loss
+Fidelity
+Fidelity NN
+Coverage NN
+Time (s)
+Dataset
+Method
+AIR QUALITY
+1000×11
+Slisemap
+7.87±1.33
+0.00±0.00
+0.02±0.01
+0.73±0.06
+160.20±54.18
+PCA
+67.85±7.32
+0.05±0.01
+0.07±0.01
+0.33±0.01
+9.73±7.47
+Spectral Embedding
+74.81±8.34
+0.06±0.01
+0.07±0.01
+0.33±0.01
+8.16±7.63
+LLE
+68.44±7.17
+0.05±0.01
+0.07±0.01
+0.33±0.02
+8.55±3.20
+MLLE
+71.51±8.46
+0.06±0.01
+0.07±0.01
+0.33±0.01
+7.90±2.55
+MDS
+68.08±7.59
+0.05±0.01
+0.07±0.01
+0.33±0.02
+22.88±9.23
+Non-Metric MDS
+78.77±8.18
+0.06±0.01
+0.08±0.01
+0.30±0.02
+4.78±1.29
+Isomap
+67.83±7.64
+0.05±0.01
+0.07±0.01
+0.33±0.02
+7.81±2.69
+t-SNE
+74.71±7.93
+0.06±0.01
+0.07±0.01
+0.33±0.01
+10.00±3.46
+UMAP
+78.00±8.22
+0.07±0.01
+0.07±0.01
+0.32±0.01
+10.56±1.66
+Supervised UMAP
+81.43±8.69
+0.08±0.01
+0.08±0.01
+0.31±0.01
+5.06±0.79
+SPAM (XAI)
+1000×57
+Slisemap
+492.45±66.51
+0.20±0.03
+0.31±0.07
+0.86±0.04
+237.68±76.62
+PCA
+2700.08±100.82
+1.65±0.11
+2.31±0.11
+0.36±0.02
+18.35±4.87
+Spectral Embedding
+2522.60±82.28
+1.36±0.06
+2.07±0.07
+0.41±0.02
+17.48±4.36
+LLE
+3075.05±233.23
+2.20±0.50
+3.09±0.41
+0.33±0.03
+19.22±5.55
+MLLE
+3474.37±112.08
+3.15±0.13
+3.46±0.33
+0.29±0.02
+15.66±7.36
+MDS
+2401.03±39.46
+1.02±0.04
+2.11±0.07
+0.38±0.02
+77.63±15.93
+Non-Metric MDS
+2926.17±85.26
+1.41±0.07
+2.70±0.09
+0.35±0.01
+24.51±4.44
+Isomap
+2559.64±106.99
+1.38±0.12
+2.17±0.16
+0.38±0.02
+24.55±9.94
+t-SNE
+2523.66±64.02
+1.22±0.04
+2.14±0.07
+0.39±0.02
+23.93±4.61
+UMAP
+3352.64±190.68
+2.40±0.27
+2.92±0.32
+0.32±0.02
+19.96±3.51
+Supervised UMAP
+3455.06±200.77
+2.63±0.31
+3.03±0.23
+0.31±0.02
+14.03±2.70
+RSYNTH
+400×15
+Slisemap
+84.53±74.48
+0.03±0.05
+0.13±0.34
+0.98±0.06
+20.92±8.59
+PCA
+2841.63±739.62
+3.23±0.81
+7.45±1.97
+0.37±0.02
+0.33±0.03
+Spectral Embedding
+2921.21±836.71
+3.35±1.02
+7.62±2.19
+0.36±0.02
+0.39±0.02
+LLE
+3151.40±933.08
+4.47±1.62
+8.58±2.41
+0.33±0.02
+0.53±0.06
+MLLE
+3376.26±823.38
+7.04±1.40
+8.50±2.03
+0.33±0.01
+0.61±0.14
+MDS
+2774.25±758.80
+2.89±0.78
+7.18±2.01
+0.37±0.02
+3.84±0.96
+Non-Metric MDS
+3174.01±844.25
+3.54±0.93
+8.41±2.14
+0.33±0.02
+0.53±0.02
+Isomap
+2938.62±860.11
+3.36±0.93
+7.73±2.36
+0.36±0.02
+0.45±0.04
+t-SNE
+2987.75±815.80
+3.51±0.90
+7.71±2.03
+0.35±0.03
+1.19±0.02
+UMAP
+3773.83±1086.93
+8.31±2.48
+8.75±2.54
+0.32±0.01
+5.62±0.20
+Supervised UMAP
+3741.48±1058.81
+8.16±2.42
+8.66±2.42
+0.33±0.01
+2.28±0.02
+Of the local, model-agnostic, approximating explanations methods mentioned in Sec-
+tion 2, SLISEMAP is most closely related to SLISE Bj¨orklund et al. (2019). SLISE uses robust
+regression (Bj¨orklund et al., 2022b) on data that have been centred on the selected data item
+to produce the local approximation. LIME (Ribeiro et al., 2016) creates a neighbourhood of
+synthetic data by mutating the selected data item (and using the black box model to obtain
+predictions). To increase interpretability LIME, normally, discretise continuous variables into
+binary variables (e.g., into quantiles). Then, LIME ﬁts a least squares linear model to the syn-
+thetic neighbourhood to form the local approximation. SHAP (Lundberg and Lee, 2017) tries
+to estimate the Shapley value of keeping a variable in the selected data item versus chang-
+ing it. This is conceptually quite similar to the discretisation in LIME. The model-agnostic
+variants of SHAP generally accomplishes this by creating variants of the selected data item
+
+SLISEMAP
+21
+Table 3 Comparison of the local white box models given by SLISEMAP, SLISE, SHAP, LIME, and LIME with
+no discretisation. A global model is included as reference. The error tolerance for SLISE and the coverage is
+selected such that the global model has a coverage of 0.3, and the running times are without GPU-acceleration.
+Smaller ﬁdelity and larger coverage are better.
+Fidelity
+Coverage
+Time (s)
+Dataset
+Method
+BOSTON (XAI)
+404×13
+Slisemap
+0.00±0.00
+0.35±0.02
+22.00±4.91
+SLISE
+0.00±0.00
+0.46±0.02
+69.82±1.32
+SHAP
+0.00±0.00
+0.13±0.01
+169.20±3.65
+LIME
+0.26±0.02
+0.14±0.01
+1614.38±20.60
+LIME (nd)
+0.16±0.01
+0.21±0.01
+49.89±0.73
+Global
+0.11±0.01
+0.30±0.00
+0.01±0.00
+AIR QUALITY (XAI)
+1000×11
+Slisemap
+0.00±0.00
+0.26±0.01
+138.55±29.93
+SLISE
+0.00±0.00
+0.35±0.01
+768.10±11.38
+SHAP
+0.01±0.00
+0.08±0.00
+446.44±7.48
+LIME
+0.23±0.05
+0.09±0.00
+3785.90±46.66
+LIME (nd)
+0.09±0.01
+0.26±0.02
+79.59±1.40
+Global
+0.08±0.01
+0.30±0.00
+0.03±0.00
+SPAM (XAI)
+1000×57
+Slisemap
+0.21±0.01
+0.23±0.01
+228.32±101.68
+SLISE
+0.00±0.00
+0.57±0.01
+578.25±66.37
+SHAP
+0.00±0.00
+0.15±0.01
+1891.84±18.94
+LIME
+3.08±0.21
+0.20±0.01
+4445.11±80.06
+LIME (nd)
+9.56±0.27
+0.09±0.01
+200.16±0.97
+Global
+3.10±0.12
+0.30±0.00
+0.35±0.16
+HIGGS (XAI)
+1000×28
+Slisemap
+0.05±0.00
+0.28±0.01
+241.86±84.21
+SLISE
+0.00±0.00
+0.41±0.01
+573.42±92.10
+SHAP
+0.00±0.00
+0.24±0.01
+512.41±20.85
+LIME
+0.85±0.07
+0.27±0.01
+8983.48±236.47
+LIME (nd)
+1.34±0.05
+0.27±0.01
+161.86±4.08
+Global
+1.19±0.06
+0.30±0.00
+0.15±0.37
+where some of the variables are sampled from the dataset. These Shapley values are then
+used as the local approximation.
+In addition to the methods outlined above, SLISEMAP, SLISE, SHAP, and LIME (with and
+without discretisation), we also consider a global model as a reference. The global models
+allow us to check that the local approximations are indeed local (better ﬁdelity than the
+global model) and how general the approximations are (by comparing the coverage). As the
+threshold for measuring coverage as well as the error tolerance parameter in SLISE, we use
+the 0.3 quantile of the losses of the global model. The results can be seen in Table 3.
+By deﬁnition, SLISE an SHAP have perfect ﬁdelity for the data item corresponding to
+the local model, with SLISEMAP not far behind. The global model is obviously not local
+and, thus, should have the worst ﬁdelity. However, there is nothing in the LIME procedure
+that ensures that the local approximation matches the selected data item. This results in the
+ﬁdelity of LIME being comparable to the global model.
+One of the advantages of SLISE is speciﬁcally optimising the subset size, which results
+in outstanding coverage. The local models in SLISEMAP are affected by the low-dimensional
+embedding. This reduced ﬂexibility results in lower coverage than SLISE but better coverage
+than both LIME and SHAP. Both SHAP and LIME create synthetic neighbourhoods, which
+
+22
+A. Bj¨orklund et al.
+results in local models that are more difﬁcult to generalise to real data items, reducing the
+coverage.
+By computing all the local approximations at the same time, SLISEMAP tends to be faster
+than the methods doing it one-by-one, the exception being LIME with no discretisation. Fur-
+thermore, SLISEMAP also ﬁnds a low-dimensional embedding that can be used to visualise
+and compare different data items, different local approximations, and how they relate to each
+other.
+5 Conclusions
+In this paper, we present a novel supervised manifold embedding method, SLISEMAP, that
+embeds data items into a lower-dimensional space such that nearby data items are modelled
+by the same white box model. Therefore, in addition to reducing the dimensionality of the
+data, SLISEMAP creates a visualisation that can be used to globally explore and explain black
+box classiﬁcation and regression models.
+We show that the state-of-the-art dimensionality reduction methods, unsurprisingly, can-
+not be used to explain classiﬁers or regression models. On the other hand, the state-of-the-art
+tools used to explain black box models typically only provide local explanations for single
+examples, whereas SLISEMAP gives an overview of all local explanations.
+Interesting future work would be to explore how SLISEMAP visualisations can be used
+to better understand data, both with and without a black box model, and to help build bet-
+ter models. For example, if a SLISEMAP visualisation could show that some group of data
+items should be handled differently. Future work could also explore how to use SLISEMAP
+to detect anomalous behaviours, such as outliers or concept drift. Finally, the scaling of
+SLISEMAP could be improved by, e.g., using stochastic optimisation or prototypes.
+The source code for SLISEMAP, published under an open source MIT license, as well
+as the code needed to replicate all of the experiments in this paper, is available via GitHub
+(Bj¨orklund et al., 2022a).
+Declarations
+Funding: Computational resources provided by Finnish Grid and Cloud Infrastructure.
+Anton Bj¨orklund is supported by the Doctoral Programme in Computer Science at Univer-
+sity of Helsinki, and Jarmo M¨akel¨a is supported by Academy of Finland (decision 320182).
+Conﬂict of interest: The authors declare that they have no conﬂicts of interest.
+Ethical considerations: This paper is computational in nature, it uses only synthetic or
+previously published reference datasets, does not involve any human participants, and has
+no other outstanding ethical concerns.
+Consent for participation and publication: Not applicable.
+Data availability: All datasets found in this paper can be downloaded from openml.org.
+Code availability: The source code for the algorithm and all the experiments are available
+under an open source MIT License from GitHub (Bj¨orklund et al., 2022a).
+Authors’ contributions: The authors Anton Bj¨orklund, Jarmo M¨akel¨a, and Kai Puolam¨aki
+have all contributed to all parts of the research (theory, experiments, and writing).
+
+SLISEMAP
+23

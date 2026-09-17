@@ -1,0 +1,853 @@
+Robust and Resource-Efficient Data-Free Knowledge Distillation
+by Generative Pseudo Replay
+Kuluhan Binici1, 2, Shivam Aggarwal2, Nam Trung Pham1, Karianto Leman1, Tulika Mitra2
+1Institute for Infocomm Research, A*STAR, Singapore
+2School of Computing, National University of Singapore
+Abstract
+Data-Free Knowledge Distillation (KD) allows knowl-
+edge transfer from a trained neural network (teacher) to
+a more compact one (student) in the absence of orig-
+inal training data. Existing works use a validation set
+to monitor the accuracy of the student over real data
+and report the highest performance throughout the en-
+tire process. However, validation data may not be avail-
+able at distillation time either, making it infeasible to
+record the student snapshot that achieved the peak accu-
+racy. Therefore, a practical data-free KD method should
+be robust and ideally provide monotonically increasing
+student accuracy during distillation. This is challeng-
+ing because the student experiences knowledge degra-
+dation due to the distribution shift of the synthetic data.
+A straightforward approach to overcome this issue is to
+store and rehearse the generated samples periodically,
+which increases the memory footprint and creates pri-
+vacy concerns. We propose to model the distribution of
+the previously observed synthetic samples with a gen-
+erative network. In particular, we design a Variational
+Autoencoder (VAE) with a training objective that is cus-
+tomized to learn the synthetic data representations opti-
+mally. The student is rehearsed by the generative pseudo
+replay technique, with samples produced by the VAE.
+Hence knowledge degradation can be prevented with-
+out storing any samples. Experiments on image clas-
+sification benchmarks show that our method optimizes
+the expected value of the distilled model accuracy while
+eliminating the large memory overhead incurred by the
+sample-storing methods.
+Introduction
+Recently there is a surging interest to deploy neural net-
+works on the edge devices. Most of these devices have strict
+resource (e.g., memory or power) constraints that are incom-
+patible with the high computational demand of the neural
+networks. Knowledge Distillation (KD) (Hinton, Vinyals,
+and Dean 2015) is a well-studied approach to deploy pre-
+trained neural networks on resource-constrained devices by
+making them more compact. KD needs access to the origi-
+nal dataset that was used to train the teacher model. This is
+challenging if the distillation is performed by a party other
+than the model developers as they may not have access to the
+Copyright © 2021, Association for the Advancement of Artificial
+Intelligence (www.aaai.org). All rights reserved.
+Figure 1: Example of student accuracy degradation over dis-
+tillation steps due to catastrophic forgetting. Red vertical
+line marks the epoch with peak accuracy on the validation
+dataset.
+original training dataset, either due to privacy issues or the
+extremely large dataset size making its relocation infeasible.
+Addressing this issue, some works utilize alternative data
+that are publicly available (Addepalli et al. 2020; Nayak,
+Mopuri, and Chakraborty 2021), while others propose to use
+synthetic data. (Zhang et al. 2021; Ma et al. 2020) The sec-
+ond approach is called Data-Free KD and completely elim-
+inates the need for any real data. The decoupling of the KD
+from the original dataset allows distillation to be performed
+in a much wider spectrum of scenarios in comparison to
+the data-dependent approaches. Typically data-free KD ap-
+proaches contain multiple rounds (epochs) of synthetic data
+samples generation and knowledge transfer. In each round,
+the synthetic samples are generated to close the current in-
+formation gap between the teacher and the student. As the
+student is trained and the gap gets smaller, the synthetic
+sample distribution changes as well. Therefore, if the pre-
+viously generated synthetic samples are not periodically re-
+hearsed to the student, the information acquired in earlier
+distillation epochs might be lost, causing accuracy degra-
+dation over time. This is known as catastrophic forgetting
+(French 1999) Such accuracy degradation is not desirable
+in practice, especially if the validation dataset is also not
+available. The absence of the validation dataset prevents the
+arXiv:2201.03019v3  [cs.LG]  29 Jul 2024
+
+user from monitoring the student accuracy over time and
+choosing the distilled model with the peak accuracy. For
+example, Figure 1 shows the CIFAR10 validation accuracy
+of the student model distilled by an existing work, DFAD
+(Fang et al. 2019), over 100 epochs. The peak accuracy is
+achieved at the 8th epoch and the accuracy degrades sub-
+sequently. As the users do not have access to the validation
+dataset, they cannot evaluate the student accuracy and find
+the peak. Hence, the final accuracy will be a function of the
+arbitrary termination epoch chosen by the user. This sug-
+gests that an ideal data-free KD method should be robust
+and either sustain high accuracy or monotonically increase
+it over time so that the distillation can be safely terminated
+after a pre-determined sufficient number of epochs. Recent
+research (Yin et al. 2020; Fang et al. 2021) propose to store
+the generated samples over epochs and continuously expose
+the student to the entire collection at each distillation step.
+However, with this approach, the memory overhead and the
+wall-clock time per distillation step increase substantially.
+If the dataset is complex in terms of the number of classes
+and the samples it contains, the required number of distilla-
+tion steps to achieve an accurate student model can be quite
+large. For instance, for the Imagenet dataset, the DeepInver-
+sion method (Yin et al. 2020) stores 140K synthetic samples
+that occupy around 17 GB and takes 2.8K NVIDIA V100
+GPU-hours to complete distillation. Moreover, storing the
+generated samples may violate the privacy considerations of
+the original dataset as they can leak information related to
+the original samples (Li and Zhang 2020). In summary, the
+current data-free KD methods are either not robust in terms
+of student accuracy throughout the distillation process or are
+resource inefficient by storing the generated samples and can
+have potential privacy concerns. This trade-off casts them
+less appealing to the end-users.
+In this work, we aim to democratize data-free KD by
+proposing a novel method that preserves student accuracy
+by performing replay without storing any data samples. We
+achieve this by designing a Variational Auto-Encoder (VAE)
+(Kingma and Welling 2013) to model the cumulative distri-
+bution of all the generated samples. We establish that the
+vanilla VAE optimization objective is not suitable to model
+the synthetic data distribution and propose a synthetic data-
+aware reconstruction loss. The modeled distribution is used
+to infer “memory samples” that represent those generated
+in earlier steps and rehearse the student with these samples
+in conjunction with the newly generated samples to further
+bridge the information gap between the teacher and the stu-
+dent. Hence, our approach has a constant and very limited
+memory overhead of a few megabytes to store only the VAE
+parameters and offers accurate distillation. Experimental re-
+sults show that our method achieves up to 26.8% increase
+in average student accuracy compared to methods without
+replay on image classification benchmarks. Moreover, com-
+pared to methods that replay stored samples, ours can reduce
+the memory footprint by gigabytes. Our concrete contribu-
+tions can be summarized as follows.
+• A novel data-free KD framework containing two special-
+ized generators to allow the student network acquire new
+knowledge while retaining the prior information.
+• Enabling VAEs to operate with synthetic data, produced
+for knowledge distillation, by modifying the reconstruc-
+tion loss.
+• Extensive experimental evaluation of our approach in
+comparison with the state-of-the-art.
+Related Work
+Knowledge Distillation (KD)
+KD (Hinton, Vinyals, and Dean 2015) can be defined as
+transferring the learnt prediction behavior of a complex neu-
+ral network model to a relatively smaller one. In literature,
+the complex network is often referred as the “teacher” and
+the compact network is referred as the “student”. Through-
+out the distillation process, the student is trained with the
+guidance of the ground truth labels as well as the teacher’s
+responses to the training data. The inclusion of teacher’s re-
+sponses in the training objective consolidates the informa-
+tion provided to the student about the data-label relation-
+ships. Thus the student network can achieve much higher
+accuracy than when it is trained with the supervision of only
+the ground truth labels. This is viewed as a form of compres-
+sion, as the compact student model approximates the teacher
+by carrying more information than it could have learnt from
+data on its own.
+Data-Free KD
+The concept of performing knowledge distillation using syn-
+thetic data samples in place of a real dataset is called data-
+free KD. Unavailability of real data with ground truth labels
+limits the student training to be guided only by the teacher
+outputs (softmax logits, activation maps, etc.). One quality
+that the synthetic samples are expected to have is that their
+distribution should match that of the original data (Yoo et al.
+2019; Nayak et al. 2019; Chen et al. 2019; Haroush et al.
+2020). Another one is that they should be optimal to close
+the information gap between the teacher and the student
+(Micaelli and Storkey 2019; Fang et al. 2019). Producing
+samples that satisfy both, generally yields the best distilla-
+tion results (Yin et al. 2020; Fang et al. 2021; Binici et al.
+2021). During distillation, the synthetic data distribution is
+updated at each epoch to achieve the above-mentioned qual-
+ities. Such distribution shift could cause the student model
+to lose the information over epochs and experience accu-
+racy degradation (Binici et al. 2021). This could be avoided
+by periodically rehearsing the student with samples from all
+the distributions it has previously observed. We can group
+the existing data-free KD methods based on whether they
+employ such practice or not as replay-based methods and
+replay-free methods.
+The replay-based methods typically store a collection of
+generated synthetic samples over epochs. CMI (Fang et al.
+2021) is a recent work that utilizes the model inversion tech-
+nique to generate the synthetic samples and store them all
+in memory. Each time a newly generated batch is added,
+the student is trained with the entire collection of samples.
+This approach suffers from high memory utilization and re-
+quires a significant amount of time to achieve high-quality
+distillation. (Binici et al. 2021) proposed to use a fixed-sized
+
+Generator (novel) 
+n(z; θ
+n)
+Generator (memory) 
+m(z; θ
+m)
+Encoder 
+ℰm(x; θℰm)
+ 
+z ∼
+(0,1)
+ 
+z ∼
+(0,1)
+Novel sample 
+batch
+Memory sample 
+batch
+Sample Generation
+Knowledge Distillation
+Teacher 
+a)
+b)
+T(x; θT)
+Student S(x; θS)
+KD loss
+ loss
+n
+ loss
+m
+̂yS
+̂yT
+T(x)l
+T(x)l−1
+concetanated batch
+Generator (novel)
+backpropagation
+novel sample batch
+Encoder
+Generator (memory)
+VAE
+backpropagation
+memory sample batch
+reconstruction
+loss
+novel generator
+loss
+Knowledge Distillation
+−KL( ̂yT|| ̂yS)
+̂yT
+(T(x)l, T(x)l−1 . . . )
+Figure 2: Method overview. (a) Proposed PRE-DFKD framework. The student and the generators are trained alternately. First
+the generators are fixed and the student is trained by a combination of novel and memory samples. In the next stage, student
+is fixed and the generators are trained by the learning signals received from the KD. (b) Training process of VAE. First, the
+memory generator is frozen and a batch of memory samples are inferred. Later the memory batch is combined with a novel
+sample batch to train the encoder-decoder pair.
+memory buffer instead of storing all synthetic samples. Al-
+though the memory overhead is constant, this approach does
+not completely eliminate the possibility of catastrophic for-
+getting as the student is rehearsed only with a subset of pre-
+viously observed samples.
+The replay-free approaches train the student only with the
+newly generated samples at any distillation epoch. DAFL
+(Chen et al. 2019) introduced three novel loss terms that
+motivate the generated samples to be categorically diverse
+and be classified with high confidence by the teacher.
+DFAD (Fang et al. 2019) targeted generating samples that
+would cause maximum information gain to the student when
+learned. Since these works do not contain any replay mech-
+anism, the student accuracy often fluctuates and degrades
+over epochs.
+Replay in Continual Learning
+Continual Learning (CL) methods focus on incrementally
+learning from a non-stationary dataset, with the goal of
+mitigating catastrophic forgetting (Goodfellow et al. 2015),
+i.e., the inability of the model to preserve the past knowl-
+edge while learning from the recent data. The CL meth-
+ods (Mai et al. 2021) can be broadly classified into three
+major approaches: regularization-based, architecture-based,
+and replay-based (either generative or from a stored buffer),
+with the latter being the most effective and the focus of this
+paper. Vanilla replay-based techniques (Rebuffi et al. 2017)
+maintain a buffer of raw samples from the past tasks and
+replay them periodically with the new data in the learning
+process. However, these methods become infeasible when
+raw samples cannot be stored due to privacy or memory
+constraints. Moreover, they cannot perform lifelong learn-
+ing due to the inability to scale well with the growing data
+stream. The generative replay strategies (Shin et al. 2017;
+Wu et al. 2018) mitigate these shortcomings by training a
+deep generative model to create pseudo-samples that mimic
+the data distribution from past experiences. Our work lever-
+ages generative pseudo replay. In particular, we adopt a
+VAE-based strategy (Shin et al. 2017) to preserve the knowl-
+edge of the previously generated synthetic samples. Unlike
+existing continual learning works, our method focuses on
+the generation of synthetic samples in a data-free environ-
+ment. We propose a modified optimization objective to pre-
+serve the categorical information in reconstructed samples
+and mitigate catastrophic forgetting in a data-free knowl-
+edge distillation scenario.
+Proposed PRE-DFKD Approach
+Our data-free KD approach is called Pseudo Replay En-
+hanced Data-Free Knowledge Distillation (PRE-DFKD).
+Figure 2(a) provides an overview of PRE-DFKD. It consists
+of data generation and knowledge distillation. In data gen-
+eration, randomly sampled latent variables are transformed
+by generative models to produce synthetic samples. Later
+during knowledge distillation, the student model is trained
+to categorize these samples similar to the teacher model.
+These two stages repeat alternately until the target number
+of steps is reached. We use two generative models in our
+framework. The first one (novel sample generator) produces
+samples that bring novel information to the student. The sec-
+ond generator (memory sample generator) is responsible for
+re-exposing the student to the information acquired earlier.
+
+Novel Sample Generation
+We define novel samples as those that the student classi-
+fies differently from the teacher. When the student is trained
+with these novel samples, it better approximates the teacher.
+We condition our novel sample generator by including the
+distance between student and teacher predictions in the op-
+timization objective. To quantify such distance, we used
+Jensen-Shannon (JS) divergence (see Eq. 3) (Yin et al. 2020)
+as it is shown to provide better performing student models
+compared to other alternatives (e.g. Kullback–Leibler, L1
+norm) (Binici et al. 2021). Moreover, to ensure that the novel
+sample distribution is similar to the original one, we also in-
+clude the loss terms introduced by (Chen et al. 2019) (see
+Eq. 2). The first two of these are predictive entropy and ac-
+tivation loss terms, which are minimized when the synthetic
+data induce the teacher to output high valued activation maps
+and low entropy prediction vectors. The third term, cate-
+gorical entropy loss, sustains class balance in the generated
+batches by maximizing the categorical entropy of synthetic
+sample distribution. Eq. 1 shows the complete optimization
+objective of the novel sample generator.
+θ∗
+n := arg min
+θ
+
+L(T )
+ϕ
++ αLδ
+
+(1)
+L(T )
+ϕ
+= 1
+n
+X
+i
+ λ1ti
+T log(ˆyi
+T ) −λ2
+
+f i
+T
+
+1
+
+−λ3H(p(ˆyT ))
+(2)
+Lδ = 1 −JS(ˆyT ∥ˆyS);
+z ∼N(0, 1)
+(3)
+where θ∗
+n, represents the optimal values of the generator pa-
+rameters denoted by θn. Moreover, ˆyT = T (θ(z)) and fT
+are the softmax outputs and the activation maps at the last
+FC layer of the teacher T for the generated batch θ(z) re-
+spectively, while ti
+T = argmax(ˆyi
+T ). H(p(ˆyT )) denotes
+the entropy of class label distribution in generated batch.
+λi(i = 1, 2, 3) and α coefficients adjust the weighted con-
+tribution of each loss term.
+Memory Sample Generation
+As mentioned earlier, the distribution of novel samples shifts
+over distillation steps. To prevent such shift from causing
+the student to lose earlier learned information, we replay the
+samples from earlier distributions. These memory samples
+are inferred from a VAE that models the past synthetic data
+distributions. Our memory sample generator is the decoder
+part of the VAE and is trained jointly with the encoder. To
+train the pair, we use a combination of novel samples and
+memory samples. The inclusion of memory samples in the
+training process is to prevent the generator itself from expe-
+riencing catastrophic forgetting. The process is described in
+Algorithm 1 and visualized in Figure 2(b).
+Incompatibility of Vanilla VAE loss for Synthetic Data
+Representation Learning
+After conducting experiments
+with vanilla VAE for pseudo replay in data-free KD, we ob-
+served that the teacher’s predictions of the memory samples
+were of low confidence (14%). However, the average pre-
+diction confidence was significantly higher for novel sam-
+ples (72%). This indicated that the modelled distribution
+was not accurate. We posited that the training loss of the
+Algorithm 1 Memory Sample Generator Training
+INPUT: Novel sample generator Gn(z; θGn), memory
+sample generator Gm(z; θGm), encoder Em(x; θEm), batch
+size b, latent vector dimension n.
+# Train with novel samples
+sample B vectors (z ∼N(0, 1))
+xn ←Gn(z)
+ˆzµ, ˆzσ ←Em(xn)
+zn ∼N(ˆzµ, ˆzσ)
+ˆxn ←Gm(zn)
+# Rehearse by reconstructing old samples
+sample B vectors (zm ∼N(0, 1))
+xm ←Gm(zm)
+¯zµ, ¯zσ ←Em(xm)
+¯zm ∼N(¯zµ, ¯zσ)
+ˆxm ←Gm(¯zm)
+# Calculate & backpropagate loss
+LV AE ←Lrec(x(i)
+m , ˆx(i)
+m , x(i)
+n , ˆx(i)
+n ) + γLKLD(¯zµ, ¯zσ)
+θGm, θEm ←optimizer.step(backward(LV AE), θGm, θEm)
+vanilla VAE is incompatible with the properties of syn-
+thetic samples. The reconstruction term in the loss function
+(Lrec = ∥x −D(E(x))∥2
+2) is optimized when the decoded
+samples D(E(x)) match the inputs x in pixel space. If the
+L2 distance between the input and target image pixels is low,
+the loss term yields a small value. This assumes that small
+differences in pixel values do not impact the information
+content significantly. While this assumption holds for real
+images, it might not be accurate for synthetic ones. The syn-
+thetic samples are generated for the sole purpose of knowl-
+edge transfer. They are not visually realistic (see Figure 3)
+yet still achieve their goal. Therefore, the assumption that
+two images that are visually similar represent the same con-
+tent may not hold for synthetic samples. To test this hypoth-
+esis, we inject random Gaussian noise to both real and syn-
+thetic samples and record the percentage of samples that pre-
+served their class labels. The experimental details are given
+in the appendix. The effect of pixel-wise perturbations on
+class labels is visualized in Figure 3. It can be seen that the
+class information of synthetic samples got affected more sig-
+nificantly than real samples. This suggests that even if a re-
+constructed sample yields a small reconstruction loss with
+very similar pixel values to those of the synthetic input, its
+categorical information could be completely different.
+Synthetic Data-Aware VAE Reconstruction Loss
+To en-
+sure that the categorical information is preserved, we modify
+the VAE reconstruction loss. Our synthetic data-aware loss
+constrains the reconstructed samples to cause similar feature
+responses in the last layers of the teacher. Typically, these
+layers are considered to represent content-related informa-
+tion in Convolutional Neural Networks (CNNs) (Jing et al.
+2019). To impose the mentioned constraint, we add the term
+in Eq. 4 to the VAE optimization objective.
+X
+l∈L
+|T(x)l −T(D(E(x)))l|1
+(4)
+
+Figure 3: Example real and synthetic CIFAR10 samples are
+given before and after noise injection in the first row. In the
+second row, the projection of real and synthetic samples in-
+jected with noise on 2-dimensional planes are shown. Colors
+represent the class labels assigned to these samples by the
+teacher model. The original samples are marked with purple
+crosses.
+The encoder and decoder networks are represented by D and
+E respectively. Moreover, the set L denotes the selected set
+of teacher network (T) layers. The total training loss we use
+can be denoted as,
+LV AE = Lrec + LKLD
+(5)
+Lrec = |x−D(E(x))|1+
+X
+l∈L
+|T(x)l−T(D(E(x)))l|1 (6)
+LKLD = (N(µz, σz) ∥N(0, 1))
+(7)
+where x is the input sample batch; µz and σz are the mean
+and variance of the latent vector (z = E(x)) distribution.
+Sustaining Class Balance in Inferred Memory Batches
+Once we accomplish training a VAE with synthetic data, an-
+other remaining issue is to ensure that the inferred memory
+samples are evenly distributed into classes. Typically, latent
+vectors that are sampled from standard Gaussian distribution
+are fed to the generator to produce new images. However,
+our task requires the generated batch to be diverse in terms
+of the categorical contents of the samples. This is to guar-
+antee that the student learns to approximate the teacher for
+samples from any category. Therefore, to provide such class
+balance, we freeze the memory sample generator and tune
+the input latent vectors.
+z∗
+m := arg
+max
+z ∼N(0,1) (p(ˆyN)log(p(ˆyN)))
+(8)
+The procedure we used to solve the optimization objective
+described in Eq. 8 is given in algorithm 2. Tuning the input
+latent variables can deviate their distribution from standard
+normal, which would cause the generator to produce noise.
+To prevent such deviation, we use the Kullback–Leibler
+Algorithm 2 Memory Sample Generator Inference
+INPUT: memory sample generator Gm(z; θGm), teacher
+T(x; θT ).
+OUTPUT: memory batch xm.
+# Tune latent variables
+sample B vectors (zm ∼N(0, 1))
+xm ←Gm(zm)
+ˆyT ←T (xm)
+R ←1
+n
+P
+i
+ ti
+T log(ˆyi
+T )
+
++ KL(N(µz, σz) ∥N(0, 1))
+Lz ←−H(p(ˆyT )) + R
+zm ←optimizer.step(backward(Lz), z)
+# Infer memory samples
+xm ←Gm(zm)
+(KL) divergence as a regularization term. Moreover, to sam-
+ple the most representative images (within each class) from
+the modeled distribution, we also include the predictive en-
+tropy loss in the regularization term (R).
+Knowledge Distillation
+Knowledge transfer happens by minimizing the distance
+between teacher and student predictions against combined
+batches of novel and memory samples. The minimization
+problem that results in optimal student model parameters is
+θ∗
+S := arg min
+θS ∥S((xn, xm); θS) −T((xn, xm); θT )∥1
+(9)
+θ∗
+S in Eq. 9 denotes the optimal student model parameters;
+xn and xm are novel and memory samples, respectively.
+Experimental Evaluation
+We demonstrate the effectiveness of PRE-DFKD in improv-
+ing the expected student accuracy and reducing resource uti-
+lization on several image classification benchmarks. We pro-
+vide a comparison with methods that store samples for re-
+play and those that do not employ replay. Our baselines from
+the first category are CMI (Fang et al. 2021), and the mem-
+ory bank approach (Binici et al. 2021) that we refer to as
+MB-DFKD. For the baselines that do not use replay, we se-
+lect DAFL (Chen et al. 2019) and DFAD (Fang et al. 2019)
+methods. For a fair comparison, we used the implementa-
+tions of CMI, DAFL, and DFAD available from the authors’
+GitHub pages.
+Datasets:
+We use four datasets with different complexi-
+ties and sizes. The simplest is MNIST (LeCun et al. 1998)
+that contains 32 × 32 grayscale images from ten classes. CI-
+FAR10 (Krizhevsky, Hinton et al. 2009) contains RGB im-
+ages from ten classes (3×32×32). CIFAR100 (Krizhevsky,
+Hinton et al. 2009) contains hundred different categories
+while the samples have the same dimensions as those in CI-
+FAR10. Lastly, the most complex dataset we use is Tiny Im-
+ageNet (Deng et al. 2009) that contains 64 × 64 RGB sam-
+ples from 200 classes.
+
+MNIST
+CIFAR10
+CIFAR100
+Tiny ImageNet
+T :LeNet5 (98.9%)
+T :ResNet34 (95.4%)
+T :ResNet34 (77.9%)
+T :ResNet34 (71.2%)
+S :LeNet-half
+S :ResNet18
+S :ResNet18
+S :ResNet18
+Method
+µ
+σ2
+accmax
+µ
+σ2
+accmax
+µ
+σ2
+accmax
+µ
+σ2
+accmax
+Train with data
+98.7
+0.5
+98.9
+89.0
+8.1
+95.2
+71.3
+8.1
+77.1
+60.2
+8.8
+64.9
+DAFL
+87.3
+6.6
+98.2
+62.6
+17.1
+92.0
+52.5
+12.8
+74.5
+39.5
+10.3
+52.2
+DFAD
+63.5
+6.8
+98.3
+86.1
+12.3
+93.3
+54.9
+12.9
+67.7
+-
+-
+-
+CMI
+memory: N.A.
+memory: 250 MB
+memory: 500MB
+memory: 2.7 GB
+-
+-
+-
+82.4
+16.6
+94.8
+55.2
+24.1
+77.0
+-
+-
+-
+MB-DFKD
+memory: 6.7 MB
+memory: 20 MB
+memory: 20 MB
+memory: 20MB
+88.6
+3.2
+98.3
+83.3
+16.4
+92.4
+64.4
+18.3
+75.4
+45.7
+11.5
+53.5
+PRE-DFKD (ours)
+memory: 2.1 MB
+memory: 2.1 MB
+memory: 2.1 MB
+memory: 2.1 MB
+90.3
+1.9
+98.3
+87.4
+10.3
+94.1
+70.2
+11.1
+77.1
+46.3
+11.0
+54.2
+Table 1: Student accuracy results for Data-Free KD on four image classification benchmarks. The T and S values denote the
+teacher-student pairs. The values for µ and σ2 represent mean and variance (%) of the averaged student validation accuracy
+(over 4 runs), over epochs. accmax is the maximum recorded accuracy at any epoch of any distillation run.
+Implementation Details
+We run each method for 200,
+200, 400, and 500 epochs for MNIST, CIFAR10, CIFAR100,
+and Tiny ImageNet, respectively. To evaluate each dataset
+and method pair, we conduct four runs. For MNIST, we
+select LeNet5 (LeCun et al. 1998) and LeNet5-half as the
+teacher-student pair. For the remaining datasets, we use
+ResNet34 (He et al. 2016) as the teacher and ResNet18
+as the student. While benchmarking the baseline methods,
+we use the hyper-parameter configurations from the pa-
+pers or GitHub pages where available. Our code and ad-
+ditional experimental details are available at https://github.
+com/kuluhan/PRE-DFKD. We note that CMI failed for
+MNIST and Tiny ImageNet datasets. The original imple-
+mentation required the teacher models to contain Batch Nor-
+malization layers and as LeNet does not contain any, we
+could not test it on MNIST. For Tiny ImageNet, although we
+searched extensively for proper hyper-parameter configura-
+tion, none of our trials yielded comparable results. Similarly,
+all our experiments with DFAD on Tiny ImageNet were un-
+successful.
+Evaluation Metrics:
+If we consider the termination step
+of the distillation as a random variable ts ∈R, then our goal
+is
+max
+ts E[accts] −σ2[accts]
+(10)
+where accts stands for student accuracy at epoch ts. To re-
+port results, first, we average the accts across all runs at the
+corresponding epoch (ts). These averaged accuracy series
+can be denoted as Ei[acc(i)
+ts ] where acc(i)
+ts is the student ac-
+curacy observed in the ith run at epoch ts. We report the
+mean and variance values of Ei[acc(i)
+ts ]. The mean (µ) corre-
+sponds to Ets[Ei[acc(i)
+ts ]] and the variance (σ2) corresponds
+to σ2[Ei[acc(i)
+ts ]]. Additionally, we include the peak accu-
+racy recorded across all runs (accmax) to demonstrate that
+our method achieves state-of-the-art performance when the
+validation set is available.
+Improved Distillation Quality:
+Table 1 provides a sum-
+mary of the results across four runs. The accuracies of the
+pre-trained teachers are given next to T in Table 1 fol-
+lowed by the student accuracy with different methods. The
+first row Train with data shows the student accuracy when
+trained with the original dataset. The remaining rows re-
+port the accuracy for different baseline data-free KD meth-
+ods and our approach (PRE-DFKD). As expected, the Train
+with data student accuracy is lower than the teacher accu-
+racy and the data-free methods have lower student accuracy
+than Train with data student accuracy. PRE-DFKD achieves
+student accuracy that is better than almost all the baseline
+data-free KD approaches and approximates the student accu-
+racy trained with the original dataset closer for all datasets.
+When compared with baselines that do not contain replay
+(DAFL and DFAD), PRE-DFKD is more robust for vali-
+dation set-agnostic distillation with higher expectation and
+lower variance. When compared with CMI and MB-DFKD
+that store generated samples for replay, PRE-DFKD typi-
+cally is at least similar and more often better. It might be
+counter-intuitive that although CMI stores and replays all
+generated samples, PRE-DFKD outperforms it. This is be-
+cause the accuracy gain rate of the student models distilled
+via CMI is relatively low (see Figure 4) causing lower ex-
+pected value. We believe the gain rate is low because the
+novel samples constitute only a small proportion when com-
+pared to the replay samples. Lastly, MB-DFKD perform-
+ing lower than PRE-DFKD suggests that limited amount of
+stored samples in MB-DFKD is not as effective as modeling
+the entire distribution of earlier observed samples in PRE-
+DFKD.
+Furthermore, to visualize the effect of pseudo replay on
+student accuracy throughout distillation, we plot the stu-
+dent accuracy curves (see Figure 4) for the MNIST and CI-
+FAR100 benchmarks. For all methods, the observed accu-
+racy series (acc(i)
+ts ) across different runs on MNIST bench-
+mark, had relatively higher variation than on other bench-
+marks. Therefore, for MNIST, we plot the accuracy curves
+with mean and variances across runs are indicated. For
+CIFAR100, we only display the mean accuracy curve (µ)
+across four runs for each baseline.
+
+Figure 4: Visualized student accuracy curves. The first row contains MNIST results with mean and variance values over runs.
+The second row contains student accuracies averaged over runs for CIFAR100.
+Reduced Memory Footprint:
+We next compare PRE-
+DFKD with baselines using replay in terms of memory foot-
+print. The additional memory required for the replay are
+noted in Table 1. Although CMI failed in Tiny ImageNet ex-
+periments, we report the memory it utilized after running for
+the same number of epochs (500) as other methods. The Ta-
+ble 1 shows that PRE-DFKD significantly reduces the mem-
+ory footprint for replay from hundreds of megabytes and
+even gigabytes to a constant 2MB, that is the memory occu-
+pied by the VAE parameters. Such reduction becomes more
+significant compared to CMI as the number of distillation
+steps increases since more batches of samples are generated
+and stored. The calculated memory footprint of CMI for dif-
+ferent choices of distillation steps ts and synthetic data di-
+mensions are marked in Table 2. As the VAE architecture is
+independent of the selection of teacher-student pairs and dis-
+tillation steps, the memory overhead does not scale based on
+them. Although MB-DFKD maintains fixed-sized storage,
+the required storage for optimal distillation largely depends
+on the dataset. If the storage is small relative to the number
+of distillation steps, the effectiveness of replay diminishes.
+pixel dim. \ts
+2000
+4000
+8000
+16000
+32
+2.5 GB
+5 GB
+10 GB
+20 GB
+64
+10 GB
+20 GB
+40 GB
+80 GB
+128
+40 GB
+80 GB
+160 GB
+320 GB
+Table 2: CMI memory footprint for various pixel dimensions
+and distillation epochs
+Ablation Study:
+We now validate that the pseudo replay
+is effective regardless of the novel sample synthesis strategy.
+To do this, we couple our memory generator to the DFAD
+baseline method. In Figure 5, DFAD distilled student accu-
+racy is plotted with and without the inclusion of our mem-
+ory generator. We name the VAE-enhanced baseline PRE-
+DFAD. For a fair comparison, we fix the random seeds for
+all the runs. The plots indicate that pseudo replay succeeded
+in preventing accuracy degradation caused by catastrophic
+forgetting even for DFAD. Additionally, we plot the PRE-
+DFKD results where the proposed class-balanced memory
+sample inference and synthetic data-aware reconstruction
+loss are omitted. This way, we examine the individual con-
+tributions of these techniques. In Figure 5, it is apparent that
+the exclusion of any of these impaired the student accuracy
+progressions.
+Figure 5: Ablation experiment results on MNIST.
+Conclusion
+In this work, we propose a data-free KD method that pre-
+vents the distilled model accuracy from degrading over time
+by generative pseudo replay. While our method is more ro-
+bust than existing approaches in the absence of validation
+data, it also significantly reduces the memory footprint and
+improves privacy preservation. We believe these contribu-
+tions provide a step towards allowing a wider audience to
+benefit from data-free KD, i.e., democratize it. In the future,
+our approach can be further improved by exploring ways to
+reduce the impact of dataset-specific hyper-parameter selec-
+tion on distillation performance.
+
+Acknowledgement
+This work was supported by the A*STAR Computational
+Resource Centre through the use of its high-performance
+computing facilities and by the National Research Founda-
+tion, Singapore under its Competitive Research Programme
+Award NRF-CRP23-2019-0003.

@@ -1,0 +1,983 @@
+PARAMETER-EFFICIENT FINE-TUNING DESIGN SPACES
+Jiaao Chen†∗, Aston Zhang‡, Xingjian Shi‡, Mu Li‡, Alex Smola‡, Diyi Yang⋄
+†Georgia Institute of Technology, ‡Amazon Web Services, ⋄Stanford University
+ABSTRACT
+Parameter-efﬁcient ﬁne-tuning aims to achieve performance comparable to ﬁne-tuning, using fewer
+trainable parameters. Several strategies (e.g., Adapters, preﬁx tuning, BitFit, and LoRA) have been
+proposed. However, their designs are hand-crafted separately, and it remains unclear whether cer-
+tain design patterns exist for parameter-efﬁcient ﬁne-tuning. Thus, we present a parameter-efﬁcient
+ﬁne-tuning design paradigm and discover design patterns that are applicable to different experi-
+mental settings. Instead of focusing on designing another individual tuning strategy, we introduce
+parameter-efﬁcient ﬁne-tuning design spaces that parameterize tuning structures and tuning strate-
+gies. Speciﬁcally, any design space is characterized by four components: layer grouping, trainable
+parameter allocation, tunable groups, and strategy assignment. Starting from an initial design space,
+we progressively reﬁne the space based on the model quality of each design choice and make greedy
+selection at each stage over these four components. We discover the following design patterns:
+(i) group layers in a spindle pattern; (ii) allocate the number of trainable parameters to layers uni-
+formly; (iii) tune all the groups; (iv) assign proper tuning strategies to different groups. These
+design patterns result in new parameter-efﬁcient ﬁne-tuning methods. We show experimentally that
+these methods consistently and signiﬁcantly outperform investigated parameter-efﬁcient ﬁne-tuning
+strategies across different backbone models and different tasks in natural language processing1.
+1
+Introduction
+Large pretrained models have achieved the state-of-the-art performances across a wide variety of downstream natural
+language processing tasks through ﬁne-tuning on task-speciﬁc labeled data [Devlin et al., 2019, Liu et al., 2019, Yang
+et al., 2019, Joshi et al., 2019, Sun et al., 2019, Clark et al., 2019, Lewis et al., 2020a, Bao et al., 2020, He et al.,
+2020, Raffel et al., 2020, Ziems et al., 2022]. However, ﬁne-tuning all the parameters and storing them separately for
+different tasks is expensive in terms of computation and storage overhead (e.g., 355M parameters for RoBERTa [Liu
+et al., 2019] and 175B parameters for GPT-3 [Brown et al., 2020]). This makes it difﬁcult to deploy in real-world
+natural language processing (NLP) systems composed of multiple tasks.
+To adapt general knowledge in pretrained models to speciﬁc down-stream tasks in a more parameter-efﬁcient way,
+various strategies have been proposed where only a small number of (extra) parameters are learned while the remaining
+pretrained parameters are frozen [Houlsby et al., 2019a, Pfeiffer et al., 2021, Li and Liang, 2021, Brown et al., 2020,
+Lester et al., 2021a, Schick and Sch¨utze, 2021, Ziems et al., 2022]. Adapter tuning [Houlsby et al., 2019a] is among
+the earliest strategies to steer pretrained models with a limited number of parameters. It inserts adapters (small neural
+modules) to each layer of the pretrained network and only the adapters are trained at the ﬁne-tuning time. Inspired
+by the success of prompting methods that control pretrained language models through textual prompts [Brown et al.,
+2020], preﬁx tuning [Li and Liang, 2021] and prompt tuning [Lester et al., 2021b] prepend additional tunable tokens
+to the input or hidden layers and only train these soft prompts when ﬁne-tuning on downstream tasks. BitFit [Zaken
+et al., 2021] updates the bias terms in pretrained models while freezing the remaining parameters. LoRA [Hu et al.,
+2021] decomposes attention weight gradients into low-rank matrices to reduce the number of trainable parameters.
+With promising results from such research, He et al. [2022] proposed a uniﬁed view of these existing strategies and
+
+1Code is available at: https://github.com/amazon-science/peft-design-spaces.
+arXiv:2301.01821v1  [cs.CL]  4 Jan 2023
+
+P
+P
+P
+L
+P
+L
+A
+B
+L
+A
+B
+L
+…
+Layer Grouping
+P
+L
+Strategy Assignment
+Trainable Parameter Allocation
+Tunable Groups
+p
+⇥
+p
+Figure 1: A parameter-efﬁcient ﬁne-tuning design space. It is characterized by (i) layer grouping (how to group
+consecutive layers), (ii) trainable parameter allocation (how to allocate the number of trainable parameters to layers),
+(iii) tunable groups (which groups will be ﬁnetuned), and (iv) strategy assignment (how to assign proper strategies,
+such as among Adapter, Preﬁx, BitFit, and LoRA, to groups).
+illustrated differences and connections among them. Like its antecedents, the resulting method is still equally assigned
+to different pretrained layers.
+Despite being effective, most parameter-efﬁcient ﬁne-tuning strategies have been developed via manual design pro-
+cesses, without much consideration of whether design patterns exist across these different strategies and how such
+patterns might apply to different backbone models and downstream tasks. Moreover, different strategies are usually
+applied separately; thus, it is unclear which strategy works best when and where [Mao et al., 2022], as well as how
+these different strategies reinforce or complement each other. In this light, our goal is to understand the parameter-
+efﬁcient ﬁne-tuning design in a more comprehensive view and discover design patterns that are both interpretable and
+applicable across different experimental settings.
+Instead of designing yet another individual strategy that is equally applied to different pretrained layers, we introduce
+parameter-efﬁcient ﬁne-tuning design spaces that parameterize both tuning structures and strategies. More con-
+cretely, any of these design spaces is characterized by four major components as shown in Figure 1: layer grouping,
+trainable parameter allocation, tunable groups, and strategy assignment.
+Starting from a relatively unconstrained parameter-efﬁcient ﬁne-tuning design space, we progressively reﬁne the space
+by comparing the overall quality of models randomly sampled from design spaces enforced with different constraints
+(e.g., each group has the same number of layers). Throughout the experimental process, we discover several design
+patterns for parameter-efﬁcient ﬁne-tuning, such as group layers in a spindle pattern, allocate the number of trainable
+parameters to layers uniformly, tune all the groups, and assign proper tuning strategies to different groups. We fur-
+ther introduce new parameter-efﬁcient ﬁne-tuning methods that adopt all these discovered design patterns. Extensive
+experiments show that our methods consistently outperform investigated parameter-efﬁcient ﬁne-tuning strategies. Al-
+though we use T5 [Raffel et al., 2020] and classiﬁcation tasks as the working example, we ﬁnd that our methods with
+all these discovered design patters are applicable to other backbones (e.g., RoBERTa [Liu et al., 2019], BART [Lewis
+et al., 2020b], and XLNet [Yang et al., 2019]) and different natural language processing tasks (e.g., summarization,
+machine translation, and eight SuperGLUE datasets).
+Our contributions can be summarized as follows: (i) We introduce parameter-efﬁcient ﬁne-tuning design spaces. (ii)
+Based on these design spaces, we discover several design patterns in parameter-efﬁcient ﬁne-tuning via comprehen-
+sive experiments. (iii) Our discovered design patterns lead to parameter-efﬁcient ﬁne-tuning methods, consistently
+outperforming investigated parameter-efﬁcient ﬁne-tuning strategies across different backbone models and different
+NLP tasks.
+2
+
+2
+Related Work
+Our work is closely related to and built upon the research about the network design spaces and parameter-efﬁcient
+ﬁne-tuning. We discuss the connections and differences below.
+Network Design Spaces
+A lot of works designed neural network models via an ad-hoc discovery of new design
+choices that improve performances [Radosavovic et al., 2019], such as the use of deeper architectures or residuals.
+Recently, there have been works [Radosavovic et al., 2020, You et al., 2020, Radosavovic et al., 2019] performing
+at the design space level to discover new design principles for convolutional neural networks [Radosavovic et al.,
+2020] and graph neural networks [You et al., 2020]. Inspired by this line of research, we focus on the design space
+perspective to rethink parameter-efﬁcient ﬁne-tuning, with the goal of discovering design patterns that are applicable
+to different experimental settings.
+Parameter-Efﬁcient Fine-Tuning for NLP
+As pretrained models grow in size, storing ﬁne-tuned models becomes
+exceedingly expensive, and ﬁne-tuning becomes infeasible for those without extremely high compute resources. A
+growing body of research has been devoted to ﬁnding parameter-efﬁcient alternatives for adapting large-scale pre-
+trained models with reduced memory and storage costs. Houlsby et al. [2019b] proposed to adapt large models using
+bottleneck layers (with skip-connections) between each layer. This idea has been extended in many domains [Stick-
+land and Murray, 2019, Pfeiffer et al., 2020, Rebufﬁet al., 2017, Lin et al., 2020]. Other works have aimed to avoid
+introducing additional parameters by identifying and training only a subset of all model parameters [Zhao et al., 2020,
+Guo et al., 2020, Mallya et al., 2018, Radiya-Dixit and Wang, 2020, Sung et al., 2021, Zaken et al., 2021]. Recent
+works also explored the idea of rank decomposition based on parameterized hypercomplex multiplications via the Kro-
+necker product [Zhang et al., 2021a] and injecting trainable rank decomposition matrices into each layer [Hu et al.,
+2021, Karimi Mahabadi et al., 2021]. Li and Liang [2021] introduced preﬁx-tuning that prepends a set of preﬁxes
+to autoregressive language models or prepends preﬁxes for both encoders and decoders. The preﬁx parameters are
+updated while the pretrained parameters are ﬁxed. Lester et al. [2021a] proposed a similar method, but only added
+virtual tokens at the embedding layer of large-scale models rather than discrete prompts [Deng et al., 2022, Zhong
+et al., 2022]. Bari et al. [2022] proposed semi-parametric prompt tuning that converges more easily, where memory
+prompts are input-adaptive without the need for tuning. Recently, He et al. [2022] and Ding et al. [2022] proposed
+a uniﬁed view of the existing parameter-efﬁcient ﬁne-tuning strategies and illustrated the difference and connections
+among them. Mao et al. [2022] also introduced a uniﬁed framework to combine different methods through mixture-
+of-experts.
+In contrast to these aforementioned works that assign their individual method equally to different pretrained layers, we
+focus on more general design spaces of parameter-efﬁcient ﬁne-tuning. This could provide a more comprehensive view
+of parameter-efﬁcient ﬁne-tuning in terms of both the tuning structures and tuning strategies. Through experiments
+where we progressively reﬁne design spaces, we discover design patterns for parameter-efﬁcient ﬁne-tuning.
+3
+Components of Design Spaces
+When deﬁning design spaces of parameter-efﬁcient ﬁne-tuning, we aim to cover key design components and provide
+a representative set of choices in each design component. Note that our goal is not to enumerate all possible design
+spaces, but to demonstrate how the use of design spaces can help inform parameter-efﬁcient ﬁne-tuning research.
+Concretely, in our work, the parameter-efﬁcient ﬁne-tuning design spaces are formed by a representative set of choices
+in parameter-efﬁcient ﬁne-tuning, which consists of the following four components: (i) layer grouping, (ii) trainable
+parameter allocation, (iii) tunable groups, and (iv) strategy assignment. Following the illustrated design space exam-
+ple in Figure 1, we describe these four design components in detail below and will explore their design choices in
+Section 4.
+Layer Grouping
+Different layers in pretrained models capture different information and behave differently. For
+example, Jawahar et al. [2019] found that the {3, 4, 5, 6, 7, 9, 12}-th layers have the most representation power in
+BERT and every layer captures a different type of information ranging from the surface, syntactic, to the semantic
+level representation of text. For instance, the 9th layer has predictive power for semantic tasks such as checking
+random swapping of coordinated clausal conjuncts, while the 3rd layer performs best in surface tasks like predicting
+sentence length. Therefore when adapting these pretrained models to downstream tasks, how to group layers with
+similar behaviors together is critical to the design and application of proper parameter-efﬁcient ﬁne-tuning strategies.
+For this design component, we study the patterns of how to group consecutive layers in pretrained models (e.g.,
+transformer layers in T5) during the ﬁne-tuning process.
+3
+
+Trainable Parameter Allocation
+In parameter-efﬁcient ﬁne-tuning, the total number of trainable parameters is
+usually preset, such as a small portion of the total number of parameters in the pretrained models. We will study
+different design choices for how to allocate a predeﬁned number of trainable parameters to layers.
+Tunable Groups
+Zaken et al. [2021] found that not all the parameters need to be tuned during ﬁne-tuning on the
+downstream tasks. For instance, BitFit [Zaken et al., 2021] only updates the bias parameters in pretrained models
+while freezing the remaining parameters. Thus, we study which groups need to be learned during parameter-efﬁcient
+ﬁne-tuning to attain better performances.
+Strategy Assignment
+In order to improve the parameter efﬁciency, different sets of strategies [Li and Liang, 2021,
+Lester et al., 2021a, Houlsby et al., 2019a, Hu et al., 2021] have been proposed where only a small number of (ex-
+tra) parameters are tuned and the remaining parameters in these pretrained models are frozen to adapt their general
+knowledge to speciﬁc down-stream tasks. Inspired by effectiveness of offering architectural ﬂexibility [Zhang et al.,
+2021a,b], we hypothesize that different groups might beneﬁt from different proper strategies (or combinations) for
+capturing different types of information. More formally, given a set of individual strategies A for assignment, for any
+group Gi, assign a subset Ui ⊂A to each layer in Gi.
+4
+Discovering Design Patterns
+Building on these four different design components of PEFT design spaces, we will start from a relatively uncon-
+strained design space and progressively discover the design patterns.
+4.1
+Design Space Experimental Setup
+We ﬁrst describe our experimental setup for discovering the design patterns. Note that our process is generic for other
+tasks and future pretrained backbone models.
+Datasets
+Our process for discovering design patterns of PEFT is based on the average performances on the widely-
+used GLUE benchmark [Wang et al., 2018]. It covers a wide range of natural language understanding tasks. First,
+single-sentence tasks include (i) Stanford Sentiment Treebank (SST-2) and (ii) Corpus of Linguistic Acceptability
+(CoLA). Second, similarity and paraphrase tasks include (i) Quora Question Pairs (QQP), (ii) Semantic Textual Sim-
+ilarity Benchmark (STS-B), and (iii) Microsoft Research Paraphrase Corpus (MRPC). Third, inference tasks include
+(i) Multi-Genre Natural Language Inference (MNLI), (ii) Question Natural Language Inference (QNLI), and (iii) Rec-
+ognizing Textual Entailment (RTE). To compare performances, the Matthews correlation is measured for CoLA; the
+Spearman correlation is used for STS-B, and accuracy is measured for the rest GLUE tasks.
+Pretrained Backbone Models and Model Settings
+We use T5-base/3b [Raffel et al., 2020] as the main pretrained
+backbone models for discovering design patterns via our PEFT design spaces. We use Hugging Face 2 for our imple-
+mentations and follow the default settings. During the exploration, we set the total number of trainable parameters (in
+the percentage of that in the backbone model) to 0.5% by following He et al. [2022].
+4.2
+Discovering Design Patterns Using T5-base
+In this subsection, we describe the empirical process for discovering the design patterns using T5-base (pretrained
+backbone model) as the working example. Each PEFT design space (denoted as Si) consists of a set of models (Si-
+models) that satisfy constraints characterizing the space with respect to layer grouping, trainable parameter allocation,
+tunable groups, and strategy assignment. To discover design patterns, we start from a relatively unconstrained PEFT
+design space (S0). Then we progressively reﬁne design spaces (from S0 to S1:4) by comparing overall quality of
+models in design spaces enforced with different constraints (e.g., each group has the same number of layers). To
+quantify the overall quality of models in any design space Si with a low-compute, low-epoch regime [Radosavovic
+et al., 2020], we randomly sample 100 models from Si, ﬁne-tune with 3 epochs3, and compute the average of the
+GLUE average performances.
+2https://huggingface.co/docs/transformers/index
+3We set the low epoch by observing whether it is enough for models to obtain stable performances to draw consistent conclusions
+(See Table 7 in the Appendix).
+4
+
+We emphasize that our goal is to demonstrate how the perspective of design spaces can help inform PEFT research,
+rather than to ﬁnd out the “best” design space or method. For computational efﬁciency, it is beyond the scope of this
+work to enumerate all possible constraints with respect to the design space components (Section 3).
+4.2.1
+The Initial S0 Design Space
+The initial relatively unconstrained design space S0 consists of all models without constraints on the design space
+components (Section 3). Individual PEFT strategies consist of Adapter, Preﬁx, BitFit, and LoRA. One can think
+of this S0 design space as a set of random models (S0-models) with random design patterns. Speciﬁcally, without
+grouping constraints, each layer of the pretrained layer has a half chance to be tuned: if tuned, random strategies (or
+combinations) with a random amount of trainable parameters are assigned to that layer.
+Before comparing more subtle design patterns such as how to properly assign tunable strategies among Adapter, Preﬁx,
+BitFit, and LoRA, we begin with exploring how to group layers and how to allocate the total number of trainable
+parameters to layers.
+4.2.2
+The S1 Design Space with Additional Grouping Constraints
+Inspired by Radosavovic et al. [2020], we also consider 4 groups (G1, . . . , G4, in the order of forward pass) in the
+experiments 4. Denote by Ni the number of layers in Gi. As illustrated in Figure 2, we compare the following layer
+grouping patterns: (i) Increasing (Ni+1 > Ni): the number of layers in groups gradually increases; (ii) Uniform
+(Ni+1 = Ni): the number of layers in groups is the same; (iii) Decreasing (Ni+1 < Ni): the number of layers in
+groups gradually decreases; (iv) Spindle (N1 < N2 = N3 > N4): the numbers of layers in groups at both ends are
+smaller; and (v) Bottleneck (N1 > N2 = N3 < N4): the numbers of layers in groups at both ends are bigger.
+Figure 2: Layer grouping patterns, where the horizontal and vertical axes represent groups (G1, . . . , G4) and numbers
+of layers in groups.
+These layer grouping patterns lead to 5 different design spaces. Any of these 5 design spaces consists of all models
+in the S0 design space that satisfy one of these grouping pattern constraints. To compare the overall model qualities
+of different design spaces, we (i) randomly sample 100 models from the S0 design space that satisfy each grouping
+pattern constraint (Figure 2); (ii) ﬁne-tune with 3 epochs; and (iii) compute the average performances for each design
+space. We will follow this procedure as we progressively add new constraints later.
+The averaged performances are shown in Table 15. We ﬁnd that models from the design space with the spindle
+grouping pattern (Figure 2) consistently outperform those from the other design spaces across all the 8 GLUE tasks.
+This may be due to the complexities of information captured in different layers of large pretrained models, which favor
+information adaptation in the discovered layer grouping pattern.
+From now on, we will group layers in a spindle pattern. We refer to S0 with this additional design pattern as the new
+S1 design space.
+4.2.3
+The S2 Design Space with Additional Parameter Constraints
+We continue to explore design patterns in trainable parameter allocation to reﬁne the S1 design space. Denote by ni
+the number of trainable parameters for the i-th layer of the pretrained backbone model, we compare the following
+design patterns: (i) Increasing (ni+1 ≥ni): the number of trainable parameters in every layer gradually increases (or
+remains the same); (ii) Uniform (ni+1 = ni): the number of trainable parameters in every layer is the same; and (iii)
+Decreasing (ni+1 ≤ni): the number of trainable parameters in every layer gradually decreases (or remains the same).
+Following the procedure described in Section 4.2.2, we obtain 100 models for each of these 3 new design spaces.
+Table 2 reports the average performances of these 3 design spaces. The uniform allocation design pattern obtains the
+highest GLUE average performance, making this relatively simple, interpretable design pattern favorable.
+4The experimental results with 8 groups are shown in the Table 16 in the Appendix.
+5The training time for the step is shown in the Table 18 in the Appendix.
+5
+
+Table 1: Average performances (low-compute, low-epoch regime: 100 random models, 3 tuning epochs) on the GLUE
+datasets using the T5-base pretrained backbone model. We compare adding different layer grouping constraints to the
+S0 design space.
+Layer Grouping
+SST-2
+MNLI
+QNLI
+QQP
+RTE
+STS-B
+MRPC
+CoLA
+Avg
+S0-models
+76.9
+70.1
+72.5
+73.3
+63.6
+71.7
+73.8
+24.3
+65.7
+Increasing
+85.3
+74.9
+77.2
+77.5
+66.8
+76.2
+76.0
+33.0
+70.8
+Uniform
+84.8
+73.7
+78.1
+78.6
+68.5
+77.8
+79.2
+36.1
+72.1
+Decreasing
+81.9
+72.1
+78.3
+76.7
+67.3
+75.9
+78.6
+28.7
+70.0
+Spindle
+86.9
+75.5
+79.8
+79.4
+69.8
+78.3
+80.1
+37.3
+73.3
+Bottleneck
+84.5
+74.6
+76.9
+78.1
+69.2
+76.2
+78.6
+32.1
+71.3
+Table 2: Average performances (low-compute, low-epoch regime: 100 random models, 3 tuning epochs) on the GLUE
+datasets using the T5-base pretrained backbone model. We compare adding different parameter allocation constraints
+to the S1 design space.
+Param Allocation
+SST-2
+MNLI
+QNLI
+QQP
+RTE
+STS-B
+MRPC
+CoLA
+Avg
+Increasing
+87.2
+77.9
+79.4
+78.7
+71.6
+77.6
+81.4
+32.0
+73.2
+Uniform
+87.8
+77.4
+80.1
+80.5
+73.9
+78.1
+80.4
+34.3
+74.0
+Decreasing
+86.4
+75.8
+78.4
+77.0
+70.4
+77.1
+78.7
+35.8
+72.4
+We will allocate the number of trainable parameters to layers uniformly. We refer to S1 with this additional design
+pattern as the new S2 design space.
+4.2.4
+The S3 Design Space with Additional Tunable Group Constraints
+Before digging into the strategy assignment design patterns, it is necessary to examine which groups need to be tuned.
+After all, it is only meaningful to study assigning strategies to different groups after we ﬁnd out which groups need to
+be ﬁne-tuned. As shown in Table 3, we explore various design patterns in tunable groups to further constrain the S2
+design space. Based on the GLUE average performances, we ﬁnd that all the groups need to be tuned to obtain the
+best performances. This suggests that all the groups of pretrained layers have captured useful information that should
+be adapted to the downstream tasks.
+We will tune all the groups. We refer to S2 with this additional design pattern as the new S3 design space.
+4.2.5
+The S4 Design Space with Additional Strategy Constraints
+Finally, we study the subtle design pattern with respect to assigning proper strategies by further constraining the
+derived S3 design space. Speciﬁcally, each design space consists of models that assign a subset of {Adapter (A),
+Preﬁx (P), BitFit (B), and LoRA (L)} to all layers of any group Gi (i = 1, . . . , 4). We begin by adding different G1
+strategy assignment constraints to the S3 space. Following the same pattern discovery procedure (Section 4.2.2), we
+discover strategy assignment patterns for G1. Then we progressively add Gi (i > 1) strategy assignment constraints
+together with the discovered strategy assignment patterns for all Gj (j = 1, . . . , i −1) to the S3 space. Due to space
+limit, we present results of this process in the Appendix (G1 in Table 8, G2 Table 9, G3 in Table 10, and G4 in
+Table 11), which suggests strategy assignment of G1-(A, L) – G2-(A, P) – G3-(A, P, B) – G4-(P, B, L) for the T5-base
+pretrained backbone model.
+We will assign the discovered proper tuning strategies to groups. We refer to S3 with this additional design pattern as
+the new S4 design space, which consists of the ﬁnal S4-model.
+4.3
+Discovering Design Patterns Using T5-3b
+We then repeat the above process on T5-3b to examine if the design patterns we discovered using smaller models (T5-
+base) still apply when we use larger models. The results are shown in Table 12 (layer grouping), Table 13 (trainable
+parameter allocation), Table 14 (tunable groups) and Table 15 (strategy assignment) in the Appendix. We observe
+that the design patterns still apply when larger models like T5-3b are used: (i) grouping layers in a spindle pattern
+(Table 12), (ii) uniformly allocating the number of trainable parameters to layers (Table 13), (iii) tuning all the groups
+6
+
+Table 3: Average performances (low-compute, low-epoch regime: 100 random models, 3 tuning epochs) on the GLUE
+datasets using the T5-base pretrained backbone model. We compare adding different tunable group constraints to the
+S2 design space.
+Tunable Groups
+SST-2
+MNLI
+QNLI
+QQP
+RTE
+STS-B
+MRPC
+CoLA
+Avg
+G1
+82.6
+72.1
+77.6
+70.6
+65.3
+71.9
+77.6
+27.6
+68.2
+G2
+83.3
+72.8
+77.5
+72.8
+63.6
+72.8
+77.5
+27.5
+68.4
+G3
+83.6
+73.3
+78.2
+73.3
+66.4
+71.3
+77.9
+22.9
+68.4
+G4
+83.2
+73.0
+77.9
+73.7
+63.9
+72.0
+77.9
+27.9
+68.7
+G1, G2
+83.5
+73.2
+78.0
+75.4
+67.7
+73.2
+78.0
+28.0
+69.6
+G3, G4
+87.8
+74.6
+78.3
+76.9
+68.6
+74.3
+78.3
+28.3
+70.7
+G1, G2, G3
+86.0
+75.8
+79.0
+77.8
+71.8
+78.8
+79.0
+33.0
+72.6
+G2, G3, G4
+85.2
+76.6
+79.1
+78.6
+70.1
+77.6
+79.1
+31.9
+72.2
+G1, G2, G3, G4
+88.3
+77.4
+82.1
+81.5
+74.9
+79.4
+81.4
+34.3
+74.9
+Table 4: Performances of different tuning methods on the GLUE datasets using the T5-base (upper part) and T5-3b
+(lower part) pretrained backbone models, respectively. The results are averaged over 20 random runs (with standard
+deviations as subscripts). The S4-model and the S4-3b-model perform signiﬁcantly better than the second-best PEFT
+methods in all the eight datasets at the signiﬁcance level p < 0.05(∗) or even p < 0.01(∗∗).
+Method
+SST-2
+MNLI
+QNLI
+QQP
+RTE
+STS-B
+MRPC
+CoLA
+Average
+full
+95.2
+87.1
+93.7
+89.4
+80.1
+89.4
+90.7
+51.1
+84.5
+Adapter
+94.6
+85.5
+89.8
+86.7
+75.3
+86.7
+89.1
+59.2
+83.3
+Preﬁx
+94.0
+81.6
+87.8
+83.4
+64.3
+83.1
+84.8
+34.0
+76.6
+BitFit
+94.4
+84.5
+90.6
+88.3
+74.3
+86.6
+90.1
+57.7
+83.3
+LoRA
+94.8
+84.7
+91.6
+88.5
+75.8
+86.3
+88.7
+51.5
+82.7
+S4-model
+95.5∗∗
+1.7
+87.6∗∗
+1.0
+92.7∗∗
+1.1
+88.8∗∗
+1.0
+80.4∗
+2.3
+87.4∗
+2.0
+91.2∗∗
+2.4
+62.2∗
+3.2
+85.7
+full
+97.4
+91.4
+96.3
+89.7
+91.1
+90.6
+92.5
+67.1
+89.5
+Adapter
+96.3
+89.9
+94.7
+87.8
+83.4
+90
+89.7
+65.2
+87.1
+Preﬁx
+96.3
+82.8
+88.9
+85.5
+78.3
+83.5
+85.4
+42.7
+80.4
+BitFit
+95.8
+89.5
+93.5
+88.5
+86.2
+90.7
+88.6
+64.2
+87.1
+LoRA
+96.2
+90.6
+94.9
+89.1
+91.2
+91.1
+91.1
+67.4
+88.9
+S4-3b-model
+97.2∗∗
+1.8
+91.6∗∗
+1.2
+96.6∗∗
+1.0
+89.5∗∗
+1.5
+91.5∗
+2.8
+91.5∗
+2.5
+91.9∗
+2.0
+69.7∗
+3.4
+89.9
+(Table 14), and (iv) tuning different groups with proper strategies (Table 15). For T5-3b, the discovered proper strategy
+assignment is G1-(P, L) – G2-(A, L) – G3-(P, B, L) – G4-(A, P, B). We refer to the ﬁnal design space as S4-3b and the
+ﬁnal model in this space as S4-3b-model.
+5
+Evaluation
+The S4-model (Section 4.2.5) and S4-3b-model (Section 4.3) adopt all the design patterns that have been discovered
+by using T5-base and T5-3b, respectively. As a result, they are both new methods of PEFT. We will evaluate their
+effectiveness when applied to different pretrained backbone models and different NLP tasks.
+5.1
+Experimental Setup
+Datasets
+Besides the GLUE datasets [Wang et al., 2018] (Section 4.1), we further evaluate our methods on two
+generation tasks used by He et al. [2022]: (i) Abstractive Summarization using XSum [Narayan et al., 2018], and (ii)
+Machine Translation using the WMT 2016 en-ro dataset [Bojar et al., 2016]. We report ROUGE scores [Lin, 2004]
+on the XSum test set, and BLEU scores [Papineni et al., 2002] on the en-ro test set.
+Models and Model Settings
+We mainly compare our methods with the following baselines: (i) Full Fine-tuning
+(full): it ﬁne-tunes all the model parameters in the pretrained models; (ii) Adapter [Houlsby et al., 2019a]: it adds
+adapter modules to each transformer layer; (iii) Preﬁx [Li and Liang, 2021]: it optimizes a set of small continuous
+vectors prepended to transformer layers; (iv) BitFit [Zaken et al., 2021]: it only updates the bias terms in pretrained
+models; (v) LoRA [Hu et al., 2021]: it decomposes the attention weight into low-rank matrices to reduce the number
+of trainable parameters. Besides T5 [Raffel et al., 2020], we additionally apply our methods to other backbone models
+7
+
+Table 5: Performances of different tuning methods on GLUE datasets using the RoBERTa-base (upper part) and
+RoBERTa-large (lower part) pretrained backbone models. The results are averaged over 20 random runs (with standard
+deviations as subscripts). Here we also include two baselines: (i) S0-model, where all the designs are randomly
+selected for RoBERTa as in the S0 design space; (ii) S3-model, where strategies are randomly assigned to different
+RoBERTa layer groups as in the S3 design space. The S4-model and S4-3b-model perform signiﬁcantly better than
+the second-best PEFT methods in all the eight datasets at the signiﬁcance level p < 0.05(∗) or even p < 0.01(∗∗).
+Method
+SST-2
+MNLI
+QNLI
+QQP
+RTE
+STS-B
+MRPC
+CoLA
+Average
+full
+94.8
+87.6
+92.8
+91.9
+80.8
+90.3
+90.2
+63.6
+86.5
+Adapter
+94.2
+87.1
+93.1
+90.2
+71.5
+89.7
+88.5
+60.8
+84.4
+Preﬁx
+94.0
+86.8
+91.3
+90.5
+74.5
+90.3
+88.2
+61.5
+84.6
+BitFit
+93.7
+84.8
+91.3
+84.5
+77.8
+90.8
+90.0
+61.8
+84.3
+LoRA
+94.9
+87.5
+93.1
+90.8
+83.1
+90.0
+89.6
+62.6
+86.4
+S0-model
+94.2
+95.3
+90.4
+90.6
+75.6
+89.6
+88.0
+60.9
+85.6
+S3-model
+94.3
+87.2
+92.8
+91.0
+81.8
+90.3
+89.2
+63.2
+86.2
+S4-model
+94.81.6
+87.8∗∗
+0.8
+93.4∗∗
+1.3
+91.6∗
+1.2
+85.8∗∗
+1.8
+90.4∗
+2.0
+90.0∗∗
+1.8
+63.2∗
+3.5
+87.1
+full
+96.4
+90.2
+94.7
+92.2
+86.6
+92.4
+90.9
+68.0
+88.9
+Adapter
+96.6
+90.5
+94.8
+91.7
+80.1
+92.1
+90.9
+67.8
+88.1
+Preﬁx
+95.7
+87.6
+92.1
+88.7
+82.3
+89.6
+87.4
+62.8
+85.7
+BitFit
+96.1
+88.0
+93.4
+90.2
+86.2
+90.9
+92.7
+64.2
+87.7
+LoRA
+96.2
+90.6
+94.7
+91.6
+87.4
+92.0
+89.7
+68.2
+88.8
+S0-model
+95.5
+86.5
+92.3
+89.8
+84.6
+89.2
+86.3
+61.2
+85.6
+S3-model
+96.3
+89.4
+93.8
+90.2
+85.9
+90.8
+90.9
+63.4
+87.6
+S4-3b-model
+96.6∗∗
+1.3
+90.8∗
+1.1
+95.1∗∗
+0.8
+92.0∗∗
+1.2
+87.22.8
+92.3∗
+2.2
+91.8∗∗
+1.8
+68.4∗
+3.2
+89.3
+including RoBERTa-base/large [Liu et al., 2019] and BART-base/large [Lewis et al., 2020a]. We use the default
+settings. We set the total number of trainable parameters (in the percentage of that in the backbone model) by following
+He et al. [2022]. Speciﬁcally, this value is set to 0.5% for Adapter, Preﬁx, LoRA, and our methods, and 0.1% for BitFit.
+For all the experiments, we followed Liu et al. [2019] to set the linear decay scheduler with a warmup ratio of 0.06
+for training. The batch size was 128 for base models and 64 for large models. The maximum learning rate was 5e −5
+and the maximum number of training epochs was set to be either 5 or 10. All the experiments were performed using
+8 A100 GPUs.
+5.2
+Effectiveness on GLUE with T5 Backbones
+Table 6: Performances of different tuning methods on generation
+tasks (XSUM and en-ro) using the BART-base (upper part) and
+BART-large (lower part) pretrained backbone models.
+Method
+XSUM(R-1/2/L)
+en-ro (BLEU)
+full
+40.5/19.2/34.8
+34.5
+Adapter
+37.7/17.9/33.1
+33.3
+Preﬁx
+38.2/18.4/32.4
+33.8
+BitFit
+37.2/17.5/31.4
+33.2
+LoRA
+38.9/18.6/33.5
+33.6
+PA
+39.3/18.7/33.8
+33.8
+S4-model
+40.2/19.3/34.2
+34.1
+full
+45.1/22.3/37.2
+37.9
+Adapter
+43.8/20.8/35.7
+35.3
+Preﬁx
+43.4/20.4/35.5
+35.6
+BitFit
+42.8/18.7/33.2
+35.2
+LoRA
+42.9/19.4/34.8
+35.8
+PA
+43.9/20.6/35.6
+36.4
+S4-3b-model
+44.3/21.7/36.8
+37.2
+With our discovered design patterns, we ﬁne-tune
+T5-base (S4-model) and T5-3b (S4-3b-model) on
+GLUE and compare them with all the baseline
+methods. The results are shown in Table 4, where
+the key measure is the GLUE average performance
+(last column). We ﬁnd that our S4-model and S4-
+3b-model consistently outperform the investigated
+methods in the key measure. By tuning only 0.5%
+parameters, our methods even outperform the full
+ﬁne-tuning baseline where all the parameters are
+tuned, indicating the effectiveness of our discov-
+ered PEFT design patterns.
+5.3
+General Effectiveness
+on GLUE with RoBERTa Backbones
+We directly apply the S4-model and S4-3b-model
+(adopting design patterns discovered using T5-
+base and T5-3b) to ﬁne-tune the RoBERTa-base
+and RoBERTa-large pretrained backbone models
+(with no extra discovery process), respectively. We
+keep all the other settings the same and evaluate
+them on GLUE datasets. We also compare with
+variant methods randomly sampled from two de-
+8
+
+sign spaces: (i) S0-model, where all the designs are randomly selected for RoBERTa as in S0; (ii) S3-model, where
+strategies are randomly assigned to different RoBERTa layer groups as in S3. Table 5 shows that (i) the design pat-
+terns (adopted by S4-model and S4-3b-model) discovered using T5 models are applicable to the RoBERTa backbone
+models and outperform the investigated methods in GLUE average performances with no extra discovery process;(ii)
+improved performances from S0-models, S3-models, to S4-(3b)-models support adding more constraints in the pattern
+discovery process (Section 4).
+5.4
+General Effectiveness on Generation Tasks with BART Backbones
+Like in Section 5.3, we further directly apply the S4-model and S4-3b-model (adopting design patterns discovered
+using T5-base and T5-3b) to ﬁne-tune the BART-base and BART-large pretrained backbone models (without additional
+discovery process.), respectively. We evaluate the models on two generation tasks: summarization (XSUM) and
+machine translation (en-ro) following He et al. [2022]. We also compare with PA (parallel adapter) using the same
+number of trainable parameters [He et al., 2022]. Table 6 shows that our methods, although adopting design patterns
+discovered from classiﬁcation tasks using T5, still outperform investigated PEFT strategies on generation tasks with
+different BART backbones.
+6
+Conclusion
+PEFT adapts knowledge in pretrained models to down-stream tasks in a more parameter-efﬁcient fashion. Instead
+of focusing on designing another strategy in the ﬁrst place, we introduced PEFT design spaces. We empirically
+discovered several design patterns in PEFT. These design patterns led to new PEFT methods. Experiments showed that
+these methods consistently outperform investigated PEFT strategies across different backbone models and different
+tasks in natural language processing.

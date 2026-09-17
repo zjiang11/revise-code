@@ -1,0 +1,663 @@
+arXiv:1701.03757v2  [stat.ML]  7 Mar 2017
+Published as a conference paper at ICLR 2017
+DEEP PROBABILISTIC PROGRAMMING
+Dustin Tran
+Columbia University
+Matthew D. Hoffman
+Adobe Research
+Rif A. Saurous
+Google Research
+Eugene Brevdo
+Google Brain
+Kevin Murphy
+Google Research
+David M. Blei
+Columbia University
+ABSTRACT
+We propose Edward, a Turing-complete probabilistic programming language. Ed-
+ward deﬁnes two compositional representations—randomvariables and inference.
+By treating inference as a ﬁrst class citizen, on a par with modeling, we show that
+probabilistic programming can be as ﬂexible and computationally efﬁcient as tra-
+ditional deep learning. For ﬂexibility, Edward makes it easy to ﬁt the same model
+using a variety of composable inference methods, ranging from point estimation
+to variational inference to MCMC. In addition, Edward can reuse the modeling
+representation as part of inference, facilitating the design of rich variational mod-
+els and generative adversarial networks. For efﬁciency, Edward is integrated into
+TensorFlow, providing signiﬁcant speedups over existing probabilistic systems.
+For example, we show on a benchmark logistic regression task that Edward is at
+least 35x faster than Stan and 6x faster than PyMC3. Further, Edward incurs no
+runtime overhead: it is as fast as handwritten TensorFlow.
+1
+INTRODUCTION
+The nature of deep neural networks is compositional. Users can connect layers in creative ways,
+without having to worry about how to perform testing (forward propagation) or inference (gradient-
+based optimization, with back propagation and automatic differentiation).
+In this paper, we design compositional representations for probabilistic programming. Probabilis-
+tic programming lets users specify generative probabilistic models as programs and then “compile”
+those models down into inference procedures. Probabilistic models are also compositional in na-
+ture, and much work has enabled rich probabilistic programs via compositions of random variables
+(Goodman et al., 2012; Ghahramani, 2015; Lake et al., 2016).
+Less work, however, has considered an analogous compositionality for inference. Rather, many ex-
+isting probabilistic programming languages treat the inference engine as a black box, abstracted
+away from the model.
+These cannot capture probabilistic inferences that reuse the model’s
+representation—a key idea in recent advances in variational inference (Kingma & Welling, 2014;
+Rezende & Mohamed, 2015; Tran et al., 2016b), generative adversarial networks (Goodfellow et al.,
+2014), and also in more classic inferences (Dayan et al., 1995; Gutmann & Hyvärinen, 2010).
+We propose Edward1, a Turing-complete probabilistic programming language which builds on two
+compositional representations—one for random variables and one for inference. By treating infer-
+ence as a ﬁrst class citizen, on a par with modeling, we show that probabilistic programming can
+be as ﬂexible and computationally efﬁcient as traditional deep learning. For ﬂexibility, we show
+how Edward makes it easy to ﬁt the same model using a variety of composable inference methods,
+ranging from point estimation to variational inference to MCMC. For efﬁciency, we show how to
+integrate Edward into existing computational graph frameworks such as TensorFlow (Abadi et al.,
+2016). Frameworks like TensorFlow provide computational beneﬁts like distributed training, paral-
+lelism, vectorization, and GPU support “for free.” For example, we show on a benchmark task that
+Edward’s Hamiltonian Monte Carlo is many times faster than existing software. Further, Edward
+incurs no runtime overhead: it is as fast as handwritten TensorFlow.
+1See Tran et al. (2016a) for details of the API. A companion webpage for this paper is available at
+http://edwardlib.org/iclr2017. It contains more complete examples with runnable code.
+1
+
+Published as a conference paper at ICLR 2017
+2
+RELATED WORK
+Probabilistic programming languages (PPLs) typically trade off the expressiveness of the language
+with the computational efﬁciency of inference. On one side, there are languages which emphasize
+expressiveness (Pfeffer, 2001; Milch et al., 2005; Pfeffer, 2009; Goodman et al., 2012), represent-
+ing a rich class beyond graphical models. Each employs a generic inference engine, but scales
+poorly with respect to model and data size. On the other side, there are languages which em-
+phasize efﬁciency (Spiegelhalter et al., 1995; Murphy, 2001; Plummer, 2003; Salvatier et al., 2015;
+Carpenter et al., 2016). The PPL is restricted to a speciﬁc class of models, and inference algorithms
+are optimized to be efﬁcient for this class. For example, Infer.NET enables fast message pass-
+ing for graphical models (Minka et al., 2014), and Augur enables data parallelism with GPUs for
+Gibbs sampling in Bayesian networks (Tristan et al., 2014). Edward bridges this gap. It is Turing
+complete—it supports any computable probability distribution—and it supports efﬁcient algorithms,
+such as those that leverage model structure and those that scale to massive data.
+There has been some prior research on efﬁcient algorithms in Turing-complete languages. Venture
+and Anglican design inference as a collection of local inference problems, deﬁned over program
+fragments (Mansinghka et al., 2014; Wood et al., 2014). This produces fast program-speciﬁc infer-
+ence code, which we build on. Neither system supports inference methods such as programmable
+posterior approximations, inference models, or data subsampling.
+Concurrent with our work,
+WebPPL features amortized inference (Ritchie et al., 2016). Unlike Edward, WebPPL does not
+reuse the model’s representation; rather, it annotates the original program and leverages helper func-
+tions, which is a less ﬂexible strategy. Finally, inference is designed as program transformations in
+Kiselyov & Shan (2009); ´Scibior et al. (2015); Zinkov & Shan (2016). This enables the ﬂexibility of
+composing inference inside other probabilistic programs. Edward builds on this idea to compose not
+only inference within modeling but also modeling within inference (e.g., variational models).
+3
+COMPOSITIONAL REPRESENTATIONS FOR PROBABILISTIC MODELS
+We ﬁrst develop compositional representations for probabilistic models. We desire two criteria: (a)
+integration with computational graphs, an efﬁcient framework where nodes represent operations on
+data and edges represent data communicated between them (Culler, 1986); and (b) invariance of the
+representation under the graph, that is, the representation can be reused during inference.
+Edward deﬁnes random variables as the key compositional representation. They are class objects
+with methods, for example, to compute the log density and to sample. Further, each random variable
+x is associated to a tensor (multi-dimensional array) x∗, which represents a single sample x∗∼
+p(x). This association embeds the random variable onto a computational graph on tensors.
+The design’s simplicity makes it easy to develop probabilistic programs in a computational graph
+framework. Importantly, all computation is represented on the graph. This enables one to compose
+random variables with complex deterministic structure such as deep neural networks, a diverse set of
+math operations, and third party libraries that build on the same framework. The design also enables
+compositions of random variables to capture complex stochastic structure.
+As an illustration, we use a Beta-Bernoulli model, p(x, θ) = Beta(θ | 1, 1) Q50
+n=1 Bernoulli(xn | θ),
+where θ is a latent probability shared across the 50 data points x ∈{0, 1}50. The random variable x
+is 50-dimensional, parameterized by the random tensor θ∗. Fetching the object x runs the graph: it
+simulates from the generative process and outputs a binary vector of 50 elements.
+1
+theta = Beta(a=1.0, b=1.0)
+2
+x = Bernoulli(p=tf.ones(50) * theta)
+θ
+θ∗
+tf.ones(50)
+x
+x∗
+Figure 1: Beta-Bernoulli program (left) alongside its computational graph (right). Fetching x from
+the graph generates a binary vector of 50 elements.
+All computation is registered symbolically on random variables and not over their execution. Sym-
+bolic representations do not require reifying the full model, which leads to unreasonable memory
+2
+
+Published as a conference paper at ICLR 2017
+zn
+xn
+θ
+φ
+N
+1
+# Probabilistic model
+2
+z = Normal(mu=tf.zeros([N, d]), sigma=tf.ones([N, d]))
+3
+h = Dense(256, activation=’relu’)(z)
+4
+x = Bernoulli(logits=Dense(28 * 28, activation=None)(h))
+5
+6
+# Variational model
+7
+qx = tf.placeholder(tf.float32, [N, 28 * 28])
+8
+qh = Dense(256, activation=’relu’)(qx)
+9
+qz = Normal(mu=Dense(d, activation=None)(qh),
+10
+sigma=Dense(d, activation=’softplus’)(qh))
+Figure 2: Variational auto-encoder for a data set of 28×28 pixel images: (left) graphical model, with
+dotted lines for the inference model; (right) probabilistic program, with 2-layer neural networks.
+consumption for large models (Tristan et al., 2014). Moreover, it enables us to simplify both de-
+terministic and stochastic operations in the graph, before executing any code (´Scibior et al., 2015;
+Zinkov & Shan, 2016).
+With computational graphs, it is also natural to build mutable states within the probabilistic program.
+As a typical use of computational graphs, such states can deﬁne model parameters; in TensorFlow,
+this is given by a tf.Variable. Another use case is for building discriminative models p(y | x),
+where x are features that are input as training or test data. The program can be written independent
+of the data, using a mutable state (tf.placeholder) for x in its graph. During training and testing,
+we feed the placeholder the appropriate values.
+In Appendix A, we provide examples of a Bayesian neural network for classiﬁcation (A.1), latent
+Dirichlet allocation (A.2), and Gaussian matrix factorization (A.3). We present others below.
+3.1
+EXAMPLE: VARIATIONAL AUTO-ENCODER
+Figure 2 implements a variational auto-encoder (VAE) (Kingma & Welling, 2014; Rezende et al.,
+2014) in Edward. It comprises a probabilistic model over data and a variational model designed to
+approximate the former’s posterior. Here we use random variables to construct both the probabilistic
+model and the variational model; they are ﬁt during inference (more details in Section 4).
+There are N data points xn ∈{0, 1}28·28 each with d latent variables, zn ∈Rd. The program
+uses Keras (Chollet, 2015) to deﬁne neural networks. The probabilistic model is parameterized by
+a 2-layer neural network, with 256 hidden units (and ReLU activation), and generates 28 × 28 pixel
+images. The variational model is parameterized by a 2-layer inference network, with 256 hidden
+units and outputs parameters of a normal posterior approximation.
+The probabilistic program is concise. Core elements of the VAE—such as its distributional assump-
+tions and neural net architectures—are all extensible. With model compositionality, we can embed
+it into more complicated models (Gregor et al., 2015; Rezende et al., 2016) and for other learning
+tasks (Kingma et al., 2014). With inference compositionality (which we discuss in Section 4), we
+can embed it into more complicated algorithms, such as with expressive variational approxima-
+tions (Rezende & Mohamed, 2015; Tran et al., 2016b; Kingma et al., 2016) and alternative objec-
+tives (Ranganath et al., 2016a; Li & Turner, 2016; Dieng et al., 2016).
+3.2
+EXAMPLE: BAYESIAN RECURRENT NEURAL NETWORK WITH VARIABLE LENGTH
+Random variables can also be composed with control ﬂow operations. As an example, Figure 3
+implements a Bayesian recurrent neural network (RNN) with variable length. The data is a sequence
+of inputs {x1, . . . , xT } and outputs {y1, . . . , yT } of length T with xt ∈RD and yt ∈R per time
+step. For t = 1, . . . , T , a RNN applies the update
+ht = tanh(Whht−1 + Wxxt + bh),
+where the previous hidden state is ht−1 ∈RH. We feed each hidden state into the output’s like-
+lihood, yt ∼Normal(Wyht + by, 1), and we place a standard normal prior over all parameters
+{Wh ∈RH×H, Wx ∈RD×H, Wy ∈RH×1, bh ∈RH, by ∈R}. Our implementation is dy-
+namic: it differs from a RNN with ﬁxed length, which pads and unrolls the computation.
+3
+
+Published as a conference paper at ICLR 2017
+xt
+bh
+Wx
+Wh
+Wy
+by
+ht
+· · ·
+· · ·
+yt
+1
+def rnn_cell(hprev, xt):
+2
+return tf.tanh(tf.dot(hprev, Wh) + tf.dot(xt, Wx) + bh)
+3
+4
+Wh = Normal(mu=tf.zeros([H, H]), sigma=tf.ones([H, H]))
+5
+Wx = Normal(mu=tf.zeros([D, H]), sigma=tf.ones([D, H]))
+6
+Wy = Normal(mu=tf.zeros([H, 1]), sigma=tf.ones([H, 1]))
+7
+bh = Normal(mu=tf.zeros(H), sigma=tf.ones(H))
+8
+by = Normal(mu=tf.zeros(1), sigma=tf.ones(1))
+9
+10
+x = tf.placeholder(tf.float32, [None, D])
+11
+h = tf.scan(rnn_cell, x, initializer=tf.zeros(H))
+12
+y = Normal(mu=tf.matmul(h, Wy) + by, sigma=1.0)
+Figure 3: Bayesian RNN: (left) graphical model; (right) probabilistic program. The program has
+an unspeciﬁed number of time steps; it uses a symbolic for loop (tf.scan).
+3.3
+STOCHASTIC CONTROL FLOW AND MODEL PARALLELISM
+p
+p∗
+tf.while_loop(...)
+a∗
+a
+x
+x∗
+Figure 4: Computational graph for a probabilistic program with stochastic control ﬂow.
+Random variables can also be placed in the control ﬂow itself, enabling probabilistic programs with
+stochastic control ﬂow. Stochastic control ﬂow deﬁnes dynamic conditional dependencies, known in
+the literature as contingent or existential dependencies (Mansinghka et al., 2014; Wu et al., 2016).
+See Figure 4, where x may or may not depend on a for a given execution. In Appendix A.4, we
+use stochastic control ﬂow to implement a Dirichlet process mixture model. Tensors with stochastic
+shape are also possible: for example, tf.zeros(Poisson(lam=5.0)) deﬁnes a vector of zeros with
+length given by a Poisson draw with rate 5.0.
+Stochastic control ﬂow produces difﬁculties for algorithms that use the graph structure because the
+relationship of conditional dependencies changes across execution traces. The computational graph,
+however, provides an elegant way of teasing out static conditional dependence structure (p) from
+dynamic dependence structure (a). We can perform model parallelism (parallel computation across
+components of the model) over the static structure with GPUs and batch training. We can use more
+generic computations to handle the dynamic structure.
+4
+COMPOSITIONAL REPRESENTATIONS FOR INFERENCE
+We described random variables as a representation for building rich probabilistic programs over
+computational graphs. We now describe a compositional representation for inference. We desire
+two criteria: (a) support for many classes of inference, where the form of the inferred posterior
+depends on the algorithm; and (b) invariance of inference under the computational graph, that is, the
+posterior can be further composed as part of another model.
+To explain our approach, we will use a simple hierarchical model as a running example. Figure 5
+displays a joint distribution p(x, z, β) of data x, local variables z, and global variables β. The ideas
+here extend to more expressive programs.
+4.1
+INFERENCE AS STOCHASTIC GRAPH OPTIMIZATION
+The goal of inference is to calculate the posterior distribution p(z, β | xtrain; θ) given data xtrain,
+where θ are any model parameters that we will compute point estimates for.2 We formalize this as
+2For example, we could replace x’s sigma argument with tf.exp(tf.Variable(0.0))*tf.ones([N, D]).
+This deﬁnes a model parameter initialized at 0 and positive-constrained.
+4
+
+Published as a conference paper at ICLR 2017
+β
+zn
+xn
+N
+1
+N = 10000
+# number of data points
+2
+D = 2
+# data dimension
+3
+K = 5
+# number of clusters
+4
+5
+beta = Normal(mu=tf.zeros([K, D]), sigma=tf.ones([K, D]))
+6
+z = Categorical(logits=tf.zeros([N, K]))
+7
+x = Normal(mu=tf.gather(beta, z), sigma=tf.ones([N, D]))
+Figure 5: Hierarchical model: (left) graphical model; (right) probabilistic program. It is a mixture
+of Gaussians over D-dimensional data {xn} ∈RN×D. There are K latent cluster means β ∈
+RK×D.
+the following optimization problem:
+min
+λ,θ L(p(z, β | xtrain; θ), q(z, β; λ)),
+(1)
+where q(z, β; λ) is an approximation to the posterior p(z, β | xtrain; θ), and L is a loss function with
+respect to p and q.
+The choice of approximation q, loss L, and rules to update parameters {θ, λ} are speciﬁed by an in-
+ference algorithm. (Note q can be nonparametric, such as a point or a collection of samples.)
+In Edward, we write this problem as follows:
+1
+inference = ed.Inference({beta: qbeta, z: qz}, data={x: x_train})
+Inference is an abstract class which takes two inputs. The ﬁrst is a collection of latent random vari-
+ables beta and z, associated to their “posterior variables” qbeta and qz respectively. The second is a
+collection of observed random variables x, which is associated to their realizations x_train.
+The idea is that Inference deﬁnes and solves the optimization in Equation 1. It adjusts parameters
+of the distribution of qbeta and qz (and any model parameters) to be close to the posterior.
+Class methods are available to ﬁnely control the inference. Calling inference.initialize() builds
+a computational graph to update {θ, λ}. Calling inference.update() runs this computation once
+to update {θ, λ}; we call the method in a loop until convergence. Importantly, no efﬁciency is lost
+in Edward’s language: the computational graph is the same as if it were handwritten for a speciﬁc
+model. This means the runtime is the same; also see our experiments in Section 5.2.
+A key concept in Edward is that there is no distinct “model” or “inference” block. A model is simply
+a collection of random variables, and inference is a way of modifying parameters in that collection
+subject to another. This reductionism offers signiﬁcant ﬂexibility. For example, we can infer only
+parts of a model (e.g., layer-wise training (Hinton et al., 2006)), infer parts used in multiple models
+(e.g., multi-task learning), or plug in a posterior into a new model (e.g., Bayesian updating).
+4.2
+CLASSES OF INFERENCE
+The design of Inference is very general. We describe subclasses to represent many algorithms
+below: variational inference, Monte Carlo, and generative adversarial networks.
+Variational inference posits a family of approximating distributions and ﬁnds the closest member in
+the family to the posterior (Jordan et al., 1999). In Edward, we build the variational family in the
+graph; see Figure 6 (left). For our running example, the family has mutable variables as parameters
+λ = {π, µ, σ}, where q(β; µ, σ) = Normal(β; µ, σ) and q(z; π) = Categorical(z; π).
+Speciﬁc variational algorithms inherit from the VariationalInference class. Each deﬁnes its own
+methods, such as a loss function and gradient. For example, we represent maximum a posteriori
+(MAP) estimation with an approximating family (qbeta and qz) of PointMass random variables, i.e.,
+with all probability mass concentrated at a point. MAP inherits from VariationalInference and de-
+ﬁnes the negative log joint density as the loss function; it uses existing optimizers inside TensorFlow.
+In Section 5.1, we experiment with multiple gradient estimators for black box variational inference
+(Ranganath et al., 2014). Each estimator implements the same loss (an objective proportional to the
+divergence KL(q ∥p)) and a different update rule (stochastic gradient).
+5
+
+Published as a conference paper at ICLR 2017
+1
+qbeta = Normal(
+2
+mu=tf.Variable(tf.zeros([K, D])),
+3
+sigma=tf.exp(tf.Variable(tf.zeros([K, D]))))
+4
+qz = Categorical(
+5
+logits=tf.Variable(tf.zeros([N, K])))
+6
+7
+inference = ed.VariationalInference(
+8
+{beta: qbeta, z: qz}, data={x: x_train})
+1
+T = 10000
+# number of samples
+2
+qbeta = Empirical(
+3
+params=tf.Variable(tf.zeros([T, K, D])))
+4
+qz = Empirical(
+5
+params=tf.Variable(tf.zeros([T, N])))
+6
+7
+inference = ed.MonteCarlo(
+8
+{beta: qbeta, z: qz}, data={x: x_train})
+Figure 6: (left) Variational inference. (right) Monte Carlo.
+ǫn
+θ
+xn
+N
+1
+def generative_network(eps):
+2
+h = Dense(256, activation=’relu’)(eps)
+3
+return Dense(28 * 28, activation=None)(h)
+4
+5
+def discriminative_network(x):
+6
+h = Dense(28 * 28, activation=’relu’)(x)
+7
+return Dense(h, activation=None)(1)
+8
+9
+# Probabilistic model
+10
+eps = Normal(mu=tf.zeros([N, d]), sigma=tf.ones([N, d]))
+11
+x = generative_network(eps)
+12
+13
+inference = ed.GANInference(data={x: x_train},
+14
+discriminator=discriminative_network)
+Figure 7: Generative adversarial networks: (left) graphical model; (right) probabilistic program.
+The model (generator) uses a parameterized function (discriminator) for training.
+Monte Carlo approximates the posterior using samples (Robert & Casella, 1999). Monte Carlo
+is an inference where the approximating family is an empirical distribution, q(β; {β(t)}) =
+1
+T
+PT
+t=1 δ(β, β(t)) and q(z; {z(t)}) =
+1
+T
+PT
+t=1 δ(z, z(t)). The parameters are λ = {β(t), z(t)}.
+See Figure 6 (right). Monte Carlo algorithms proceed by updating one sample β(t), z(t) at a time in
+the empirical approximation. Speciﬁc MC samplers determine the update rules: they can use gra-
+dients such as in Hamiltonian Monte Carlo (Neal, 2011) and graph structure such as in sequential
+Monte Carlo (Doucet et al., 2001).
+Edward also supports non-Bayesian methods such as generative adversarial networks (GANs)
+(Goodfellow et al., 2014). See Figure 7. The model posits random noise eps over N data points,
+each with d dimensions; this random noise feeds into a generative_network function, a neural
+network that outputs real-valued data x. In addition, there is a discriminative_network which
+takes data as input and outputs the probability that the data is real (in logit parameterization). We
+build GANInference; running it optimizes parameters inside the two neural network functions. This
+approach extends to many advances in GANs (e.g., Denton et al. (2015); Li et al. (2015)).
+Finally, one can design algorithms that would otherwise require tedious algebraic manipulation.
+With symbolic algebra on nodes of the computational graph, we can uncover conjugacy relationships
+between random variables. Users can then integrate out variables to automatically derive classical
+Gibbs (Gelfand & Smith, 1990), mean-ﬁeld updates (Bishop, 2006), and exact inference. These
+algorithms are being currently developed in Edward.
+4.3
+COMPOSING INFERENCES
+Core to Edward’s design is that inference can be written as a collection of separate inference pro-
+grams. Below we demonstrate variational EM, with an (approximate) E-step over local variables
+and an M-step over global variables. We instantiate two algorithms, each of which conditions on
+inferences from the other, and we alternate with one update of each (Neal & Hinton, 1993),
+1
+qbeta = PointMass(params=tf.Variable(tf.zeros([K, D])))
+2
+qz = Categorical(logits=tf.Variable(tf.zeros([N, K])))
+3
+4
+inference_e = ed.VariationalInference({z: qz}, data={x: x_train, beta: qbeta})
+5
+inference_m = ed.MAP({beta: qbeta}, data={x: x_train, z: qz})
+6
+...
+6
+
+Published as a conference paper at ICLR 2017
+7
+for _ in range(10000):
+8
+inference_e.update()
+9
+inference_m.update()
+This extends to many other cases such as exact EM for exponential families, contrastive divergence
+(Hinton, 2002), pseudo-marginal methods (Andrieu & Roberts, 2009), and Gibbs sampling within
+variational inference (Wang & Blei, 2012; Hoffman & Blei, 2015). We can also write message pass-
+ing algorithms, which solve a collection of local inference problems (Koller & Friedman, 2009). For
+example, classical message passing uses exact local inference and expectation propagation locally
+minimizes the Kullback-Leibler divergence, KL(p ∥q) (Minka, 2001).
+4.4
+DATA SUBSAMPLING
+Stochastic optimization (Bottou, 2010) scales inference to massive data and is key to algorithms
+such as stochastic gradient Langevin dynamics (Welling & Teh, 2011) and stochastic variational
+inference (Hoffman et al., 2013). The idea is to cheaply estimate the model’s log joint density in an
+unbiased way. At each step, one subsamples a data set {xm} of size M and then scales densities
+with respect to local variables,
+log p(x, z, β) = log p(β) +
+N
+X
+n=1
+h
+log p(xn | zn, β) + log p(zn | β)
+i
+≈log p(β) + N
+M
+M
+X
+m=1
+h
+log p(xm | zm, β) + log p(zm | β)
+i
+.
+To support stochastic optimization, we represent only a subgraph of the full model. This prevents
+reifying the full model, which can lead to unreasonable memory consumption (Tristan et al., 2014).
+During initialization, we pass in a dictionary to properly scale the arguments. See Figure 8.
+β
+zm
+xm
+M
+1
+beta = Normal(mu=tf.zeros([K, D]), sigma=tf.ones([K, D]))
+2
+z = Categorical(logits=tf.zeros([M, K]))
+3
+x = Normal(mu=tf.gather(beta, z), sigma=tf.ones([M, D]))
+4
+5
+qbeta = Normal(mu=tf.Variable(tf.zeros([K, D])),
+6
+sigma=tf.nn.softplus(tf.Variable(tf.zeros([K, D]))))
+7
+qz = Categorical(logits=tf.Variable(tf.zeros([M, D])))
+8
+9
+inference = ed.VariationalInference({beta: qbeta, z: qz}, data={x: x_batch})
+10
+inference.initialize(scale={x: float(N)/M, z: float(N)/M})
+Figure 8: Data subsampling with a hierarchical model. We deﬁne a subgraph of the full model,
+forming a plate of size M rather than N. We then scale all local random variables by N/M.
+Conceptually, the scale argument represents scaling for each random variable’s plate, as if we had
+seen that random variable N/M as many times. As an example, Appendix B shows how to im-
+plement stochastic variational inference in Edward. The approach extends naturally to streaming
+data (Doucet et al., 2000; Broderick et al., 2013; McInerney et al., 2015), dynamic batch sizes, and
+data structures in which working on a subgraph does not immediately apply (Binder et al., 1997;
+Johnson & Willsky, 2014; Foti et al., 2014).
+5
+EXPERIMENTS
+In this section, we illustrate two main beneﬁts of Edward: ﬂexibility and efﬁciency. For the former,
+we show how it is easy to compare different inference algorithms on the same model. For the latter,
+we show how it is easy to get signiﬁcant speedups by exploiting computational graphs.
+5.1
+RECENT METHODS IN VARIATIONAL INFERENCE
+We demonstrate Edward’s ﬂexibility for experimenting with complex inference algorithms. We
+consider the VAE setup from Figure 2 and the binarized MNIST data set (Salakhutdinov & Murray,
+7
+
+Published as a conference paper at ICLR 2017
+Inference method
+Negative log-likelihood
+VAE (Kingma & Welling, 2014)
+≤88.2
+VAE without analytic KL
+≤89.4
+VAE with analytic entropy
+≤88.1
+VAE with score function gradient
+≤87.9
+Normalizing ﬂows (Rezende & Mohamed, 2015)
+≤85.8
+Hierarchical variational model (Ranganath et al., 2016b)
+≤85.4
+Importance-weighted auto-encoders (K = 50) (Burda et al., 2016)
+≤86.3
+HVM with IWAE objective (K = 5)
+≤85.2
+Rényi divergence (α = −1) (Li & Turner, 2016)
+≤140.5
+Table 1: Inference methods for a probabilistic decoder on binarized MNIST. The Edward PPL is a
+convenient research platform, making it easy to both develop and experiment with many algorithms.
+2008). We use d = 50 latent variables per data point and optimize using ADAM. We study different
+components of the VAE setup using different methods; Appendix C.1 is a complete script. After
+training we evaluate held-out log likelihoods, which are lower bounds on the true value.
+Table 1 shows the results. The ﬁrst method uses the VAE from Figure 2. The next three methods
+use the same VAE but apply different gradient estimators: reparameterization gradient without an
+analytic KL; reparameterization gradient with an analytic entropy; and the score function gradient
+(Paisley et al., 2012; Ranganath et al., 2014). This typically leads to the same optima but at different
+convergence rates. The score function gradient was slowest. Gradients with an analytic entropy
+produced difﬁculties around convergence: we switched to stochastic estimates of the entropy as
+it approached an optima. We also use hierarchical variational models (HVMs) (Ranganath et al.,
+2016b) with a normalizing ﬂow prior; it produced similar results as a normalizing ﬂow on the latent
+variable space (Rezende & Mohamed, 2015), and better than importance-weighted auto-encoders
+(IWAEs) (Burda et al., 2016).
+We also study novel combinations, such as HVMs with the IWAE objective, GAN-based optimization
+on the decoder (with pixel intensity-valued data), and Rényi divergence on the decoder. GAN-based
+optimization does not enable calculation of the log-likelihood; Rényi divergence does not directly
+optimize for log-likelihood so it does not perform well. The key point is that Edward is a convenient
+research platform: they are all easy modiﬁcations of a given script.
+5.2
+GPU-ACCELERATED HAMILTONIAN MONTE CARLO
+β
+yn
+xn
+N
+1
+# Model
+2
+x = tf.Variable(x_data, trainable=False)
+3
+beta = Normal(mu=tf.zeros(D), sigma=tf.ones(D))
+4
+y = Bernoulli(logits=tf.dot(x, beta))
+5
+6
+# Inference
+7
+qbeta = Empirical(params=tf.Variable(tf.zeros([T, D])))
+8
+inference = ed.HMC({beta: qbeta}, data={y: y_data})
+9
+inference.run(step_size=0.5 / N, n_steps=10)
+Figure 9: Edward program for Bayesian logistic regression with Hamiltonian Monte Carlo (HMC).
+We benchmark runtimes for a ﬁxed number of Hamiltonian Monte Carlo (HMC; Neal, 2011) iter-
+ations on modern hardware: a 12-core Intel i7-5930K CPU at 3.50GHz and an NVIDIA Titan X
+(Maxwell) GPU. We apply logistic regression on the Covertype dataset (N = 581012, D = 54;
+responses were binarized) using Edward, Stan (with PyStan) (Carpenter et al., 2016), and PyMC3
+(Salvatier et al., 2015). We ran 100 HMC iterations, with 10 leapfrog updates per iteration, a step
+size of 0.5/N, and single precision. Figure 9 illustrates the program in Edward.
+Table 2 displays the runtimes.3 Edward (GPU) features a dramatic 35x speedup over Stan (1 CPU)
+and 6x speedup over PyMC3 (12 CPU). This showcases the value of building a PPL on top of com-
+3In a previous version of this paper, we reported PyMC3 took 361s. This was caused by a bug preventing
+PyMC3 from correctly handling single-precision ﬂoating point. (PyMC3 with double precision is roughly 14x
+8
+
+Published as a conference paper at ICLR 2017
+Probabilistic programming system
+Runtime (s)
+Handwritten NumPy (1 CPU)
+534
+Stan (1 CPU) (Carpenter et al., 2016)
+171
+PyMC3 (12 CPU) (Salvatier et al., 2015)
+30.0
+Edward (12 CPU)
+8.2
+Handwritten TensorFlow (GPU)
+5.0
+Edward (GPU)
+4.9
+Table 2: HMC benchmark for large-scale logistic regression. Edward (GPU) is signiﬁcantly faster
+than other systems. In addition, Edward has no overhead: it is as fast as handwritten TensorFlow.
+putational graphs. The speedup stems from fast matrix multiplication when calculating the model’s
+log-likelihood; GPUs can efﬁciently parallelize this computation. We expect similar speedups for
+models whose bottleneck is also matrix multiplication, such as deep neural networks.
+There are various reasons for the speedup. Stan only used 1 CPU as it leverages multiple cores by
+running HMC chains in parallel. Stan also used double-precision ﬂoating point as it does not allow
+single-precision. For PyMC3, we note Edward’s speedup is not a result of PyMC3’s Theano backend
+compared to Edward’s TensorFlow. Rather, PyMC3 does not use Theano for all its computation, so
+it experiences communication overhead with NumPy. (PyMC3 was actually slower when using the
+GPU.) We predict that porting Edward’s design to Theano would feature similar speedups.
+In addition to these speedups, we highlight that Edward has no runtime overhead: it is as fast as
+handwritten TensorFlow. Following Section 4.1, this is because the computational graphs for infer-
+ence are in fact the same for Edward and the handwritten code.
+5.3
+PROBABILITY ZOO
+In addition to Edward, we also release the Probability Zoo, a community repository for pre-trained
+probability models and their posteriors.4 It is inspired by the model zoo in Caffe (Jia et al., 2014),
+which provides many pre-trained discriminative neural networks, and which has been key to making
+large-scale deep learning more transparent and accessible. It is also inspired by Forest (Stuhlmüller,
+2012), which provides examples of probabilistic programs.
+6
+DISCUSSION: CHALLENGES & EXTENSIONS
+We described Edward, a Turing-complete PPL with compositional representations for probabilistic
+models and inference. Edward expands the scope of probabilistic programming to be as ﬂexible
+and computationally efﬁcient as traditional deep learning. For ﬂexibility, we showed how Edward
+can use a variety of composable inference methods, capture recent advances in variational inference
+and generative adversarial networks, and ﬁnely control the inference algorithms. For efﬁciency, we
+showed how Edward leverages computational graphs to achieve fast, parallelizable computation,
+scales to massive data, and incurs no runtime overhead over handwritten code.
+In present work, we are applying Edward as a research platform for developing new probabilistic
+models (Rudolph et al., 2016; Tran et al., 2017) and new inference algorithms (Dieng et al., 2016).
+As with any language design, Edward makes tradeoffs in pursuit of its ﬂexibility and speed for re-
+search. For example, an open challenge in Edward is to better facilitate programs with complex
+control ﬂow and recursion. While possible to represent, it is unknown how to enable their ﬂexible
+inference strategies. In addition, it is open how to expand Edward’s design to dynamic computa-
+tional graph frameworks—which provide more ﬂexibility in their programming paradigm—but may
+sacriﬁce performance. A crucial next step for probabilistic programming is to leverage dynamic
+computational graphs while maintaining the ﬂexibility and efﬁciency that Edward offers.
+slower than Edward (GPU).) This has been ﬁxed after discussion with Thomas Wiecki. The reported numbers
+also exclude compilation time, which is signiﬁcant for Stan.
+4The Probability Zoo is available at http://edwardlib.org/zoo. It includes model parameters and
+inferred posterior factors, such as local and global variables during training and any inference networks.
+9
+
+Published as a conference paper at ICLR 2017

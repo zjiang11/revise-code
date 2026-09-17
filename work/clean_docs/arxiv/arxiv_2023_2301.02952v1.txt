@@ -1,0 +1,262 @@
+Learning Symbolic Representations for
+Reinforcement Learning of Non-Markovian Behavior
+Phillip J.K. Christoffersen, Andrew C. Li, Rodrigo Toro Icarte, Sheila A. McIlraith
+University of Toronto & Vector Institute for Artiﬁcial Intelligence, Toronto, Canada
+
+Abstract
+Many real-world reinforcement learning (RL) problems necessitate learning com-
+plex, temporally extended behavior that may only receive reward signal when the
+behavior is completed. If the reward-worthy behavior is known, it can be speciﬁed
+in terms of a non-Markovian reward function—a function that depends on aspects
+of the state-action history, rather than just the current state and action. Such reward
+functions yield sparse rewards, necessitating an inordinate number of experiences
+to ﬁnd a policy that captures the reward-worthy pattern of behavior. Recent work
+has leveraged Knowledge Representation (KR) to provide a symbolic abstraction
+of aspects of the state that summarize reward-relevant properties of the state-action
+history and support learning a Markovian decomposition of the problem in terms
+of an automaton over the KR. Providing such a decomposition has been shown to
+vastly improve learning rates, especially when coupled with algorithms that exploit
+automaton structure. Nevertheless, such techniques rely on a priori knowledge
+of the KR. In this work, we explore how to automatically discover useful state
+abstractions that support learning automata over the state-action history. The result
+is an end-to-end algorithm that can learn optimal policies with signiﬁcantly fewer
+environment samples than state-of-the-art RL on simple non-Markovian domains.
+1
+Introduction
+Deep RL has shown promise at learning complex behavior in many settings, including game-playing
+[1], robotics [2], and control systems [3]. These algorithms typically take advantage of a Markov
+assumption — that it is enough to consider only the current state when deciding which action to take.
+However, many real-world tasks are inherently temporally extended. The pattern of behavior the
+RL agent must learn depends not only upon the current state but also on past states and actions. For
+example, an agent that needs to get through a locked door to get high reward must have previously
+located and acquired the key. Unfortunately, learning such temporally extended behavior can be
+incredibly challenging since the agent must learn to discern relevant features from its state-action
+history; these can be arbitrarily far removed from the present state, and may depend on this history in
+complex ways and without intermediate reward signal to aid learning. The standard deep RL solution
+to learning such temporally extended behavior is to use a recurrent neural network (RNN), which
+learns an abstract hidden state in order to summarize environment histories, but RNNs require much
+data to train, and are difﬁcult to tune.
+By contrast, in recent work, an algorithm for learning temporally extended behavior is proposed,
+where the RNN hidden states are replaced with an augmentation of the current state in terms of
+hand-designed propositional symbols, which incorporate domain knowledge and point the agent
+towards potentially reward-relevant properties of the state-action history (e.g. [4, 5, 6, 7]). In the
+previous example, one can augment the agent with the propositional symbol have_keys, indicating
+whether the agent has acquired the keys to the door in the past. Markovian policies on this state
+4th Knowledge Representation and Reasoning Meets Machine Learning Workshop (KR2ML 2020), at NeurIPS.
+arXiv:2301.02952v1  [cs.LG]  8 Jan 2023
+
+space now become vastly more expressive: if one can additionally condition on the truth state of
+have_keys when deciding an action, we can perform the following temporally extended behavior: go
+towards the keys when have_keys is false, then go towards the door when have_keys is true. But
+how did we know to augment the agent with have_keys in the ﬁrst place? While this example seems
+simple, this is only because we contrived the reward: it is not in general clear which propositional
+symbols to augment an agent with, in order to achieve high performance. To address this, we propose
+the use of automata learning within the RL framework to automatically yield such propositional
+symbols, rather than relying on domain knowledge. We demonstrate that the trained automata
+dramatically accelerate policy learning, with our end-to-end approach outperforming a state-of-the-art
+RL algorithm (Recurrent-PPO) on several non-Markovian reward domains.
+2
+Related Work
+Recently, the idea of specifying non-Markovian reward functions in RL via formal languages such as
+Linear Temporal Logic (LTL) (e.g., ( [8, 9, 10, 11, 12, 13, 5, 14]) or automata (e.g., [7, 4, 15, 16])
+has garnered signiﬁcant attention. While these approaches rely on domain knowledge and a domain-
+speciﬁc vocabulary for speciﬁcation of the reward function, we consider a black-box non-Markovian
+reward and present an automated approach to uncover the reward structure. In this approach, we
+train automata ofﬂine using a reward-prediction heuristic, and augment the environment states with
+the states of the learned automaton, as opposed to hand-designed features. An alternate black-box
+approach to ours is to ﬁrst train an RNN, with a standard deep (recurrent) RL algorithm, and then
+"quantize" the hidden state of the RNN, but this learned transition model is not a direct function of
+the state-action history [17].
+Previous work by Toro Icarte et al. [4] and Xu et al. [18] share many of the motivations of our work
+but perform poorly in noisy environments. The work most similar to ours is by Gaon & Brafman [6],
+which we build on in several key ways. First, the (off-the-shelf) automata-learning approaches they
+employ are sensitive to noisy data and often learn large, sample-sensitive automata even when the
+reward structure is simple. We make use of recent advances in automata-learning which are robust to
+noise and regularize the size of the automaton, which we demonstrate in Section 5. Furthermore, [6]
+lacked experimental comparisons against state-of-the-art RL. In our experiments with non-Markovian
+goals, we outperform state-of-the-art RL based on RNNs.
+3
+Preliminaries
+An MDP is a tuple M = (S, A, P, R, γ), where S is a set of states, A a set of actions, P : S×A×S →
+[0, 1] the state-action transition function, R : S →R the reward, and 0 ≤γ ≤1 the discounting
+factor [19]. In such a setup, the reward R is considered Markovian, due to its dependence only
+on the most recent state. We will consider the following extension of the MDP: an NMRDP [20]
+(non-Markovian Reward Decision Process) N = (S, A, P, R, γ) is as before, but where the reward
+R : H →R, where H = (S × A)∗is the set of ﬁnite histories with states S and actions A: in
+other words, the agent can be rewarded for behavior which is arbitrarily far removed from its current
+experience. Further, we deﬁne a proposition as a function P : H →{True, False}, in an NMRDP.
+Intuitively, propositions correspond to facts about the state-action history in a given episode, such as
+"the agent has at some point reached the top right corner" or "within the 3 most recent timesteps, the
+agent took action x". While the number of possible propositions grows double-exponentially in the
+length of the episode, domain knowledge is often used to specify a relevant set of such propositions,
+under which the reward is Markovian. The RL domains we consider have non-Markovian goals, i.e.
+there exists G ⊂H where R(g) = 1 for g ∈G, and R(h) = 0 for h ∈H −G. Intuitively, we want to
+create a policy which makes the agent attain a goal history as soon as possible.
+4
+Algorithm
+We use the algorithm described in Algorithm 1 named AutRL. Following each period of Markovian
+learning, the sampled traces are used to train (ofﬂine) a deterministic ﬁnite automaton (DFA) M to
+predict whether a given sequence achieves reward 0 or 1. We leverage the DFA-learning approach
+from [21] due to its efﬁciency, its propensity to learn small DFAs with few transitions, and its
+robustness to noise. Tabular Q-learning is used for markov_learn. Intuitively, a DFA with state
+2
+
+Algorithm 1: AutRL
+1 dfa ←empty_automata;
+2 π ←uniform_random_policy;
+3 traces ←∅;
+4 while true do
+5
+sample_traces ←sample(π, N) ;
+6
+append traces with sample_traces;
+7
+if sample_traces inconsistent with dfa then
+8
+dfa ←aut_learn(traces);
+9
+end
+10
+π ←markov_learn(sample_traces × dfa);
+11 end
+space Q that accurately discriminates reward 1 traces from reward 0 traces (which we deﬁne as
+consistent) must model all parts of the state-action history relevant to the goal, and therefore the
+augmented state space S × Q must make the problem Markovian. We remark that the resultant DFAs
+are functions H →Q and are learned end-to-end without domain knowledge. Examples of this can
+be seen in Section 5. We also provide a convergence guarantee for this algorithm in Appendix A.
+We note that our implementation using Q-learning converges to an optimal policy as the number
+of environment samples approaches inﬁnity (assuming G is regular, as above) due to the optimal
+convergence guarantees of Q-learning on MDPs [19]). Note that while we search for consistent
+DFAs, this condition is not necessary to make the learning problem Markovian. For this reason, we
+relax the inconsistency condition analyzed above, replacing the DFA only under weak performance
+(i.e. low average reward) at the end of a given epoch of markov_learn.
+5
+Experimental Results
+The purpose of our experiments was to evaluate our AutRL algorithm, which leverages a learned
+symbolic representation, relative to a state-of-the-art RNN-based deep RL algorithm. The two metrics
+were the quality of the policies in terms of maximizing reward, and their sample efﬁciency. We tested
+on four non-Markovian domains, similar to those used in the experiments of [6] as follows.
+Multi-Armed Bandit: A single-state environment with two actions (left, right) and episodes
+of length 6.
+A reward of 1 is obtained only if the 6 actions performed are precisely
+left, right, right, left, right, left in that order.
+Hallway: A 1 × 10 grid, aligned left-to-right, with actions left, right, and with episodes of length 30.
+The agent spawns at a random location on the left half of the grid and must ﬁrst reach the right-most
+square, and then reach the left-most square to obtain a reward of 1. Before reaching the right-most
+square, the optimal action in every state is right, but after reaching the right-most square, the optimal
+action becomes left in every state.
+Gridworld: A 5 × 5 gridworld (with x, y-coordinates from 0 to 4) with an episode length of 20 and
+actions up, down, left, right. The agent must ﬁrst reach (4, 0) and then the opposite corner (0, 4)
+to collect a reward of 1. We also tested a noisy version of this environment where the reward was
+randomly withheld in 10% of successful traces, and actions had a random outcome 10% of the time.
+We compared AutRL against Recurrent-PPO ([22]) (with an LSTM policy) using the OpenAI
+Baselines implementation [23]. As shown in all of the below environments, AutRL converges to high
+reward policies in fewer environment samples than Recurrent-PPO does. Notice that AutRL, despite
+being automata-based, outperforms Recurrent-PPO even on the Stochastic Gridworld, showing that
+AutRL is robust to noisy environments. In Figure 2 are two such examples of learned automata on
+two different runs of the Hallway environment.
+3
+
+1000000
+2000000
+3000000
+4000000
+Environment Samples
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Average Reward
+Multi-Armed Bandit
+1000000
+2000000
+3000000
+4000000
+Environment Samples
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Average Reward
+Hallway
+1000000
+2000000
+3000000
+4000000
+Environment Samples
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Average Reward
+Gridworld
+1000000
+2000000
+3000000
+4000000
+Environment Samples
+0.0
+0.2
+0.4
+0.6
+0.8
+Average Reward
+Stochastic Gridworld
+Legend:
+PPO + LSTM
+AutRL + Q-Learning (ours)
+Figure 1: The results from the conducted experiments. The error bars are 95% conﬁdence intervals over 30
+runs. AutRL learns a superior policy to the LSTM-based PPO in a way that is, at most, over order of magnitude
+more sample-efﬁcient. Learning is far more stable across runs with AutRL: the error bars for AutRL are far
+tighter than those for PPO, indicating very little variation in the learning trajectory across runs.
+q0
+q2
+q1
+o/w
+o/w
+always
+Right side
+Left side
+q0
+q2
+q1
+o/w
+o/w
+always
+Right side
+4th square from left
+Figure 2: Two distinct DFAs learned from the Hallway environment. Both are enough to make the domain
+Markovian: however, the one on the right is not a perfect classiﬁer of G for this domain. This shows that the
+condition in the statement of AutRL above is strictly stronger than necessary: there are automata which do
+not perfectly decide G, but which discern enough relevant information to learn optimal, temporally extended
+behavior in non-Markovian settings.
+6
+Concluding Remarks
+In this work, we show how to learn a KR that provides a useful symbolic abstraction in support of
+realizing temporally extended behavior in standard RL agents which rely on a Markov assumption. We
+provide an end-to-end RL algorithm which, in deterministic and stochastic domains, is demonstrably
+more sample-efﬁcient than the state of the art. We further provide theoretical guarantees of optimal
+convergence for our approach (under conditions outlined in the theorem of Appendix A), along with
+insight into the structure of DFAs which are learned by this method.
+This work reveals several promising directions for future research. While we considered environments
+where the reward function is non-Markovian, learning in the more general setting of POMDPs is
+an important problem related to this work, to which the DFA methods leveraged here do not apply.
+Further, AutRL leverages DFAs, which can only represent regular languages, thus learning efﬁciently
+when G is not a regular language in S ×A, as well as learning KR in high-dimensional and continuous
+state spaces, remain major open challenges to this methodology.
+4
+
+Acknowledgments and Disclosure of Funding
+We gratefully acknowledge funding from the Natural Sciences and Engineering Research Council of
+Canada (NSERC), the Canada CIFAR AI Chairs Program, and Microsoft Research. The third author
+also acknowledges funding from ANID (Becas Chile). Resources used in preparing this research
+were provided, in part, by the Province of Ontario, the Government of Canada through CIFAR,
+and companies sponsoring the Vector Institute for Artiﬁcial Intelligence (www.vectorinstitute.
+ai/partners). Finally, we thank the Schwartz Reisman Institute for Technology and Society for
+providing a rich multi-disciplinary research environment.

@@ -1,0 +1,760 @@
+L2PF - Learning to Prune Faster
+Manoj-Rohit Vemparala *1, Nael Fasfous*2, Alexander Frickenstein*1,
+Mhd Ali Moraly*1, Aquib Jamal1, Lukas Frickenstein1,
+Christian Unger1 Naveen-Shankar Nagaraja1 Walter Stechele2
+* indicates equal contributions
+1 BMW Autonomous Driving
+2 Technical University of Munich
+
+Abstract. Various applications in the ﬁeld of autonomous driving are
+based on convolutional neural networks (CNNs), especially for process-
+ing camera data. The optimization of such CNNs is a major challenge in
+continuous development. Newly learned features must be brought into ve-
+hicles as quickly as possible, and as such, it is not feasible to spend redun-
+dant GPU hours during compression. In this context, we present Learn-
+ing to Prune Faster which details a multi-task, try-and-learn method,
+discretely learning redundant ﬁlters of the CNN and a continuous ac-
+tion of how long the layers have to be ﬁne-tuned. This allows us to
+signiﬁcantly speed up the convergence process of learning how to ﬁnd
+an embedded-friendly ﬁlter-wise pruned CNN. For ResNet20, we have
+achieved a compression ratio of 3.84× with minimal accuracy degrada-
+tion. Compared to the state-of-the-art pruning method, we reduced the
+GPU hours by 1.71×.
+1
+Introduction
+With the advent of scalable training hardware and frameworks, the trend to-
+wards training larger deep neural networks (DNNs) or ensembles of networks
+has become more prevalent than ever [8]. As a result, compression of DNNs has
+become an increasingly popular ﬁeld of research in recent years. This is partic-
+ularly the case for convolutional neural networks (CNNs), which have become
+the state-of-the-art solution for most computer vision problems, and often ﬁnd
+applications in embedded scenarios, necessitating a reduction in their storage
+requirements and computational costs for inference. In the ﬁeld of autonomous
+driving [4], embedded hardware [2,18] is highly constrained and short develop-
+ment cycles are key for being ﬁrst to market.
+Many standard techniques exist in literature to reduce the number of network
+parameters and the complexity of the computations involved in CNNs [8,11]. Due
+to their inherent complexity and redundancy, CNNs can sustain many forms of
+structural and algorithmic approximation while still delivering adequate func-
+tional accuracy w.r.t. the given task, e.g. image classiﬁcation. With the help of
+arXiv:2101.02663v1  [cs.CV]  7 Jan 2021
+
+2
+M.-R. Vemparala, N. Fasfous, A. Frickenstein et al.
+ﬁne-tuning iterations, CNNs can recover the lost accuracy after a compression
+method has been applied, with negligible degradation.
+Network compression can be viewed as a standard optimization problem. The
+search space composes of the possible combinations to compress neurons, kernels
+or layers. Exploring this design space is a diﬃcult task when considering its size
+and the computational overhead required to suﬃciently evaluate each potential
+conﬁguration in it. Referring back to the healing eﬀect of network ﬁne-tuning
+after pruning, eﬃciently traversing this search space necessitates a fair balance
+between the number of epochs the ﬁne-tuning is done for and the computational
+overhead required by those ﬁne-tuning epochs. This ultimately leads to shorter
+product and time-to-market cycles and facilitates continuous development.
+As with many other optimization problems, existing literature covers various
+forms of design space exploration w.r.t. pruning [9,12,20]. Automated pruning
+was an inevitable step in the evolution of this compression technique due to
+its complex nature. Automated pruning makes tools usable for researchers and
+product developers with little to no background in CNN optimization.
+In this work, we build upon a learning-based pruning approach [12] to tackle
+the challenge of choosing the optimal number of ﬁne-tuning epochs 3 for a poten-
+tial pruning solution. The decisions of our RL-based pruning agent are based not
+only on the features embedded in the CNNs kernels, but also on the ﬁne-tuning
+potential of the individual layers. This results in feature-conscious decisions and
+reduced overall time required by the pruning technique. The contributions of
+this paper can be summarized as follows:
+– A multi-task learning approach involving a reinforcement learning agent,
+which learns a layer’s features and adequate ﬁne-tuning time concurrently.
+– Formalizing the design space exploration problem w.r.t. pruning eﬀectiveness
+and time-eﬀort.
+– A study on the sequence of layer-wise pruning of a convolutional neural
+network.
+2
+Related Work
+In the following sections, we classify works which use pruning techniques into
+heuristic-based, in-train and learning-based strategies.
+Heuristic-based Pruning: Heuristic-based compression techniques consider
+static or pseudo-static rules that deﬁne the compression strategy, when pruning
+an underlying CNN. The pruning method proposed by [6] utilizes the magni-
+tude of weights, where values below a threshold identify expendable connec-
+tions. Such pruning of individual weights, as presented in [6], leads to ineﬃcient
+memory accesses, rendering irregular pruning techniques impractical for most
+general purpose computing platforms. Regularity in pruning is a key factor in
+3 An epoch describes a complete cycle of a data set, i.e. training data set.
+
+L2PF - Learning to Prune Faster
+3
+accelerator-aware optimization. Frickenstein et al. [5] identiﬁes redundant ker-
+nels in the weight matrix based on magnitude based heuristic. He et al. [10]
+prune redundant ﬁlters based on the geometric median heuristic of the ﬁlters.
+In [11], He et al. introduce an iterative two-step algorithm to eﬀectively prune
+layers in a given CNN. First, redundant feature maps are selected by LASSO re-
+gression followed by minimizing the output errors of the remaining feature maps
+by solving least squared minimization.
+In-train Pruning: Integrating the pruning process into the training phase
+of CNNs is characterized as in-train pruning. The auto-encoder-based low-rank
+ﬁlter-sharing technique (ALF) proposed by Frickenstein et al. [3] utilizes sparse
+auto-encoders that extract the most salient features of convolutional layers, prun-
+ing redundant ﬁlters. Zhang et al. [22] propose ADAM-ADMM, a uniﬁed, sys-
+tematic framework of structured weight pruning of DNNs, that can be employed
+to induce diﬀerent types of structured sparsity based on ADMM.
+Learning-based Pruning: Deﬁning the pruning process as an optimization
+problem and exposing it to an RL-agent has been done in a variety of works [9,
+12]. He et al. [9] demonstrate a channel pruning framework leveraging a Deep
+Deterministic Policy Gradient (DDPG) agent. Their framework ﬁrst learns the
+sparsity ratio to prune a layer, while actual channel selection is performed using
+ℓ1 criteria. The appealing higher compression ratio, better preservation of accu-
+racy as well as faster, coarse and learnable exploration of the design space with
+few GPU hours, highlight the strong points of the AMC framework. However,
+this leaves room for improvement in search-awareness, as AMC is unaware of
+the exact features it is pruning. Huang et al. [12] demonstrated a ’try-and-learn’
+RL-based ﬁlter-pruning method to learn both sparsity ratio and the exact po-
+sition of redundant ﬁlters, but it leaves out the number of ﬁne-tuning epochs
+as a hyper-parameter. Here, the optimal value can change, depending on the
+model’s architecture and the data set at hand. We extend the work of Huang
+et al. [12] incorporating GPU hour awareness by proposing an iterative method
+with a learned minimum number of iterations for ﬁne-tuning, hyper-parameter
+free method.
+3
+Method
+In this chapter, we propose a multi-task learning approach, namely Leaning to
+Prune Faster (L2PF) involving a RL-agent, which learns a layer’s features and
+adequate ﬁne-tuning time concurrently. In this regard, the pruning problem in
+the context of a RL framework is formulated in Sec. 3.1. The environment and
+state space is deﬁned in Sec. 3.2. We discuss the discrete and continuous action
+spaces in Sec. 3.3, and the reward formulation in Sec. 3.4. Lastly, the agent’s
+objective function is formulated in Sec. 3.5.
+3.1
+Problem Formulation
+The structured ﬁlter-pruning task within an RL framework can be expressed
+as a ‘try-and-learn’ problem, similar to the work from Huang et al. [12]. We
+
+4
+M.-R. Vemparala, N. Fasfous, A. Frickenstein et al.
+aim to ﬁnd the best combination of ﬁlters that achieve the highest compression
+ratio (CR) while incurring a minimum loss of accuracy (Acc) and requiring a
+minimum number of ﬁne-tuning epochs during the exploration episodes. Fig. 1
+demonstrates the interplay between the proposed pruning agent and CNN envi-
+ronment. The proposed method is able to learn three aspects: First, the minimum
+number of epochs required to explore each pruning strategy. Second, the degree
+of sparsity of each layer in the model. Third, the exact position of the least
+important ﬁlters to be pruned.
+Formally, let B be a fully-trained model with L layers and the input of
+the ℓth convolutional layer has a shape [cℓ× wℓ× hℓ], where cℓ, hℓand wℓ
+represents number of input channels, height and width. The ℓth layer is con-
+volved with the weight tensor Wℓ, i.e. 2D convolutional layer’s trainable param-
+eters, with shape
+
+N ℓ× cℓ× kℓ× kℓ
+, where kℓrepresents the kernel size and
+N ℓis number of ﬁlters. After pruning nℓﬁlters, the weight tensor is of shape
+
+(N ℓ−nℓ) × cℓ× kℓ× kℓ
+. To enable a direct comparison with the work of He
+et al. [9], the layer compression ratio is deﬁned as cℓ−nℓ−1
+cℓ
+. Additionally, we de-
+ﬁne model compression ratio to be the total number of weights divided by the
+number of non-zero weights.
+Fig. 1: Agent receives rewards and weights as input state, whereas environment
+receives both prune and epoch actions. In each prune episode, M=5 Monte-Carlo
+set of actions are sampled (Aprune and Aretrain). The corresponding M rewards
+(Rprune and Rretrain) are normalized to zero mean and unit variance [12].
+3.2
+Environment
+The environment is the pre-trained CNN model B to be pruned. The state
+space is the fully trained weight tensor Wℓof the layer to be pruned, which is
+used as an input for the agent, similar to Huang et al. [12]. For each layer (or
+residual block), a new agent is trained from scratch. The environment receives
+
+L2PF - Learning to Prune Faster
+5
+two actions from the agent: pruning action Aprune and ﬁne-tuning epoch action
+Aretrain. Subsequently, it generates a reward R = Rprune + Rretrain. For each
+ﬁlter there is a binary mask mℓ
+i ∈{0, 1}cℓ×kℓ×kℓ
+. Pruning the ith ﬁlter Wℓ
+i in
+layer ℓis performed by element-wise multiplication between the ﬁlter Wℓ
+i and
+its corresponding mask mℓ
+i . When pruning Wℓ
+i, the ith kernel of all ﬁlters in
+the (ℓ+ 1)th layer are also pruned. At each pruning step, masks are updated
+according to Aprune and the environment is ﬁne-tuned for a few epochs eretrain.
+3.3
+Distinct Action Space for Pruning and Epoch-Learning
+The action space of the proposed RL-framework is split into two distinct spaces
+to satisfy the discrete and continuous requirements of actions for pruning and
+epoch learning respectively.
+Discrete Pruning Action Space: The discrete pruning action space is the
+combination of all possible prune actions Aprune. It is clear that action space
+dimension grows exponentially as O(2N), where N is the number of ﬁlters in
+a layer. Discrete actions are sampled from N independent stochastic Bernoulli
+units [19]. Each unit has one learnable parameter p that represents the proba-
+bility of keeping the ﬁlter.
+Continuous Epoch-Learning Action Space: The continuous epoch-learning
+is used to determine the number of ﬁne-tuning epochs eretrain. Like the discrete
+action, the continuous action Aretrain must also be sampled from some distribu-
+tion. Practically, eretrain takes values within a bounded range ∈Q+. A continuous
+action Aretrain is sampled from a Normal distribution which has two learn-able
+parameters µ and σ. Since eretrain is bounded while Normal distribution has
+unbounded support, it must be truncated. Truncating a Normal distribution
+might cause the estimated policy to get biased into the direction of the trunca-
+tion boundary where the reward peaks (boundary eﬀect) [1]. To circumvent the
+boundary eﬀect, we employ the approach from Chou et al. [1]. The sampled ac-
+tion Aretrain is sent to the environment with no alteration. To calculate eretrain,
+the action value is truncated within [0, 1]. However, for gradient calculations,
+non-truncated action values are used.
+3.4
+Multi-objective Reward Function
+The quality of agent action is conveyed back to the agent by the reward signal,
+Rprune and Rretrain for Aprune and Aretrain respectively.
+Prune Reward: The prune reward Rprune is a measure for sparsity level and
+model accuracy accpruned. It promotes actions that remove ﬁlters with minimum
+accuracy loss of the pruned model w.r.t. the validation set. Following the work
+of Huang et al. [12], we deﬁne the prune reward as a product of two terms,
+i.e. accterm and eff term, as stated in Eq. 1.
+Rprune
+ Aℓ
+prune, accpruned
+
+= accterm · eff term
+(1)
+
+6
+M.-R. Vemparala, N. Fasfous, A. Frickenstein et al.
+Accuracy Term:
+Similar to Huang et al. [12], accterm is deﬁned in Eq. 2.
+The bound b is a hyper-parameter introduced in the reward function to allow
+control over the trade-oﬀbetween model compression and tolerable accuracy
+drop. When the accuracy drop is greater than b, accterm is negative, otherwise
+it lies in the range [0, 1] respectively 0 and 100%.
+accterm = b −max [0, accbase −accpruned]
+b
+(2)
+Eﬃciency Term:
+To prevent the agent from changing the model depth, the
+eﬃciency term eff term proposed by Huang et al. [12] is extended as shown in
+Eq. 3. If the prune action is aggressive, the accuracy drop will be less than the
+bound b resulting in a negative reward. If layer sparsity ratio is low, eff term will
+drive reward to zero.
+eff term =
+
+
+
+log
+N
+(N −n)
+if (N −n) ≤N
+−1
+if (N −n) = 0
+(3)
+Fine-tuning Epoch Reward: The ﬁne-tuning epoch reward Rretrain is re-
+sponsible for promoting a lower number of ﬁne-tuning epochs. The reward is
+expressed in Eq. 4. An action is considered good when |Aretrain| is low without
+causing an intolerable accuracy drop. If the environment incurs no accuracy loss
+then Rretrain = 0, when loss is incurred then it will be a negative value scaled
+by the absolute value of Aretrain.
+Rretrain (Aretrain, accpruned) = |Aretrain| × (accpruned −accbase)
+(4)
+In each prune episode, M Monte-Carlo set of actions are sampled again resulting
+in M corresponding rewards Rprune and Rretrain. The reward values are normal-
+ized to zero mean and unit variance for both set of rewards [7,14].
+3.5
+Agent Design
+The agent is a non-linear stochastic functional approximator parameterized by
+θ. It is composed of four convolutional layers, two classiﬁers each with two
+feed-forward layers [12], and two types of stochastic output units, i.e. Bernoulli
+and Normal. The agent parameters are θ = {w, µ, P}, where parameters w are
+the agent weights, µ is a learnable parameter to sample the ﬁne-tuning action
+Aretrain, and P is the set of probabilities for Bernoulli units. The agent outputs
+two actions: discrete action Aprune for pruning, and continuous action Aretrain
+for ﬁne-tuning epochs.
+The pruning action Aprune is a set {aℓ
+1, aℓ
+2, ..., aℓ
+Nl}, where aℓ
+i ∈{0, 1} is
+equivalent to {prune, keep} and N ℓis the number of ﬁlters in the ℓth layer [12].
+Using this scheme, the agent is able to explore both sparsity ratio and to select
+the exact position of ﬁlters to prune.
+
+L2PF - Learning to Prune Faster
+7
+The fine-tuning action Aretrain is a continuous action sampled from a
+normal distribution with two parameters - µ, σ. The mean µ is a learnable
+parameter, while σ is chosen to be non-learnable and set to be proportional to
+|Rretrain| [17,19]. The value of σ controls how far a sample can be from the mean.
+When reward signal Rretrain is low indicating bad actions, then σ takes higher
+value which allows the agent to explore actions further away from µ. Actions
+Aretrain /∈[0, 1] are considered bad and give negative reward. The environment
+ﬁne-tunes for the number of epochs given in Eq. 5, where β is an upper limit for
+eretrain.
+eretrain = min[max[0, Aretrain], 1] × β
+(5)
+We leverage the stochastic policy gradient (SPG) method to ﬁnd an optimal
+policy π∗. SPG is guaranteed to converge at least to a local optimum without
+requiring the state space distribution [16]. Our objective function J(θ) is the
+expected sum of all rewards over one episode. The objective gradient w.r.t. the
+policy parameters is given in Eq. 6. Both terms in Eq. 6 can be solved approx-
+imately using the policy gradient theorem. Speciﬁcally, we implement a variant
+of SPG called REINFORCE [12,19]. The agent parameters θ are updated with
+gradient ascent so that actions with higher rewards are more probable to be
+sampled [19].
+∇θJ (θ) = ∇θE [rprune] + ∇θE [rretrain]
+(6)
+The ﬁrst term in Eq. 6 has the Bernoulli policy πB
+ Aprune|Wℓ, P, w
+
+, while
+the second has the Normal policy πN
+ Aretrain|Wℓ, µ, w
+
+, where Wℓare weights
+for layer to prune. Finding a closed-form solution for the expectation is not feasi-
+ble, so it is approximated using M samples of a Monte-Carlo gradient estimator
+with score function [14,16]. The gradient of our objective function is given by
+Eq. 7.
+∇θJ (θ) ≈
+M
+X
+j=1
+"
+(Rprune)j ·
+n
+X
+i=1
+aij −pij
+pij(1 −pij) · ∂pij
+∂w + (Rretrain)j · aj −µj
+σ2
+j
+· ∂µj
+∂w
+#
+(7)
+4
+Experimental Results
+Our experiments are conducted on the CIFAR-10 [13] data set. One-time ran-
+dom splitting of the 50k images into 45k training and 5k evaluation is performed.
+Agent reward is evaluated on 5k images. To ensure that our pruning method
+generalizes, the 10k images in the test data set are held separate and only used
+after the agent learns to prune a layer, to report actual model accuracy. No
+training or reward evaluation is performed using the test data set. As a baseline,
+ResNet-20 is trained from scratch as described in [8] until convergence with val-
+idation accuracy 92.0%, and test accuracy of 90.8%. After each pruning episode,
+the environment is retrained for a few epochs (8 w/o epochs learning) using
+mini-batch momentum SGD [15] with learning rate of 0.001, gamma 0.5, step
+size of 1900, batch size of 128, and l2 regularization. After learning to prune a
+
+8
+M.-R. Vemparala, N. Fasfous, A. Frickenstein et al.
+Accuracy Drop
+Sparsity Ratio
+# Remaining ﬁlters
+# Pruned ﬁlters
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+20
+40
+60
+80
+Shallow-to-Deep
+Index of Layer
+Number of Filters
+0
+1
+2
+(a) Forwards (Layer-wise)
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+20
+40
+60
+80
+Deep-to-Shallow
+Index of Layer
+0
+1
+2
+Accuracy drop
+(b) Backwards (Layer-wise)
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+20
+40
+60
+80
+Shallow-to-Deep
+Index of Layer
+Number of Filters
+0
+1
+2
+(c) Forwards (Residual block-wise)
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+20
+40
+60
+80
+Deep-to-Shallow
+Index of Layer
+0
+1
+2
+Accuracy drop
+(d) Backwards (Residual block-wise)
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+20
+40
+60
+Index of Layer
+Number of Filters
+Filters pruned with epoch learning
+Filters pruned without epoch learning
+0
+2
+4
+6
+8
+Finetune Epochs ·103
+Epochs with learning
+Epochs without learning
+(e) Layer-wise reduction in ﬁne-tuning epochs with and without learning.
+Fig. 2: Exploration of ﬁlter pruning order and epoch-learning eﬀect.
+layer, the model is ﬁne-tuned for 150 epochs before moving to the next layer.
+The agent is also trained using mini-batch momentum SGD with ﬁxed learning
+rate of 0.005 and batch size equal to the number of Monte-Carlo samples M = 5.
+4.1
+Design Space Exploration
+Exploration of Eﬃcient Pruning Order: We investigate four diﬀerent strate-
+gies based on the pruning order and the agent’s capability to prune layers simul-
+taneously (layerwise or blockwise). We exclude the ﬁrst convolutional layer since
+pruning it oﬀers insigniﬁcant compression beneﬁts, while damaging the learning
+ability of the model. When pruning a full residual block, we preserve the element-
+wise summation by zero-padding the output channels of the second layer in a
+residual block to restore the original number of output channels, such that the
+order of pruned channels is preserved. Fig. 2 shows results of pruning ResNet-20
+with loss bound b of 2%. In Fig. 2a, we perform layer-wise pruning following the
+forward pruning order (conv2 1 1 →conv4 3 2). The agent starts pruning ini-
+tial layers aggressively and struggles to ﬁnd redundant ﬁlters in the deep layers
+
+L2PF - Learning to Prune Faster
+9
+Conﬁguration
+Pruning
+Bound Learnable
+Acc
+CR
+Order
+[%]
+Epochs
+[%]
+[×]
+ResNet-20 [8]
+-
+-
+-
+90.8
+1.00
+L2PF (Block-wise)
+Forwards
+2.0
+
+89.9 (-0.9) 1.84
+L2PF (Layer-wise)
+Forwards
+2.0
+
+89.6 (-1.2) 1.79
+L2PF (Block-wise)
+Backwards
+2.0
+
+89.5 (-1.3) 3.38
+L2PF (Layer-wise)
+Backwards
+2.0
+
+89.9 (-0.9) 3.90
+L2PF (Layer-wise)
+Backwards
+1.0
+
+90.2 (-0.6) 2.52
+L2PF (Layer-wise)
+Backwards
+2.0
+
+89.9 (-0.9) 3.90
+L2PF (Layer-wise)
+Backwards
+3.0
+
+89.2 (-1.0) 4.53
+L2PF (Layer-wise)
+Backwards
+4.0
+
+88.5 (-2.3) 7.23
+L2PF (Layer-wise)
+Backwards
+2.0
+
+89.9 (-0.9) 3.90
+L2PF (Layer-wise) Backwards
+2.0
+
+89.9 (-0.9) 3.84
+Table 1: Evaluating various conﬁgurations for L2PF to analyze the inﬂuence of
+exploration granularity, pruning order, accuracy bound w.r.t. prediction accu-
+racy and compression ratio.
+(indicated by large blue bars). In Fig. 2b, we perform a similar layer wise pruning
+analysis for the backward pruning order (conv2 1 1 ←conv4 3 2). From Tab. 1,
+we observe that the backward pruning order results in higher CR with lower ac-
+curacy degradation (0.9%). In Fig. 2c and 2d, we perform block wise pruning
+allowing the agent to prune the entire residual block simultaneously. Similar to
+layer-wise pruning, we prune the residual blocks both in forward and backward
+orders. Lower compression ratio is observed when compared to layer-wise prun-
+ing, see also Tab. 1. Thus, we prune layer-wise in backward order as it results in
+lower accuracy degradation and high CR for the subsequent experiments.
+Eﬀect of Accuracy Bound on Compression Ratio: In Tab. 1, we also
+evaluate the impact of the prediction accuracy and compression ratio by varying
+the agent’s loss bound b. As we increase b, we obtain higher CR with lower
+prediction accuracy after ﬁne-tuning. We choose b as 2% to maintain a trade-oﬀ
+between accuracy degradation and CR.
+Eﬀect of Accuracy and Pruning Rate on Exploration Time: Previous
+experiments were conducted with ﬁne-tuning epochs set manually to 8 at each
+exploration step. We allow the agent to decide the amount of ﬁne-tuning time
+required to evaluate the pruning strategy based on the retrain epoch reward
+presented in Eq. 4. Fig. 2e shows a comparison of number of ﬁne-tuning epochs
+required to decide the pruning strategy for each layer. Pruning with epochs learn-
+ing achieves 1.71× speedup in search time with a slight reduction in compression
+ratio, see Tab. 1.
+
+10
+M.-R. Vemparala, N. Fasfous, A. Frickenstein et al.
+4.2
+Class Activation Maps
+The discrete action space proposed by Huang et al. [12] and applied in L2PF (de-
+scribed in Sec.3.3) allows the integration of class activation mapping (CAM) [23]
+into the design process. CAM allows the visualization of regions of interest (RoI)
+in an input image to identify the corresponding prediction label. Regions with
+red color denote the part with higher interest for CNN model and blue denotes
+regions with less importance w.r.t. the target label. Tab. 2 shows three exemplary
+CAMs for the learned features of vanilla ResNet-20 and the inﬂuence of L2PF
+pruning (backwards) on the learned features and thus the RoIs. The progression
+of discriminative regions of classes can be compared across pruning steps.
+In the ﬁrst row, the vanilla ResNet-20 predicts the wrong class, i.e. deer. After
+pruning layer conv3 3 2, the RoI shifts towards the trunk of the car indicating
+the correct class. In the second row, the vanilla ResNet-20 predicts the ship class.
+The agent tries to retain the prediction across diﬀerent stages of pruning with
+high conﬁdence. In the third row, the vanilla ResNet-20 predicts the truck class.
+Accordingly, the pruned model at diﬀerent stages also predict a truck. However,
+we can observe that the RoI becomes narrower indicating that the pruned model
+requires only few concentrated regions due to lower model capacity. We consider
+potential directions of our future work as follows: (1) Considering the CAM
+output as a state embedding instead of a weight matrix, making the pruning
+more feature-aware and interpretable. This would not possible with threshold
+Input
+ResNet-20
+Learning to Prune Faster (Backwards)
+image
+unpruned
+conv4 3 2 →
+conv3 3 2 →
+conv2 3 2 →
+conv2 1 2
+raw
+deer(0.53)
+car(0.99) →
+car(0.99) →
+car(0.99) →
+car(0.88)
+raw
+ship(0.99)
+ship(0.51) →
+ship(0.98) →
+ship(0.81) →
+ship(0.99)
+raw
+truck(0.99) truck(0.98) →truck(0.77) →truck(0.62) →truck(0.67)
+Table 2: CAM visualization for three examples images from the validation
+dataset. Each column shows the CAM output after pruning, using backwards
+pruning order before model ﬁne-tuning.
+
+L2PF - Learning to Prune Faster
+11
+based approaches like AMC [9], (2) Understanding, the impact of feature-aware
+pruning on model robustness [21].
+4.3
+Comparison with the State-of-the-Art
+In this section, we compare the proposed L2PF with other RL-based state-of-the-
+art ﬁlter pruning works proposed in literature. In Fig. 3, we compare our pruning
+conﬁguration using layer-wise CR and ﬁnal prediction accuracy with AMC [9],
+L2P [12], ALF [3]. We reimplemented L2P using forward pruning order with
+an accuracy bound b=2% to obtain pruning results for ResNet-20. Compared to
+L2P, we obtain 0.3% better prediction accuracy, 2.11× higher CR and 1.71× less
+ﬁne-tune epochs. ALF and AMC do not require ﬁne-tuning during the pruning
+process. Compared to AMC’s pruning implementation for Plain-20, we obtain
+2.08× higher CR with 0.3% lower prediction accuracy. Compared to ALF, we
+achieve 0.5% better accuracy with comparable CR.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+0
+0.5
+1
+Layer Index
+Compression Ratio
+AMC-Plain20 [9]
+L2P [12]
+ALF-ResNet20 [3]
+L2PF (Ours)
+Conﬁguration
+Pruning Acc CR Fine-tune
+Type
+[%]
+[×]
+[epochs]
+ResNet-20 [8]
+-
+90.8 1.00
+-
+AMC-Plain20 [9] RL-agent 90.2 1.84
+-
+ALF [8]
+In-train
+89.4 3.99
+-
+L2P [12]
+RL-agent 89.6 1.79
+60.3K
+L2PF (Ours)
+RL-agent 89.9 3.84
+35.2K
+Fig. 3: Comparing L2PF pruning statistics on ResNet-20 with State-of-the-Art.
+5
+Conclusion
+In this work, we demonstrated an RL-based ﬁlter-wise pruning method which is
+both feature and time-aware. Our multi-task approach achieved high compres-
+sion ratios, while minimizing the required GPU-hours and the accuracy degra-
+dation. The analysis on the sequence of layer-wise pruning led to the conclusion
+that backward (deep-to-shallow) pruning can surpass the existing state-of-the-
+art compression ratios, with minimal degradation in task accuracy. Finally, we
+visually analyzed the eﬀect of our pruning technique with the help of class ac-
+tivation maps to build a better understanding of our agent’s pruning decisions.
+GPU-hours for CNN compression can have many negative consequences on de-
+velopment cycles, proﬁtability and fast exploration. The GPU-hour-aware ap-
+proach presented can help mitigate this impediment and achieve a competitive
+advantage in active research ﬁelds such as autonomous driving.

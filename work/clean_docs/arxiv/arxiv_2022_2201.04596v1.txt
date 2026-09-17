@@ -1,0 +1,920 @@
+arXiv:2201.04596v1  [cs.AI]  12 Jan 2022
+MeTeoR: Practical Reasoning in Datalog with Metric Temporal Operators
+Dingmin Wang1, Pan Hu1,2, Przemysław Andrzej Wałęga1, Bernardo Cuenca Grau1
+1Department of Computer Science, University of Oxford, UK
+
+2School of Electronic Information and Electrical Engineering, Shanghai Jiao Tong University, China
+
+Abstract
+DatalogMTL is an extension of Datalog with operators from
+metric temporal logic which has received signiﬁcant attention
+in recent years. It is a highly expressive knowledge represen-
+tation language that is well-suited for applications in temporal
+ontology-based query answering and stream processing. Rea-
+soning in DatalogMTL is, however, of high computational
+complexity, making implementation challenging and hinder-
+ing its adoption in applications. In this paper, we present
+a novel approach for practical reasoning in DatalogMTL
+which combines materialisation (a.k.a. forward chaining) with
+automata-based techniques. We have implemented this ap-
+proach in a reasoner called MeTeoR and evaluated its perfor-
+mance using a temporal extension of the Lehigh University
+Benchmark and a benchmark based on real-world meteoro-
+logical data. Our experiments show that MeTeoR is a scalable
+system which enables reasoning over complex temporal rules
+and datasets involving tens of millions of temporal facts.
+Introduction
+Temporal data is ubiquitous in many application scenar-
+ios, such as stock trading (Nuti et al. 2011), network ﬂow
+anomaly detection (Munz and Carle 2007), and equipment
+malfunction monitoring (Doherty, Kvarnström, and Heintz
+2009). In order to represent knowledge and subsequently
+reason in the presence of such temporal data, Brandt et al.
+(2018) proposed DatalogMTL—an extension of Data-
+log (Ceri, Gottlob, and Tanca 1989) with operators from
+metric temporal logic (Koymans 1990) interpreted over
+the rational timeline. DatalogMTL is a powerful KR lan-
+guage, which has found applications in ontology-based
+query answering (Brandt et al. 2018; Kikot et al. 2018;
+Kalaycı et al. 2018; Koopmann 2019) and stream reason-
+ing (Wałęga, Kaminski, and Cuenca Grau 2019). For exam-
+ple, the following DatalogMTL rule can be used to analyse
+equipment data:
+⊟[0,1]ExcHeat(푥) ←⊟[0,1]Temp24(푥) ∧x[0,1]Temp41(푥).
+The rule states that a device 푥has been under excessive heat
+continuously within a past interval of length 1 (⊟[0,1]) if the
+temperature recorded in this interval was always above 24
+Copyright © 2022, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+degrees (Temp24) and also, at some point in this interval
+(x[0,1]), the temperature was above 41 degrees (Temp41).
+Reasoning in DatalogMTL is, however, of high com-
+plexity, namely ExpSpace-complete (Brandt et al. 2018) and
+PSpace-complete with respect to data size (Wałęga et al.
+2019), which makes reasoning in practice challenging. Thus,
+research has recently focused on establishing a suitable trade-
+oﬀbetween expressive power and complexity of reasoning,
+by identifying lower complexity fragments of DatalogMTL
+(Wałęga et al. 2020b; Wałęga, Zawidzki, and Cuenca Grau
+2021) as well as studying alternative semantics with more
+favourable computational behaviour (Wałęga et al. 2020a;
+Ryzhikov, Wałęga, and Zakharyaschev 2019).
+The design and implementation of practical reasoning al-
+gorithms for the full DatalogMTL language, however, re-
+mains a largely unexplored area—something that has pre-
+vented its widespread adoption in applications. In particular,
+the only implementation we are aware of is the prototype
+by Brandt et al. (2018), which is limited to non-recursive
+DatalogMTL programs. This is in stark contrast with plain
+Datalog, for which a plethora of systems have been de-
+veloped and successfully deployed in practice (Motik et al.
+2014; Carral et al. 2019; Bellomarini, Sallinger, and Gottlob
+2018).
+In this paper, we present the ﬁrst practical reasoning al-
+gorithm for the full DatalogMTL language, which combines
+materialisation (a.k.a. forward chaining)and automata-based
+reasoning. On the one hand, materialisation is the reason-
+ing paradigm adopted in most Datalog systems (Bry et al.
+2007); to check fact entailment in this setting, one ﬁrst com-
+putes in a forward chaining manner all facts logically en-
+tailed by the input program and dataset, and then veriﬁes
+whether the input fact is included amongst the entailed facts.
+A direct implementation of materialisation-based reason-
+ing in DatalogMTL is, however, problematic since forward
+chaining may require inﬁnitely many rounds of rule appli-
+cations (Wałęga, Zawidzki, and Cuenca Grau 2021). On the
+other hand, Wałęga et al. (2019) introduced a decision proce-
+dure for DatalogMTL which relies on constructing Büchi au-
+tomata and checking non-emptiness of their languages. This
+procedure has been introduced for obtaining tight complex-
+ity bounds, and not with eﬃcient implementation in mind; in
+particular, the constructed automata are of exponential size,
+which makes direct implementations impractical.
+
+Our new algorithm deals with these diﬃculties by pro-
+viding an eﬀective way of combining the scalability of
+materialisation-based reasoning and the completeness guar-
+anteed by automata-based procedures, thus bringing to-
+gether ‘the best of both worlds’. To achieve this, our algo-
+rithm aims at minimising reasoning workload by resorting
+to materialisation-based reasoning whenever possible while
+minimising the use of automata. Furthermore, we propose
+a suite of optimisation techniques aimed at reducing the
+workload involved in rule application during materialisation-
+based reasoning, as well as in Büchi automata construction
+and the subsequent non-emptiness checks.
+We have implemented our approach in a new rea-
+soner called MeTeoR (https://meteor.cs.ox.ac.uk), which
+supports fact entailment over arbitrary (i.e., potentially re-
+cursive) DatalogMTL programs and large-scale temporal
+datasets. We have evaluated the performance of our rea-
+soner on an extension of the Lehigh University Bench-
+mark (Guo, Pan, and Heﬂin 2005) with temporal rules and
+data, as well as on a benchmark based on a real-world me-
+teorological dataset (Maurer et al. 2002). Our results show
+that MeTeoR is a scalable system that can successfully rea-
+son over complex recursive programs and datasets including
+tens of millions of temporal facts; furthermore, it consistently
+outperformedthe approach by Brandt et al. (2018) when rea-
+soning over non-recursive programs.
+Preliminaries
+We recapitulate the standard deﬁnition of DatalogMTL, in-
+terpreted with the standard continuous semantics over the
+rational timeline (Brandt et al. 2018).
+Syntax.
+A relational atom is a function-free ﬁrst-order
+atom of the form 푃(s), with 푃a predicate and s a tuple
+of terms. A metric atom is an expression given by the follow-
+ing grammar, where 푃(s) is a relational atom, and x, |, ⊟,
+⊞, S, U are MTL operators indexed with positive rational
+intervals 휚(i.e., containing only non-negative rationals):
+푀F ⊤| ⊥| 푃(s) | x휚푀| |휚푀|
+⊟휚푀| ⊞휚푀| 푀S휚푀| 푀U휚푀.
+A rule is an expression of the form of
+푀′ ←푀1 ∧· · · ∧푀푛,
+for 푛≥1,
+(1)
+with each 푀푖a metric atom, and 푀′ a metric atom not
+mentioning operators x, |, S, and U; metric atom 푀′ is
+the rule’s head and the conjunction 푀1 ∧· · ·∧푀푛is its body.
+A rule is safe if each variable in its head also occurs in its
+body; a program is a ﬁnite set of safe rules. An expression
+(metric atom, rule, etc.) is ground if it mentions no variables.
+
+atom and 휚a rational interval; a dataset is a ﬁnite set of
+
+and 휚2 intervals that are either adjacent or have a non-empty
+
+and 휚2. The grounding ground(Π, D) of a program Π with
+respect to a dataset D is a set of all ground rules obtained by
+assigning constants from Π and D to variables in Π.
+ℑ, 푡|= ⊤
+for each 푡
+ℑ, 푡|= ⊥
+for no 푡
+ℑ, 푡|= x휚푀
+iﬀℑ, 푡′ |= 푀for some 푡′ with 푡−푡′ ∈휚
+ℑ, 푡|= |휚푀
+iﬀℑ, 푡′ |= 푀for some 푡′ with 푡′ −푡∈휚
+ℑ, 푡|= ⊟휚푀
+iﬀℑ, 푡′ |= 푀for all 푡′ with 푡−푡′ ∈휚
+ℑ, 푡|= ⊞휚푀
+iﬀℑ, 푡′ |= 푀for all 푡′ with 푡′ −푡∈휚
+ℑ, 푡|= 푀1S휚푀2 iﬀℑ, 푡′ |= 푀2 for some 푡′ with 푡−푡′ ∈휚
+and ℑ, 푡′′ |= 푀1 for all 푡′′ ∈(푡′, 푡)
+ℑ, 푡|= 푀1U휚푀2 iﬀℑ, 푡′ |= 푀2 for some 푡′ with 푡′ −푡∈휚
+and ℑ, 푡′′ |= 푀1 for all 푡′′ ∈(푡, 푡′)
+Table 1: Semantics of ground metric atoms
+The dependency graph of a program Π is the directed
+graph 퐺Π, with a vertex 푣푃for each predicate 푃in Π and
+an edge (푣푄, 푣푅) whenever there is a rule in Π mentioning
+푄in the body and 푅in the head. Program Π is recursive
+if 퐺Π has a cycle. A predicate 푃is recursive in Π if 퐺Π
+has a path ending in 푣푃and including a cycle (the path can
+be a self-loop). Furthermore, for a predicate 푃, a rule 푟is
+푃-relevant in Π if there exists a rule 푟′ in Π mentioning 푃
+or ⊥in the head and a path in 퐺Π starting from a vertex
+representing the predicate in the head of 푟and ending in
+a vertex representing some predicate from the body of 푟′.
+Intuitively, 푃-relevant rules may be used for deriving facts
+about 푃or ⊥(i.e., inconsistency).
+Semantics.
+An interpretation ℑspeciﬁes, for each ground
+relational atom 푀and each time point 푡∈Q, whether 푀
+holds at 푡, in which case we write ℑ, 푡|= 푀. This extends
+to metric atoms with MTL operators as shown in Table 1.
+
+all 푡∈휚. An interpretation ℑsatisﬁes a ground rule 푟if,
+whenever ℑsatisﬁes each body atom of 푟at a time point
+푡, then ℑalso satisﬁes the head of 푟at 푡. An interpretation
+ℑsatisﬁes a (non-ground) rule 푟if it satisﬁes each ground
+instance of 푟. An interpretation ℑis a model of a program
+Π if it satisﬁes each rule in Π, and it is a model of a dataset
+D if it satisﬁes each fact in D. A program Π and a dataset
+D are consistent if they have a model, and they entail a fact
+
+that dataset D represents interpretation ℑD.
+Canonical Interpretation.
+The immediate consequence
+operator 푇Π for a program Π is a function mapping an in-
+terpretation ℑto the least interpretation containing ℑand
+satisfying the following property for each ground instance
+푟of a rule in Π: whenever ℑsatisﬁes each body atom of 푟
+at time point 푡, then 푇Π(ℑ) satisﬁes the head of 푟at 푡. The
+successive application of 푇Π to ℑD deﬁnes a transﬁnite se-
+quence of interpretations 푇훼
+Π (ℑD) for ordinals 훼as follows:
+(i) 푇0
+Π(ℑD) = ℑD, (ii) 푇훼+1
+Π
+(ℑD) = 푇Π(푇훼
+Π (ℑD)) for 훼an
+ordinal, and (iii) 푇훼
+Π (ℑD) = Ð
+훽<훼푇훽
+Π (ℑD) for 훼a limit or-
+dinal. The canonical interpretation ℭΠ,D of Π and D is the
+
+interpretation 푇휔1
+Π (ℑD), with 휔1 the ﬁrst uncountable ordi-
+nal. If Π and D have a model, the canonical interpretation
+ℭΠ,D is the least model of Π and D (Brandt et al. 2018).
+Reasoning.
+The main reasoning tasks in DatalogMTL are
+fact entailment and consistency checking. The former is to
+check whether a program and dataset entail a given fact,
+and the latter is to check whether a program and dataset
+are consistent. These problems are reducible to the comple-
+ment of each other; both of them are ExpSpace-complete
+(Brandt et al. 2018) and PSpace-complete in data complex-
+ity (i.e. with respect to the size of a dataset) (Wałęga et al.
+2019).
+Materialisation vs. Automata-based Reasoning
+Materialisation (a.k.a. forward chaining) is a standard rea-
+soning technique used in scalable implementations of plain
+Datalog, which consists of successive rounds of rule appli-
+cations to compute all consequences of an input program
+and dataset (Motik et al. 2019; Bry et al. 2007). The result-
+ing set of facts represents the canonical model over which all
+queries can be answered directly. As in plain Datalog, each
+consistent pair of a DatalogMTL program Π and a dataset D
+admits a canonical model ℭΠ,D deﬁned as the least ﬁxpoint
+of the immediate consequence operator 푇Π capturing a sin-
+gle round of rule applications. The use of metric operators
+in rules, however, introduces two main practical diﬃculties.
+First, DatalogMTL interpretations are intrinsically inﬁnite
+and hence a materialisation-based algorithm must be able to
+ﬁnitely represent (e.g., as a dataset) the result of each individ-
+ual round of rule applications. Second, reaching the least ﬁx-
+point of the immediate consequence operatorin DatalogMTL
+may require an inﬁnite number of rule applications; hence,
+a direct implementation of materialisation-based reasoning
+is non-terminating. In contrast, materialisation is guaranteed
+to terminate for non-recursive programs, thus providing a
+decision procedure (Brandt et al. 2018).
+Wałęga et al. (2019) provided an automata-based decision
+procedure for consistency checking applicable to unrestricted
+DatalogMTL programs. This approach relies on reducing
+consistency checking of an input program Π and dataset D
+to checking non-emptinessof two Büchi automata. These au-
+tomata are responsible for accepting parts of a model located,
+respectively, to the left of the least number mentioned in D,
+and to the right of the greatest number in D. Thus, Π and D
+have a model if and only if both automata have non-empty
+languages. States of these automata are polynomially repre-
+sentable in the size of D, so the reduction yields a PSpace
+data complexity bound for consistency checking. The idea
+behind the reduction is based on splitting a model witnessing
+consistency of Π and D into fragments correspondingto seg-
+ments of the timeline; automata states describe metric atoms
+holding in such segments and the transition functions guar-
+antee that atoms from successive fragments do not violate the
+semantics of metric operators. Although this automata-based
+approach provides tight complexity bounds, it does not yield
+a practical decision procedure since the automata contain a
+large (exponential in the size of D) number of states.
+A Practical Decision Procedure
+In this section, we present our approach to practical reasoning
+in the full DatalogMTL language. Our algorithm decides fact
+entailment, that is, checks whether a given fact is entailed by
+a given program and dataset. To this end, we optimise and
+combine materialisation—which is a scalable technique, but
+is not guaranteed to terminate—, and the automata-based
+approach—which is terminating in general, but less eﬃcient
+in practice. The key novelties of our approach are as follows:
+– an optimised implementation of the materialisation ap-
+proach, which aims at applying the immediate conse-
+quence operator eﬃciently and storing a succinct repre-
+sentation of the fragment of the canonical interpretation
+constructed thus far;
+– an optimised implementation of the automata-based rea-
+soning approach of Wałęga et al. (2019), which aims at
+minimising the size of the automata; and
+– an eﬀective way of combining materialisation with
+automata-based reasoning that aims at reducing reasoning
+workload and achieving early termination.
+In the remainder of this section we will discuss each of these
+components in detail.
+Optimising Materialisation
+The key component of materialisation-based reasoning is
+an eﬀective implementation of the immediate consequence
+operator capturing a single round of rule applications. Our
+implementation takes as input a program Π and a dataset D
+and computes a dataset D′ representing the interpretation
+푇Π(ℑD) obtained by application of 푇Π to the least model of
+D. Thus, it addresses one of the diﬃculties associated to
+materialisation-based reasoning by ensuring that the result
+of a single round of rule applications is a ﬁnite object.
+To facilitate the presentation of our rule application proce-
+dure, we ﬁrst brieﬂy discuss details regarding the represen-
+tation and storage of datasets. We associate to each ground
+relational atom a list of intervals sorted by their left end-
+points, which provides a compact account of all facts men-
+tioning this ground relational atom. Moreover, each ground
+relational atom is indexed by a composite key consisting of its
+predicate and its tuple of constants. This layout is useful for
+fact coalescing and fact entailment checking; for instance, to
+
+by ﬁrst scanning the sorted list of intervals for 푀using the
+index and checking if 휚is a subset of one of these intervals.
+Additionally, each ground relational atom is also indexed by
+each of its term arguments to facilitate joins. Finally, when
+a fact is inserted into the dataset, the corresponding list of
+intervals is sorted to facilitate subsequent operations.
+We perform a single round of rule applications with a
+procedure ApplyRules presented in Algorithm 1. To con-
+struct a representation of 푇Π(ℑ퐷), for an input program
+Π and a dataset D, our algorithm performs two main
+steps. The ﬁrst step is performed for each ground rule
+in ground(Π, D) (Line 2), where rule grounding is per-
+formed using a standard index nested loop join algorithm
+
+(Garcia-Molina, Ullman, and Widom 2009) since facts in D
+are indexed. Then, the ﬁrst step consists of extending D with
+all facts that can be derived by applying 푟to D (we also add
+⊥to D if some rule leads to inconsistency). Hence, the new
+dataset D′ represents the interpretation 푇{푟}(ℑ퐷) (Line 3).
+To implement the ﬁrst step, we modiﬁed the completion rules
+for normalised programs deﬁned by Brandt et al. (2018, Sec-
+tion 3)—our approach is suitable for arbitrary DatalogMTL
+rules and thus not only for rules in the aforementioned nor-
+mal form, which disallows nested MTL operators, the use
+of | and x in rule bodies, and the use of ⊞and ⊟in rule
+heads (Brandt et al. 2018). Since our approach does not re-
+quire program normalisation as a pre-processing step, we
+avoid the computation and storage of auxiliary predicates
+introduced by the normalisation. Furthermore we implement
+an optimised version of (temporal) joins that is required to
+evaluate rules with several body atoms. A naïve implemen-
+tation of the join of metric atoms 푀1, . . . , 푀푛occurring in
+the body of a rule would require computing all intersections
+
+constructed dataset, for each 푖∈{1, . . . , 푛}. Since each 푀푖
+may hold in multiple intervals in the dataset, the naïve ap-
+proach is ineﬀective in practice. In contrast, we implemented
+a variant of the sort-merge join algorithm: we ﬁrst sort all 푛
+lists of intervals correspondingto 푀1, . . . , 푀푛, and then scan
+the sorted lists to compute the intersections, which improves
+performance. Our approach to temporal joins can be seen as
+a generalisation of the idea sketched by Brandt et al. (2018,
+Section 5), which deals with two metric atoms at a time but
+has not been put into practice.
+Algorithm 1: ApplyRules
+Input: a program Π and a dataset D
+Output: a dataset
+1 D′ ≔D;
+2 for each rule 푟∈ground(Π, D) do
+3
+D′ ≔representation of ℑD′ ∪푇{푟}(ℑD);
+4 for each ground metric atom 푀appearing in D′ do
+5
+
+6
+Merge 휚1, . . . , 휚푛into 휚′
+1, . . . , 휚′
+푚;
+7
+
+푚in D′;
+8 Return D′;
+The second step of Algorithm 1consists of coalescing facts
+in the so-far constructed dataset (Lines 4–7). Conceptually,
+
+To achieve this in practice, for each ground relational atom
+occurring in D′ we iterate through the corresponding sorted
+list of intervals and merge them as needed (Lines 5–6). Re-
+placing intervals with coalesced ones reduces memory us-
+age while preventing redundant computations in subsequent
+rounds of rule applications. Finally, in Line 8, Algorithm 1
+returns a dataset, which represents 푇Π(ℑ퐷).
+Optimising Automata-based Reasoning
+We have implemented an optimised variant of the automata-
+based approach for checking consistency of a program Π and
+dataset D introduced by Wałęga et al. (2019), which is based
+on verifying non-emptiness of two Büchi automata. States of
+these automata are of size polynomial in D and exponential
+in the combined size of Π and D, which makes automata
+construction and the non-emptiness checks hard in practice.
+To address this diﬃculty, our implementation introduces a
+number of optimisations and we next highlight two of them.
+First, instead of directly checking consistency of Π and
+D, our implementation checks consistency of Π and the
+‘relevant’ part of D, namely the subset D′ of facts in D
+mentioning predicates occurring in the bodies of rules in Π.
+This optimisation is based on the straightforwardobservation
+that Π and D are consistent if and only if Π and D′ are. In
+practice, D′ can be signiﬁcantly smaller than D, with the
+subsequent reduction in the size of the constructed automata.
+Second,we have optimised the constructionof states of the
+automata when searching for accepting runs. Since automata
+states represent fragments of a model, we can exploit the
+semantics of MTL operators to restrict possible locations
+of metric atoms holding in the same state. For example, if
+⊞[0,∞)푃holds at a time point 푡, then it needs to hold in all time
+points greater than 푡; similarly, if |[0,∞)푃holds at 푡, then it
+needs to hold at all time points smaller than 푡, and analogous
+statements hold for metric atoms with past operators ⊟and
+x. We have incorporated a suite of such restrictions, which
+resulted in a more eﬃcient construction of automata states.
+Combining Materialisation and Automata
+Our approach aims at minimising the reasoning workload
+by considering only relevant parts of the input during rea-
+soning, and by resorting to materialisation-based reasoning
+whenever possible while minimising the use of automata.
+Given as input a program Π, a dataset D, and a fact
+
+marised in Algorithm 2. The algorithm starts by checking
+
+case True is returned in Line 1. As already discussed, this
+check can be realised very eﬃciently using suitable indexes.
+In Line 2, we identify (using the program’s dependency
+graph 퐺Π) the subset Π푃of 푃-relevant rules in Π, that can be
+
+This allows us to disregard a potentially large number of ir-
+relevant rules during reasoning, optimise automata construc-
+tion, and also identify cases where materialisation naturally
+terminates and automata-based reasoning is not required. In
+particular, if Π푃is non-recursive, fact entailment can be de-
+cided using only materialisation (Lines 3–8), namely rules
+
+detected (Line 6) or a ﬁxpoint of the immediate consequence
+operator is reached (Line 7).
+Even if Π푃is recursive, we can still beneﬁt from using
+materialisation. For this, we start by performing a ‘pre-
+materialisation’ step (Lines 10–16), where we materialise
+until all facts mentioning non-recursive predicates in Π푃have
+
+Algorithm 2: Practical fact entailment
+
+Output: A truth value
+
+2 Π푃≔the set of all 푃-relevant rules in Π;
+3 if Π푃is non-recursive then
+4
+loop
+5
+D′ ≔ApplyRules(Π푃, D);
+6
+
+7
+if D′ = D then Return False;
+8
+D ≔D′;
+9 else
+10
+loop
+11
+D′ ≔ApplyRules(Π푃, D);
+12
+
+13
+if D′ = D then Return False;
+14
+D ≔D′;
+15
+if all facts with non-recursive predicates are
+derived then break;
+16
+Dpre ≔D;
+17
+run two threads in parallel:
+18
+Thread 1:
+19
+loop
+20
+D′ ≔ApplyRules(Π푃, D);
+21
+
+22
+if D′ = D then Return False;
+23
+D ≔D′;
+24
+Thread 2:
+25
+
+26
+Return negation of AutomataProcedure(Π′, D′);
+been derived, in which case we break the pre-materialisation
+loop and continue to the next stage. Upon completion of
+the pre-materialisation step, we run two threads in parallel,
+where the ﬁrst thread continues applying materialisation on a
+best-eﬀort basis (Lines 18–23) and the second thread resorts
+to automata (Lines 24–26); the algorithm terminates as soon
+as one of the threads generates an output truth value.
+The second thread reduces fact entailment to inconsistency
+of a new program Π′ and dataset D′ using the reduction
+from the literature (Brandt et al. 2018; Wałęga et al. 2019)
+and then runs the automata-based procedure for consistency
+checking described in the previous section. Our reduction
+from entailment to inconsistency (Line 25) uses the set of
+relevant rules Π푃instead of Π, which reduces the size of the
+automata; furthermore we use the pre-materialised dataset
+Dpre instead of the input dataset D to optimise the non-
+emptiness tests for the constructed automata. Indeed, with
+Dpre we can determine entailment of all facts with non-
+recursive predicates, and this allows us to reduce the search
+space when checking existence of accepting runs of the au-
+tomata.
+Algorithm 2 is clearly sound and complete. Furthermore,
+it is designed so that, on the one hand, the majority of en-
+tailment tests are handled via materialisation and, on the
+other hand, the recursive program passed on as input to the
+automata-based approach is small. These features of the al-
+gorithm will be empirically conﬁrmed by our experiments
+described in the following section.
+Implementation and Evaluation
+We have implemented a prototype DatalogMTL reasoner,
+called MeTeoR, which exploits our practical decision proce-
+dure from Algorithm 2 to decide fact entailment. Our imple-
+mentation uses existing libraries in the Python 3.8 eco-system
+without depending on other third-party libraries. To the best
+of our knowledge,no reasoning benchmarkis currently avail-
+able for DatalogMTL1, so to evaluate the performance of
+MeTeoR we have designed two new benchmarks.
+LUBM
+Benchmark.
+We
+obtain
+the
+ﬁrst
+bench-
+mark by extending the Lehigh University Benchmark
+(LUBM) (Guo, Pan, and Heﬂin 2005) with temporal rules
+and data. To construct temporal datasets we modiﬁed
+LUBM’s data generator, which provides means for generat-
+ing datasets of diﬀerent sizes, to randomly assign an interval
+to each generated fact; the rational endpoints of each interval
+belong to a range, which is a customised parameter. We used
+the same approach to generate input query facts for entail-
+ment checks. In addition, we extended the 56 plain Datalog
+rules obtained from the OWL 2 RL fragment of LUBM with
+29 temporal rules involving recursion and mentioning all
+metric operators available in DatalogMTL. We denote the
+resulting DatalogMTL program with 85 rules as Π퐿.
+MeteorologicalBenchmark.
+For this benchmark,we used
+a freely available dataset with meteorological observations
+(Maurer et al. 2002); in particular, we used a set D푊of 397
+millions of facts from the years 1949–2010.We then adapted
+the DatalogMTL program used by Brandt et al. (2018) to
+reason with DatalogMTL about weather, which resulted in a
+a non-recursive program Π푊with 4 rules.
+Machine Conﬁguration.
+All experiments have been con-
+ducted on a Dell PowerEdge R730 server with 512 GB RAM
+and two Intel Xeon E5-2640 2.6 GHz processors running Fe-
+dora 33, kernel version 5.8.17. Our ﬁrst experiment tests the
+scalability of MeTeoR; the second experiment compares the
+performance of MeTeoR and the approach of Brandt et al.
+(2018) when reasoning over non-recursive programs. In both
+experiments, each test was conducted once.
+Experiment 1: Scalability of MeTeoR
+In Experiment 1a, to evaluate the scalability of MeTeoR, we
+used the recursive program Π퐿from our LUBM benchmark
+and four datasets (obtained with LUBM’s data generator)
+D1
+퐿, D2
+퐿, D3
+퐿, and D4
+퐿of increasing size, which consist
+of 5, 10, 15, and 20 million facts, respectively. As already
+mentioned, input query facts are randomly generated. We
+hypothesise that performance critically depends on the type
+of these input query facts and, in particular, on which block
+within Algorithm 2 the answer is returned.
+1The datasets used by Brandt et al. (2018) to test their reasoning
+approach for non-recursive programs are not publicly available.
+
+T1
+T2
+T3
+T4
+T5
+D1
+퐿0.6s(푐= 0.6s,푛= 0) 70.1s(푐= 2.1s,푛= 1.7)
+66.9s(푐= 4.1s,푛= 1.9)
+97.8s(푐= 3.2s,푛= 21.4)
+7.6min(푝= 2.7s)
+D2
+퐿0.8s(푐= 0.8s,푛= 0) 152.5s(푐= 8.9s,푛= 1.5) 167.9s(푐= 11.2s,푛= 3.1)229.3s(푐= 10.2s,푛= 17.1) 50.2min(푝= 10.5s)
+D3
+퐿1.9s(푐= 1.9s,푛= 0)201.4s(푐= 13.1s,푛= 1.6)269.2s(푐= 18.3s,푛= 2.9)284.8s(푐= 27.3s,푛= 11.1) 92.1min (푝= 19.7s)
+D4
+퐿2.5s(푐= 2.5s,푛= 0)301.2s(푐= 21.3s,푛= 1.8)341.9s(푐= 26.1s,푛= 2.6) 312.5s(푐= 41.3s,푛= 7.8) 172.6min (푝= 28.6s)
+Table 2: Results of Experiment 1a
+To check our hypothesis we have identiﬁed ﬁve disjoint
+types of input query facts for an input program Π and dataset
+D, depending on where in the execution of Algorithm 2 an
+answer is returned. In particular, Algorithm 2 terminates in
+– Line 1 for facts of type T1, so these facts are already
+entailed by the input dataset D;
+– Lines 6 or 7 for facts of type T2, so these facts are not
+entailed by D and mention a predicate whose relevant
+rules in Π are non-recursive;
+– Line 13 or 22 for facts of type T3, so materialisation
+of the relevant (recursive) subprogram reaches a ﬁxpoint,
+and the fact is not entailed by the resulting materialisation;
+– Line 12 or 21 for facts of type T4, so these facts have a
+recursive relevant subprogram and are found to be entailed
+after ﬁnitely many rounds of rule application; and
+– Line 26 for facts of type T5, so the entailment of these
+facts is checked using automata.
+The results of Experiment 1a are reported in Table 2,
+where we have generated 10 facts of each type and recorded
+the average runtime of MeTeoR for such sets of 10 facts;
+additionally, we have stated in brackets how much time was
+consumed for fact coalescing (푐) and how many rounds of
+rule applications (푛) were performed on average. In the case
+of type T5 we report, instead, the time consumed by the
+pre-materialisation step (푝). The experiment shows that the
+performance of MeTeoR is dependent on the type of an in-
+put fact, and in particular, on whether the system can verify
+it using materialisation only (types T1–T4) or automata are
+needed (type T5). As expected, runtimes increase with the
+size of the dataset and the number of rounds of rule appli-
+cations needed. Furthermore, although materialisation was
+more eﬃcient, it is worth noting that the automata-based ap-
+proach could also be successfully applied to such large-scale
+datasets. Finally, coalescing times were relatively small, and
+so were pre-materialisation times for facts of type T5.
+If the majority of input facts can be veriﬁed using ma-
+terialisation only, then we can expect robust and scalable
+performance; we hypothesise that this is likely to be the case
+in many practical situations. To verify this hypothesis on our
+benchmark, we have generated 1, 000 random facts for each
+of the datasets D1
+퐿–D4
+퐿and calculated the percentageof facts
+that belong to each of the types T1–T5 (with respect to the
+considered dataset and the program Π퐿). We found that in
+46.0% cases the facts were of type T1, 28.3% of type T2,
+16.6% of type T3, 8.3% of type T4, and only 0.8% of type
+T5. This supports our hypothesis that input facts requiring
+the use of automata may rarely occur in practice.
+Finally, in Experiment 1b, we have stress tested MeTeoR.
+To this end, we proceeded as in Experiment 1a, but we keep
+constructing bigger datasets, until the average run times ex-
+ceed 40 minutes. Note that this threshold is already exceeded
+by facts of type T5 in Experiment 1a, whereas facts of type
+T1 do not require rule applications. Therefore,in Experiment
+1b we focused on types T2, T3, and T4. Our results, which
+are shown in Figure 1, suggest that MeTeoR scales very well
+and it is capable of handling datasets containing up to 150
+million temporal facts using materialisation.
+50
+70
+90
+110
+130
+150
+0
+1.000
+2.000
+3.000
+Size of a dataset (in millions)
+Run time (in seconds)
+T2
+T3
+T4
+Figure 1: Results of Experiment 1b
+Experiment 2: Comparison with Baseline
+We performed two experiments to compare the performance
+of MeTeoR and the baseline approach of Brandt et al. (2018)
+for reasoning with non-recursive programs. The approach
+by Brandt et al. (2018) is based on query rewriting—-given
+a target predicate 푃and an input program Π the algorithm
+generates a SQL query that, when evaluated over the in-
+put dataset D, provides the set of all facts with maximal
+intervals over 푃entailed by Π and D. To the best of our
+knowledge there is no publicly available implementation of
+this approach; thus, we have produced our own implemen-
+tation. Following Brandt et al. (2018), we used temporary
+tables (instead of subqueries) to compute the extensions of
+predicates appearing in Π on the ﬂy, which has two impli-
+cations. First, we usually have not just one SQL query but
+a set of queries for computing the ﬁnal result; second, simi-
+larly to MeTeoR, the approach essentially works bottom-up
+rather than top-down. The implementation by Brandt et al.
+(2018) provides two variants for coalescing: the ﬁrst one uses
+standard SQL queries by Zhou, Wang, and Zaniolo (2006),
+whereas the second one implements coalescing explicitly.
+For our baseline we adopted the standard SQL approach,
+which is less dependent on implementation details. Finally,
+
+we used Postgresql 10.18 for all our baseline experiments.
+In each test, we could verify that the answers returned by
+MeTeoR and the baseline coincided.
+In Experiment 2a, we compared the performance of our
+system with that of the baseline using three target predi-
+cates from our LUBM benchmark program Π퐿, whose rele-
+vant sets of rules constitute non-recursive programs Π1
+퐿, Π2
+퐿,
+and Π3
+퐿consisting of 5, 10, and 21 rules, respectively. For
+each program Π1
+퐿–Π3
+퐿and each dataset D1
+퐿–D4
+퐿from our
+benchmark, we used the baseline approach and MeTeoR to
+compute all facts over the target predicates entailed by the
+corresponding program and dataset—this was achieved by
+MeTeoR using materialisation only since these programs are
+non-recursive. As a result, MeTeoR computed a representa-
+tion of the entire canonical model, and not just the extension
+of the target predicates.As shown in Table 3, both approaches
+exhibit good performance and scalable behaviour as the size
+of the data increases, with our system consistently outper-
+forming the baseline.
+Π1
+퐿
+Π2
+퐿
+Π3
+퐿
+baseline MeTeoR baseline MeTeoR baseline MeTeoR
+D1
+퐿160.3s
+51.3s
+345.9s
+146.8s
+523.9s
+213.4s
+D2
+퐿331.8s
+90.5s
+747.8s
+321.9s
+1118.5s 455.2s
+D3
+퐿503.2s
+114.2s
+1154.0s 425.8s
+1688.5s 760.1s
+D4
+퐿683.0s
+170.3
+1575.6s 582.7s
+2254.6s 953.4s
+Table 3: Results of Experiment 2a
+In Experiment 2b, we performed similar tests as in Ex-
+periment 2a, but using the meteorological benchmark. We
+chose two target predicates from the program Π푊which
+correspond to non-recursive programs Π1
+푊and Π2
+푊, each
+with two rules. In addition, we constructed subsets D푖
+푊of
+the entire meteorological dataset D푊, where the superscript
+푖indicates the number of years covered by the dataset; in
+particular D62
+푊is the full dataset covering all 62 years, so
+D62
+푊= D푊. The results, as presented in Table 4, show that
+MeTeoR consistently outperforms the baseline approach.
+Π1
+푊
+Π2
+푊
+baseline
+MeTeoR
+baseline
+MeTeoR
+D10
+푊
+376.9s
+141.8s
+38.8s
+34.8s
+D20
+푊
+761.3s
+324.0s
+78.5s
+77.9s
+D30
+푊
+1059.5s
+430.8s
+119.4s
+101.8s
+D40
+푊
+1406.5s
+782.8s
+163.23s
+140.6s
+D50
+푊
+1765.1s
+929.2s
+203.7s
+171.8s
+D62
+푊
+2234.0s
+1050.8s
+258.5s
+240.4s
+Table 4: Results of Experiment 2b
+Although in Experiments 2a and 2b the performance of
+the baseline was comparable to that of MeTeoR, we hy-
+pothesised that the performance gap would signiﬁcantly in-
+crease (in favour of MeTeoR) as the number of temporal
+joins involved during reasoning increases. This is because
+computing temporal joins requires intersecting intervals—
+something for which databases do not seem to be optimised.
+In contrast, we anticipate that the performance of MeTeoR is
+more robust due to the way we implement joins (by ﬁrst sort-
+ing the sets of intervals involved in a join and then linearly
+scanning these sets to compute the relevant intersections).
+To verify this hypothesis we performed Experiment 2c
+which is similar to Experiments 2a and 2b, but we consid-
+ered only one target predicate from the LUBM benchmark
+with the corresponding (non-recursive) program Π1
+퐿, and
+datasets D200
+퐿, D1000
+퐿
+, D2000
+퐿
+, D3000
+퐿
+, and D4000
+퐿
+, which, for
+each relational atom, contain increasing number of facts. In
+particular, these datasets contain facts mentioning 7, 082 re-
+lational atoms—D200
+퐿
+has 200 facts for each of these atoms
+(so in total 1, 416, 400 facts); whereas D1000
+퐿
+, D2000
+퐿
+, D3000
+퐿
+,
+and D4000
+퐿
+have 1000, 2000, 3000, and 4000 facts, respec-
+tively. In general, the larger is the numberof facts mentioning
+the same relational atom, the larger the number of temporal
+joins involved in reasoning. Thus, our hypothesis is that, as
+we progress from D200
+퐿
+towards D4000
+퐿
+, we will see a larger
+performance gap between baseline and MeTeoR.
+The results of Experiment2c are shown in Figure 2. As an-
+ticipated, the performance of the baseline quickly degrades as
+the number of temporal joins needed for SQL query evalua-
+tion increases, whereas the performance of MeTeoR remains
+stable. We see these results as empirical validation for the
+need of specialised temporal join algorithms, which are not
+provided oﬀ-the-shelf by SQL engines.
+퐷200
+퐿
+퐷1000
+퐿
+퐷2000
+퐿
+퐷3000
+퐿
+퐷4000
+퐿
+0
+500
+1,000
+1,500
+Run time (in seconds)
+baseline
+MeTeoR
+Figure 2: Results of Experiment 2c
+Conclusion and Future Work
+We have presented the ﬁrst practical algorithm and scal-
+able implementation for the full DatalogMTL language. Our
+system MeTeoR eﬀectively combines optimised implemen-
+tations of materialisation and automata-based reasoning, and
+was able to successfully decide fact entailment over complex
+recursive programs and large-scale datasets containing tens
+of millions of temporal facts.
+We see many exciting avenues for future research. First,
+Cucala et al. (2021) have recently extended DatalogMTL
+with stratiﬁed negation as failure—a very useful feature
+for applications—and provided an automata-based deci-
+sion procedure. It would be interesting to extend MeTeoR
+to support stratiﬁed negation, which will require a non-
+trivial revision of our algorithm since materialisation within
+
+each separate stratum may be non-terminating. Second, it
+would be interesting to explore incremental reasoning tech-
+niques (Wałęga, Kaminski, and Cuenca Grau 2019), which
+are especially relevant to stream reasoning applications.
+Third, we aim to explore additional optimisations to further
+improve scalability and also to apply MeTeoR in real-world
+applications in collaboration with our industrial partners.

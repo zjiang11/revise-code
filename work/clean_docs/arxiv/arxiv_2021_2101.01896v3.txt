@@ -1,0 +1,1246 @@
+Taxonomy Completion via Triplet Matching Network
+Jieyu Zhang⋆,1 Xiangchen Song,2 Ying Zeng,3 Jiaze Chen,3 Jiaming Shen,2 Yuning Mao,2 Lei Li 3
+1 Paul G. Allen School of Computer Science & Engineering, University of Washington, WA, USA
+2 Department of Computer Science, University of Illinois Urbana-Champaign, IL, USA
+3 ByteDance AI Lab
+
+Abstract
+Automatically constructing taxonomy ﬁnds many applications
+in e-commerce and web search. One critical challenge is as
+data and business scope grow in real applications, new con-
+cepts are emerging and needed to be added to the existing
+taxonomy. Previous approaches focus on the taxonomy ex-
+pansion, i.e. ﬁnding an appropriate hypernym concept from
+the taxonomy for a new query concept. In this paper, we for-
+mulate a new task, “taxonomy completion”, by discovering
+both the hypernym and hyponym concepts for a query. We
+propose Triplet Matching Network (TMN1), to ﬁnd the appro-
+priate ⟨hypernym, hyponym⟩pairs for a given query concept.
+TMN consists of one primal scorer and multiple auxiliary
+scorers. These auxiliary scorers capture various ﬁne-grained
+signals (e.g., query to hypernym or query to hyponym se-
+mantics), and the primal scorer makes a holistic prediction
+on ⟨query, hypernym, hyponym⟩triplet based on the internal
+feature representations of all auxiliary scorers. Also, an innova-
+tive channel-wise gating mechanism that retains task-speciﬁc
+information in concept representations is introduced to further
+boost model performance. Experiments on four real-world
+large-scale datasets show that TMN achieves the best perfor-
+mance on both taxonomy completion task and the previous
+taxonomy expansion task, outperforming existing methods.
+Introduction
+Taxonomies, formulated as directed acyclic graphs or trees,
+have been widely used to organize knowledge in various do-
+mains, such as news domain (Vrandecic 2012; Mao et al.
+2019), scientiﬁc domain (Lipscomb 2000; Sinha et al. 2015;
+Shen et al. 2018c) and online commerce (Karamanolakis,
+Ma, and Dong 2020; Mao et al. 2020). Equipped with these
+curated taxonomies, researchers are able to boost the per-
+formance of numerous downstream applications such as
+query understanding (Hua et al. 2017; Yang, Zhang, and
+Han 2020), content browsing (Yang 2012), personalized rec-
+ommendation (Zhang et al. 2014; Huang et al. 2019), and
+web search (Wu et al. 2012; Liu et al. 2019).
+As human knowledge is constantly growing and new con-
+cepts emerge everyday, it is needed to dynamically complete
+an existing taxonomy. Figure 1 shows an illustrative example
+Copyright © 2021, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+*This work is done while interning at ByteDance AI Lab.
+1The code is released at https://github.com/JieyuZ2/TMN
+Desktop
+Existing 
+Taxonomy
+New
+Concepts
+SSD 
+Memory
+CPU
+Keyboard
+Smart
+Phone  
+Electronic 
+Device
+Camera
+Disk
+Desktop
+Memory
+Keyboard
+Electronic 
+Device
+Camera
+Disk
+Enlarged 
+Taxonomy
+Smart
+Phone
+SSD
+HDD
+HDD
+…
+…
+…
+…
+Flash
+Card
+Flash
+Card
+…
+…
+CPU
+…
+…
+Label
+Query
+Candidate Position
+Smart Phone
+Smart Phone
+Positive
+Partial-correct Negative
+< Electronic Device, HDD >
+Smart Phone
+Partial-correct Negative 
+Negative
+< Camera, CPU>
+Smart Phone
+< Desktop, Keyboard>
+< Electronic Device, CPU >
+Figure 1: An example of completing one “Electronic Device”
+taxonomy. The table illustrates different types of candidate
+positions for a given query “Smart Phone”.
+where a taxonomy of “Electronic Device” is completed to
+include new devices (e.g., “Smart Phone”) and hardware (e.g.,
+“SSD”). Most existing taxonomies are curated by domain ex-
+perts. However, such manual curations are labor-intensive,
+time-consuming and rarely-complete, and therefore infeasi-
+ble to handle the inﬂux of new contents in online streaming
+setting. To this end, many recent studies (Shen et al. 2020;
+Manzoor et al. 2020; Yu et al. 2020) investigate the problem
+of taxonomy expansion which aims to automatically expand
+an existing taxonomy. Speciﬁcally, given a query concept,
+these methods ﬁrst rank each concept in the existing taxon-
+omy based on how likely it is the hypernym of the query
+concept measured by an one-to-one matching score between
+the two concepts. Then, the query concept is added into the
+existing taxonomy as the hyponym of the top-ranked con-
+cepts. Notice that such a formulation is built upon one strong
+assumption: all new concepts can only be added into ex-
+isting taxonomy as hyponyms (i.e., leaf nodes2). However,
+we argue that such a “hyponym-only” assumption is inap-
+propriate in real applications. For example, in Fig 1, the
+term “Smart Phone” is invented much later than term “CPU”,
+which means that when “Smart Phone” emerges, “CPU” al-
+ready exists in taxonomy. In this case, it is inappropriate
+to add “Smart Phone” into taxonomy as leaf node because
+“CPU” is a hyponym of “Smart Phone”.
+2Nodes with zero out-degree in a directed acyclic graph.
+arXiv:2101.01896v3  [cs.CL]  4 Mar 2021
+
+In this paper, instead, we deﬁne and investigate a new tax-
+onomy completion task without the strong “hyponym-only”
+assumption. Formally, given an existing taxonomy and a set
+of new concepts, we aim to automatically complete the tax-
+onomy to incorporate these new concepts by discovering the
+most likely ⟨hypernym, hyponym⟩pairs of each new concept.
+For instance, in Fig 1, one of the most likely candidate pairs
+for “Smart Phone” is ⟨“Electronic Device”, “CPU”⟩. This
+formulation leads to a novel one-to-pair matching problem
+different from the previous one-to-one setting in taxonomy
+expansion task that only seeks for a new concept’s most
+likely hypernyms while ignores its possible hyponyms. Note
+that the hypernym/hyponym concept within the candidate
+⟨hypernym, hyponym⟩pair could be a “pseudo concept” in
+case there is no appropriate one for a given query concept. We
+can easily see that the taxonomy expansion task is a special
+case of taxonomy completion when the hyponym concepts
+are always “pseudo concept”.
+Tackling the new taxonomy completion task is challeng-
+ing because the induced one-to-pair matching problem re-
+sults in the existence of a special type of negative candidate
+⟨hypernym, hyponym⟩pairs we called partially-correct nega-
+tive candidates. Before introducing partially-correct negative
+candidates, we ﬁrst clarify that for a given query concept nq,
+a candidate pair of existing concepts ⟨np, nc⟩is positive if
+np(nc) is the true hypernym (hyponym) of nq and negtiave
+otherwise. Then, a candidate pair ⟨np, nc⟩is partially-correct
+negative if either np is true hypernym but nc is not true
+hyponym or vice versa. We illustrate the different types of
+candidate pairs in the table of Fig 1. Due to the high correla-
+tion of positive and partially-correct negative candidates, the
+model might struggle to distinguish one from another.
+To solve the aforementioned challenge, we propose a novel
+Triplet Matching Network (TMN), which learns a scoring
+function to output the matching score of a ⟨query, hypernym,
+hyponym⟩triplet and leverages auxiliary signals to help dis-
+tinguish positive pairs from partially-correct negative ones.
+Speciﬁcally, auxiliary signals are binary signals indicating
+whether one component within the pair is positive or not,
+in contrast to binary primal signals that reveal holistically
+whether a candidate position is positive or not. To make best
+use of the auxiliary signals to handle the existence of partially-
+correct negative, TMN consists of multiple auxiliary scorers
+that learn different auxiliary signals via corresponding aux-
+iliary loss and one primal scorer that aggregates internal
+feature representations of auxiliary scorers to output the ﬁ-
+nal matching score. The auxiliary and primal scorers are
+jointly trained in an auxiliary learning framework. In this
+way, we encourage the model to learn meaningful internal
+feature representations for the primal scorer to discriminate
+between positive, negative, and partially-correct negative can-
+didates. In addition, we propose an innovative technique
+called channel-wise gating mechanism to regulate the rep-
+resentations of concepts. It produces a channel-wise gating
+vector based on the ⟨query, hypernym, hyponym⟩triplet, and
+then modiﬁes the embeddings using this channel-wise gating
+vector to reduce the effect of irrelevant information stored in
+embeddings while retain the most task-speciﬁc information
+when calculating matching scores.
+In the experiments, we benchmark the taxonomy comple-
+tion task on four real-world taxonomies from different do-
+mains using modiﬁed version of multiple one-to-one match-
+ing models and state-of-the-art taxonomy expansion methods.
+Our experimental results show that TMN outperforms the
+baselines by a large margin on both taxonomy completion
+task and taxonomy expansion task. Finally, ablation study
+demonstrates the effectiveness of each component of TMN,
+and efﬁciency analysis shows the efﬁciency of TMN at infer-
+ence stage.
+Contributions. To summarize, our major contributions in-
+clude: (1) a more realistic task called taxonomy completion
+which simultaneously ﬁnds hypernym and hyponym concepts
+of new concepts; (2) a novel and effective Triple Matching
+Network (TMN) to solve the one-to-pair matching problem
+induced from the taxonomy completion task by leveraging
+auxiliary signals and an innovative channel-wise gating mech-
+anism; and (3) extensive experiments that verify both the
+effectiveness and efﬁciency of TMN framework on four real-
+world large-scale taxonomies from different domains.
+Problem Formulation
+The input of the taxonomy completion task includes two
+parts: (1) an existing taxonomy T 0 = (N 0, E0) and (2) a set
+of new concepts C. We assume each concept ni ∈N 0∪C has
+an initial embedding vector xi ∈Rd as in previous studies
+(Jurgens and Pilehvar 2016; Vedula et al. 2018; Aly et al.
+2019). The overall goal is to complete the existing taxonomy
+T 0 into a larger one T = (N 0∪C, E′) by adding the new con-
+cept nq ∈C between any pair of existing concepts ⟨np, nc⟩
+to form two new taxonomic relations ⟨np, nq⟩and ⟨nq, nc⟩.
+Following previous studies (Shen et al. 2020; Manzoor et al.
+2020), we assume the new concepts in C are independent to
+each other and thus reduce the more generic taxonomy com-
+pletion task into |C| independent simpliﬁed problems. Note
+that we use the term “hypernym” and “parent”, “hyponym”
+and “child” interchangeably throughout the paper.
+Taxonomy. Follow (Shen et al. 2020), we deﬁne a taxonomy
+T = (N, E) as a directed acyclic graph where each node
+n ∈N represents a concept (i.e., a word or a phrase) and each
+directed edge ⟨np, nc⟩∈E indicates a relation expressing
+that concept np is the most speciﬁc concept that is more
+general than concept nc. Here, the relation types of edges are
+implicitly deﬁned by existing taxonomy.
+Candidate Position. A valid candidate position is a pair of
+concepts ⟨np, nc⟩where nc is one of the descendants of np
+in the existing taxonomy. This deﬁnition reduces the search
+space of candidate positions. Note that np or nc could be a
+“pseudo concept” acting as a placeholder.
+Positive Position. For a query concept nq, positive position
+⟨np, nc⟩is a candidate position wherein np and nc is the true
+parent and child of nq, respectively.
+Negative Position. For a query concept nq, negative position
+⟨np, nc⟩is a candidate position wherein np or nc is not the
+true parent or child of nq, respectively.
+Partially-correct Negative Position. For a query concept
+nq, partially-correct negative position ⟨np, nc⟩is a negative
+position but np or nc is the true parent or child of nq.
+
+The TMN Framework
+In this section, we ﬁrst introduce our one-to-pair matching
+model which leverages auxiliary signals to augment primal
+matching task. Then, we present a novel channel-wise gating
+mechanism designed for regulating concept embedding to
+boost the model performance. Finally, we discuss how to
+generate self-supervision data from the existing taxonomy
+and use them to train the TMN model. The overall model
+architecture is presented in Fig 2.
+Modeling One-To-Pair Matching
+In this work, we seek to learn a model s : N ×(N ×N) →R
+with parameter Θ that can measure the relatedness of a query
+concept nq and a candidate position, i.e., a pair of concepts
+t = ⟨np, nc⟩, in existing taxonomy T 0. A straightforward
+instantiation of s is as follows:
+s(nq, np, nc) = f(xq, [xp, xc]) = f(xq, xt)
+(1)
+Where f is a parameterized scoring function of choice that
+outputs the relatedness score of nq and ⟨np, nc⟩, and [·] rep-
+resents the concatenation operation. This formulation simply
+degenerates one-to-pair matching into one-to-one matching
+by using concatenation of xp and xc as representation of can-
+didate position. Here, we choose the neural tensor network
+(Socher et al. 2013) as our base model:
+s(nq, np, nc) = uT σ(h(xq, xt))
+(2)
+h(xq, xt) = xqW[1:k]xt + V
+xq
+xt
+
++ b
+(3)
+Where σ = tanh(·) is a standard nonlinearity applied
+element-wise, W[1:k] ∈Rd×2d×k is a tensor and the bi-
+linear tensor product xqW[1:k]xt results in a vector r ∈Rk,
+where each entry is computed by one slice i = 1, . . . , k of
+the tensor: hi = xqWixt. The other parameters are the stan-
+dard form of a neural network: V ∈Rk×2d and u ∈Rk,
+b ∈Rk. We call the vector h output by h(·, ·) the internal
+feature representation of neural tensor network.
+However, such a na¨ıve instantiation only measures the
+coarse-grained relatedness of query nq and the whole candi-
+date pair ⟨np, nc⟩but fails to capture the ﬁne-grained re-
+latedness of ⟨nq, np⟩and ⟨nq, nc⟩, preventing the model
+from learning to clearly distinguish positive candidates from
+partially-correct negatives candidates.
+To address the limitation of the naive approach, we pro-
+pose a novel expressive Triplet Matching Network (TMN).
+Speciﬁcally, we develop multiple auxiliary scorers to cap-
+ture both coarse- and ﬁne-grained relatedness in one-to-pair
+matching, and one primal scorer that inputs the internal fea-
+ture representations of all auxiliary scorers and outputs ﬁnal
+matching scores. For each auxiliary scorer, we adopt neural
+tensor network as in Eq. 2 as instantiation due to its expres-
+siveness, and the corresponding k-dimension internal feature
+representation h is as in Eq. 3. Assume we have l auxiliary
+scorers, each with k-dimension internal feature representation
+hj and j = 1, . . . , l. Then, the primal scorer is a single-layer
+projection with non-linear activation function:
+sprimal(nq, np, nc) = uT
+p σ([h1, . . . , hl])
+(4)
+Where, again, σ = tanh(·) and up ∈Rkl. Now we elaborate
+the three auxiliary scorers that capture both coarse- and ﬁne-
+grained relatedness:
+s1(nq, np) = uT
+1 σ(h1(xq, xp))
+(5)
+s2(nq, nc) = uT
+2 σ(h2(xq, xc))
+(6)
+s3(nq, np, nc) = uT
+3 σ(h3(xq, [xp, xc]))
+(7)
+Where the auxiliary scorer s1 and s2 capture the ﬁne-grained
+relatedness of ⟨nq, np⟩and ⟨nq, nc⟩respectively, while s3 is
+for coarse-grained relatedness between nq and ⟨np, nc⟩.
+Given above formulations, primal scorer sprimal can be
+trained using primal signals indicating whether ⟨np, nc⟩is
+positive candidate of nq or not, and auxiliary scorers can
+be trained via corresponding auxiliary signals. Particularly,
+s1 will be trained to learn whether np is positive parent of
+nq, s2 is to learn whether nc is positive child of nq, and s3
+captures coarse-grained relatedness between nq and ⟨np, nc⟩
+so its auxiliary signal is exactly the same as primal signal.
+Although s3 and sprimal share the same supervision signals
+and both aim to capture relatedness between nq and ⟨np, nc⟩,
+sprimal outputs matching score based on the internal feature
+representations of all auxiliary scorers including s3, which
+enables sprimal to rely on s1 or s2 when s3 struggle to differ-
+entiate positive candidates from partially-correct candidates
+negatives.
+Channel-wise Gating Mechanism
+As the nature of taxonomy, concepts under the same ances-
+tor are semantically related to each other, which makes it
+challenging for model to learn the true taxonomic relations
+based on concept embeddings, especially in bottom-level
+of a taxonomy. For instance, in Fig 1, the model needs to
+learn that “Disk” is the true parent of “SSD” but “Memory”
+is not. However, “Disk” and “Memory” are siblings in taxon-
+omy, which makes them highly-related, and therefore hard to
+distinguish based on their embeddings learned from a more
+general corpus.
+To mitigate this problem, instead of directly using initial
+embedding vectors of concepts, we propose a novel channel-
+wise gating mechanism to regulate the information stored
+in initial embedding vectors, reducing the negative effects
+of irrelevant or spurious information on learning taxonomic
+relations. Specially, to distinguish “Disk” and “Memory” that
+both belong to “Desktop”, we would like to ﬁlter out the
+shared information stored in their embeddings related to
+“Desktop” in order to push the model to focus on the re-
+maining more speciﬁc information. Formally, we give the
+formulation of channel-wise gating mechanism as follows:
+gp = θ(W1[xq, xp, xc])
+(8)
+ˆxp = gp ⊙xp
+(9)
+gc = θ(W2[xq, xp, xc])
+(10)
+ˆxc = gc ⊙xc
+(11)
+Where θ(·) is a sigmoid function and W1, W2 ∈Rd×3d. ⊙
+is element-wise multiplication. g is the channel-wise gating
+vector dependent on embeddings of both query and candidate
+positions. We treat each dimension of concept embedding
+
+Xc
+Query
+Candidate
+Child
+Candidate
+Parent
+Xq
+Xp
+Xc
+Initial Embedding
+gc
+Channel-wise Gating Mechanism
+⊙
+=
+Xq
+Xp
+Xc
+W
+W
+W
+W
+Xq
+Xq
+Xq
+X1
+W
+W
+W
+V
++
+b
++
+=
+h
+K-Dimension Internal Feature h (                   ,                   )
+k
+k
+k
+k
+k
+k
+k
+X1
+Primal and Auxiliary Scorers
+Xp
+Xcˆ
+gp
+⊙
+Xpˆ
+=
+X2
+Xq
+Xq
+Xq
+X2
+Xq
+Xq
+Xq
+X2
+Xq
+Xq
+Xq
+X1
+Lp
+L1
+L2
+L3
+L
+yp
+y1
+y2
+y3
+Loss
+fp
+fc
+Primal
+Auxiliary
+Xpˆ
+Xq
+Xcˆ
+sprimal
+s1
+s2
+s3
+h1(xq, ˆxp)
+h2(xq, ˆxc)
+h3(xq, [ˆxp, ˆxc])
+Figure 2: Overview of TMN framework.
+as a channel to store information, and the output value of
+sigmoid lies in the interval [0, 1], which enables the channel-
+wise gating vector g to downscale irrelevant information in
+certain channels while retain task-speciﬁc ones.
+With the gated embedding ˆxp and ˆxc in hand, we now re-
+place the initial embedding vectors in Eq. 3 with it to facilitate
+TMN. Notably, this simple channel-wise gating mechanism
+is ready to be plugged in any matching models.
+Jointly Learning Primal and Auxiliary Scorers
+In this section, we ﬁrst introduce how to generate self-
+supervision data as well as primal and auxiliary signals from
+the existing taxonomy, and then propose to jointly learn the
+primal and auxiliary scorers.
+Self-supervision Generation. Given one node nq in the ex-
+isting taxonomy T 0 = (N 0, E0) as “query”, we ﬁrst con-
+struct a positive ⟨np, nc⟩pair by using one of its parents
+np and one of its children nc. Then, we sample N negative
+pairs from valid candidates positions that are not positive
+positions. Notably, it is allowed that one end of the nega-
+tive pair is true parent/child of nq. Given a candidate pair
+⟨np, nc⟩, the primal signal, i.e. y, indicates whether the whole
+pair is positive or not, while the auxiliary signals, i.e. yp and
+yc, represent whether np (nc) is the true parent (child) of
+query nq respectively regardless of the primal signal. The
+generated positive and negative pairs as well as correspond-
+ing primal and auxiliary signals collectively consist of one
+training instance (X, y). By repeating the above process for
+each node in T 0, we obtain the full self-supervision dataset
+D = {(X1, y1), . . . , (X|N 0|, y|N 0|)}.
+Learning Objective. We learn our model on D using the
+following objective:
+L(Θ) = Lp + λ1L1 + λ2L2 + λ3L3
+(12)
+where Lp represents the loss for primal scorer and L1, L2,
+L3 are auxiliary losses for auxiliary scorers s1, s2 and s3
+respectively. The hyperparameters λ1, λ2 and λ3 are weights
+to adjust relative effects of each auxiliary loss. The above
+objective function is similar to multi-task learning at the ﬁrst
+glance, but it is an auxiliary learning strategy that only cares
+Dataset
+|N|
+|E|
+|D|
+MAG-CS
+24,754
+42,329
+6
+MAG-Psychology
+23,187
+30,041
+6
+WordNet-Verb
+13,936
+13,408
+13
+WordNet-Noun
+83,073
+76,812
+20
+Table 1: Dataset Statistics. |N| and |E| are the number of
+nodes and edges in the existing taxonomy. |D| indicates the
+taxonomy depth.
+the performance of primal task, i.e. primal scorer in our case,
+and the auxiliary loss are meant to augment the learning of
+primal task.
+Here, Li is loss function of choice. We choose binary
+cross entropy loss for simplicity. Take the primal loss as an
+example, it is formulated as:
+Lp = −1
+|D|
+X
+(Xi,yi)∈D
+yi log(sp(Xi)) + (1 −yi) log(1 −sp(Xi))
+(13)
+Experiments
+Experimental Setup
+Dataset. We study the performance of TMN on four large-
+scale real-world taxonomies.
+• Microsoft Academic Graph (MAG). We evaluate TMN
+on the public Field-of-Study (FoS) Taxonomy in Microsoft
+Academic Graph (MAG) (Sinha et al. 2015). It contains
+over 660 thousand scientiﬁc concepts and more than 700
+thousand taxonomic relations. Following (Shen et al. 2020),
+we construct two datasets which we refer to as MAG-
+Psychology and MAG-CS based on the subgraph related
+to the “Psychology” and “Computer Science” domain, re-
+spectively. We compute a 250-dimension word word2vec
+embedding on a related paper abstracts corpus.
+• WordNet. Based on WordNet 3.0, we collect verbs and
+nouns along with the relations among them to form
+two datasets which we refer to as WordNet-Verb and
+WordNet-Noun, respectively. The reason for limiting our
+
+Method
+MAG-CS
+MR
+MRR
+
+Closest-Position
+9466.670
+0.093
+0.012
+0.034
+0.051
+0.054
+0.029
+0.022
+Single Layer Model
+1025.245 ± 22.827
+0.153 ± 0.002
+0.030 ± 0.001
+0.074 ± 0.001
+0.105 ± 0.002
+0.130 ± 0.004
+0.064 ± 0.001
+0.046 ± 0.001
+Multiple Layer Model
+1110.340 ± 64.987
+0.156 ± 0.002
+0.032 ± 0.001
+0.080 ± 0.001
+0.108 ± 0.002
+0.140 ± 0.004
+0.069 ± 0.000
+0.047 ± 0.001
+Bilinear Model
+3373.772 ± 7.473
+0.026 ± 0.000
+0.000 ± 0.000
+0.003 ± 0.000
+0.006 ± 0.000
+0.001 ± 0.000
+0.002 ± 0.000
+0.003 ± 0.000
+Neural Tensor Network
+769.830 ± 2.416
+0.171 ± 0.003
+0.023 ± 0.001
+0.073 ± 0.001
+0.112 ± 0.002
+0.099 ± 0.004
+0.063 ± 0.001
+0.049 ± 0.001
+TaxoExpan
+1523.904 ± 52.982
+0.099 ± 0.002
+0.004 ± 0.001
+0.027 ± 0.002
+0.049 ± 0.001
+0.017 ± 0.003
+0.023 ± 0.001
+0.021 ± 0.000
+ARBORIST
+1142.335 ± 19.249
+0.133 ± 0.004
+0.008 ± 0.001
+0.044 ± 0.003
+0.075 ± 0.003
+0.037 ± 0.004
+0.038 ± 0.003
+0.033 ± 0.001
+TMN
+639.126 ± 35.849
+0.204 ± 0.005
+0.036 ± 0.003
+0.099 ± 0.006
+0.139 ± 0.006
+0.156 ± 0.011
+0.086 ± 0.005
+0.060 ± 0.003
+Method
+MAG-Psychology
+MR
+MRR
+
+Closest-Position
+5201.604
+0.168
+0.030
+0.072
+0.107
+0.062
+0.029
+0.022
+Single Layer Model
+435.548 ± 4.057
+0.350 ± 0.002
+0.090 ± 0.003
+0.209 ± 0.002
+0.274 ± 0.003
+0.183 ± 0.006
+0.085 ± 0.001
+0.056 ± 0.001
+Multiple Layer Model
+297.644 ± 8.097
+0.413 ± 0.002
+0.110 ± 0.001
+0.265 ± 0.004
+0.334 ± 0.002
+0.224 ± 0.003
+0.108 ± 0.001
+0.068 ± 0.000
+Bilinear Model
+2113.024 ± 9.231
+0.032 ± 0.000
+0.000 ± 0.000
+0.001 ± 0.000
+0.003 ± 0.000
+0.000 ± 0.000
+0.000 ± 0.000
+0.001 ± 0.000
+Neural Tensor Network
+299.004 ± 6.294
+0.380 ± 0.004
+0.066 ± 0.004
+0.207 ± 0.002
+0.291 ± 0.004
+0.134 ± 0.008
+0.084 ± 0.001
+0.059 ± 0.001
+TaxoExpan
+728.725 ± 2.096
+0.253 ± 0.001
+0.015 ± 0.001
+0.092 ± 0.001
+0.163 ± 0.001
+0.031 ± 0.001
+0.038 ± 0.000
+0.033 ± 0.000
+ARBORIST
+547.723 ± 20.165
+0.344 ± 0.012
+0.062 ± 0.009
+0.185 ± 0.011
+0.256 ± 0.013
+0.126 ± 0.018
+0.076 ± 0.004
+0.052 ± 0.003
+TMN
+212.298 ± 3.051
+0.471 ± 0.001
+0.141 ± 0.001
+0.305 ± 0.004
+0.377 ± 0.002
+0.287 ± 0.001
+0.124 ± 0.001
+0.077 ± 0.000
+Method
+WordNet-Verb
+MR
+MRR
+
+Closest-Position
+34778.772
+0.144
+0.011
+0.045
+0.075
+0.020
+0.016
+0.013
+Single Layer Model
+2798.243 ± 61.384
+0.140 ± 0.009
+0.029 ± 0.005
+0.065 ± 0.006
+0.093 ± 0.008
+0.044 ± 0.007
+0.019 ± 0.002
+0.014 ± 0.001
+Multiple Layer Model
+2039.213 ± 240.577
+0.227 ± 0.020
+0.050 ± 0.006
+0.120 ± 0.009
+0.160 ± 0.015
+0.075 ± 0.009
+0.036 ± 0.003
+0.024 ± 0.002
+Bilinear Model
+1863.915 ± 5.685
+0.175 ± 0.001
+0.012 ± 0.001
+0.054 ± 0.000
+0.096 ± 0.001
+0.017 ± 0.001
+0.016 ± 0.000
+0.015 ± 0.000
+Neural Tensor Network
+1599.196 ± 18.409
+0.255 ± 0.003
+0.051 ± 0.002
+0.125 ± 0.006
+0.176 ± 0.005
+0.076 ± 0.003
+0.038 ± 0.002
+0.027 ± 0.001
+TaxoExpan
+1799.939 ± 4.511
+0.227 ± 0.002
+0.024 ± 0.001
+0.095 ± 0.001
+0.140 ± 0.002
+0.036 ± 0.002
+0.029 ± 0.000
+0.021 ± 0.000
+ARBORIST
+1637.025 ± 4.950
+0.206 ± 0.011
+0.016 ± 0.004
+0.073 ± 0.011
+0.116 ± 0.011
+0.024 ± 0.006
+0.022 ± 0.003
+0.018 ± 0.002
+TMN
+1445.801 ± 27.209
+0.304 ± 0.005
+0.072 ± 0.003
+0.163 ± 0.005
+0.215 ± 0.001
+0.108 ± 0.005
+0.049 ± 0.002
+0.032 ± 0.000
+Method
+WordNet-Noun
+MR
+MRR
+
+Closest-Position
+5601.033
+0.136
+0.017
+0.044
+0.074
+0.025
+0.013
+0.011
+Single Layer Model
+3260.415 ± 79.776
+0.177 ± 0.010
+0.025 ± 0.003
+0.072 ± 0.006
+0.103 ± 0.006
+0.043 ± 0.005
+0.025 ± 0.002
+0.018 ± 0.001
+Multiple Layer Model
+2801.500 ± 143.579
+0.175 ± 0.005
+0.029 ± 0.001
+0.077 ± 0.002
+0.106 ± 0.003
+0.051 ± 0.002
+0.027 ± 0.001
+0.018 ± 0.000
+Bilinear Model
+3498.184 ± 3.586
+0.176 ± 0.001
+0.012 ± 0.000
+0.052 ± 0.001
+0.095 ± 0.001
+0.020 ± 0.000
+0.018 ± 0.000
+0.017 ± 0.000
+Neural Tensor Network
+2808.900 ± 79.415
+0.215 ± 0.007
+0.034 ± 0.002
+0.093 ± 0.003
+0.133 ± 0.004
+0.060 ± 0.004
+0.033 ± 0.001
+0.023 ± 0.001
+TaxoExpan
+3188.935 ± 17.461
+0.209 ± 0.000
+0.017 ± 0.000
+0.074 ± 0.000
+0.125 ± 0.001
+0.030 ± 0.001
+0.026 ± 0.000
+0.022 ± 0.000
+ARBORIST
+2993.341 ± 114.749
+0.217 ± 0.005
+0.021 ± 0.001
+0.073 ± 0.002
+0.125 ± 0.002
+0.036 ± 0.001
+0.025 ± 0.001
+0.022 ± 0.000
+TMN
+1647.665 ± 15.370
+0.270 ± 0.006
+0.039 ± 0.002
+0.111 ± 0.006
+0.167 ± 0.005
+0.068 ± 0.004
+0.039 ± 0.002
+0.029 ± 0.001
+Table 2: Overall results on four datasets. We run all methods ﬁve times and report the averaged result with standard deviation.
+Note that smaller MR indicates better model performance. For all other metrics, larger values indicate better performance. We
+highlight the best two models in terms of the average performance under each metric.
+choice to only verbs and nouns is that only these parts of
+speech have fully-developed taxonomies in WordNet (Ju-
+rgens and Pilehvar 2016). We obtain the 300-dimension
+fasttext embeddings3 as initial feature vectors.
+For each dataset, we randomly sample 1,000 nodes for vali-
+dation and another 1,000 for test. Then we build the initial tax-
+onomy using remaining nodes and associated edges. Notice
+that new edges will be added into initial taxonomy to avoid
+the taxonomy from breaking into multiple directed acyclic
+graphs. Table 1 lists the statistics of these four datasets.
+Evaluation Metrics. As our model returns a rank list of
+candidate positions for each query concept, we evaluate its
+performance using the following ranking-based metrics.
+• Mean Rank (MR) measures the average rank position of
+a query concept’s true positions among all candidates. For
+queries with multiple positive edges, we ﬁrst calculate the
+rank position of each individual edge and then take the
+3We use the wiki-news-300d-1M-subword.vec.zip version on ofﬁcial website.
+average of all rank positions.
+• Mean Reciprocal Rank (MRR) calculates the reciprocal
+rank of a query concept’s true positions. We follow (Ying
+et al. 2018) and scale the original MRR by a factor 10 to
+amplify the performance gap between different methods.
+
+ranked in the top k, divided by the total number of true
+positions of all query concepts.
+
+tions ranked in the top k, divided by the total number of
+queries times k.
+Compared Methods. To the best of our knowledge, we are
+the ﬁrst to study taxonomy completion task and there is
+no directly comparable previous method. Thus, we adapt
+the following related methods to our problem setting and
+compare TMN with them:
+1. Closest-Position: A rule-based method which ranks can-
+
+didate positions based on the cosine similarity:
+s(nq, np, nc) = cosine(xp, xq) + cosine(xc, xq)
+2
+2. Single Layer Model: A model that scores tuple by a stan-
+dard single layer neural network which inputs the concate-
+nation of the concept embeddings.
+3. Multiple Layer Model: An extension of Single Layer
+Model that replaces the single layer neural network with
+multiple layer neural network.
+4. Bilinear Model (Sutskever, Salakhutdinov, and Tenen-
+baum 2009; Jenatton et al. 2012): It incorporates the inter-
+action of two concept embeddings through a simple and
+efﬁcient bilinear form.
+5. Nerual Tensor Network (Socher et al. 2013): It incor-
+porates Single Layer Model with a bilinear tensor layer
+that directly relates the two concept embeddings across
+multiple dimensions and a bias vector.
+6. TaxoExpan (Shen et al. 2020): One state-of-the-art tax-
+onomy expansion framework which leverages position-
+enhanced graph neural network to capture local informa-
+tion and InfoNCE loss(Oord, Li, and Vinyals 2018) for
+robust training.
+7. ARBORIST (Manzoor et al. 2020): One state-of-the-art
+taxonomy expansion model which aims for taxonomies
+with heterogeneous edge semantics and optimizes a large-
+margin ranking loss with a dynamic margin function.
+Notably, except for the rule-based method Closest-Position,
+other baselines are learning-based method and designed for
+one-to-one matching. Thus we concatenate the embeddings
+of candidate’s constituting concepts as candidate embedding
+to ﬁt our one-to-pair setting. For fair comparison, we replace
+the GNN encoder of TaxoExpan with initial feature vector to
+align with other compared methods. There are other recently-
+proposed taxonomy expansion methods, e.g., HiExpan (Shen
+et al. 2018b) and STEAM (Yu et al. 2020). We do not include
+them as baselines because they leverage external sources, e.g.,
+text corpus, to extract complicated features, while TMN and
+other baselines only take initial feature vectors as input.
+Parameter Settings. For learning-based methods, we use
+Adam optimizer with initial learning rate 0.001 and ReduceL-
+ROnPlateau scheduler4 with ten patience epochs. During
+model training, the batch size and negative sample size is set
+to 128 and 31, respectively. We set k, i.e., the dimension of
+internal feature representation, to be 5. For TMN, we sim-
+ply set λ1 = λ2 = λ3 = 1 to avoid heavy hyperparameter
+tuning.
+Experimental Results
+Overall Performance. Table 2 presents the results of all
+compared methods on the four datasets. First, we ﬁnd
+that learning-based methods clearly outperform rule-based
+Closest-Position method. Second, there is no baseline that
+could consistently outperform others in all taxonomies, which
+4https://pytorch.org/docs/stable/optim.html#torch.optim.lr scheduler.
+ReduceLROnPlateau
+indicates the diversity of taxonomies of different domains
+and the difﬁculty of taxonomy completion task. Third, AR-
+BORIST and TaxoExpan do not work well in taxonomy com-
+pletion, which indicates that methods carefully designed for
+taxonomy expansion task will struggle in taxonomy comple-
+tion task. Finally, our proposed TMN has the overall best
+performance across all the metrics and defeats the second
+best method by a large margin.
+Method
+MAG-Psychology
+MR
+MRR
+
+TaxoExpan
+175.730
+0.594
+0.477
+0.153
+ARBORIST
+119.935
+0.722
+0.629
+0.258
+TMN
+69.293
+0.740
+0.646
+0.329
+Method
+WordNet-Verb
+MR
+MRR
+
+TaxoExpan
+642.694
+0.410
+0.319
+0.098
+ARBORIST
+608.668
+0.380
+0.277
+0.067
+TMN
+464.970
+0.479
+0.379
+0.132
+Table 3: Results on taxonomy expansion task.
+Performance on Taxonomy Expansion. As taxonomy ex-
+pansion being a special case of our novel taxonomy com-
+pletion task, we are curious about how TMN performs on
+previous task. Thus, we compare TMN with ARBORIST and
+TaxoExpan on taxonomy expansion task5. The results are
+presented in Table 3. Notice that ARBORIST and TaxoEx-
+pan is trained directly on taxonomy expansion task, while
+TMN is trained solely on taxonomy completion task. From
+the results, we can see TMN outperforms the others in both
+dataset with a large margin, which indicates that TMN is
+able to solve taxonomy expansion task better than previous
+state-of-the-arts.
+Method
+MAG-Psychology
+MR
+MRR
+
+TMN w/o CG
+265.729
+0.385
+0.298
+0.061
+TMN w/o s1&s2
+258.382
+0.458
+0.368
+0.075
+TMN w/o s1
+269.058
+0.471
+0.382
+0.123
+TMN w/o s2
+229.306
+0.474
+0.381
+0.078
+TMN w/o s3
+342.021
+0.326
+0.213
+0.043
+TMN
+212.298
+0.471
+0.377
+0.077
+Method
+WordNet-Verb
+MR
+MRR
+
+TMN w/o CG
+1578.120
+0.260
+0.178
+0.027
+TMN w/o s1&s2
+1497.843
+0.278
+0.200
+0.030
+TMN w/o s1
+1530.192
+0.293
+0.219
+0.033
+TMN w/o s2
+1586.740
+0.290
+0.207
+0.031
+TMN w/o s3
+1604.802
+0.248
+0.159
+0.024
+TMN
+1445.801
+0.304
+0.215
+0.032
+Table 4: Ablation analysis on MAG-Psychology and
+WordNet-Verb datasets.
+Ablation Study. We conduct the ablation studies on two rep-
+resentative datasets MAG-Psychology and WordNet-Verb,
+and the results are presented in Table 4. The results show that
+without any of the key components of TMN, i.e., auxiliary
+5We sample validation/test set from leaf nodes for taxonomy expansion task.
+
+scorers (s1, s2 and s3) and channel-wise gating mechanism
+(CG), the overall performance will degrade by different ex-
+tends, which indicates the effectiveness of the components.
+Dataset
+# of candidate pairs
+Avg. running time per query (s)
+MAG-CS
+153,726
+0.131
+MAG-Psychology
+101,077
+0.067
+WordNet-Verb
+51,159
+0.055
+WordNet-Noun
+799,735
+0.870
+Table 5: Efﬁciency Analysis.
+Efﬁciency Analysis. At the training stage, our model uses
+|N (0)| training instances every epoch and thus scales lin-
+early to the number of concepts in the existing taxonomy. At
+inference stage, because the cardinality of candidate pairs
+is |N (0)|2 without any restriction, for each query concept,
+we need to calculate |N (0)|2 matching scores, one for every
+candidate pair. However, in practical, as we restrict the valid
+candidate pairs to be ⟨ancestor, descendant⟩concept pairs
+in existing taxonomy, the number of candidates need to be
+considered is substantially reduced and therefore the infer-
+ence efﬁciency is largely improved. Also, the inference stage
+can be further accelerated using GPU. We list the number of
+valid candidate pairs and the average running time per query
+during inference stage of all datasets in Table 5. From the
+table, we can see the number of valid candidate pairs is no
+more than ten times of |N (0)| and thus the inference stage is
+quite efﬁcient.
+Arborist
+Query Set
+Toyon
+Detective
+4
+Toyon
+Detective
+Private Detective
+Shrub
+Noun
+Investigator
+ŏ
+ŏ
+ŏ
+Sleuth
+23
+2
+1
+Toyon
+Private Detective
+Shrub
+Noun
+Investigator
+ŏ
+ŏ
+TMN
+1
+Sleuth
+1/2
+Examiner
+Examiner
+Detective
+Figure 3: Case Study. The grey concepts are existing concepts
+while the red ones are queries needed to be inserted. The dash
+lines mean an omitting of some internal nodes and the solid
+lines indicate real edges in taxonomy. The numbers inside
+nodes are the ranking position output by the model. We can
+see TMN recovers the true positions for both internal and leaf
+concepts.
+Case Study. We illustrate the power of TMN via two real
+query concepts “Detective” and “Toyon” of WordNet-Noun
+in Fig.3. For internal concept “Detective”, TMN ranks the
+true positions ⟨“Investigator”, “Private Detective”⟩at top 1
+and ⟨“Investigator”, “Sleuth”⟩at top 2, while Arborist can
+only rank the true parent “Investigator” at top 23. For leaf
+concept “Toyon”, TMN recovers its true parent “Shrub” but
+Arborist ranks “Shrub” at top 5. We can see that TMN works
+better than baseline in terms of recovering true positions.
+Related Work
+Taxonomy Construction and Expansion. Automatic tax-
+onomy construction is a long-standing task in the literature.
+Existing taxonomy construction methods leverage lexical
+features from the resource corpus such as lexical-patterns
+(Nakashole, Weikum, and Suchanek 2012; Jiang et al. 2017;
+Hearst 1992; Agichtein and Gravano 2000) or distributional
+representations (Mao et al. 2018; Zhang et al. 2018; Jin,
+Barzilay, and Jaakkola 2018; Luu et al. 2016; Roller, Erk,
+and Boleda 2014; Weeds, Weir, and McCarthy 2004) to con-
+struct a taxonomy from scratch. However, in many real-world
+applications, some existing taxonomies may have already
+been laboriously curated and are deployed in online systems,
+which calls for solutions to the taxonomy expansion prob-
+lem. To this end, multitudinous methods have been proposed
+recently to solve the taxonomy expansion problem (Vedula
+et al. 2018; Shen et al. 2018b; Manzoor et al. 2020; Shen
+et al. 2020; Yu et al. 2020; Mao et al. 2020). For example,
+Arborist (Manzoor et al. 2020) studies expanding taxonomies
+by jointly learning latent representations for edge semantics
+and taxonomy concepts; TaxoExpan (Shen et al. 2020) pro-
+poses position-enhanced graph neural networks to encode the
+relative position of terms and a robust InfoNCE loss; STEAM
+(Yu et al. 2020) re-formulates the taxonomy expansion task
+as a mini-path-based prediction task and proposes to solve
+it through a multi-view co-training objective. However, all
+the existing taxonomy expansion methods aim for solving
+the one-to-one matching problem, i.e. to ﬁnd the true par-
+ent/hypernym, which is incompatible to our novel one-to-pair
+matching problem induced by taxonomy completion task.
+Auxiliary Learning. Auxiliary learning refers to a learning
+strategy that facilitates training of a primal task with auxiliary
+tasks (Ruder 2017; Shen et al. 2018a). Different from multi-
+task learning, auxiliary learning only cares the performance
+of the primal task. The beneﬁts of auxiliary learning have
+been proved in various applications (Standley et al. 2020;
+Tang et al. 2020; Trinh et al. 2018; Toshniwal et al. 2017;
+Hwang et al. 2020; Jaderberg et al. 2017; Odena, Olah, and
+Shlens 2017; Liu, Davison, and Johns 2019; Lin et al. 2019;
+Xiao et al. 2019). In most of these contexts, joint training
+with auxiliary tasks adds an inductive bias, encouraging the
+model to learn meaningful representations and avoid overﬁt-
+ting spurious correlations. Despite the numerous applications
+of auxiliary learning, its beneﬁts on taxonomy construction
+remains less investigated. To our best knowledge, we are
+the ﬁrst to leverage auxiliary learning to enhance taxonomy
+construction.
+Conclusion
+This paper studies taxonomy completion without manually
+labeled supervised data. We propose a novel TMN framework
+to solve the one-to-pair matching problem in taxonomy com-
+pletion, which can be applied on other applications where
+one-to-pair matching problem exists. Extensive experiments
+demonstrate the effectiveness of TMN on various taxonomies.
+Interesting future work includes leveraging current method
+to cleaning the existing taxonomy, and incorporating feed-
+back from downstream applications (e.g., searching & recom-
+mendation) to generate more diverse (auxiliary) supervision
+signals for taxonomy completion.

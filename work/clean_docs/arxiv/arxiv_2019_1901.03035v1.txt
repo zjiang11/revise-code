@@ -1,0 +1,803 @@
+Published as a conference paper at ICLR 2019
+SELF-MONITORING NAVIGATION AGENT VIA AUXIL-
+IARY PROGRESS ESTIMATION
+Chih-Yao Ma∗†, Jiasen Lu∗†, Zuxuan Wu∗‡, Ghassan AlRegib†, Zsolt Kira†,
+Richard Socher§ & Caiming Xiong§
+†Georgia Institute of Technology
+
+‡University of Maryland, College Park
+
+§Salesforce Research
+
+ABSTRACT
+The Vision-and-Language Navigation (VLN) task entails an agent following nav-
+igational instruction in photo-realistic unknown environments. This challenging
+task demands that the agent be aware of which instruction was completed, which
+instruction is needed next, which way to go, and its navigation progress towards
+the goal. In this paper, we introduce a self-monitoring agent with two complemen-
+tary components: (1) visual-textual co-grounding module to locate the instruction
+completed in the past, the instruction required for the next action, and the next
+moving direction from surrounding images and (2) progress monitor to ensure the
+grounded instruction correctly reﬂects the navigation progress. We test our self-
+monitoring agent on a standard benchmark and analyze our proposed approach
+through a series of ablation studies that elucidate the contributions of the primary
+components. Using our proposed method, we set the new state of the art by a
+signiﬁcant margin (8% absolute increase in success rate on the unseen test set).
+Code is available at https://github.com/chihyaoma/selfmonitoring-agent.
+1
+INTRODUCTION
+Recently, the Vision-and-Language (VLN) navigation task (Anderson et al., 2018b), which requires
+the agent to follow natural language instructions to navigate through a photo-realistic unknown envi-
+ronment, has received signiﬁcant attention (Wang et al., 2018b; Fried et al., 2018). In the VLN task,
+an agent is placed in an unknown realistic environment and is required to follow natural language
+instructions to navigate from its starting location to a target location. In contrast to some existing
+navigation tasks (Kempka et al., 2016; Zhu et al., 2017; Mirowski et al., 2017; 2018), we address
+the class of tasks where the agent does not have an explicit representation of the target (e.g., location
+in a map or image representation of the goal) to know if the goal has been reached or not (Matuszek
+et al., 2013; Hemachandra et al., 2015; Duvallet et al., 2016; Arkin et al., 2017). Instead, the agent
+needs to be aware of its navigation status through the association between the sequence of observed
+visual inputs to instructions.
+Consider an example as shown in Fig. 1, given the instruction ”Exit the bedroom and go towards
+the table. Go to the stairs on the left of the couch. Wait on the third step.”, the agent ﬁrst needs
+to locate which instruction is needed for the next movement, which in turn requires the agent to
+be aware of (i.e., to explicitly represent or have an attentional focus on) which instructions were
+completed or ongoing in the previous steps. For instance, the action ”Go to the stairs” should
+be carried out once the agent has exited the room and moved towards the table. However, there
+exists inherent ambiguity for ”go towards the table”. Intuitively, the agent is expected to ”Go to the
+stairs” after completing ”go towards the table”. But, it is not clear what deﬁnes the completeness of
+”Go towards the table”. The completeness of an ongoing action often depends on the availability
+of the next action. Since the transition between past and next part of the instructions is a soft
+∗Work done while the authors were research interns at Salesforce Research.
+1
+arXiv:1901.03035v1  [cs.AI]  10 Jan 2019
+
+Published as a conference paper at ICLR 2019
+I think
+I am here
+Textual grounding
+Visual grounding
+Progress monitoring
+Self-
+monitoring
+History info
+Which words are completed?
+Which words are for next action?
+Which direction matches words?
+Exit the bedroom and go towards the table. Go to the 
+stairs on the left of the couch. Wait on the third step.
+Action: Go to the stairs 
+Figure 1: Vision-and-Language Navigation task and our proposed self-monitoring agent. The agent
+is constantly aware of what was completed, what is next, and where to go, as it navigates through
+unknown environments by following navigational instructions.
+boundary, in order to determine when to transit and to follow the instruction correctly the agent
+is required to keep track of both grounded instructions. On the other hand, assessing the progress
+made towards the goal has indeed been shown to be important for goal-directed tasks in humans
+decision-making (Benn et al., 2014; Chatham et al., 2012; Berkman & Lieberman, 2009). While a
+number of approaches have been proposed for VLN (Anderson et al., 2018b; Wang et al., 2018b;
+Fried et al., 2018), previous approaches generally are not aware of which instruction is next nor
+progress towards the goal; indeed, we qualitatively show that even the attentional mechanism of the
+baseline does not successfully track this information through time.
+In this paper, we propose an agent endowed with the following abilities: (1) identify which direc-
+tion to go by ﬁnding the part of the instruction that corresponds to the observed images—visual
+grounding, (2) identify which part of the instruction has been completed or ongoing and which
+part is potentially needed for the next action selection—textual grounding, and (3) ensure that the
+grounded instruction can correctly be used to estimate the progress made towards the goal, and ap-
+ply regularization to ensure this —progress monitoring. Therefore, we introduce the self-monitoring
+agent consisting of two complementary modules: visual-textual co-grounding and progress monitor.
+More speciﬁcally, we achieve both visual and textual grounding simultaneously by incorporating
+the full history of grounded instruction, observed images, and selected actions into the agent. We
+leverage the structural bias between the words in instructions used for action selection and progress
+made towards the goal and propose a new objective function for the agent to measure how well it
+can estimate the completeness of instruction-following. We then demonstrate that by conditioning
+on the positions and weights of grounded instruction as input, the agent can be self-monitoring of
+its progress and further ensure that the textual grounding accurately reﬂects the progress made.
+Overall, we propose a novel self-monitoring agent for VLN and make the following contributions:
+(1) We introduce the visual-textual co-grounding module, which performs grounding interdepen-
+dently across both visual and textual modalities. We show that it can outperform the baseline method
+by a large margin. (2) We propose to equip the self-monitoring agent with a progress monitor, and
+for navigation tasks involving instructions instantiate this by introducing a new objective function
+for training. We demonstrate that, unlike the baseline method, the position of grounded instruction
+can follow both past and future instructions, thereby tracking progress to the goal. (3) With the pro-
+posed self-monitoring agent, we set the new state-of-the-art performance on both seen and unseen
+environments on the standard benchmark. With 8% absolute improvement in success rate on the
+unseen test set, we are ranked #1 on the challenge leaderboard.
+2
+SELF-MONITORING NAVIGATION AGENT
+2.1
+NOTATION
+Given a natural language instruction with L words, its representation is denoted by X
+=
+
+x1, x2, . . . , xL
+	
+, where xl is the feature vector for the l-th word encoded by an LSTM language
+encoder. Following Fried et al. (2018), we enable the agent with panoramic view. At each time
+step, the agent perceives a set of images at each viewpoint vt =
+
+vt,1, vt,2, ..., vt,K
+	
+, where K
+2
+
+Published as a conference paper at ICLR 2019
+Exit the bedroom and go towards the
+table. Go to the stairs on the left of the
+couch. Wait on the third step.
+feature         extraction
+Textual grounding
+embedded   instructions
+Grounded instruction
+Positional encoding
+Soft-attention
+Visual grounding
+Soft-attention
+Grounded img features
+Projection
+LSTM
+Prev.
+action
+Projection
+  Action 
+selection
+Progress monitoring
+distance 
+ to goal
+Figure 2: Proposed self-monitoring agent consisting of visual-textual co-grounding, progress mon-
+itoring, and action selection modules. Textual grounding: identify which part of the instruction has
+been completed or ongoing and which part is potentially needed for next action. Visual grounding:
+summarize the observed surrounding images. Progress monitor: regularize and ensure grounded
+instruction reﬂects progress towards the goal. Action selection: identify which direction to go.
+is the maximum number of navigable directions1, and vt,k represents the image feature of direc-
+tion k. The co-grounding feature of instruction and image are denoted as ˆxt and ˆvt respectively.
+The selected action is denoted as at. The learnable weights are denoted with W , with appropriate
+sub/super-scripts as necessary. We omit the bias term b to avoid notational clutter in the exposition.
+2.2
+VISUAL AND TEXTUAL CO-GROUNDING
+First, we propose a visual and textual co-grounding model for the vision and language navigation
+task, as illustrated in Fig. 2. We model the agent with a sequence-to-sequence architecture with
+attention by using a recurrent neural network. More speciﬁcally, we use Long Short Term Memory
+(LSTM) to carry the ﬂow of information effectively. At each step t, the decoder observes representa-
+tions of the current attended panoramic image feature ˆvt, previous selected action at−1 and current
+grounded instruction feature ˆxt as input, and outputs an encoder context ht:
+ht = LSTM([ˆxt, ˆvt, at−1])
+(1)
+where [, ] denotes concatenation. The previous encoder context ht−1 is used to obtain the textual
+grounding feature ˆxt and visual grounding feature ˆvt, whereas we use current encoder context ht to
+obtain next action at, all of which will be illustrated in the rest of the section.
+Textual grounding. When the agent moves from one viewpoint to another, it is required to identify
+which direction to go by relying on a grounded instruction, i.e. which parts of the instruction should
+be used. This can either be the instruction matched with the past (ongoing action) or predicted for
+the future (next action). To capture the relative position between words within an instruction, we
+incorporate the positional encoding PE(·) (Vaswani et al., 2017) into the instruction features. We
+then perform soft-attention on the instruction features X, as shown on the left side of Fig. 2. The
+attention distribution over L words of the instructions is computed as:
+ztextual
+t,l
+= (Wxht−1)⊤PE(xl),
+and
+αt = softmax(ztextual
+t
+),
+(2)
+where Wx are parameters to be learnt. ztextual
+t,l
+is a scalar value computed as the correlation between
+word l of the instruction and previous hidden state ht−1, and αt is the attention weight over features
+in X at time t. Based on the textual attention distribution, the grounded textual feature ˆxt can be
+obtained by the weighted sum over the textual features ˆxt = αT
+t X.
+1Empirically, we found that using only the images on navigable directions to be slightly better than using
+all 36 surrounding images (12 headings × 3 elevations with 30 degree intervals).
+3
+
+Published as a conference paper at ICLR 2019
+Visual grounding. In order to locate the completed or ongoing instruction, the agent needs to keep
+track of the sequence of images observed along the navigation trajectory. We thus perform visual
+attention over the surrounding views based on its previous hidden vector ht−1. The visual attention
+weight βt can be obtained as:
+zvisual
+t,k
+= (Wvht−1)⊤g(vt,k),
+and
+βt = softmax(zvisual
+t
+),
+(3)
+where g is a one-layer Multi-Layer Perceptron (MLP), Wv are parameters to be learnt. Similar to
+Eq. 2, the grounded visual feature ˆvt can be obtained by the weighted sum over the visual features
+ˆvt = βT
+t V .
+Action selection. To make a decision on which direction to go, the agent ﬁnds the image features
+on navigable directions with the highest correlation with the grounded navigation instruction ˆxt and
+the current hidden state ht. We use the inner-product to compute the correlation, and the probability
+of each navigable direction is then computed as:
+ot,k = (Wa[ht, ˆxt])⊤g(vt,k)
+and
+pt = softmax(ot),
+(4)
+where Wa are the learnt parameters, g(·) is the same MLP as in Eq. 3, and pt is the probability of
+each navigable direction at time t. We use categorical sampling during training to select the next
+action at. Unlike the previous method with the panoramic view (Fried et al., 2018), which attends
+to instructions only based on the history of observed images, we achieve both textual and visual
+grounding using the shared hidden state output containing grounded information from both textual
+and visual modalities. During action selection, we rely on both hidden state output and grounded
+instruction, instead of only relying on grounded instruction.
+2.3
+PROGRESS MONITOR
+It is imperative that the textual-grounding correctly reﬂects the progress towards the goal, since the
+agent can then implicitly know where it is now and what the next instruction to be completed will
+be. In the visual-textual co-grounding module, we ensure that the grounded instruction reasonably
+informs decision making when selecting a navigable direction. This is necessary but not sufﬁcient
+for ensuring that the notion of progress to the goal is encoded. Thus, we propose to equip the agent
+with a progress monitor that serves as regularizer during training and prunes unﬁnished trajectories
+during inference.
+Since the positions of localized instruction can be a strong indication of the navigation progress due
+to the structural alignment bias between navigation steps and instruction, the progress monitor can
+estimate how close the current viewpoint is to the ﬁnal goal by conditioning on the positions and
+weights of grounded instruction. This can further enforce the result of textual-grounding to align
+with the progress made towards the goal and to ensure the correctness of the textual-grounding.
+The progress monitor aims to estimate the navigation progress by conditioning on three inputs: the
+history of grounded images and instructions, the current observation of the surrounding images, and
+the positions of grounded instructions. We therefore represent these inputs by using (1) the previous
+hidden state ht−1 and the current cell state ct of the LSTM, (2) the grounded surrounding images
+ˆvt, and (3) the distribution of attention weights of textual-grounding αt, as shown at the bottom of
+Fig. 2 represented by dotted lines.
+Our proposed progress monitor ﬁrst computes an additional hidden state output hpm
+t
+by using
+grounded image representations ˆvt as input, similar to how a regular LSTM computes hidden states
+except we use concatenation over element-wise addition for empirical reasons2. The hidden state
+output is then concatenated with the attention weights αt on textual-grounding to estimate how close
+the agent is to the goal3. The output of the progress monitor ppm
+t
+, which represents the completeness
+of instruction-following, is computed as:
+hpm
+t
+= σ(Wh([ht−1, ˆvt]) ⊗tanh(ct)),
+ppm
+t
+= tanh(Wpm([αt, hpm
+t
+]))
+(5)
+where Wh and Wpm are the learnt parameters, ct is the cell state of the LSTM, ⊗denotes the
+element-wise product, and σ is the sigmoid function.
+2We found that using concatenation provides slightly better performance and stable training.
+3We use zero-padding to handle instructions with various lengths.
+4
+
+Published as a conference paper at ICLR 2019
+2.4
+TRAINING AND INFERENCE
+Training. We introduce a new objective function to train the proposed progress monitor. The
+training target ypm
+t
+is deﬁned as the normalized distance in units of length from the current viewpoint
+to the goal, i.e., the target will be 0 at the beginning and closer to 1 as the agent approaches the goal4.
+Note that the target can also be lower than 0, if the agent’s current distance from the goal is farther
+than the starting point. Finally, our self-monitoring agent is optimized with a cross-entropy loss
+and a mean squared error loss, computed with respect to the outputs from both action selection and
+progress monitor.
+Lloss = −λ
+T
+X
+t=1
+ynv
+t log(pk,t)
+|
+{z
+}
+action selection
+−(1 −λ)
+T
+X
+t=1
+(ypm
+t
+−ppm
+t
+)2
+|
+{z
+}
+progress monitor
+(6)
+where pk,t is the action probability of each navigable direction, λ = 0.5 is the weight balancing the
+two losses, and ynv
+t
+is the ground-truth navigable direction at step t.
+Inference. During inference, we follow Fried et al. (2018) by using beam search. we propose that,
+while the agent decides which trajectories in the beams to keep, it is equally important to evaluate
+the state of the beams on actions as well as on the agent’s conﬁdence in completing the given
+instruction at each traversed viewpoint. We accomplish this idea by integrating the output of our
+progress monitor into the accumulated probability of beam search. At each step, when candidate
+trajectories compete based on accumulated probability, we integrate the estimated completeness
+of instruction-following ppm
+t
+(normalized between 0 to 1) with action probability pk,t to directly
+evaluate the partial and unﬁnished candidate routes: pbeam
+t
+= ppm
+t
+× pk,t.
+Without beam search, we use greedy decoding for action selection with one condition. If the progress
+monitor output decreases (ppm
+t+1 < ppm
+t
+), the agent is required to move back to the previous viewpoint
+and select the action with next highest probability. We repeat this process until the selected action
+leads to increasing progress monitor output. We denote this procedure as progress inference.
+3
+EXPERIMENTS
+R2R Dataset. We use the Room-to-Room (R2R) dataset (Anderson et al., 2018b) for evaluating our
+proposed approach. The R2R dataset is built upon the Matterport3D dataset (Chang et al., 2017) and
+has 7,189 paths sampled from its navigation graphs. Each path has three ground-truth navigation
+instructions written by humans. The whole dataset is divided into 4 sets: training, validation seen,
+validation unseen, and test sets unseen.
+Evaluation metrics. We follow the same evaluation metrics used by previous work on the R2R task:
+(1) Navigation Error (NE), mean of the shortest path distance in meters between the agent’s ﬁnal
+4We set the target to 1 if the agent’s distance to the goal is less than 3.
+Table 1: Performance comparison with the state of arts: Student-forcing (Anderson et al., 2018b),
+RPA (Wang et al., 2018b), and Speaker-Follower (Fried et al., 2018). *: with data augmentation.
+leaderboard: when using beam search, we modify our search procedure to comply with the leader-
+board guidelines, i.e., all traversed viewpoints are recorded.
+Validation-Seen
+Validation-Unseen
+Test (unseen)
+Method
+NE ↓
+SR ↑
+OSR ↑
+SPL ↑
+NE ↓
+SR ↑
+OSR ↑
+SPL ↑
+NE ↓
+SR ↑
+OSR ↑
+SPL ↑
+Random
+9.45
+0.16
+0.21
+-
+9.23
+0.16
+0.22
+-
+9.77
+0.13
+0.18
+-
+Student-forcing
+6.01
+0.39
+0.53
+-
+7.81
+0.22
+0.28
+-
+7.85
+0.20
+0.27
+-
+RPA
+5.56
+0.43
+0.53
+-
+7.65
+0.25
+0.32
+-
+7.53
+0.25
+0.33
+-
+Speaker-Follower
+3.88
+0.63
+0.71
+-
+5.24
+0.50
+0.63
+-
+-
+-
+-
+-
+Speaker-Follower*
+(leaderboard)
+3.08
+0.70
+0.78
+-
+4.83
+0.55
+0.65
+-
+4.87
+0.53
+0.64
+-
+-
+-
+-
+-
+-
+-
+-
+-
+4.87
+0.53
+0.96
+0.01
+Ours (beam search)
+(leaderboard)
+3.23
+0.70
+0.78
+0.66
+5.04
+0.57
+0.70
+0.51
+4.99
+0.57
+0.68
+0.51
+-
+-
+-
+-
+-
+-
+-
+-
+4.99
+0.57
+0.95
+0.02
+Ours* (beam search)
+(leaderboard)
+3.04
+0.71
+0.78
+0.67
+4.62
+0.58
+0.68
+0.52
+4.48
+0.61
+0.70
+0.56
+-
+-
+-
+-
+-
+-
+-
+-
+4.48
+0.61
+0.97
+0.02
+5
+
+Published as a conference paper at ICLR 2019
+Baseline (panoramic action space)
+Self-Monitoring
+validation seen
+validation unseen
+validation seen
+validation unseen
+Agent step
+instruction: !", !$, … , !&
+Figure 3:
+The positions and weights of grounded instructions as agents navigate by following
+instructions. Our self-monitoring agent with progress monitor demonstrates the grounded instruction
+used for action selection shifts gradually from the beginning of instructions towards the end. This is
+not true of the baseline method.
+position and the goal location. (2) Success Rate (SR), the percentage of ﬁnal positions less than 3m
+away from the goal location. (3) Oracle Success Rate (OSR), the success rate if the agent can stop at
+the closest point to the goal along its trajectory. In addition, we also include the recently introduced
+Success rate weighted by (normalized inverse) Path Length (SPL) (Anderson et al., 2018a), which
+trades-off Success Rate against trajectory length.
+3.1
+COMPARISON WITH PRIOR ART
+We ﬁrst compare the proposed self-monitoring agent with existing approaches. As shown in Table 1,
+our method achieves signiﬁcant performance improvement compared to the state of the arts without
+data augmentation. We achieve 70% SR on the seen environment and 57% on the unseen environ-
+ment while the existing best performing method achieved 63% and 50% SR respectively. When
+trained with synthetic data5, our approach achieves slightly better performance on the seen environ-
+ments and signiﬁcantly better performance on both the validation unseen environments and the test
+unseen environments when submitted to the test server. We achieve 3% and 8% improvement on SR
+on both validation and test unseen environments. Both results with or without data augmentation
+indicate that our proposed approach is more generalizable to unseen environments. At the time of
+writing, our self-monitoring agent is ranked #1 on the challenge leader-board among the state of the
+arts.
+Note that both Speaker-Follower and our approach in Table 1 use beam search. For comparison
+without using beam search, please refer to the Appendix.
+Textually grounded agent.
+Intuitively, an instruction-following agent is required to strongly
+demonstrate the ability to correctly focus and follow the corresponding part of the instruction as
+it navigates through an environment. We thus record the distribution of attention weights on instruc-
+tion at each step as indications of which parts of the instruction being used for action selection. We
+average all runs across both validation seen and unseen dataset splits. Ideally, we expect to see the
+distribution of attention weights lies close to a diagonal, where at the beginning, the agent focuses
+on the beginning of the instruction and shifts its attention towards the end of instruction as it moves
+closer to the goal.
+To demonstrate, we use the method with panoramic action space proposed in Fried et al. (2018) as
+a baseline for comparison. As shown in Figure 3, our self-monitoring agent with progress monitor
+demonstrates that the positions of grounded instruction over time form a line similar to a diagonal.
+This result may further indicate that the agent successfully utilizes the attention on instruction to
+complete the task sequentially. We can also see that both agents were able to focus on the ﬁrst
+part of the instruction at the beginning of navigation consistently. However, as the agent moves
+further in unknown environments, our self-monitoring agent can still successfully identify the parts
+of instruction that are potentially useful for action selection, whereas the baseline approach becomes
+uncertain about which part of the instruction should be used for selecting an action.
+5We use the exact same synthetic data generated from the Speaker as in Fried et al. (2018) for comparison.
+6
+
+Published as a conference paper at ICLR 2019
+Table 2:
+Ablation study showing the effect of each proposed component. All methods use the
+panoramic action space. Note that, for methods using beam search during inference, only the last
+selected trajectory is used for evaluating OSR and SPL. *: we implemented the model from Speaker-
+Follower (Fried et al., 2018) with panoramic action space as baseline.
+Inference Mode
+Validation-Seen
+Validation-Unseen
+#
+Co-
+Grounding
+Progress
+Monitor
+Greedy
+Decoding
+Progress
+Inference
+Beam
+Search
+Data
+Aug.
+NE ↓
+SR ↑
+OSR ↑
+SPL ↑
+NE ↓
+SR ↑
+OSR ↑
+SPL ↑
+Baseline*
+4.36
+0.54
+0.68
+-
+7.22
+0.27
+0.39
+-
+1
+✓
+✓
+3.65
+0.65
+0.75
+0.56
+6.07
+0.42
+0.57
+0.28
+2
+✓
+✓
+✓
+3.72
+0.63
+0.75
+0.56
+5.98
+0.44
+0.58
+0.30
+3
+✓
+✓
+✓
+✓
+3.22
+0.67
+0.78
+0.58
+5.52
+0.45
+0.56
+0.32
+4
+✓
+✓
+✓
+3.56
+0.65
+0.75
+0.58
+5.89
+0.46
+0.60
+0.32
+5
+✓
+✓
+✓
+✓
+3.18
+0.68
+0.77
+0.58
+5.41
+0.47
+0.59
+0.34
+6
+✓
+✓
+3.66
+0.66
+0.76
+0.62
+5.70
+0.49
+0.68
+0.42
+7
+✓
+✓
+✓
+3.23
+0.70
+0.78
+0.66
+5.04
+0.57
+0.70
+0.51
+8
+✓
+✓
+✓
+✓
+3.04
+0.71
+0.78
+0.67
+4.62
+0.58
+0.68
+0.52
+3.2
+ABLATION STUDY
+We now discuss the importance of each component proposed in this work. We begin with the same
+baseline as before (agent with panoramic action space in Fried et al. (2018))6.
+Co-grounding. When comparing the baseline with row #1 in our proposed method, we can see that
+our co-grounding agent outperformed the baseline with a large margin. This is due to the fact that
+we use the LSTM to carry both the textually and visually grounded content, and the decision on
+each navigable direction is predicted with both textually grounded instruction and the hidden state
+output of the LSTM. On the other hand, the baseline agent relies on the LSTM to carry visually
+grounded content, and uses the hidden state output for predicting the textually grounded instruction.
+As a result, we observed that instead of predicting the instruction needed for selecting a navigable
+direction, the textually grounded instruction may match with the past sequence of observed images
+implicitly saved within the LSTM.
+Progress monitor. Given the effective co-grounding, the proposed progress monitor further ensure
+that the grounded instruction correctly reﬂects the progress made toward the goal. This further
+improves the performance especially on the unseen environments as we can see from row #1 and #2.
+When using the progress inference, the progress monitor serve as a progress indicator for the agent
+to decide when to move back to the last viewpoint. We can see from row #2 and #4 that the SR
+performance can be further improved around 2% on both seen and unseen environments.
+Finally, we integrate the output of the progress monitor with the state-factored beam search (Fried
+et al., 2018), so that the candidate paths compete not only based on the probability of selecting a
+certain navigable direction but also on the estimated correspondence between the past trajectory and
+the instruction. As we can see by comparing row #2, #6, and #7, the progress monitor signiﬁcantly
+improved the success rate on both seen and unseen environments and is the key for surpassing the
+state of the arts even without data augmentation. We can also see that when using beam search
+without progress monitor, the SR on unseen improved 7% (row #1 vs #6), while using beam search
+integrated with progress estimation improved 13% (row #2 vs #7).
+Data augmentation. In the above, we have shown each row in our approach contributes to the
+performance. Each of them increases the success rate and reduces the navigation error incremen-
+tally. By further combining them with the data augmentation pre-trained from the speaker (Fried
+et al., 2018), the SR and OSR are further increased, and the NE is also drastically reduced. In-
+terestingly, the performance improvement introduced by data augmentation is smaller than from
+Speaker-Follower on the validation sets (see Table 1 for comparison). This demonstrates that our
+proposed method is more data-efﬁcient.
+6Note that our results for this baseline are slightly higher on val-seen and slightly lower on val-unseen than
+those reported, due to differences in hyper-parameter choices.
+7
+
+Published as a conference paper at ICLR 2019
+Figure 4:
+Successful self-monitoring agent navigates in two unseen environments. The agent is
+able to correctly follow the grounded instruction and achieve the goal successfully. The percentage
+of instruction completeness estimated by the proposed progress monitor gradually increases as the
+agent navigates and approaches the goal. Finally, the agent grounded the word ”Stop” to stop (see
+the supplementary material for full ﬁgures).
+3.3
+QUALITATIVE RESULTS
+To further validate the proposed method, we qualitatively show how the agent navigates through
+unseen environments by following instructions as shown in Fig. 4. In each ﬁgure, the agent follows
+the grounded instruction (at the top of the ﬁgure) and decides to move towards a certain direction
+(green arrow). For the full ﬁgures and more examples of successful and failed agents in both unseen
+and seen environments, please see the supplementary material.
+Consider the trajectory on the left side in Fig. 4, at step 3, the grounded instruction illustrated that
+the agent just completed ”turn right” and focuses mainly on ”walk straight to bedroom”. As the
+agent entered the bedroom, it then shifts the textual grounding to the next action ”Turn left and walk
+to bed lamp”. Finally, at step 6, the agent completed another ”turn left” and successfully stop at the
+rug (see the supplementary material for the importance of dealing with duplicate actions). Consider
+the example on the right side, the agent has already entered the hallway and now turns right to walk
+across to another room. However, it is ambiguous that which room the instructor is referring to. At
+step 5, our agent checked out the room on the left ﬁrst and realized that it does not match with ”Stop
+in doorway in front of rug”. It then moves to the next room and successfully stops at the goal.
+In both cases, we can see that the completeness estimated by progress monitor gradually increases as
+the agent steadily navigates toward the goal. We have also observed that the estimated completeness
+ends up much lower for failure cases (see the supplementary material for further details).
+4
+RELATED WORK
+Vision, Language, and Navigation.. There is a plethora work investigating the combination of vi-
+sion and language for a multitude of applications (Zhou et al., 2018a;b; Antol et al., 2015; Tapaswi
+et al., 2016; Das et al., 2017), etc. While success has been achieved in these tasks to handle massive
+corpora of static visual input and text data, a resurgence of interest focuses on equipping an agent
+with the ability to interact with its surrounding environment for a particular goal such as object
+manipulation with instructions (Misra et al., 2016; Arkin et al., 2017), grounded language acqui-
+sition (Al-Omari et al., 2017; Kollar et al., 2013; Spranger & Steels, 2015; Dubba et al., 2014),
+8
+
+Published as a conference paper at ICLR 2019
+embodied question answering (Das et al., 2018; Gordon et al., 2018), and navigation (Matuszek
+et al., 2013; Hemachandra et al., 2015; Duvallet et al., 2016; Zhu et al., 2017; de Vries et al., 2018;
+Yuke Zhu, 2017; Mousavian et al., 2018; Wayne et al., 2018; Wang et al., 2018a; Mirowski et al.,
+2017; 2018; Zamir et al., 2018). In this work, we concentrate on the recently proposed the Vision-
+and-Language Navigation task (Anderson et al., 2018b)—asking an agent to carry out sophisti-
+cated natural-language instructions in a 3D environment. This task has application to ﬁelds such
+as robotics; in contrast to traditional map-based navigation systems, navigation with instructions
+provides a ﬂexible way to generalize across different environments.
+A few approaches have been proposed for the VLN task. For example, Anderson et al. (2018b)
+address the task in the form of a sequence-to-sequence translation model. Yu et al. (2018) introduce
+a guided feature transformation for textual grounding. Wang et al. (2018b) present a planned-head
+module by combing model-free and model-based reinforcement learning approaches. Recently,
+Fried et al. (2018) propose to train a speaker to synthesize new instructions for data augmentation
+and further use it for pragmatic inference to rank the candidate routes. These approaches leverage
+attentional mechanisms to select related words from a given instruction when choosing an action,
+but those agents are deployed to explore the environment without knowing about what progress has
+been made and how far away the goal is. In this paper, we propose a self-monitoring agent that
+performs co-grounding on both visual and textual inputs and constantly monitors its own progress
+toward the goal as a way of regularizing the textual grounding.
+Visual and textual grounding. Visual grounding learns to localize the most relevant object or re-
+gion in an image given linguistic descriptions, and has been demonstrated as an essential component
+for a variety of vision tasks like image captioning (Hu et al., 2016; Rohrbach et al., 2016; Lu et al.,
+2018), visual question answering (Lu et al., 2016b; Agrawal et al., 2018), relationship detection (Lu
+et al., 2016a; Ma et al., 2018) and referral expression (Nagaraja et al., 2016; Gavrilyuk et al., 2018).
+In contrast to identifying regions or objects, we perform visual grounding to locate relevant images
+(views) in a panoramic photo constructed by stitching multiple images with the aim of choosing
+which direction to go. Extensive efforts have been made to ground language instructions into a se-
+quence of actions (MacMahon et al., 2006; Branavan et al., 2009; Vogel & Jurafsky, 2010; Tellex
+et al., 2011; Artzi & Zettlemoyer, 2013; Andreas & Klein, 2015; Mei et al., 2016; Cohn et al., 2016;
+Misra et al., 2017). These early approaches mainly emphasize the incorporation of structural align-
+ment biases between the linguistic structure and sequence of actions (Mei et al., 2016; Andreas &
+Klein, 2015), and assume the agents are in relatively easy environment where limited visual percep-
+tion is required to fulﬁll the instructions.
+5
+CONCLUSION
+We introduce a self-monitoring agent which consists of two complementary modules: visual-textual
+co-grounding module and progress monitor. The visual-textual co-grounding module locates the
+instruction completed in the past, the instruction needed in the next action, and the moving di-
+rection from surrounding images. The progress monitor regularizes and ensures the grounded in-
+struction correctly reﬂects the progress towards the goal by explicitly estimating the completeness
+of instruction-following. This estimation is conditioned on the positions and weights of grounded
+instruction. Our approach sets a new state-of-the-art performance on the standard Room-to-Room
+dataset on both seen and unseen environments. While we present one instantiation of self-monitoring
+for a decision-making agent, we believe that this concept can be applied to other domains as well.

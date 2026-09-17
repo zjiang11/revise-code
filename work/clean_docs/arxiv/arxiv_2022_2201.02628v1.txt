@@ -1,0 +1,628 @@
+Attention Option-Critic
+Raviteja Chunduru1,2, Doina Precup1,2,3
+1McGill University, 2Mila, 3Google Deepmind
+
+Abstract
+Temporal abstraction in reinforcement learning is the ability
+of an agent to learn and use high-level behaviors, called op-
+tions. The option-critic architecture provides a gradient-based
+end-to-end learning method to construct options. We pro-
+pose an attention-based extension to this framework, which
+enables the agent to learn to focus different options on dif-
+ferent aspects of the observation space. We show that this
+leads to behaviorally diverse options which are also capa-
+ble of state abstraction, and prevents the degeneracy prob-
+lems of option domination and frequent option switching that
+occur in option-critic, while achieving a similar sample com-
+plexity. We also demonstrate the more efﬁcient, interpretable,
+and reusable nature of the learned options in comparison with
+option-critic, through different transfer learning tasks. Exper-
+imental results in a relatively simple four-rooms environment
+and the more complex ALE (Arcade Learning Environment)
+showcase the efﬁcacy of our approach.
+1
+Introduction
+Humans are effortlessly adept at many forms of abstraction.
+We use a high-level of decision making, to plan using ab-
+stract actions, which are typically composed of a sequence
+of shorter, lower-level actions and last for an extended pe-
+riod of time. This is known as temporal abstraction. When
+observing our surroundings before making a decision, we
+also rely and focus on the important aspects of our sensory
+input, and ignore unnecessary signals. This is called state
+abstraction.
+Within the options framework (Sutton, Precup, and Singh
+1999; Precup 2000), for temporal abstraction, the end-to-
+end learning of hierarchical behaviors has recently become
+possible through the option-critic architecture (Bacon, Harb,
+and Precup 2017), which enables the learning of intra-option
+policies, termination functions and the policy over options,
+to maximize the expected return. However, if this is the sole
+objective for option discovery, the beneﬁt that the learned
+options have over primitive action policies becomes ques-
+tionable. Indeed, the option-critic architecture eventually re-
+sults in option degeneracy i.e. either one option dominates
+and is the only one that is used, or there is frequent termina-
+tion of and switching between options. Introduced to combat
+this problem, the deliberation cost model (Harb et al. 2018)
+Copyright © 2021, All rights reserved.
+modiﬁes the termination gradient to assign a penalty to op-
+tion termination. This leads to extended options, but relies
+on a hard-to-interpret cost parameter. Alternatively, the ter-
+mination critic algorithm (Harutyunyan et al. 2019) employs
+a predictability objective for option termination to prevent
+option collapse and improve planning.
+In this paper, we adopt the view that options should be di-
+verse in their behavior by explicitly learning to attend to dif-
+ferent parts of the observation space. This approach would
+solve the degeneracy problem by ensuring that options are
+only used when their respective attentions are activated. This
+is in line with the notion of options specializing to achieve
+speciﬁc behaviors, and can be viewed as an approach that
+simultaneously achieves state and temoral abstraction. Our
+approach, in effect, relaxes the strong assumption – made by
+most option discovery methods – that all options are avail-
+able everywhere, and is a step towards learning the initiation
+sets for options (Sutton, Precup, and Singh 1999), which are
+otherwise inconvenient to directly learn using a gradient-
+based approach. We present an algorithm which builds on
+option-critic in order to develop options endowed with at-
+tention, and evaluate it in several problems, showing both
+quantitative beneﬁts, as well as qualitative beneﬁts, in terms
+of the interpretability of the options that are acquired.
+The view of bounded rationality (Simon 1957) can be
+seen as one of the motivations for temporal abstraction. The
+added capability of state abstraction takes this one step fur-
+ther, and serves as an additional rationale for our work.
+2
+Background
+A discrete-time ﬁnite discounted MDP (Markov Decision
+Process) M (Puterman 1995; Sutton and Barto 1998) is de-
+ﬁned as a tuple {S, A, R, P, γ}, where S is the set of states,
+A is the set of actions, R : S × A →R is the reward func-
+tion, P : S × A × S →[0, 1] is the transition probability
+function which speciﬁes the dynamics of the environment,
+and γ ∈[0, 1) is the scalar discount factor. A Markovian
+stationary policy π : S × A →[0, 1] is a probabilistic
+mapping from the set of states S to the set of actions A.
+At each timestep t, the agent observes state st ∈S and
+takes an action at ∈A according to policy π, thereby re-
+ceiving reward rt+1 = R(st, at) and transitioning to state
+st+1 ∈S with probability P(st+1|st, at). For policy π,
+the discounted state value function is given by: V π(s) =
+arXiv:2201.02628v1  [cs.LG]  7 Jan 2022
+
+Eπ[P∞
+t=0 γtrt+1|s0 = s] and the discounted action value
+function by: Qπ(s, a) = Eπ[P∞
+t=0 γtrt+1|s0 = s, a0 = a].
+For a parameterized policy πθ with J(θ) = V π(s0) as the
+objective function (where s0 is an initial state), the policy
+gradient theorem (Sutton et al. 2000) can be used to derive
+a learning algorithm for ﬁnding the optimal policy π∗
+θ that
+maximizes J(θ) as:
+∇θJ(θ, s0) =
+X
+s
+dπ(s|s0)
+X
+a
+∇θπ(s, a)Qπ(s, a)
+(1)
+where dπ(s|s0) = P∞
+t=0 γtP(st = s|s0, π) is the dis-
+counted weighting of states with s0 as the starting state.
+In actor-critic methods (Konda and Tsitsiklis 2000), the ac-
+tion values Qπ
+φ(s, a), parameterized by φ, are typically es-
+timated by using temporal difference (TD) learning (Sut-
+ton 1988). For instance, the update rule for 1-step TD(0)
+is: φ = φ + αδt∇φQπ
+φ(st, at) where the TD(0) error δt =
+rt+1 + γQπ
+φ(st+1, at+1) −Qπ
+φ(st, at) and α ∈(0, 1) is the
+learning rate.
+2.1
+The Options Framework
+A Markovian option ω ∈Ω(Sutton, Precup, and Singh
+1999) is a tuple that consists of an initiation set Iω ⊆S,
+which denotes the set of states where the option can be ini-
+tiated, an intra-option policy πω : S × A →[0, 1], which
+speciﬁes a probabilistic mapping from states to actions, and
+a termination condition βω : S →[0, 1], which signiﬁes
+the probability of option termination in any state. Let Ω(s)
+denote the set of available options for state s. An option ω
+is available in state s if s ∈Iω. The set of all options is:
+Ω= ∪s∈SΩ(s).
+Similar to Bacon, Harb, and Precup (2017), we consider
+call-and-return option execution. In this model, when the
+agent is in state st, it chooses an option ω ∈Ω(st) accord-
+ing to a policy over options πΩ. The intra-option policy πω
+is then followed until the current option terminates accord-
+ing to βω after which a new option that is available at the
+new state is chosen by πΩ, and the process repeats. Like
+many existing option discovery methods, we too make the
+assumption that all options are available everywhere, i.e.,
+∀s ∈S, ∀ω ∈Ω: s ∈Iω. However, we show that our
+approach ends up relaxing this assumption, in effect, and
+provides an elegant way to learn distinct initiation sets for
+options.
+The option-critic architecture (Bacon, Harb, and Pre-
+cup 2017) provides an end-to-end gradient-based method to
+learn options. For parameterized intra-option policies πω,θ
+and option terminations βω,ν, the option-value function is:
+QΩ(s, ω) =
+X
+a
+πω,θ(a|s)QU(s, ω, a)
+(2)
+where QU : S ×Ω×A →R is the value of executing action
+a in the context of state-option (s, ω):
+QU(s, ω, a) = r(s, a) + γ
+X
+s′
+P(s′|s, a)U(ω, s′)
+(3)
+and U : Ω× S →R is the option-value on arrival (Sutton,
+Precup, and Singh 1999) and represents the value of execut-
+ing option ω in state s′:
+U(ω, s′) = (1 −βω,ν(s′))QΩ(s′, ω) + βω,ν(s′)VΩ(s′) (4)
+where VΩ(s) = P
+ω πΩ(ω|s)QΩ(s, ω) is the option-level
+state value function.
+The intra-option policies and option terminations can be
+learned by using the policy gradient theorem to maximize
+the expected discounted return (Bacon, Harb, and Precup
+2017). The gradient of this objective with respect to intra-
+option policy parameters θ when the initial condition is
+(s0, ω0) is:
+∇θJ(θ, s0, ω0) =
+X
+s,ω
+
+µΩ(s, ω|s0, ω0)
+×
+X
+a
+
+∇θπω,θ(a|s)
+
+QU(s, ω, a)
+	
+(5)
+where µΩ(s, ω|s0, ω0) is the discounted weighting of state-
+option pairs along trajectories that start with (s0, ω0):
+µΩ(s, ω|s0, ω0) = P∞
+t=0 γtP(st = s, ωt = ω|s0, ω0). Sim-
+ilarly, the gradient with respect to option termination param-
+eters ν with initial condition (s1, ω0) is:
+∇νJ(ν, s1, ω0) = −
+X
+s′,ω
+
+µΩ(s′, ω|s1, ω0)
+×
+
+∇νβω,ν(s′)
+
+AΩ(s′, ω)
+	
+(6)
+where AΩ(s, ω) = QΩ(s, ω) −VΩ(s) is the advantage of
+choosing option ω in state s.
+2.2
+Attention
+The attention mechanism was ﬁrst proposed in language
+translation tasks (Bahdanau, Cho, and Bengio 2015) but has
+since been applied in vision (Mnih et al. 2014) and rein-
+forcement learning (Sorokin et al. 2015) as well. It enables
+the localization of important information before making a
+prediction. In our approach, soft attention (smoothly vary-
+ing and differentiable) is applied as a learnable mask over
+the state observations.
+3
+Attention Option-Critic
+One inspiration for using attention with options stems from
+human behavior. Consider the situation of putting on a coat
+that is hanging next to your front door, opening the door,
+and heading out. Consider one option to be putting on your
+coat and another to be opening the door, with a ﬁeld of view
+where both coat and door are visible. When executing the
+ﬁrst option, we do not focus on the door even though it is
+visible. Similarly, when opening the door, we do not con-
+sider our coat anymore. The high-level behavior that we ex-
+hibit inﬂuences what we pay attention to, which in turn de-
+termines whether a behavior can and should be executed in
+that particular situation.
+We introduce the Attention Option-Critic (AOC) architec-
+ture in order to enable options to learn to attend to speciﬁc
+features in the observation space, in order to diversify their
+behavior and prevent degeneracy. An attention mechanism
+
+Algorithm 1 Attention Option-Critic
+Input: αθ, αν, αφ as learning rates for θ, ν and φ respec-
+tively.
+Initialize policy over options πΩ(o), intra-option policies
+πω,θ, option terminations βω,ν, option attentions hω,φ
+s ←s0
+o ←{hω,φ(s) ⊙s : ω ∈Ω}
+Choose ω according to ϵ-soft πΩ(o)
+repeat
+Choose a according to πω,θ(a|oω)
+Take action a in s, observe s′, r
+o′ ←{hω,φ(s′) ⊙s′ : ω ∈Ω}
+1. Options evaluation:
+δ ←r −QU(oω, ω, a)
+if s′ is non-terminal then
+δ ←δ + γ(1 −βω,ν(o′
+ω))QΩ(o′
+ω, ω)
++γβω,ν(o′
+ω) max¯ω QΩ(o′
+ω, ¯ω)
+end if
+QU(oω, ω, a) ←QU(oω, ω, a) + αδ
+2. Options improvement:
+θ ←θ + αθ
+
+∇θ log πω,θ(a|oω)
+
+QU(oω, ω, a)
+ν ←ν −αν
+
+∇νβω,ν(o′
+ω)
+
+QΩ(o′
+ω, ω) −VΩ(o′
+ω)
+
+φ ←φ + αφ∇φ
+
+QΩ(oω, ω) + L
+
+if βω,ν terminates in s′ then
+choose new ω according to ϵ-soft πΩ(o′)
+end if
+s ←s′
+o ←{hω,φ(s) ⊙s : ω ∈Ω}
+until s′ is terminal
+hω,φ, parameterized by φ, is applied to the observation s
+for each option ω as: oω = hω,φ(s) ⊙s where ⊙denotes
+element-wise multiplication. hω,φ consists of values in [0, 1]
+and is the same size as the original observation s. The result
+oω is used to determine the value of the option, the intra-
+option policy and the termination condition. This is done for
+each option separately, and ensures only the required fea-
+tures from the observation determine the option’s behavior.
+We refer to o as the list of all attention-modiﬁed observa-
+tions for each option o = {oω : ω ∈Ω}. The learning of the
+option terminations and intra-option policies is performed
+similarly to the option-critic architecture. The complete al-
+gorithm is shown in Algorithm 1.
+The attention for each option is learned to maximize the
+expected cumulative return of the agent while simultane-
+ously maximizing a distance measure between the atten-
+tions of the options, so that the options attend to different
+features. Additionally, some regularization is added to fa-
+cilitate the emergence of desired option characteristics. The
+attention parameters φ are updated with gradient ascent as
+φ = φ + αφ∇φ
+
+QΩ(oω, ω) + L
+
+, where L denotes the sum
+of the distance measure and the regularization, weighted by
+their respective importance. More details are speciﬁed in the
+next section.
+The attention mechanism brings an aspect of explainabil-
+ity to the agent, and allows one to easily understand each
+option’s focus and behavior. Also, it provides a highly inter-
+pretable knob to tune options since the characteristics of the
+resulting options can be controlled by affecting how the at-
+tentions of the options are learned during training. For exam-
+ple, constraining attentions to be distinct enables the diver-
+sity of options to be set explicitly as a learning objective. Al-
+ternatively, penalizing differences in option attention values
+for states along a trajectory results in temporally extended
+options, achieving an effect similar to the deliberation cost
+model (Harb et al. 2018), but in a more transparent way.
+The resulting attention for each option also serves as an
+indication of the regions of state space where that option
+is active and can be initialized. Thus, along with the intra-
+option policies and option terminations, AOC essentially
+learns the initiation sets of the options, in that an option is
+typically only initiated in a particular state when the corre-
+sponding attention of that option in that state is high. This
+prevents the options from degenerating. Since every option
+cannot be executed or initiated everywhere, this prevents
+both frequent option termination and switching, and also op-
+tion domination (see section A.2), by ensuring that a single
+option cannot always be followed.
+3.1
+Optimality of Learned Solution
+Since each option receives different information, it is not im-
+mediately obvious whether the solution that is learned by
+AOC is ﬂat, hierarchically or recursively optimal (Dietterich
+2000). However, each option learns to act optimally based on
+the information that it sees, and apart from some constraints
+enforced via option attentions, individual option optimality
+is driven by the goal of the policy over options to maximize
+the total expected return. Since there is no pseudo reward
+or subtask assigned to each option, their attentions and ar-
+eas of usage are learned to maximize this objective and we
+reason that in the absence of attention constraints, a ﬂat op-
+timal policy will be learned in the limit. In the presence of
+constraints, the optimality of the learned options will depend
+on the interactions between the multiple objectives. Even in
+such cases, AOC is capable of achieving a ﬂat optimal solu-
+tion, as shown empirically in the next section.
+Figure 1: The shared network model for AOC in four-rooms.
+The option attentions are observation independent. The ⊙
+symbol represents element-wise multiplication.
+
+(a)
+(b)
+(c)
+Figure 2: An example of learned options in the four-rooms domain with goal at the north hallway (shown in green). (a) example
+of degenerate options learned by OC. Darker color indicates more frequent option execution in that particular state. Option 1
+dominates and is used 88.12% while Option 0 is used 11.88%. Options 2 and 3 are unused. (b) the resulting attention learned
+for each option with AOC. (c) the options learned using AOC. The options are diverse and respect their attentions. The option
+usage is relatively balanced at 19.5%, 34.3%, 8.1% and 38.1% respectively.
+4
+Experimental Results
+In this section, we show the beneﬁt of combining attention
+with options and empirically demonstrate that it prevents
+option degeneracy, provides interpretability, and promotes
+reusability of options in transfer settings.
+4.1
+Learning in the four-rooms environment
+We start by showing the beneﬁt of attention in the four-
+rooms navigation task (Sutton, Precup, and Singh 1999)
+where the agent must reach a speciﬁed goal. The observation
+space consists of one-hot-encoded vectors for every permis-
+sible state in the grid. The available actions are up, down,
+left and right. The chosen action is executed with probability
+0.98 and a random action is executed with 0.02 probability.
+The reward is +20 upon reaching the goal, and -1 otherwise.
+The agent starts in a uniformly random state and the goal is
+chosen randomly for each run of the algorithm.
+We use 4 options for learning, with a discount factor of
+0.99. The attention hω,φ for each option ω is initialized ran-
+domly as a vector of the same length as the input observation
+s. Thus, in this situation, the option attentions are indepen-
+dent of the state observation. We employ a 3-layer shared-
+parameter neural network with 3 individual heads, each of
+which respectively estimates the intra-option policy, the op-
+tion termination functions, and the option values. In our
+implementation of AOC (for all experiments), the network
+learns the option values QΩto which the ϵ-greedy strategy
+is applied to determine the policy over options πΩ. Intra-
+option exploration is enforced with entropy regularization.
+The architecture is shown in Figure 1.
+The option attentions, option values, intra-option policies
+and option terminations are learned in an end-to-end man-
+ner to maximize the total expected discounted return. The
+cosine similarity between the option attentions is added to
+the loss to ensure that the learned attentions are diverse. Fur-
+(a) Training curves
+(b) Goal transfer
+(c) Blocked hallway
+Figure 3: Learning and transfer (averaged over 10 runs) in the four-rooms domain with 4 options.
+
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+Figure 4: (a) and (b): resulting options learned by option-critic upon goal transfer and transfer with blocked hallway respec-
+tively. (c) and (d): the resulting option attentions and usage upon goal transfer. (e) and (f): the resulting option attentions and
+usage upon transfer with blocked hallway. For the goal transfer plots above, the goal is shifted from north hallway to the top
+left state in the north west room. For blocked hallway transfer, the goal is kept ﬁxed as the north hallway, but the east hallway
+is blocked. The transfer results shown here are with OC and AOC transfer I. The goal states are shown in green.
+thermore, a regularization loss – the sum of absolute differ-
+ences between attentions (for each option) of adjacent states
+in a trajectory – penalizes irregularities in the option atten-
+tions of states in close temporal proximity along trajectories.
+This results in smooth attentions and leads to temporally
+extended options by minimizing switching, and achieves a
+similar effect to deliberation cost (Harb et al. 2018). Thus,
+for the four-rooms domain, the L term in Algorithm 1 is en-
+forced by adding w1L1 + w2L2 to the overall network loss
+function, where L1 is the total sum of cosine similarities be-
+tween the attentions of every pair of options, L2 is the tem-
+poral regularization loss for option attentions, and w1 and
+w2 are the respective weights for these additional objectives.
+Through their inﬂuence on the option attentions, different
+values for these weights allow options with the desired char-
+acteristics to be obtained. We found that respective values
+of 4.0 and 2.0 for w1 and w2 resulted in the most diverse
+options, judged quantitatively (see section A.4) and qualita-
+tively (Figure 2). Further details regarding hyperparameters
+and reproducibility are given in section C.
+The resulting option usage and their attentions are shown
+in Figure 2. The learned options are distinct and specialized
+in their behavior, and they perform state abstraction by fo-
+cusing on a subset of the observation vector to perform their
+speciﬁc tasks. The option usage respects the corresponding
+area of attention, which indicates that the options are typi-
+cally limited to this area and that their behavior can be rea-
+sonably understood from their attentions. AOC also learns
+
+stable options and the behavior and usage of options does
+not vary signiﬁcantly during the course of training. This sta-
+bility could be useful for effectively scaling options to more
+abstract behaviors. This is in contrast to option-critic (OC),
+which tends to learn degenerate options that are volatile and
+continuously change. A qualitative comparison that demon-
+strates AOC option stability is shown in section A.1.
+Although AOC additionally needs to learn option atten-
+tions, it learns faster than OC, as shown in Figure 3a. One
+possible reason is that in AOC, options specialize to differ-
+ent regions and enable quicker learning, because of smaller
+overlap between their applicability regions. Furthermore, a
+comparison between option domination in AOC and OC (see
+A.2) during the course of training indicates that the latter
+prevents it.
+4.2
+Transfer in the four-rooms environment
+We perform two experiments to assess the transfer capa-
+bility of AOC in the four-rooms domain, both after 30,000
+episodes of training. The ﬁrst is goal transfer, where the goal
+is moved to a new random location. The second is blocked
+hallway, where the goal is the same but a random hallway is
+blocked. To preserve the knowledge learned from the origi-
+nal task, the main network body is frozen, and only the heads
+and the attentions (in the case of AOC) are updated. AOC
+transfer I and transfer II respectively represent the scenarios
+where the weights w1 and w2 are kept unchanged or are set
+to 0 to give priority to option learning over attention regular-
+ization, before learning in the new task. From Figures 3b and
+3c, it can be seen that in spite of the option volatility that aids
+OC transfer, AOC is faster to recover. In the blocked hall-
+way setting, both variants of AOC perform similarly while
+OC fails altogether to transfer in multiple runs. This may be
+explained by the fact that AOC needs to ﬂip only one option
+policy around, while OC may need to relearn the entire pol-
+icy for the new task, if the options had already degenerated
+prior to transfer. Figures 3b and 3c also show that right after
+transfer, AOC has a lower decline in performance, compared
+to OC.
+From another perspective, upon transfer, option-critic
+completely relearns the options. Figure 4 shows a speciﬁc
+instance of transfer. Comparing Figure 2a with Figures 4a
+and 4b shows that there is little similarity between the option
+behavior before and after transfer with OC. We argue that
+for options to be beneﬁcial for generalization, they should
+exhibit similar behavior upon transfer, so that previously
+Figure 5: The shared network model for AOC in Atari envi-
+ronments. The option attentions are observation dependent.
+The ⊙symbol represents element-wise multiplication.
+learned behaviors can be leveraged, and so that options can
+be efﬁciently composed through abstract decisions. AOC ex-
+hibits this quality. A comparison of Figures 2b and 2c with
+Figures 4c to 4f shows that option attentions remain ﬁxed,
+indicating that each option remains in its assigned space, and
+that the option behavior remains relatively consistent upon
+transfer. These properties of selective transfer and reusabil-
+ity with AOC lead to modular options that speedup transfer.
+4.3
+Arcade Learning Environment
+We now illustrate the performance of AOC in the Arcade
+Learning Environment (Bellemare et al. 2013). We use 2
+options with a discount factor of 0.99. The input observa-
+tion s is a stack of 4 frames. The option attentions hω,φ are
+state dependent and are learned with a convolutional neural
+network (CNN). These option attentions are then applied to
+the high level features that are also obtained from the CNN.
+Each option’s attention has the same dimensions as the ﬂat-
+tened feature vector. The option policies, values and termi-
+nations are learned with a shared-parameter deep network,
+as in option-critic. The architecture is shown in Figure 5.
+Apart from maximizing the total expected return, the at-
+tentions are constrained to exhibit some desired character-
+istics. Attention diversity is enforced by maximizing the L1
+norm between the option attentions and attention sparsity
+is incentivized by applying an L1 regularizer on the option
+attentions to penalize non-zero values. Frame stacking im-
+plicitly enforces temporal regularization between attentions
+of successive frames, so we do not specially account for
+this. Thus, for the Atari domain, the L term in Algorithm
+1 is enforced by adding w1L1 + w2L2 to the network loss
+function, where L1 and L2 are the losses for attention di-
+versity and sparsity respectively. w1 and w2, represent their
+respective weights. More details regarding hyperparameters
+are provided in section C.
+For training in the ALE environment, we found that the
+values 500 and 0.02 for the weights w1 and w2 respectively,
+resulted in diverse attentions and good performance. Fig-
+ure 6 shows the training curves, which indicate that AOC
+achieves a similar sample complexity (and slightly better
+ﬁnal performance) compared to OC, despite also having
+to learn the state-dependent attention mechanism. We rea-
+son that learning the attentions enables options to special-
+ize early on in the training process, and hence speeds up
+training, despite having more parameters to learn. Addition-
+ally, attention sparsity allows the options to focus on only
+the most important high-level features, which further speeds
+up learning. For these values of w1 and w2, each option fo-
+cuses on approximately 20% of the high level features. Fig-
+ure 7 shows the option usage for Seaquest. The options have
+learned to distinctly specialize their behavior (by learning to
+focus on different abstract high-level features), and remain
+relatively balanced in their usage, unlike OC, whose options
+eventually degenerate as training progresses, since diversity
+is not incentivized. Thus, AOC allows learning diverse op-
+tions in complex environments as well. Additional Atari re-
+sults are shown in section B.
+
+(a) Seaquest
+(b) Fishing Derby
+(c) Krull
+(d) Pooyan
+Figure 6: Learning curves (averaged over 5 seeds) in the Arcade Learning Environment.
+Figure 7: An example of AOC option usage in Seaquest over time. Option 0 (shown in white) is used about 70% of the time
+and appears to focus on the ﬁsh and diver sprites near the middle. Option 1 (shown in black) is used about 30% of the time and
+seems to focus on the oxygen bar and new sprites coming onto the screen along the edges.
+5
+Related work
+There has been extensive research on the beneﬁt of tempo-
+ral abstraction for reinforcement learning (Parr and Russell
+1998; Dayan and Hinton 1993; Dietterich 2000; McGovern
+and Barto 2001; Stolle and Precup 2002; Mann and Mannor
+2014; Kulkarni et al. 2016). Speciﬁc to the options frame-
+work (Sutton, Precup, and Singh 1999; Bacon, Harb, and
+Precup 2017), there have been several recent approaches to
+incentivize learned options to be diverse (Eysenbach et al.
+2018), temporally extended (Harb et al. 2018), more abstract
+(Riemer, Liu, and Tesauro 2018), and useful to plan (Haru-
+tyunyan et al. 2019) and explore (Jinnai et al. 2019) with.
+The interest option-critic method (Khetarpal et al. 2020)
+provides a gradient-based approach towards learning where
+to initiate options by replacing initiation sets with differen-
+tiable interest functions. However, the initialization of the in-
+terest functions is biased towards all options being available
+everywhere. In contrast, our AOC approach is completely
+end-to-end and does not require any special initializations,
+and in effect, is able to learn distinct areas where options
+can be initialized and remain active.
+Deep skill chaining (Bagaria and Konidaris 2020) is an-
+other approach that relaxes the assumption of universal op-
+tion use. This method learns a chain of options by backtrack-
+ing from the goal and ensuring that the learned initiation set
+of one option overlaps with the termination of the preceding
+option. Although each option performs state abstraction, the
+resulting options are highly dependent on the given task and
+must be relearned upon transfer. Furthermore, results were
+mostly conﬁned to navigation-based tasks.
+The MAXQ (Dietterich 2000) approach towards hierar-
+chical reinforcement learning decomposes the value func-
+tion of the target MDP into value functions of smaller MDPs.
+Although this decomposition creates an opportunity to per-
+form state abstraction, the overall approach is based on the
+heavy assumption that the subtasks are speciﬁed beforehand.
+6
+Conclusion
+To the best of our knowledge, our method is the ﬁrst to com-
+bine temporal and state abstraction in a ﬂexible, end-to-end,
+gradient based approach. It results in learned options that are
+diverse, stable, interpretable, reusable and transferable. We
+demonstrate that the addition of an attention mechanism pre-
+vents option degeneracy, a major, long-standing problem in
+option discovery, and also relaxes the assumption of univer-
+sal option availability. It also provides an intuitive method to
+control the characteristics of the learned options.
+From the continual learning perspective, an interesting
+future direction is to meta-learn the attentions and options
+across a range of tasks from the same environment. This
+could lead to faster transfer, while keeping the existing ben-
+eﬁts of our approach. From the perspective of model-based
+reinforcement learning, predictive approaches with option
+attentions could allow for efﬁcient long-horizon planning,
+by predicting option activation through predicted attentions.
+Lastly, the approach we have presented is versatile and can
+be applied to many existing option discovery methods. We
+leave such avenues of possible combination as future work.

@@ -1,0 +1,972 @@
+A Study on Mitigating Hard Boundaries of Decision-Tree-based 
+Uncertainty Estimates for AI Models 
+Pascal Gerber, Lisa Jöckel, Michael Kläs 
+Fraunhofer Institute for Experimental Software Engineering IESE, 
+Fraunhofer Platz 1, 67663 Kaiserslautern, Germany 
+
+ 
+ 
+ 
+Abstract 
+Outcomes of data-driven AI models cannot be assumed to be 
+always correct. To estimate the uncertainty in these out-
+comes, the uncertainty wrapper framework has been pro-
+posed, which considers uncertainties related to model fit, in-
+put quality, and scope compliance. Uncertainty wrappers use 
+a decision tree approach to cluster input quality related un-
+certainties, assigning inputs strictly to distinct uncertainty 
+clusters. Hence, a slight variation in only one feature may 
+lead to a cluster assignment with a significantly different un-
+certainty. Our objective is to replace this with an approach 
+that mitigates hard decision boundaries of these assignments 
+while preserving interpretability, runtime complexity, and 
+prediction performance. Five approaches were selected as 
+candidates and integrated into the uncertainty wrapper frame-
+work. For the evaluation based on the Brier score, datasets 
+for a pedestrian detection use case were generated using the 
+CARLA simulator and YOLOv3. All integrated approaches 
+achieved a softening, i.e., smoothing, of uncertainty estima-
+tion. Yet, compared to decision trees, they are not so easy to 
+interpret and have higher runtime complexity. Moreover, 
+some components of the Brier score impaired while others 
+improved. Most promising regarding the Brier score were 
+random forests. In conclusion, softening hard decision tree 
+boundaries appears to be a trade-off decision. 
+ 1. Introduction  
+An increasing number of software and software-intensive 
+systems contain data-driven components, i.e., components 
+that implement functionality using data-driven models 
+(DDMs) as provided, e.g., by Machine Learning (ML) and 
+other AI methods. However, due to their nature of being em-
+pirically defined on data, DDMs will not provide correct re-
+sults in any application situation (Kläs 2018). Therefore, un-
+certainty is an inherence concept of data-driven compo-
+nents, which needs to be considered to make informed deci-
+sions. Specifically, this means uncertainty needs to be quan-
+tified and either dealt with on the system level or appropri-
+ately provisioned to decision makers who use the system. 
+From a design perspective, two options exist for provid-
+ing situation-aware uncertainty estimates: (a) The DDMs it-
+self is made responsible for providing not only its primary 
+                                                 
+Copyright © 2022 for this paper by its authors. Use permitted under Crea-
+tive Commons License Attribution 4.0 International (CC BY 4.0). 
+outcome, but also an estimate on the uncertainty in its out-
+come, or (b) there is an independent instance that estimates 
+the uncertainty in the DDM outcome (Jöckel and Kläs 
+2021). In the first case, which is the more deeply researched 
+setting, we talk about in-model uncertainty estimation; in the 
+second case, which realizes ‘separation of concerns’ as a de-
+sign principle, we talk about outside-model uncertainty esti-
+mation. Uncertainty wrappers (UWs), as an outside-model 
+approach, have recently shown to provide advantages com-
+pared to state-of-the-art in-model approaches, such as a 
+higher degree of interpretability and statistically sound un-
+certainty estimates (Jöckel and Kläs 2021).  
+Research Problem – In order to achieve high interpreta-
+bility, UWs rely on learning a decision tree structure consid-
+ering semantic – i.e., human-interpretable – factors influenc-
+ing the uncertainty (Jöckel and Kläs 2021) (Kläs and Jöckel, 
+2020) (Kläs et al. 2021). Although this simple structure with 
+clear decision boundaries supports interpretability, it also 
+causes situations in which a minor change in just one factor 
+can result in a significant change in the estimated uncer-
+tainty (cf. Fig. 1). While this behavior does not invalidate 
+the results from a statistical point of view, it can be unintui-
+tive in some cases. 
+For example, in the case of camera-based pedestrian de-
+tection, the distance between the camera and the pedestrian 
+could be one such factor, where a lack of smooth transitions 
+in uncertainty is a rather undesirable property of decision 
+trees, as it is for other factors with linear rather than discon-
+tinuous effects (Molnar, 2019).   
+ 
+ 
+Fig. 1. Example of how a minor change in one input factor (X1)  
+may affect the uncertainty estimate (u). 
+node #0
+X1<4.5
+u = 0.2
+Factor X1
+node #2
+X2>2
+u = 0.4
+node #1
+u = 0.1
+node #3
+u = 0.3
+node #4
+u = 0.6
+Uncertainty u
+A
+X1 = 4.49
+X2 = 3.18
+False
+True
+True
+False
+A‘
+X1 = 4.52
+X2 = 3.18
+0.6
+0.1
+A A‘
+u(A) = 0.1
+Decision Tree
+small change in X1
+u(A‘) = 0.6
+
+Intuitively, uncertainty does not change significantly as 
+distance only changes marginally (e.g., increases from 
+14.9m to 15.1m). Instead, it is expected to increase gradu-
+ally with rising distance, which also improves robustness 
+against noisy inputs. 
+Research Goals – To address this undesired property of 
+decision-tree-based uncertainty estimates, we identified and 
+studied a selection of promising approaches to softening the 
+transitions between different uncertainty levels. Our selec-
+tion and evaluation, which we present in this paper, was 
+guided by the goals of (G1) making the transitions between 
+different levels of uncertainty smoother while (G2) reducing 
+interpretability as little as possible, (G3) not increasing 
+runtime complexity too much, and (G4) not negatively af-
+fecting the uncertainty estimation performance. 
+ Outline – Section 2 gives an overview of related work on 
+uncertainty estimation including UWs and possible ap-
+proaches to softening decision boundaries. Section 3 intro-
+duces the investigated approaches and discusses implica-
+tions on G1 to G3. Section 4 outlines the design and execu-
+tion of a study to investigate the approaches. Section 5 pre-
+sents the study results. Section 6 discusses the achievement 
+of the research goals and Section 7 concludes the paper. 
+2. Related Work 
+Uncertainty Estimation. Uncertainty is an active research 
+topic in the field of ML (Hüllermeier and Waegemann 2019). 
+Getting a better understanding of the sources of uncertainty 
+and providing dependable uncertainty estimations regarding 
+how much we can rely on a specific DDM-based outcome 
+contributes to enabling quality assurance of ML-based sys-
+tems, especially in contexts with high dependability de-
+mands. Uncertainty predictions can also be used to address 
+the fulfillment of system-level performance constraints, 
+such as safety constraints, when using DDMs for some of 
+the system functionality (Kläs et al. 2021). 
+A classification for potential sources of uncertainty is 
+proposed by the onion shell model (Kläs and Vollmer, 
+2018), which allows mathematically separating uncertainty 
+due to model fit, input quality, and scope compliance (Kläs 
+and Sembach 2019). Model-fit-related uncertainty is caused 
+by limitations in the DDM itself and can be reduced by im-
+proving the model regarding typical performance metrics 
+(e.g., mean absolute error or true positive rate). Input-qual-
+ity-related uncertainty is concerned with the influence of the 
+quality of the DDM inputs on the quality of the DDM out-
+comes. Scope-compliance-related uncertainty is caused by 
+possible application of the model outside its application 
+scope and can be tackled by monitoring its compliance. 
+Uncertainty predictions can be obtained by different 
+means. Some DDMs already implicitly provide uncertainty 
+predictions, e.g., decision trees (Breiman et al. 2017). Other 
+ML approaches have been extended accordingly; for exam-
+ple, for deep neural networks Bayesian neural networks 
+(Arnez et al. 2020) and deep ensembles (Arnez et al. 2020) 
+(Lakshminarayanan, Pritzel, and Blundell 2017) are com-
+monly proposed. Both approaches are, however, computa-
+tionally expensive and are generally not dependable in the 
+sense that their predictions have no statistical guarantees. 
+Uncertainty Wrapper. An alternative to uncertainty pre-
+dictions provided by the DDM itself is the UW framework, 
+which addresses the uncertainty sources of the onion shell 
+model following the separation-of-concerns principle (Kläs 
+and Jöckel, 2020). UWs are model-agnostic and encapsulate 
+the DDM as a black box (cf. Fig. 2).  
+ 
+ 
+Fig. 2. Uncertainty wrapper pattern (Bandyszak et al. 2021). 
+Jöckel and Kläs (2021) benchmarked the performance of 
+UWs to uncertainty predictions provided by deep ensembles 
+and examined the usefulness of each approach under differ-
+ent non-ideal conditions with which DDMs are confronted 
+in real settings, such as a limited training data, concluding 
+that UWs are beneficial especially in such situations.  
+ Model-fit-related uncertainty can be determined by using 
+model testing approaches and appropriate performance met-
+rics. In order to determine the likelihood of not being in the 
+target application scope (TAS), i.e., suffering from scope 
+incompliance, the UW contains a scope model and a scope 
+compliance model. In the context of traffic sign recognition, 
+the scope model might consider the GPS coordinates of the 
+vehicle as a scope factor that is checked for compliance with 
+a specific input to boundaries defined as the TAS. Similarly, 
+input-quality-related uncertainty is estimated using a quality 
+model and a quality impact model. For the quality model, 
+quality factors are considered that might occur within the 
+TAS, like obstructed vision due to rain or a dirty camera 
+lens. The quality model determines the presence of each 
+quality factor based on one or more measures, e.g., a rain 
+sensor or a convolutional neural network trained to detect 
+rain (cf. Fig. 2). This information is then used as independ-
+ent variables together with the correctness of the DDM out-
+come as a dependent variable in a decision-tree-based qual-
+ity impact model to find clusters that decompose the TAS 
+into areas with similar uncertainties. An example of such a 
+Dependable Data-Driven Component : 
+Traffic Sign Recognition (TSR) Component
+Uncertainty Wrapper for TSR
+Data-Driven Model :
+Convolutional Neural
+Network based TSR
+Confidence
+e.g., 0.9999
+GPS
+Image
+Rain Senor
+Outcome
+(a,b,c)
+Speed limit
+50 detected
+Dependable
+Uncertainty
+(a) <100.0%
+(b) <    0.3% 
+(c) <    2.1% 
+Combination
+Quality
+Model
+Scope
+Model
+Scope Compliance
+Model
+Quality-Impact
+Model
+Data-Driven Component Input
+(a)
+∉TAS
+0 mm/h
+40.71272
+-74.00604
+(b)
+∈TAS
+0 mm/h
+49.48958
+8.46725
+(c)
+∈TAS
+~7 mm/h
+49.48958
+8.46725
+TAS: Target 
+Application
+Scope
+
+decision tree together with the associated uncertainties de-
+termined for the identified clusters based on the number of 
+correct and wrong DDM outcomes can be seen in Fig.3. 
+ 
+ 
+Fig. 3. Decision tree as part of a simplified quality impact model. 
+The uncertainty estimates for the clusters, i.e., the tree 
+nodes, are calibrated using a dataset that has to be repre-
+sentative for the TAS and not previously used to learn the 
+decision tree structure. The UW combines the uncertainty 
+estimates from the scope compliance model and the quality 
+impact model to provide a situation-aware uncertainty esti-
+mate for the current input. As uncertainty in the context of 
+UWs is defined as the likelihood that the model outcome is 
+incorrect, a dependable uncertainty estimate is a justified 
+upper boundary for a given confidence level CL (Kläs and 
+Sembach 2019). Hence, the UW includes the additional 
+functionality of considering a requested CL in the estimates. 
+Approaches to Softening Decision Boundaries 
+To identify and select approaches that comply with the goals 
+defined in Research Goals, we first searched on Google 
+Scholar (Scholar 2020). Goals G1 and G2 provided an initial 
+basis for creating the search criterion. For 'softening', which 
+is intended by G1, we included the search terms 'soft', 
+'smooth', or 'fuzzy'. For G2, addressing interpretability, we 
+added the term 'interpret'. No search term was defined for 
+the runtime complexity requirement defined in G3; instead, 
+the identified approaches were examined in this regard after 
+the search. This resulted in the following search criterion: 
+ 
+ 
+('decision tree' OR 'breiman') AND  
+('soft' OR 'smooth' OR 'fuzzy') AND ('interpret') 
+ 
+ 
+ 
+It should be noted that in the first block of the search crite-
+rion, we included the name of the approach as well as the 
+name of the author who presented the CART algorithm for 
+it (Breiman et al. 1984). With this, we intended to find pub-
+lications describing approaches that aim to mitigate the 
+problem of hard decision boundaries. 
+The first approach we identified was the Fuzzy Random 
+Forest (Fuzzy RF) (Marcelloni, Matteis, and Segatori 2015), 
+which is an ensemble of several Fuzzy Decision Trees 
+(Fuzzy DTs). As a second approach, the Bagged Soft Deci-
+sion Trees (Bagged Soft DTs) (Alpaydin, Irsoy, and Yildiz 
+2016), an ensemble of Soft Decision Trees (Soft DTs) 
+(Alpaydin, Irsoy, and Yildiz 2012), was identified. In addi-
+tion to this search, we also examined approaches that exist 
+in scikit-learn (Blondel et al. 2012). Here, the Random For-
+est (RF), an ensemble consisting of DTs, was identified. 
+Boosting approaches, e.g., AdaBoost or Gradient Tree 
+Boosting, which are mentioned in (Scikit 2020a), were ex-
+cluded. In these approaches, a model is built iteratively from 
+several base models whose uncertainty estimates are then 
+weighted for the final uncertainty estimate. We anticipated 
+that interpretation (G2) would be difficult to fulfill due to 
+the different weighting of the base models. 
+3. Studied Approaches 
+This section describes the selected approaches, i.e., Random 
+Forest (RFs), Fuzzy DTs, Fuzzy RFs, Soft DTs, and Bagged 
+Soft DTs, and discusses their compliance in terms of soften-
+ing uncertainty estimates (G1), interpretability (G2) and 
+runtime complexity (G3). 
+Random Forests. An RF can be considered as a collec-
+tion of n DTs that are trained and applied independently and 
+whose individual results are aggregated (e.g., by averaging). 
+In order to obtain an ensemble of sufficiently uncorrelated 
+DTs, the DTs in an RF are commonly trained on datasets 
+generated by randomly drawing datapoint samples with re-
+placement from a single dataset, i.e., bootstrapped datasets. 
+Additionally, in contrast to a regular DT, the split feature of 
+a DT node in an RF is determined from a subset rather than 
+from all data point features (Breiman 2001) (Scikit 2020b). 
+Goal compliance. Regarding (G1), it is expected that by 
+aggregating, some degree of softening of hard decision 
+boundaries can be achieved. Since DTs are interpretable 
+(G2), RFs can also be interpreted. However, all 𝑛𝑛 DTs of an 
+RF need to be considered, resulting in higher effort than for 
+a single DT. Analogously, runtime complexity (G3) for 
+providing uncertainty estimates increases linearly with the 
+number of DTs used. For application in UWs, this complex-
+ity seems still acceptable. 
+ Fuzzification of Decision Trees and Random Forests. 
+In DTs, each node contains a split criterion, which is used to 
+strictly assign a data point to the left or the right child node. 
+As illustrated in Fig. 3, these criteria are recursively evalu-
+ated with specific feature values of a data point in order to 
+finally assign the data point to a leaf with an associated un-
+certainty. Contrary to the strict assignments in DTs, there 
+are Fuzzy DTs and Fuzzy RFs (Marcelloni, Matteis, and 
+Segatori 2015) that perform fuzzy assignments of data 
+points to nodes on the basis of fuzzy logic or fuzzy set theory 
+(Zadeh 1965). Here, fuzzy partitioning is used to determine 
+a numerical membership degree of a data point to the child 
+nodes of a parent node. 
+uncertainty = 0.06
+incorrect, correct cases
+total number of cases
+split criterion
+distance > 15.486
+→ uncertainty = 0.46
+distance > 15.486 &
+semantic_vis. > 0.245
+distance <= 15.486 
+→ uncertainty = 0.13
+distance <= 11.45
+distance
+> 11.45
+distance > 15.486 &
+semantic_vis. <= 0.245
+Input 𝑿 with
+distance = 13.5
+uncertainty = 0.21
+uncertainty = 0.74
+uncertainty = 0.39
+
+In Fig. 4, an example Fuzzy DT and the fuzzy partitioning 
+of its root node, i.e., node 0, are depicted. Here, the mem-
+bership degree of a data point in the child nodes of the root 
+is derived by the feature ‘distance’ and the three fuzzy set 
+membership functions, which are uniquely defined by the 
+three values listed below the feature. 
+ 
+ 
+Fig. 4. Application of a Fuzzy DT on a data point. 
+The fuzzy set membership value of a data point with a value 
+of 8.76 for the feature ‘distance’ in node 1 and node 4 is 0.5 
+and in node 8 it is 0, which means that the data point is fur-
+ther propagated to the left and middle sub-tree with a weight 
+of 0.5 each. This is done recursively towards the leaves of 
+the tree. In order to determine an uncertainty estimate, a 
+weighted sum is built by the uncertainties associated with 
+each leaf, which is weighted by the propagated fuzzy set 
+membership values on the path towards the leaf. Analo-
+gously, for a Fuzzy RF, the mean of all uncertainty estimates 
+of the contained Fuzzy DTs is calculated as the final uncer-
+tainty estimate. 
+Using features of a continuous data type as split criterion, 
+fuzzy partitioning is based on three fuzzy sets as illustrated 
+for node 0 in Fig. 4. For categorical features, Marcelloni, 
+Matteis, and Segatori (2015) proposed using crisp sets for 
+each category. But this creates as many child nodes as there 
+are categories of the feature used for splitting, this makes 
+global interpretability of the model more difficult because 
+some of the categories might not be meaningful differentia-
+tors between uncertainty clusters. To avoid this, we use one-
+hot encoding for the categorical features, i.e., each category 
+of the feature is considered as a binary stand-alone feature, 
+leading to a split into two mutually exclusive child nodes, 
+with one being assigned weight 1 and the other weight 0. 
+A Fuzzy DT is created similarly to the CART algorithm 
+for DTs, but taking into account fuzzy membership parti-
+tioning. Starting from the root node, each feature is consid-
+ered as a splitting criterion in order to determine a partition-
+ing. In doing so, the partitioning is intended to reduce the 
+impurity of the data point labels and can be quantified by the 
+fuzzy information gain based on (fuzzy) entropies for the 
+node to be partitioned and its child nodes. Both of these 
+numbers are depicted in the nodes of Fig. 4 as ‘entropy’. For 
+categorical features, the splitting is done similarly to DTs, 
+as we have only two child nodes. For continuous features, 
+on the other hand, a fuzzy partitioning that is defined by 
+three ascending floating-point numbers (cf. Fig. 4) is cre-
+ated. The first and last number are defined by the minimum 
+and maximum of the occurring feature values. The second 
+number is chosen in between with respect to the fuzzy infor-
+mation gain for all remaining feature values. In order to re-
+duce computational effort, we modified the original ap-
+proach in our implementation to use equal-width binning on 
+the feature values and only computed the partitioning for 
+one representative of each bin. 
+Goal compliance. Given that the membership degree of a 
+data point to nodes in Fuzzy DTs and Fuzzy RFs is deter-
+mined by linear membership functions, the resulting 
+weighting of leaves is not significantly affected by small 
+changes of the feature values. A softening of the uncertainty 
+estimates (G1) is thereby achieved. 
+With regard to interpretability (G2), a Fuzzy DT can be 
+interpreted on a global level in a similar way as a traditional 
+DT, as the feature and the respective feature values that de-
+fine the partitioning can be examined (as depicted by the 
+values in brackets in Fig. 4). However, as one data point in 
+a Fuzzy DT is usually a member of two child nodes during 
+partitioning, in the worst case 2ℎ leaves have to be consid-
+ered for a Fuzzy DT of height ℎ in order to interpret the un-
+certainty estimate for a concrete input. This is significantly 
+more than in the case of a DT, but interpretability is still 
+feasible assuming a height roughly between 5 and 8. Analo-
+gously to RFs, the 𝑛𝑛 contained Fuzzy DTs must also be in-
+terpreted additionally in order to interpret Fuzzy RFs. 
+Similar to interpretability, the runtime complexity (G3) 
+for providing uncertainty estimates increases exponentially 
+with the height of a Fuzzy DT. For Fuzzy RFs, the number 
+of Fuzzy DTs used has an additional linear influence. This 
+may limit the applicability of Fuzzy DTs in certain settings 
+with high Fuzzy DT height and tight runtime requirements. 
+(Bagged) Soft Decision Trees. Alpaydin, Irsoy, and 
+Yildiz introduced Soft DTs (2012) and Bagged Soft DTs, an 
+ensemble of Soft DTs (2016). Similarly to Fuzzy DTs, a data 
+point is propagated from a node to its child nodes with dif-
+ferent weights. Whereas for Fuzzy DTs, the weights are de-
+rived from membership functions of a fuzzy partitioning, the 
+weights in Soft DTs are determined by soft decisions. For a 
+node 𝑚𝑚, these are based on a sigmoid function 𝑔𝑔𝑚𝑚, which is 
+parameterized by 𝑤𝑤𝑚𝑚, as depicted in Fig. 5. 
+To determine an uncertainty estimate for a data point, the 
+weighting in each node is determined based on the sigmoid 
+function, and the data point is propagated throughout the 
+tree considering the weights (i.e., similarly to Fuzzy DTs). 
+The resulting uncertainty estimate associated with an in-
+put is, as in the case of Fuzzy DTs, determined by a 
+weighted average over the leaves considering the multiplied 
+weights along each path towards the leaf and the uncertainty 
+associated with the leaf. Analogously, for a Bagged Soft DT,  
+0.5
+0.5
+0.0
+0.0
+1.0
+0.5
+0.5
+0.0
+…
+in-/correct cases
+weighted number of
+cases in this node
+split criterion feature
+feature values defining
+the fuzzy partitioning
+fuzzy membership values for 
+X based on fuzzy partitioning 
+for node #0
+2.37
+15.14
+24.42
+1.0
+8.76
+0.5
+membership
+→ uncertainty 𝑋= 0.0 ȉ 0.93 + 0.5 ȉ 0.38 + 0.25 ȉ 0.08 + 0.25 ȉ 0.24 + 0.0 ȉ 0.57 = 0.27
+True
+False
+Input 𝑿 with
+distance = 8.76 and
+pedestriantype = 11
+uncertainty = 0.93
+weight 𝑋= 0.0
+uncertainty = 0.38
+weight 𝑋= 0.5
+uncertainty = 0.08
+weight 𝑋= 0.25
+uncertainty = 0.24
+weight 𝑋= 0.25
+uncertainty = 0.57
+weight 𝑋= 0.0
+
+the mean of all uncertainty estimates of the contained Soft 
+DTs is calculated as the final uncertainty estimate. 
+Unlike in the case of Fuzzy DTs, all features of a data 
+point are used to determine the weighting. However, as this 
+strongly impedes interpretability, we modified our imple-
+mentation to only use the feature that contributes most to the 
+split in terms of entropy, while the others are ignored as split 
+criterion for this node; i.e., we use a univariate split as for 
+Fuzzy DTs and DTs. Invariant to the approach as described 
+by Alpaydin, Irsoy, and Yildiz (2012), the parameter 𝑤𝑤𝑚𝑚 of 
+the sigmoid function in a node 𝑚𝑚 is determined for this fea-
+ture using the gradient descent method. In Fig. 5, the respec-
+tive feature is depicted in the second row of each inner node. 
+ 
+ 
+Fig. 5. Application of a soft decision tree on a data point. 
+Goal compliance. Softening of uncertainty estimates 
+(G1) in Soft DTs and Bagged Soft DTs mainly depends on 
+the parameter 𝑤𝑤𝑚𝑚, which drives the steepness of the contin-
+uous sigmoid function in a tree node. For a very steep sig-
+moid function, this softening behavior converges to that of 
+a regular DT. Else, small changes of the sigmoid function 
+argument do not result in significant changes of the resulting 
+weighting, which enables achieving our goal of softening. 
+The considerations regarding interpretability (G2) are 
+similar to Fuzzy DTs, i.e., the feature used as split criterion 
+is defined for each node based on one feature, and an idea 
+of what the weighting looks like over the feature range is 
+provided by the list of the three feature values in the tree 
+visualization. For a concrete input, the weights can also be 
+tracked while traversing the tree, similarly to Fuzzy DTs. 
+Once again, the effort increases exponentially with the 
+height of a Soft DT, as in the worst case, all paths to the 
+leaves need to be considered. For Bagged Soft DTs, all in-
+dividual trees need to be evaluated. 
+Analogously, the runtime complexity (G3) increases ex-
+ponentially with the height of a Soft DT; for Bagged Soft 
+DTs, it also depends linearly on the number of Soft DTs. 
+4. Study Planning and Execution 
+In this section, we concretize research goal G4 with the spe-
+cific research question that we addressed in the study, and 
+present the derived study design and its execution. 
+Research Question. The main research question is how 
+the use of softening approaches affects the performance of 
+uncertainty estimation. For this purpose, we wanted to eval-
+uate the decision-tree-based approach that has been used so 
+far in the UW, as well as Random Forests (RFs), Fuzzy DTs, 
+Fuzzy RFs, Soft DTs, and Bagged Soft DTs. 
+ 
+Research Question: How does the uncertainty estimation 
+performance of the UW differ when softening approaches 
+are used instead of a decision-tree-based approach? 
+  
+Task and Target Application Scope. In order to inves-
+tigate our research question, we considered the use case of 
+pedestrian detection. In this context, the task of a DDM is to 
+correctly detect pedestrians who are present in given camera 
+images. As the target application scope, we defined a vehi-
+cle traveling at various points in time in an urban environ-
+ment located in Germany. Additionally, we considered situ-
+ations of pedestrians located up to a maximum distance of 
+25 meters from the vehicle under a wide variety of weather 
+conditions. Our intention was to provide several factors that 
+influence the input data quality of the images and thus pos-
+sibly the correctness of the DDM outcomes. 
+Study Data. In the study, we used three datasets: a train-
+ing dataset to create quality impact models based on the tra-
+ditional DT and the softening approaches; a calibration da-
+taset, and an evaluation dataset representative for the TAS 
+to calibrate, respectively evaluate, the uncertainty estimates 
+of the quality impact models. 
+ Study Execution. Next, we outline the study execution 
+describing the key activities and decisions in the seven steps 
+introduced by the study execution plan (cf. Fig. 6). 
+(1) Generate raw data. The datasets were generated us-
+ing the open-source simulator CARLA (Codevilla et al. 
+2017), that allows visually and physically realistic simula-
+tion of vehicles, pedestrians, and environmental conditions. 
+For the recording, a vehicle was automatically navigated 
+through a town with other traffic participants like vehicles, 
+trucks, motorcycles, bicycles, and pedestrians. The images 
+of pedestrians crossing the road in the driving direction were 
+recorded, along with measures related to their respective re-
+gion in the image, the distance, the level of occlusion, and 
+the type of pedestrian. Also, the weather parameters simu-
+lated for a sequence of images, such as sun position, cloud-
+iness, precipitation, fog/wind intensity, and road wetness 
+were recorded. While weather parameters were uniformly 
+varied for the recordings related to the training dataset, the 
+ones related to the calibration/evaluation datasets were in-
+tended to be representative for the target application scope. 
+g0,left(𝑋) =  0.1
+𝐮𝐧𝐜𝐞𝐫𝐭𝐚𝐢𝐧𝐭𝐲= 𝟎. 𝟎𝟔
+weight 𝑋= 0.005
+incorrect, correct cases
+weighted number of cases in this node
+feature used as split criterion
+Input 𝑿 with distance = 16.56 
+and semantic_visibility = 0.23
+g0,right(𝑋) = 0.9
+g1,left(𝑋) =  0.05
+g4,left(𝑋) = 0.9
+g4,right(𝑋) = 0.1
+g1,right(𝑋) = 0.95
+feature values associated with
+the left child weights [0.9, 0.5, 0.1]
+0.9
+0.1
+0.5
+weights gm(𝑋) based on sigmoid function
+𝐮𝐧𝐜𝐞𝐫𝐭𝐚𝐢𝐧𝐭𝐲= 𝟎. 𝟏𝟕
+weight 𝑋= 0.095
+𝐮𝐧𝐜𝐞𝐫𝐭𝐚𝐢𝐧𝐭𝐲= 𝟎. 𝟔𝟑
+weight 𝑋= 0.81
+𝐮𝐧𝐜𝐞𝐫𝐭𝐚𝐢𝐧𝐭𝐲= 𝟎. 𝟑𝟔
+weight 𝑋= 0.09
+→ uncertainty 𝑋= 0.005 ȉ 0.06 + 0.095 ȉ 0.17 + 0.81 ȉ 0.63 + 0.09 ȉ 0.36 = 0.55915
+
+Hence, weather observations from CDC (2020) over a pe-
+riod of ten years were randomly sampled and weather pa-
+rameters were derived for the CARLA simulator. As indi-
+cated in Fig. 6, we saved the respective raw data in two da-
+tasets. Fig. 7 provides some samples of the different weather 
+conditions and locations that were simulated in CARLA. 
+ 
+ 
+Fig. 7. An excerpt of the CARLA simulator's weather conditions. 
+ (2) Apply DDM. To obtain the pedestrian detection out-
+comes for the images saved in the two datasets, we used the 
+YOLOv3 implementation (YOLO 2020) as the encapsulated 
+DDM. For this, pretrained network weights exist that have 
+been learned on the COCO (2020) dataset, that contains a 
+class for persons. Prior to creating the outcomes, the object 
+confidence threshold ("conf thres") was set to 0.5 and the 
+non-maximum suppression threshold ("nms thres") was set 
+to 0.4. Next, outcomes defining enclosing rectangles for 
+each object detected were obtained for each image. On this 
+basis, YOLOv3 created bounding boxes with a class label as 
+an outcome for each object detected in an image. Since we 
+investigated the performance of the uncertainty wrapper and 
+not of the DDM, we did not apply a sophisticated hyperpa-
+rameter search or other efforts to optimize the DDM. 
+(3) Determine correctness of DDM outcomes. The next 
+step was to determine whether the pedestrians in the image 
+were correctly detected by YOLOv3. To decide this, the in-
+tersection over union metric (Gwak et al. 2019), also re-
+ferred to as Jaccard index, was first used to quantify how 
+well a bounding box detection matches the recorded ground 
+truth bounding box of a pedestrian. Edge cases in which the 
+ground truth bounding boxes of pedestrians were less than 
+50% visible within the image were filtered out. We defined 
+that outcomes resulting in intersection over union values of 
+at least 0.25 were considered to be correct and lower values 
+were considered to be incorrect. As a result, the correctness 
+of the YOLOv3 outcome was determined and added to each 
+recorded image of both raw datasets. 
+(4) Build datasets. Based on both datasets, we built train-
+ing, calibration, and evaluation datasets, each consisting of 
+the quality model inputs (e.g., weather conditions) and the 
+correctness of the DDM outcomes. The training dataset was 
+based on the uniform data, whereas the calibration and eval-
+uation datasets were based on the representative data. Aim-
+ing to assure that no data points of the same recorded simu-
+lation sequence were present in the calibration and the eval-
+uation datasets, we performed a randomized split on the se-
+quences. Thus, the training, calibration, and evaluation da-
+tasets consisted of 1,204,119, 402,040, and 400,884 data 
+points, respectively. 
+(5) Build UWs. Using the training dataset, the different 
+quality impact model approaches were trained. Here, we 
+manually searched for suitable hyperparameter ranges for 
+each approach, which were then instantiated for training. 
+(6) Calibrate uncertainty estimates. After the training, 
+several quality impact models were obtained for each ap-
+proach. Aiming to make the quality impact models' uncer-
+tainty estimates reliable for the target application scope, cal-
+ibration was carried out on the calibration dataset consider-
+ing a confidence level of 99.99%. 
+(7) Evaluate uncertainty estimates. Estimating uncer-
+tainty, defined as the probability that a specific DDM out-
+come is incorrect, can be seen as a binary probabilistic clas-
+sification task. Therefore, strictly proper scoring rules such 
+CARLA
+Simulator
+YOLOv3-
+based
+pedestrian
+detection
+(2) Apply DDM
+(3) Determine Correctness of
+DDM Outcomes
+DDM 
+Correctness
+(1) Generate Raw Data
+(5) Build UWs Based
+on Different Quality 
+Impact Models
+(6) Calibrate Uncertainty
+Estimates
+Eval
+Brier score
+Variance
+Uncspecificity
+Unrelaibility
+Overconfidence
+(7) Evaluate Uncertainty Estimates
+Represen-
+tative data
+Uniform data
+(4) Build
+Datasets
+Evaluation
+Calibration
+Training
+Calibration
+Evaluation
+Training
+DDM predictions
+Images
+Ground truth bounding
+boxes of pedestrians
+Input for UW (e.g. weather conditions)
+Decision Tree (DT)
+Random Forest (RF)
+Fuzzy DT
+Fuzzy RF
+Soft DT
+Bagged Soft DT
+Test Metrics:
+402,040 data points
+400,884 data points
+1,204,119 data points
+Fig. 6. Summarized study execution plan with execution steps. 
+
+as the Brier score (Brier 1950), can be applied for their eval-
+uation. The Brier score measures the mean squared differ-
+ence between the predicted probability of a DDM outcome 
+and the actual outcome. Besides the overall Brier score (𝑏𝑏𝑏𝑏), 
+we also measured the three additive components into which 
+it can be decomposed (Murphy 1973), namely variance 
+(𝑣𝑣𝑣𝑣𝑣𝑣), resolution (𝑟𝑟𝑟𝑟𝑟𝑟), and unreliability (𝑢𝑢𝑢𝑢𝑢𝑢): 
+ 
+𝑏𝑏𝑏𝑏=  𝑣𝑣𝑣𝑣𝑣𝑣−𝑟𝑟𝑟𝑟𝑟𝑟+ 𝑢𝑢𝑢𝑢𝑢𝑢 
+ 
+𝑣𝑣𝑣𝑣𝑣𝑣 describes the overall variation in the correctness of 
+the DDM outcomes, which is only dependent on the overall 
+uncertainty of the DDM outcomes and thus not influenced 
+by the uncertainty estimation approach used. For 𝑟𝑟𝑟𝑟𝑟𝑟, the 
+difference between the case-specific uncertainty estimates 
+and the overall uncertainty is considered. As higher 𝑟𝑟𝑟𝑟𝑟𝑟 val-
+ues are better and 𝑣𝑣𝑣𝑣𝑣𝑣 is the upper bound, we used 𝑣𝑣𝑣𝑣𝑣𝑣−
+𝑟𝑟𝑟𝑟𝑟𝑟 as unspecificity (𝑢𝑢𝑢𝑢𝑢𝑢), where smaller values mean that 
+the resolution of the estimator is able to detail more of the 
+variance in the uncertainty of the DDM outcomes. 𝑢𝑢𝑢𝑢𝑢𝑢 
+measures the degree of calibration of the estimator to the 
+observed correctness of the DDM, such that better calibra-
+tion leads to a smaller 𝑢𝑢𝑢𝑢𝑢𝑢 value. Furthermore, we used the 
+part of the 𝑢𝑢𝑢𝑢𝑢𝑢 value that is attributed to underestimating the 
+observed error rate of the DDM as a metric of overconfi-
+dence (𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜), as this part of unreliability is especially rel-
+evant in the context of safety-related functions. 
+For the evaluation of the DT and the five candidate ap-
+proaches, we selected the best quality impact model for each 
+approach subject to the 𝑏𝑏𝑏𝑏. If there were quality impact 
+models that resulted in approximately equal 𝑏𝑏𝑏𝑏 values, the 
+𝑢𝑢𝑢𝑢𝑢𝑢 values were also considered and the quality impact 
+model with the lowest 𝑢𝑢𝑢𝑢𝑢𝑢 value was selected. The idea was 
+that a low 𝑢𝑢𝑢𝑢𝑢𝑢 value implies high reliability of the quality 
+impact model's uncertainty estimates. 
+5. Study Results 
+In this section, we will answer the research question on the 
+basis of our study results. To answer how the performance 
+of uncertainty estimation differs when using alternative sof-
+tening approaches instead of the previous DT-based quality 
+impact model, we present the evaluation results in Table 1. 
+Table 1. Evaluation results per quality impact model approach. 
+Approach 
+𝑏𝑏𝑏𝑏 
+𝑣𝑣𝑣𝑣𝑣𝑣 
+𝑢𝑢𝑢𝑢𝑢𝑢 
+𝑢𝑢𝑢𝑢𝑢𝑢 
+𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜 
+DT 
+.12176 .20284 
+.12109 
+.00066 7.4e-07 
+RF 
+.11908 .20284 
+.00646 
+.11261 .05918 
+Fuzzy DT 
+.13568 .20284 
+.01252 
+.12316 .07617 
+Fuzzy RF 
+.13799 .20284 
+.00407 
+.13393 .08611 
+Soft DT 
+.16239 .20284 
+.00001 
+.16238 .10664 
+Bagged Soft DT .16279 .20284 
+.00001 
+.16277 .10751 
+ 
+Considering the overall performance measured by the Brier 
+score (𝑏𝑏𝑏𝑏), RF performed best, while DT performed slightly 
+worse. This was followed by the fuzzy approaches, where 
+Fuzzy RF performed slightly worse than Fuzzy DT. Soft DT 
+and Bagged Soft DT, which had approximately the same 𝑏𝑏𝑏𝑏, 
+represent the worst results. 
+ For DT, the 𝑢𝑢𝑢𝑢𝑢𝑢 term has a very low value, and the value 
+of 𝑏𝑏𝑏𝑏 is essentially constituted by the 𝑢𝑢𝑢𝑢𝑢𝑢 term. For RF, this 
+is reversed, i.e., 𝑏𝑏𝑏𝑏 is primarily constituted by the 𝑢𝑢𝑢𝑢𝑢𝑢 term. 
+Similar results can be seen with Fuzzy RF and Fuzzy DT, 
+with the latter scoring even higher 𝑢𝑢𝑢𝑢𝑢𝑢. Soft DT and Bagged 
+Soft DT show minor differences in terms of 𝑢𝑢𝑢𝑢𝑢𝑢 and  𝑢𝑢𝑢𝑢𝑢𝑢. 
+Here, the high values of 𝑏𝑏𝑏𝑏 are mainly caused by the 𝑢𝑢𝑢𝑢𝑢𝑢 
+term. In addition, compared to DT, all approaches show an 
+increased 𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜𝑜 and even a bias toward overconfident un-
+certainty estimates. 
+6. Discussion 
+Compared to DTs, we were able to achieve a softening of 
+uncertainty estimates (G1) with all other approaches. As an 
+example, we illustrate this in Fig. 8 by means of the uncer-
+tainty estimates for an example data point, which we variate 
+in a single quality factor. To provide a better visual over-
+view, the uncertainty estimates of Fuzzy DT and Soft DT 
+are not displayed, as they demonstrated similar characteris-
+tics as those of the respective ensemble approaches for this 
+combination of feature values. While the uncertainty esti-
+mates of DTs vary considerably at the decision boundaries, 
+the uncertainty estimates of RF vary less. Both the Fuzzy 
+and Soft approaches show even softer boundaries. 
+ 
+ 
+Fig. 8. Estimated uncertainties of a sample data point. 
+The interpretability (G2) of the models and of the concrete 
+uncertainty estimates for data points is feasible for all ap-
+proaches, which is why we assessed the effort required for 
+this. For DTs, the effort was the lowest, since the split crite-
+ria ensure that there is always only one path to a leaf. For 
+RFs, this effort increased with the number of DTs used, 
+which also applied to the other ensemble approaches. For 
+Fuzzy and Soft approaches, there are usually several paths 
+to leaves that are weighted differently, which increases the 
+effort for interpretation exponentially with the tree height.
+
+ Analogously to the effort for interpreting, the runtime 
+complexity (G3) can be assessed. For DTs, the tree height 
+has a linear influence. In the case of RF, the number of DTs 
+contained has an additional linear influence. In contrast, for 
+the Fuzzy and Soft approaches, the depth of a tree has a sig-
+nificant influence on this complexity, so the applicability of 
+these approaches may be limited in some settings with high 
+tree height and tight runtime requirements. 
+The use of softening approaches results in a significantly 
+lower unspecificity because of their higher resolution com-
+pared to DTs. However, unreliability increases in exchange, 
+with the result that the overall uncertainty estimation perfor-
+mance (G4) is worse for most of the investigated approaches 
+in comparison to that of DTs. Although RF slightly outper-
+form DTs in overall uncertainty scores, their significantly 
+worse unreliability and overconfidence scores make them 
+less attractive to use in many cases. A summary of the extent 
+to which the approaches achieve our goals is given in Table 
+2. There, for each goal an assessment is made on a scale 
+ranging from ‘--’ to ‘++’, where the former represents poor 
+and the latter very good achievement of the goal. 
+Table 2. Goal fruition rating per quality impact model approach. 
+Approach 
+G1 
+Soft. 
+G2 Inter- 
+pret. 
+G3 Run. 
+complex. 
+G4 Est.  
+perform. 
+DT 
+-- 
+++ 
+++ 
+++ 
+RF 
+o 
++ 
++ 
++ 
+Fuzzy DT 
+++ 
++ 
+o 
+o 
+Fuzzy RF 
+++ 
+o 
+- 
+o 
+Soft DT 
+++ 
++ 
+o 
+- 
+Bagged Soft DT 
+++ 
+o 
+- 
+- 
+7. Conclusion 
+We investigated alternative approaches to decision trees that 
+allow softening of uncertainty estimates while preserving 
+reasonable interpretability, runtime complexity, and uncer-
+tainty estimation performance. In an empirical study, we 
+compared the uncertainty estimation performance of these 
+approaches using the example task of pedestrian detection 
+and the Brier score with its subcomponents as a metric. 
+The results do not allow providing a general recommen-
+dation for the use of a particular approach; rather, the selec-
+tion of an approach has proved to be a trade-off decision (cf. 
+Table 2), which should be made considering the planned ap-
+plication. Random forests, closely followed by decision 
+trees, showed the best results considering their overall un-
+certainty estimation performance but at the cost of signifi-
+cantly higher unreliability as decision trees. Fuzzy decision 
+trees and fuzzy random forests as well as soft decision trees 
+and bagged soft decision trees showed excellent perfor-
+mance in softening the decision boundaries but reduced un-
+certainty estimation performance. In general, all investi-
+gated softening approaches showed a lower but still accepta-
+ble level of interpretability and runtime performance com-
+pared to decision trees as our baseline. However, in specific 
+settings with tight runtime requirements or high demands on 
+interpretability, the application of certain approaches may 
+be limited. 
+ For features with known or expected discontinuities, 
+the use of hard decision boundaries rather than soft transi-
+tions may seem more appropriate. Therefore, it should be 
+noted that all approaches allow features of categorical and 
+continuous data type, where the softening is only carried out 
+for the continuous features. This means that all features for 
+which hard decision boundaries are more appropriate should 
+be designed as categorical data in a preprocessing step. 
+Based on the study results, we see two main directions for 
+further work on softening the boundaries of decision-tree-
+based uncertainty estimation. First, specific recommenda-
+tions should be developed that guide practitioners in decid-
+ing in which settings they should make use of which of the 
+investigated approaches. Second, the investigated ap-
+proaches could be further modified to address the observed 
+limitations regarding uncertainty estimation performance, 
+specifically addressing unreliability and overconfidence.

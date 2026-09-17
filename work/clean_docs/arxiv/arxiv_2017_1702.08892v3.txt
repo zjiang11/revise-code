@@ -1,0 +1,694 @@
+Bridging the Gap Between Value and Policy Based
+Reinforcement Learning
+Oﬁr Nachum1
+Mohammad Norouzi
+Kelvin Xu1
+Dale Schuurmans
+
+Google Brain
+Abstract
+We establish a new connection between value and policy based reinforcement
+learning (RL) based on a relationship between softmax temporal value consistency
+and policy optimality under entropy regularization. Speciﬁcally, we show that
+softmax consistent action values correspond to optimal entropy regularized policy
+probabilities along any action sequence, regardless of provenance. From this
+observation, we develop a new RL algorithm, Path Consistency Learning (PCL),
+that minimizes a notion of soft consistency error along multi-step action sequences
+extracted from both on- and off-policy traces. We examine the behavior of PCL
+in different scenarios and show that PCL can be interpreted as generalizing both
+actor-critic and Q-learning algorithms. We subsequently deepen the relationship
+by showing how a single model can be used to represent both a policy and the
+corresponding softmax state values, eliminating the need for a separate critic. The
+experimental evaluation demonstrates that PCL signiﬁcantly outperforms strong
+actor-critic and Q-learning baselines across several benchmarks.2
+1
+Introduction
+Model-free RL aims to acquire an effective behavior policy through trial and error interaction with a
+black box environment. The goal is to optimize the quality of an agent’s behavior policy in terms of
+the total expected discounted reward. Model-free RL has a myriad of applications in games [28, 43],
+robotics [22, 23], and marketing [24, 44], to name a few. Recently, the impact of model-free RL has
+been expanded through the use of deep neural networks, which promise to replace manual feature
+engineering with end-to-end learning of value and policy representations. Unfortunately, a key
+challenge remains how best to combine the advantages of value and policy based RL approaches in
+the presence of deep function approximators, while mitigating their shortcomings. Although recent
+progress has been made in combining value and policy based methods, this issue is not yet settled,
+and the intricacies of each perspective are exacerbated by deep models.
+The primary advantage of policy based approaches, such as REINFORCE [52], is that they directly
+optimize the quantity of interest while remaining stable under function approximation (given a
+sufﬁciently small learning rate). Their biggest drawback is sample inefﬁciency: since policy gradients
+are estimated from rollouts the variance is often extreme. Although policy updates can be improved
+by the use of appropriate geometry [19, 33, 38], the need for variance reduction remains paramount.
+Actor-critic methods have thus become popular [39, 40, 42], because they use value approximators
+to replace rollout estimates and reduce variance, at the cost of some bias. Nevertheless, on-policy
+learning remains inherently sample inefﬁcient [14]; by estimating quantities deﬁned by the current
+policy, either on-policy data must be used, or updating must be sufﬁciently slow to avoid signiﬁcant
+bias. Naive importance correction is hardly able to overcome these shortcomings in practice [34, 35].
+1Work done as a member of the Google Brain Residency program (g.co/brainresidency)
+2An implementation of PCL can be found at https://github.com/tensorflow/models/tree/
+master/research/pcl_rl
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+arXiv:1702.08892v3  [cs.AI]  22 Nov 2017
+
+By contrast, value based methods, such as Q-learning [51, 28, 36, 49, 27], can learn from any
+trajectory sampled from the same environment. Such “off-policy” methods are able to exploit data
+from other sources, such as experts, making them inherently more sample efﬁcient than on-policy
+methods [14]. Their key drawback is that off-policy learning does not stably interact with function
+approximation [41, Chap.11]. The practical consequence is that extensive hyperparameter tuning can
+be required to obtain stable behavior. Despite practical success [28], there is also little theoretical
+understanding of how deep Q-learning might obtain near-optimal objective values.
+Ideally, one would like to combine the unbiasedness and stability of on-policy training with the data
+efﬁciency of off-policy approaches. This desire has motivated substantial recent work on off-policy
+actor-critic methods, where the data efﬁciency of policy gradient is improved by training an off-
+policy critic [25, 27, 14]. Although such methods have demonstrated improvements over on-policy
+actor-critic approaches, they have not resolved the theoretical difﬁculty associated with off-policy
+learning under function approximation. Hence, current methods remain potentially unstable and
+require specialized algorithmic and theoretical development as well as delicate tuning to be effective
+in practice [14, 48, 12].
+In this paper, we exploit a relationship between policy optimization under entropy regularization
+and softmax value consistency to obtain a new form of stable off-policy learning. Even though
+entropy regularized policy optimization is a well studied topic in RL [53, 45, 46, 54, 6, 5, 7, 11]–in
+fact, one that has been attracting renewed interest from concurrent work [31, 15]–we contribute new
+observations to this study that are essential for the methods we propose: ﬁrst, we identify a strong
+form of path consistency that relates optimal policy probabilities under entropy regularization to
+softmax consistent state values for any action sequence; second, we use this result to formulate a
+novel optimization objective that allows for a stable form of off-policy actor-critic learning; ﬁnally, we
+observe that under this objective the actor and critic can be uniﬁed in a single model that coherently
+fulﬁlls both roles.
+2
+Notation & Background
+We model an agent’s behavior by a parametric distribution πθ(a | s) deﬁned by a neural network over
+a ﬁnite set of actions. At iteration t, the agent encounters a state st and performs an action at sampled
+from πθ(a | st). The environment then returns a scalar reward rt and transitions to the next state st+1.
+Note: Our main results identify speciﬁc properties that hold for arbitrary action sequences. To keep
+the presentation clear and focus attention on the key properties, we provide a simpliﬁed presentation
+in the main body of this paper by assuming deterministic state dynamics. This restriction is not
+necessary, and in Appendix C we provide a full treatment of the same concepts generalized to
+stochastic state dynamics. All of the desired properties continue to hold in the general case and the
+algorithms proposed remain unaffected.
+For simplicity, we assume the per-step reward rt and the next state st+1 are given by functions
+rt = r(st, at) and st+1 = f(st, at) speciﬁed by the environment. We begin the formulation
+by reviewing the key elements of Q-learning [50, 51], which uses a notion of hard-max Bellman
+backup to enable off-policy TD control. First, observe that the expected discounted reward objective,
+OER(s, π), can be recursively expressed as,
+OER(s, π) =
+X
+a
+π(a | s) [r(s, a) + γOER(s′, π)] ,
+where s′ = f(s, a) .
+(1)
+Let V ◦(s) denote the optimal state value at a state s given by the maximum value of OER(s, π) over
+policies, i.e., V ◦(s) = maxπOER(s, π). Accordingly, let π◦denote the optimal policy that results
+in V ◦(s) (for simplicity, assume there is one unique optimal policy), i.e., π◦= argmaxπ OER(s, π).
+Such an optimal policy is a one-hot distribution that assigns a probability of 1 to an action with
+maximal return and 0 elsewhere. Thus we have
+V ◦(s) = OER(s, π◦) = max
+a (r(s, a) + γV ◦(s′)).
+(2)
+This is the well-known hard-max Bellman temporal consistency. Instead of state values, one can
+equivalently (and more commonly) express this consistency in terms of optimal action values, Q◦:
+Q◦(s, a) = r(s, a) + γ max
+a′ Q◦(s′, a′) .
+(3)
+2
+
+Q-learning relies on a value iteration algorithm based on (3), where Q(s, a) is bootstrapped based on
+successor action values Q(s′, a′).
+3
+Softmax Temporal Consistency
+In this paper, we study the optimal state and action values for a softmax form of temporal con-
+sistency [55, 54, 11], which arises by augmenting the standard expected reward objective with a
+discounted entropy regularizer. Entropy regularization [53] encourages exploration and helps prevent
+early convergence to sub-optimal policies, as has been conﬁrmed in practice (e.g., [27, 30]). In this
+case, one can express regularized expected reward as a sum of the expected reward and a discounted
+entropy term,
+OENT(s, π) = OER(s, π) + τH(s, π) ,
+(4)
+where τ ≥0 is a user-speciﬁed temperature parameter that controls the degree of entropy regulariza-
+tion, and the discounted entropy H(s, π) is recursively deﬁned as
+H(s, π) =
+X
+a
+π(a | s) [−log π(a | s) + γ H(s′, π)] .
+(5)
+The objective OENT(s, π) can then be re-expressed recursively as,
+OENT(s, π) =
+X
+a
+π(a | s) [r(s, a) −τ log π(a | s) + γOENT(s′, π)] .
+(6)
+Note that when γ = 1 this is equivalent to the entropy regularized objective proposed in [53].
+Let V ∗(s) = maxπOENT(s, π) denote the soft optimal state value at a state s and let π∗(a | s) denote
+the optimal policy at s that attains the maximum of OENT(s, π). When τ > 0, the optimal policy is no
+longer a one-hot distribution, since the entropy term prefers the use of policies with more uncertainty.
+We characterize the optimal policy π∗(a | s) in terms of the OENT-optimal state values of successor
+states V ∗(s′) as a Boltzmann distribution of the form,
+π∗(a | s) ∝exp{(r(s, a) + γV ∗(s′))/τ} .
+(7)
+It can be veriﬁed that this is the solution by noting that the OENT(s, π) objective is simply a τ-scaled
+constant-shifted KL-divergence between π and π∗, hence the optimum is achieved when π = π∗.
+To derive V ∗(s) in terms of V ∗(s′), the policy π∗(a | s) can be substituted into (6), which after
+some manipulation yields the intuitive deﬁnition of optimal state value in terms of a softmax (i.e.,
+log-sum-exp) backup,
+V ∗(s) = OENT(s, π∗) = τ log
+X
+a
+exp{(r(s, a) + γV ∗(s′))/τ} .
+(8)
+Note that in the τ →0 limit one recovers the hard-max state values deﬁned in (2). Therefore we can
+equivalently state softmax temporal consistency in terms of optimal action values Q∗(s, a) as,
+Q∗(s, a) = r(s, a) + γV ∗(s′) = r(s, a) + γτ log
+X
+a′ exp(Q∗(s′, a′)/τ) .
+(9)
+Now, much like Q-learning, the consistency equation (9) can be used to perform one-step backups
+to asynchronously bootstrap Q∗(s, a) based on Q∗(s′, a′). In Appendix C we prove that such a
+procedure, in the tabular case, converges to a unique ﬁxed point representing the optimal values.
+We point out that the notion of softmax Q-values has been studied in previous work (e.g., [54, 55,
+18, 6, 4, 11]). Concurrently to our work, [15] has also proposed a soft Q-learning algorithm for
+continuous control that is based on a similar notion of softmax temporal consistency. However, we
+contribute new observations below that lead to the novel training principles we explore.
+4
+Consistency Between Optimal Value & Policy
+We now describe the main technical contributions of this paper, which lead to the development of
+two novel off-policy RL algorithms in Section 5. The ﬁrst key observation is that, for the softmax
+3
+
+value function V ∗in (8), the quantity exp{V ∗(s)/τ} also serves as the normalization factor of the
+optimal policy π∗(a | s) in (7); that is,
+π∗(a | s) = exp{(r(s, a) + γV ∗(s′))/τ}
+exp{V ∗(s)/τ}
+.
+(10)
+Manipulation of (10) by taking the log of both sides then reveals an important connection between
+the optimal state value V ∗(s), the value V ∗(s′) of the successor state s′ reached from any action a
+taken in s, and the corresponding action probability under the optimal log-policy, log π∗(a | s).
+Theorem 1. For τ >0, the policy π∗that maximizes OENT and state values V ∗(s)=maxπOENT(s, π)
+satisfy the following temporal consistency property for any state s and action a (where s′ =f(s, a)),
+V ∗(s) −γV ∗(s′) = r(s, a) −τ log π∗(a | s) .
+(11)
+Proof. All theorems are established for the general case of a stochastic environment and discounted
+inﬁnite horizon problems in Appendix C. Theorem 1 follows as a special case.
+Note that one can also characterize π∗in terms of Q∗as
+π∗(a | s) = exp{(Q∗(s, a) −V ∗(s))/τ} .
+(12)
+An important property of the one-step softmax consistency established in (11) is that it can be
+extended to a multi-step consistency deﬁned on any action sequence from any given state. That is, the
+softmax optimal state values at the beginning and end of any action sequence can be related to the
+rewards and optimal log-probabilities observed along the trajectory.
+Corollary 2. For τ > 0, the optimal policy π∗and optimal state values V ∗satisfy the following
+extended temporal consistency property, for any state s1 and any action sequence a1, ..., at−1 (where
+si+1 = f(si, ai)):
+V ∗(s1) −γt−1V ∗(st) =
+t−1
+X
+i=1
+γi−1[r(si, ai) −τ log π∗(ai | si)] .
+(13)
+Proof. The proof in Appendix C applies (the generalized version of) Theorem 1 to any s1 and
+sequence a1, ..., at−1, summing the left and right hand sides of (the generalized version of) (11) to
+induce telescopic cancellation of intermediate state values. Corollary 2 follows as a special case.
+Importantly, the converse of Theorem 1 (and Corollary 2) also holds:
+Theorem 3. If a policy π(a | s) and state value function V (s) satisfy the consistency property (11)
+for all states s and actions a (where s′ = f(s, a)), then π = π∗and V = V ∗. (See Appendix C.)
+Theorem 3 motivates the use of one-step and multi-step path-wise consistencies as the foundation
+of RL algorithms that aim to learn parameterized policy and value estimates by minimizing the
+discrepancy between the left and right hand sides of (11) and (13).
+5
+Path Consistency Learning (PCL)
+The temporal consistency properties between the optimal policy and optimal state values devel-
+oped above lead to a natural path-wise objective for training a policy πθ, parameterized by θ,
+and a state value function Vφ, parameterized by φ, via the minimization of a soft consistency
+error. Based on (13), we ﬁrst deﬁne a notion of soft consistency for a d-length sub-trajectory
+si:i+d ≡(si, ai, . . . , si+d−1, ai+d−1, si+d) as a function of θ and φ:
+C(si:i+d, θ, φ) = −Vφ(si)+γdVφ(si+d)+
+Xd−1
+j=0 γj[r(si+j, ai+j)−τ log πθ(ai+j |si+j)] . (14)
+The goal of a learning algorithm can then be to ﬁnd Vφ and πθ such that C(si:i+d, θ, φ) is as close to
+0 as possible for all sub-trajectories si:i+d. Accordingly, we propose a new learning algorithm, called
+4
+
+Path Consistency Learning (PCL), that attempts to minimize the squared soft consistency error over a
+set of sub-trajectories E,
+OPCL(θ, φ) =
+X
+si:i+d∈E
+1
+2C(si:i+d, θ, φ)2.
+(15)
+The PCL update rules for θ and φ are derived by calculating the gradient of (15). For a given trajectory
+si:i+d these take the form,
+∆θ
+=
+ηπ C(si:i+d, θ, φ)
+Xd−1
+j=0 γj∇θ log πθ(ai+j | si+j) ,
+(16)
+∆φ
+=
+ηv C(si:i+d, θ, φ)
+ ∇φVφ(si) −γd∇φVφ(si+d)
+
+,
+(17)
+where ηv and ηπ denote the value and policy learning rates respectively. Given that the consistency
+property must hold on any path, the PCL algorithm applies the updates (16) and (17) both to
+trajectories sampled on-policy from πθ as well as trajectories sampled from a replay buffer. The
+union of these trajectories comprise the set E used in (15) to deﬁne OPCL.
+Speciﬁcally, given a ﬁxed rollout parameter d, at each iteration, PCL samples a batch of on-policy
+trajectories and computes the corresponding parameter updates for each sub-trajectory of length d.
+Then PCL exploits off-policy trajectories by maintaining a replay buffer and applying additional
+updates based on a batch of episodes sampled from the buffer at each iteration. We have found it
+beneﬁcial to sample replay episodes proportionally to exponentiated reward, mixed with a uniform
+distribution, although we did not exhaustively experiment with this sampling procedure. In particular,
+we sample a full episode s0:T from the replay buffer of size B with probability 0.1/B + 0.9 ·
+exp(α PT −1
+i=0 r(si, ai))/Z, where we use no discounting on the sum of rewards, Z is a normalization
+factor, and α is a hyper-parameter. Pseudocode of PCL is provided in the Appendix.
+We note that in stochastic settings, our squared inconsistency objective approximated by Monte Carlo
+samples is a biased estimate of the true squared inconsistency (in which an expectation over stochastic
+dynamics occurs inside rather than outside the square). This issue arises in Q-learning as well, and
+others have proposed possible remedies which can also be applied to PCL [3].
+5.1
+Uniﬁed Path Consistency Learning (Uniﬁed PCL)
+The PCL algorithm maintains a separate model for the policy and the state value approximation.
+However, given the soft consistency between the state and action value functions (e.g.,in (9)), one can
+express the soft consistency errors strictly in terms of Q-values. Let Qρ denote a model of action
+values parameterized by ρ, based on which one can estimate both the state values and the policy as,
+Vρ(s)
+=
+τ log
+X
+a exp{Qρ(s, a)/τ} ,
+(18)
+πρ(a | s)
+=
+exp{(Qρ(s, a) −Vρ(s))/τ} .
+(19)
+Given this uniﬁed parameterization of policy and value, we can formulate an alternative algo-
+rithm, called Uniﬁed Path Consistency Learning (Uniﬁed PCL), which optimizes the same objective
+(i.e., (15)) as PCL but differs by combining the policy and value function into a single model. Merging
+the policy and value function models in this way is signiﬁcant because it presents a new actor-critic
+paradigm where the policy (actor) is not distinct from the values (critic). We note that in practice,
+we have found it beneﬁcial to apply updates to ρ from Vρ and πρ using different learning rates, very
+much like PCL. Accordingly, the update rule for ρ takes the form,
+∆ρ
+=
+ηπC(si:i+d, ρ)
+Xd−1
+j=0 γj∇ρ log πρ(ai+j | si+j) +
+(20)
+ηvC(si:i+d, ρ)
+ ∇ρVρ(si) −γd∇ρVρ(si+d)
+
+.
+(21)
+5.2
+Connections to Actor-Critic and Q-learning
+To those familiar with advantage-actor-critic methods [27] (A2C and its asynchronous analogue A3C)
+PCL’s update rules might appear to be similar. In particular, advantage-actor-critic is an on-policy
+method that exploits the expected value function,
+V π(s) =
+X
+a π(a | s) [r(s, a) + γV π(s′)] ,
+(22)
+5
+
+to reduce the variance of policy gradient, in service of maximizing the expected reward. As in PCL,
+two models are trained concurrently: an actor πθ that determines the policy, and a critic Vφ that is
+trained to estimate V πθ. A ﬁxed rollout parameter d is chosen, and the advantage of an on-policy
+trajectory si:i+d is estimated by
+A(si:i+d, φ) = −Vφ(si) + γdVφ(si+d) +
+Xd−1
+j=0 γjr(si+j, ai+j) .
+(23)
+The advantage-actor-critic updates for θ and φ can then be written as,
+∆θ
+=
+ηπEsi:i+d|θ [A(si:i+d, φ)∇θ log πθ(ai|si)] ,
+(24)
+∆φ
+=
+ηvEsi:i+d|θ [A(si:i+d, φ)∇φVφ(si)] ,
+(25)
+where the expectation Esi:i+d|θ denotes sampling from the current policy πθ. These updates exhibit a
+striking similarity to the updates expressed in (16) and (17). In fact, if one takes PCL with τ →0
+and omits the replay buffer, a slight variation of A2C is recovered. In this sense, one can interpret PCL
+as a generalization of A2C. Moreover, while A2C is restricted to on-policy samples, PCL minimizes
+an inconsistency measure that is deﬁned on any path, hence it can exploit replay data to enhance its
+efﬁciency via off-policy learning.
+It is also important to note that for A2C, it is essential that Vφ tracks the non-stationary target V πθ
+to ensure suitable variance reduction. In PCL, no such tracking is required. This difference is more
+dramatic in Uniﬁed PCL, where a single model is trained both as an actor and a critic. That is, it is
+not necessary to have a separate actor and critic; the actor itself can serve as its own critic.
+One can also compare PCL to hard-max temporal consistency RL algorithms, such as Q-learning [50].
+In fact, setting the rollout to d = 1 in Uniﬁed PCL leads to a form of soft Q-learning, with the degree
+of softness determined by τ. We therefore conclude that the path consistency-based algorithms
+developed in this paper also generalize Q-learning. Importantly, PCL and Uniﬁed PCL are not
+restricted to single step consistencies, which is a major limitation of Q-learning. While some
+have proposed using multi-step backups for hard-max Q-learning [32, 27], such an approach is not
+theoretically sound, since the rewards received after a non-optimal action do not relate to the hard-max
+Q-values Q◦. Therefore, one can interpret the notion of temporal consistency proposed in this paper
+as a sound generalization of the one-step temporal consistency given by hard-max Q-values.
+6
+Related Work
+Connections between softmax Q-values and optimal entropy-regularized policies have been previously
+noted. In some cases entropy regularization is expressed in the form of relative entropy [5, 7, 11, 37],
+and in other cases it is the standard entropy [54]. While these papers derive similar relationships to (7)
+and (8), they stop short of stating the single- and multi-step consistencies over all action choices we
+highlight. Moreover, the algorithms proposed in those works are essentially single-step Q-learning
+variants, which suffer from the limitation of using single-step backups. Another recent work [31]
+uses the softmax relationship in the limit of τ →0 and proposes to augment an actor-critic algorithm
+with ofﬂine updates that minimize a set of single-step hard-max Bellman errors. Again, the methods
+we propose are differentiated by the multi-step path-wise consistencies which allow the resulting
+algorithms to utilize multi-step trajectories from off-policy samples in addition to on-policy samples.
+The proposed PCL and Uniﬁed PCL algorithms bear some similarity to multi-step Q-learning [32],
+which rather than minimizing one-step hard-max Bellman error, optimizes a Q-value function
+approximator by unrolling the trajectory for some number of steps before using a hard-max backup.
+While this method has shown some empirical success [27], its theoretical justiﬁcation is lacking,
+since rewards received after a non-optimal action no longer relate to the hard-max Q-values Q◦. In
+contrast, the algorithms we propose incorporate the log-probabilities of the actions on a multi-step
+rollout, which is crucial for the version of softmax consistency we consider.
+Other notions of temporal consistency similar to softmax consistency have been discussed in the RL
+literature. Previous work has used a Boltzmann weighted average operator [26, 6]. In particular, this
+operator has been used by [6] to propose an iterative algorithm converging to the optimal maximum
+reward policy inspired by the work of [20, 45]. While they use the Boltzmann weighted average,
+they brieﬂy mention that a softmax (log-sum-exp) operator would have similar theoretical properties.
+More recently [4] proposed a mellowmax operator, deﬁned as log-average-exp. These log-average-
+exp operators share a similar non-expansion property, and the proofs of non-expansion are related.
+6
+
+Synthetic Tree
+Copy
+DuplicatedInput
+RepeatCopy
+0
+50
+100
+0
+5
+10
+15
+20
+0
+1000
+2000
+0
+5
+10
+15
+20
+25
+30
+35
+0
+1000
+2000
+3000
+0
+2
+4
+6
+8
+10
+12
+14
+16
+0
+2000
+4000
+0
+20
+40
+60
+80
+100
+Reverse
+ReversedAddition
+ReversedAddition3
+Hard ReversedAddition
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+35
+0
+20000
+40000
+60000
+0
+5
+10
+15
+20
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+PCL
+A3C
+DQN
+Figure 1: The results of PCL against A3C and DQN baselines. Each plot shows average reward
+across 5 random training runs (10 for Synthetic Tree) after choosing best hyperparameters. We also
+show a single standard deviation bar clipped at the min and max. The x-axis is number of training
+iterations. PCL exhibits comparable performance to A3C in some tasks, but clearly outperforms A3C
+on the more challenging tasks. Across all tasks, the performance of DQN is worse than PCL.
+Additionally it is possible to show that when restricted to an inﬁnite horizon setting, the ﬁxed point
+of the mellowmax operator is a constant shift of the Q∗investigated here. In all these cases, the
+suggested training algorithm optimizes a single-step consistency unlike PCL and Uniﬁed PCL, which
+optimizes a multi-step consistency. Moreover, these papers do not present a clear relationship between
+the action values at the ﬁxed point and the entropy regularized expected reward objective, which was
+key to the formulation and algorithmic development in this paper.
+Finally, there has been a considerable amount of work in reinforcement learning using off-policy data
+to design more sample efﬁcient algorithms. Broadly speaking, these methods can be understood as
+trading off bias [42, 40, 25, 13] and variance [34, 29]. Previous work that has considered multi-step
+off-policy learning has typically used a correction (e.g., via importance-sampling [35] or truncated
+importance sampling with bias correction [29], or eligibility traces [34]). By contrast, our method
+deﬁnes an unbiased consistency for an entire trajectory applicable to on- and off-policy data. An
+empirical comparison with all these methods remains however an interesting avenue for future work.
+7
+Experiments
+We evaluate the proposed algorithms, namely PCL & Uniﬁed PCL, across several different tasks and
+compare them to an A3C implementation, based on [27], and an implementation of double Q-learning
+with prioritized experience replay, based on [36]. We ﬁnd that PCL can consistently match or beat the
+performance of these baselines. We also provide a comparison between PCL and Uniﬁed PCL and
+ﬁnd that the use of a single uniﬁed model for both values and policy can be competitive with PCL.
+These new algorithms are easily amenable to incorporate expert trajectories. Thus, for the more
+difﬁcult tasks we also experiment with seeding the replay buffer with 10 randomly sampled expert
+trajectories. During training we ensure that these trajectories are not removed from the replay buffer
+and always have a maximal priority.
+The details of the tasks and the experimental setup are provided in the Appendix.
+7.1
+Results
+We present the results of each of the variants PCL, A3C, and DQN in Figure 1. After ﬁnding the
+best hyperparameters (see Section B.3), we plot the average reward over training iterations for ﬁve
+randomly seeded runs. For the Synthetic Tree environment, the same protocol is performed but with
+ten seeds instead.
+7
+
+Synthetic Tree
+Copy
+DuplicatedInput
+RepeatCopy
+0
+50
+100
+0
+5
+10
+15
+20
+0
+1000
+2000
+0
+5
+10
+15
+20
+25
+30
+35
+0
+1000
+2000
+3000
+0
+2
+4
+6
+8
+10
+12
+14
+16
+0
+2000
+4000
+0
+20
+40
+60
+80
+100
+Reverse
+ReversedAddition
+ReversedAddition3
+Hard ReversedAddition
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+0
+20000
+40000
+60000
+0
+5
+10
+15
+20
+25
+30
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+PCL
+Uniﬁed PCL
+Figure 2: The results of PCL vs. Uniﬁed PCL. Overall we ﬁnd that using a single model for both
+values and policy is not detrimental to training. Although in some of the simpler tasks PCL has an
+edge over Uniﬁed PCL, on the more difﬁcult tasks, Uniﬁed PCL preforms better.
+Reverse
+ReversedAddition
+ReversedAddition3
+Hard ReversedAddition
+0
+2000
+4000
+0
+5
+10
+15
+20
+25
+30
+0
+2000
+4000
+0
+5
+10
+15
+20
+25
+30
+0
+20000
+40000
+60000
+0
+5
+10
+15
+20
+25
+30
+0
+5000
+10000
+0
+5
+10
+15
+20
+25
+30
+PCL
+PCL + Expert
+Figure 3: The results of PCL vs. PCL augmented with a small number of expert trajectories on the
+hardest algorithmic tasks. We ﬁnd that incorporating expert trajectories greatly improves performance.
+The gap between PCL and A3C is hard to discern in some of the more simple tasks such as Copy,
+Reverse, and RepeatCopy. However, a noticeable gap is observed in the Synthetic Tree and Dupli-
+catedInput results and more signiﬁcant gaps are clear in the harder tasks, including ReversedAddition,
+ReversedAddition3, and Hard ReversedAddition. Across all of the experiments, it is clear that the
+prioritized DQN performs worse than PCL. These results suggest that PCL is a competitive RL
+algorithm, which in some cases signiﬁcantly outperforms strong baselines.
+We compare PCL to Uniﬁed PCL in Figure 2. The same protocol is performed to ﬁnd the best
+hyperparameters and plot the average reward over several training iterations. We ﬁnd that using a
+single model for both values and policy in Uniﬁed PCL is slightly detrimental on the simpler tasks,
+but on the more difﬁcult tasks Uniﬁed PCL is competitive or even better than PCL.
+We present the results of PCL along with PCL augmented with expert trajectories in Figure 3. We
+observe that the incorporation of expert trajectories helps a considerable amount. Despite only
+using a small number of expert trajectories (i.e., 10) as opposed to the mini-batch size of 400, the
+inclusion of expert trajectories in the training process signiﬁcantly improves the agent’s performance.
+We performed similar experiments with Uniﬁed PCL and observed a similar lift from using expert
+trajectories. Incorporating expert trajectories in PCL is relatively trivial compared to the specialized
+methods developed for other policy based algorithms [2, 16]. While we did not compare to other
+algorithms that take advantage of expert trajectories, this success shows the promise of using path-
+wise consistencies. Importantly, the ability of PCL to incorporate expert trajectories without requiring
+adjustment or correction is a desirable property in real-world applications such as robotics.
+8
+
+8
+Conclusion
+We study the characteristics of the optimal policy and state values for a maximum expected reward
+objective in the presence of discounted entropy regularization. The introduction of an entropy
+regularizer induces an interesting softmax consistency between the optimal policy and optimal state
+values, which may be expressed as either a single-step or multi-step consistency. This softmax
+consistency leads to the development of Path Consistency Learning (PCL), an RL algorithm that
+resembles actor-critic in that it maintains and jointly learns a model of the state values and a model of
+the policy, and is similar to Q-learning in that it minimizes a measure of temporal consistency error.
+We also propose the variant Uniﬁed PCL which maintains a single model for both the policy and the
+values, thus upending the actor-critic paradigm of separating the actor from the critic. Unlike standard
+policy based RL algorithms, PCL and Uniﬁed PCL apply to both on-policy and off-policy trajectory
+samples. Further, unlike value based RL algorithms, PCL and Uniﬁed PCL can take advantage of
+multi-step consistencies. Empirically, PCL and Uniﬁed PCL exhibit a signiﬁcant improvement over
+baseline methods across several algorithmic benchmarks.
+9
+Acknowledgment
+We thank Rafael Cosman, Brendan O’Donoghue, Volodymyr Mnih, George Tucker, Irwan Bello, and
+the Google Brain team for insightful comments and discussions.

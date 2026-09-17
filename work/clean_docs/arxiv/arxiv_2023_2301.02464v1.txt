@@ -1,0 +1,639 @@
+Architect, Regularize and Replay (ARR): a Flexible
+Hybrid Approach for Continual Learning
+Vincenzo Lomonaco
+Department of Computer Science
+University of Pisa
+
+Lorenzo Pellegrini
+Department of Computer Science and Engineering
+University of Bologna
+
+Gabriele Grafﬁeti
+Department of Computer Science and Engineering
+University of Bologna
+
+Davide Maltoni
+Department of Computer Science and Engineering
+University of Bologna
+
+Abstract
+In recent years we have witnessed a renewed interest in machine learning method-
+ologies, especially for deep representation learning, that could overcome basic
+i.i.d. assumptions and tackle non-stationary environments subject to various dis-
+tributional shifts or sample selection biases. Within this context, several compu-
+tational approaches based on architectural priors, regularizers and replay policies
+have been proposed with different degrees of success depending on the speciﬁc
+scenario in which they were developed and assessed. However, designing compre-
+hensive hybrid solutions that can ﬂexibly and generally be applied with tunable
+efﬁciency-effectiveness trade-offs still seems a distant goal. In this paper, we
+propose Architect, Regularize and Replay (ARR), an hybrid generalization of the
+renowned AR1 algorithm and its variants, that can achieve state-of-the-art results
+in classic scenarios (e.g. class-incremental learning) but also generalize to arbitrary
+data streams generated from real-world datasets such as CIFAR-100, CORe50 and
+ImageNet-1000.
+1
+Introduction
+Continual Machine Learning is a challenging research problem with profound scientiﬁc and engineer-
+ing implications [22]. On one hand, it undermines the foundations of classic machine learning systems
+relying on iid assumptions, on the other hand, it offers a path towards efﬁcient and scalable human-
+centered AI systems that can learn and think like humans, swiftly adapting to the ever-changing
+nature of the external world. However, despite the recent surge of interest from the machine learning
+and deep learning communities on the topic and the proliﬁc scientiﬁc activity of the last few years,
+this vision is far from being reached.
+While most continual learning algorithms signiﬁcantly reduce the impact of catastrophic forgetting
+on speciﬁc scenarios, it is difﬁcult to generalize those results to settings in which they have not
+been speciﬁcally designed to operate (lack of robustness and generality). Moreover, they are mostly
+Book Chapter Preprint.
+arXiv:2301.02464v1  [cs.LG]  6 Jan 2023
+
+focused on vertical and exclusive approaches to continual learning based on regularization, replay or
+architectural changes of the underlying prediction model.
+In this paper, we summarize the effort made in the formulation of hybrid strategies for Continual
+Learning that can be more robust, generally applicable and effective in real-world application contexts.
+In particular, we will focus on the deﬁnition of the “Architect, Regularize and Replay" (ARR) method:
+a general reformulation and generalization of the renowned AR1 algorithm [30] with all its variants
+[23, 36], and, arguably, one of the ﬁrst hybrid continual learning methods proposed [34] (Sec. 4).
+Through a number of experiments on state-of-the-art benchmarks such as CIFAR-100, CORe50 and
+ImageNet-1000, we show the efﬁciency and effectiveness of the proposed approach with respect to
+other existing state-of-the-art methods (Sec 5). Then, we discuss tunable parameters to easily control
+the effectiveness-efﬁciency trade-off such as the selection of the latent replay layer (Sec. 5.4) and the
+replay memory size (Sec. 5.5). Finally, we discuss current ARR implementation porting in Avalanche
+[27] (Sec 6).
+2
+Background and Problem Formulation
+Continual Learning (CL) is mostly concerned with the concept of learning from a stream of ephemeral
+non-stationary data that can be processed in separate computational steps and cannot be revisited if not
+explicitly memorized. In an agnostic continual learning scenario data arrives in a streaming fashion
+as a (possibly inﬁnite) sequence S of, what we call, learning experiences e, so that S=e1, . . . , en.
+For simplicity, we assume a supervised classiﬁcation problem, where each experience ei consists of a
+batch of samples Di, where each sample is a tuple ⟨xi
+k, yi
+k⟩of input and target data, respectively, and
+the labels yi
+k are from the set Yi, which is a subset of the entire universe of classes Y. However, we
+note this formulation is very easy to generalize to different CL problems. Usually Di is split into a
+separate train set Di
+train and test set Di
+test. A continual learning algorithm ACL is a function with
+the following signature [19, 2]:
+ACL: ⟨f CL
+i−1, Di
+train, Mi−1, ti⟩→⟨f CL
+i
+, Mi⟩
+(1)
+where f CL
+i
+is the model learned after training on experience ei, Mi a buffer of past knowledge
+(can be also void), such as previous samples or activations, stored from the previous experiences
+and usually of ﬁxed size. The term ti is a task label that may be used to identify the correct data
+distribution (or task). All the experiments in this paper assume the most challenging scenario of ti
+being unavailable. Usually, CL algorithms are limited in the amount of resources that they can use
+and they should be designed to scale up to a large number of training experiences without increasing
+their memory / computational overheads over time. The objective of a CL algorithm is to minimize
+the loss LS over the entire stream of data S, composed of n distinct experiences:
+LS(f CL
+n
+, n)=
+1
+nP
+i=1
+|Di
+test|
+n
+X
+i=1
+Lexp(f CL
+n
+, Di
+test)
+(2)
+Lexp(f CL
+n
+, Di
+test)=
+|Di
+test|
+X
+j=1
+L(f CL
+n
+(xi
+j), yi
+j),
+(3)
+where the loss L(f CL
+n
+(x), y) is computed on a single sample ⟨x, y⟩, such as cross-entropy in
+classiﬁcation problems. Hence, the main assumption in this formulation is that all the concepts
+encountered over time are still relevant (the drift is only virtual) and there’s no conﬂicting evidence.
+This is quite a common assumption for the deep continual learning literature which is more concerned
+with building robust and general representations over time rather than building systems that can
+quickly adapt to changing circumstances.
+3
+Towards Hybrid Continual Learning Approaches
+We show in Fig. 1 some of the most popular and recent CL approaches divided into the above-
+introduced categories and their combinations. In the diagram, we differentiate methods with rehearsal
+(replay of explicitly stored training samples) from methods with generative replay (replay of latent
+2
+
+Figure 1: Venn diagram of some of the most popular CL strategies: CWR [24], PNN [40], EWC [17], SI
+[44], LWF [21], ICARL [38], GEM [29], FearNet [15], GDM [35], ExStream [13], Pure Rehearsal, GR [41],
+MeRGAN [42] and AR1 [31]. Rehearsal and Generative Replay upper categories can be seen as a subset of
+replay strategies.
+representations or the training samples). Crucially, although an increasing number of methods have
+been proposed, there is no consensus on which training schemes and performance metrics are better
+to evaluate CL models. Different sets of metrics have been proposed to evaluate CL performance
+on supervised and unsupervised learning tasks (e.g. [12, 16, 10]). In the absence of standardized
+metrics and evaluation schemes, it is unclear what it means to endow a method with CL capabilities.
+In particular, a number of CL models still require large computational and memory resources that
+hinder their ability to learn in real time, or with a reasonable latency, from data streams.
+It is also worth noting that, while a multitude of methods for each main category has been proposed,
+it is still difﬁcult to ﬁnd hybrid algorithmic solutions that can ﬂexibly leverage the often orthogonal
+advantages of the three different approaches (i.e. architectural, regularization and replay), depending
+on the speciﬁc application needs and target efﬁciency-effectiveness trade-off. However, some evidence
+shows that effective biological continual learning systems (such as the human brain) make use of all
+these distinct functionalities.
+In this paper, we argue that in the near and long term future of lifelong learning machines we will
+witness a signiﬁcantly growing interest in the development of hybrid continual learning algorithms
+[28] and we propose ARR as one of the ﬁrst methodologies that practically implement such a vision.
+4
+ARR: Architect, Regularize and Replay
+The Architect, Regularize and Replay algorithm, ARR for short, is a ﬂexible generalization of the AR1
+algorithm and its variants (CWR+, CWR*, AR1*, AR1Free) [26, 36]. ARR, with a proper initialization
+of its hyper-parameters, can be instantiated in the aforementioned algorithms based on the desired
+efﬁciency-efﬁcacy trade-off [37]. It can use pre-trained parameters as suggested by a consolidated
+trend in the ﬁeld [7] or start from a random initialization. The pseudo-code 1 describes ARR in detail
+which is based on three main components: architectural, regularization and replay.
+4.1
+Architectural Component
+The core concept behind an architectural approach is to isolate and preserve some parameters
+while adding new parameters in order to house new knowledge. CWR+, an evolution of CWR [24]
+whose pseudo-code is reported in Algorithm 2 of [30] maintains two sets of weights for the output
+classiﬁcation layer: cw are the consolidated weights (for stability) used for inference and tw the
+temporary weights (for plasticity) used for training; cw are initialized to 0 before the ﬁrst experience
+and then iteratively updated, while tw are reset to 0 before each training experience.
+3
+
+Figure 2: Architectural diagram of ARR [36].
+In [30], the authors proposed an extension of CWR+ called CWR* which works both under Class-
+Incremental [39] and Class-Incremental with Repetition settings [6]; in particular, under Class-
+Incremental with Repetition the coming experiences include examples of both new and already
+encountered classes. For already known classes, instead of resetting weights to 0, consolidated
+weights are reloaded. Furthermore, in the consolidation step, a weighted sum is now used: the ﬁrst
+term represents the weight of the past and the second term is the contribution from the current training
+experience. The weight wpastj used for the ﬁrst term is proportional to the ratio pastj
+curj , where pastj
+is the total number of examples of class j encountered in past experiences whereas curj is their count
+in the current experience. In case of a large number of small non-i.i.d. training experiences, the
+weight for the most recent experiences may be too low thus hindering the learning process. In order
+to avoid this, a square root is used in order to smooth the ﬁnal value of wpastj.
+4.2
+Regularization Component
+The well-known Elastic Weight Consolidation (EWC) pure regularization approach [17] controls
+forgetting by proportionally constraining the model weights based on their estimated importance with
+respect to previously encountered data distributions and tasks. To this purpose, in a classiﬁcation
+approach, a regularization term is added to the conventional cross-entropy loss, where each weight θk
+of the model is pulled back to their optimal value θ∗
+k with a strength Fk proportional to their estimated
+importance for modeling past knowledge:
+L=Lcross(·) + λ
+2 ·
+X
+k
+Fk · (θk −θ∗
+k)2.
+(4)
+Synaptic Intelligence (SI) [44] is an equally known lightweight variant of EWC where, instead of
+updating the Fisher information F at the end of each experience1, Fk are obtained by integrating the
+1In this paper, for the EWC and ARR implementations we use a single Fisher matrix updated over time,
+following the approach described in [30].
+4
+
+loss over the weight trajectories exploiting information already available during gradient descent. For
+both approaches, the weight update rule corresponding to equation 4 is:
+θ
+′
+k=θk −η · ∂Lcross(·)
+∂θk
+−η · Fk · (θk −θ∗
+k)
+(5)
+where η is the learning rate. This equation has two drawbacks. Firstly, the value of λ must be carefully
+calibrated: in fact, if its value is too high the optimal value of some parameters could be overshoot,
+leading to divergence (see discussion in Section 2 of [30]). Secondly, two copies of all model weights
+must be maintained to store both θk and θ∗
+k, leading to double memory consumption for each weight.
+To overcome the above problems, the authors of [26] propose to replace the update rule of equation 5
+with:
+θ
+′
+k=θk −η · (1 −
+Fk
+maxF
+) · ∂Lcross(·)
+∂θk
+(6)
+where maxF is the maximum value for weight importance (we clip to maxF the Fk values larger
+than maxF ). Basically, the learning rate is reduced to 0 (i.e., complete freezing) for weights of
+highest importance (Fk=maxF ) and maintained to η for weights whose Fk=0. It is worth noting
+that these two update rules work differently: the former still moves weights with high Fk in the
+direction opposite to the gradient and then makes a step in direction of the past (optimal) values;
+the latter tends to completely freeze weights with high Fk. However, in the experiments conducted
+in [26], the two approaches lead to similar results, and therefore the second one is preferable since
+it solves the aforementioned drawbacks. Regularization of learning parameters can be enforced
+both on the low-level generic features as well as on the class-speciﬁc discriminative features as
+implemented in AR1*. However, for the sake of simplicity in ARR we consider only the application of
+such regularization terms to the last group, since freezing or slowly ﬁnetuning the low-level generic
+features already proved to be an effective strategy.
+4.3
+Replay Component
+In [36, 33] it was shown that a very simple rehearsal implementation (hereafter denoted as native
+rehearsal), where for every training experience a random subset of the experience examples is added
+to the external storage to replace a (equally random) subset of the external memory, is not less
+effective than more sophisticated approaches such as iCaRL. Therefore, in [36] the authors opted for
+simplicity and compared the learning trend of CWR* and AR1* of a MobileNetV12 trained with and
+without rehearsal on CORe50 NICv2 – 391 [26]. They used the same protocol and hyper-parameters
+introduced in [25] and a rehearsal memory of 1,500 examples. It is well evident from their study that
+even a moderate external memory (about 1.27% of the total training set) is very effective to improve
+the accuracy of both approaches and to reduce the gap with the cumulative upper bound that, for this
+model, is ∼85%.
+In deep neural networks the layers close to the input (often denoted as representation layers) usually
+perform low-level feature extraction and, after a proper pre-training on a large dataset (e.g., ImageNet),
+their weights are quite stable and reusable across applications. On the other hand, higher layers
+tend to extract class-speciﬁc discriminant features and their tuning is often important to maximize
+accuracy.
+A latent replay (see Figure 2) approach [36] can then be formulated: instead of maintaining copies of
+input examples in the external memory in the form of raw data, we can store the activations volumes
+at a given layer (denoted as latent replay layer). To keep the representation stable and the stored
+activations valid we propose to slow down the learning at all the layers below the latent replay one and
+to leave the layers above free to learn at full pace. In the limit case where lower layers are completely
+frozen (i.e., slow-down to 0) latent replay is functionally equivalent to rehearsal from the input, but
+achieves a computational and storage saving thanks to the smaller fraction of examples that need to
+ﬂow forward and backward across the entire network and the typical information compression that
+networks perform at higher layers.
+2The network was pre-trained on ImageNet-1k.
+5
+
+Algorithm 1 ARR pseudocode: ¯Θ are the class-shared parameters of the representation layers; the notation
+cw[j] / tw[j] is used to denote the groups of consolidated / temporary weights corresponding to class j. Note that
+this version continues to work under New Classes (NC), which is seen here as a special case of New Classes and
+Instances (NIC) [24]; in fact, since in NC the classes in the current experience were never encountered before,
+the step at line 7 loads 0 values for classes in Di because cwj were initialized to 0 and in the consolidation
+step (line 13) wpastj values are always 0. The external random memory RM is populated across the training
+experiences. Note that the amount h of examples to add progressively decreases to maintain a nearly balanced
+contribution from the different training experiences, but no constraints are enforced to achieve a class-balancing.
+λ is the regularization strength, α is the replay layer. The three input parameters default to 0 if omitted.
+1: procedure ARR(RMsize, λ, α)
+2:
+RM=∅, cw[j]=0 and pastj=0 ∀j
+3:
+init ¯Θ randomly or from pre-trained model (e.g. on ImageNet)
+4:
+for each training experience ei:
+5:
+tw[j]=
+(
+cw[j],
+if class j in Di
+0,
+otherwise
+6:
+mbe=
+(
+|Di|
+(|Di|+RMsize)/mbsize ,
+if ei>e1
+mbsize,
+otherwise
+7:
+mbr=mbsize −mbe
+8:
+for each epoch:
+9:
+Sample mbe examples from Di and mbr examples from RM
+10:
+train the model on sampled data (replay data to be injected at leyer α):
+11:
+if ei=e1 learn both ¯Θ and tw
+12:
+else learn tw and ¯Θ with λ to control forgetting.
+13:
+for each class j in Di:
+14:
+wpastj=
+q
+pastj
+curj , where curj is the number of examples of class j in Di
+15:
+cw[j]=
+cw[j]·wpastj+(tw[j]−avg(tw))
+wpastj+1
+16:
+pastj=pastj + curj
+17:
+test the model by using ¯Θ and cw
+18:
+h= RMsize
+i
+19:
+Radd= random sampling h examples from Di
+20:
+Rreplace=
+(
+∅
+if i==1
+random sample h examples from RM
+otherwise
+21:
+RM=(RM −Rreplace) ∪Radd
+In the general case where the representation layers are not completely frozen, the activations stored
+in the external memory may suffer from an aging effect (i.e., as time passes they tend to increasingly
+deviate from the activations that the same pattern would produce if feed-forwarded from the input
+layer). However, if the training of these layers is sufﬁciently slow, the aging effect is not disruptive
+since the external memory has enough time to be updated with newly acquired examples. When
+latent replay is implemented with mini-batch SGD training: (i) in the forward step, a concatenation is
+performed at the replay layer (on the mini-batch dimension) to join examples coming from the input
+layer with activations coming from the external storage; (ii) the backward step is stopped just before
+the replay layer for the replay examples.
+5
+Empirical Evaluation
+In order to empirically evaluate the overall quality and ﬂexibility of ARR, we evaluate its performance
+on three commonly used continual learning benchmarks for computer vision classiﬁcation tasks:
+CIFAR-100 (Section 5.1), CORe50 (Section 5.2) and ImageNet-1000 (Section 5.3). Then, we
+provide a more in-depth analysis of the impact of the latent replay layer selection (Sec: 5.4) and the
+memory size in terms of memorized activations volumes (Sec: 5.5).
+6
+
+5.1
+CIFAR-100
+CIFAR-100 [18] is a well-known and largely used dataset for small (32 × 32) natural image classi-
+ﬁcation. It includes 100 classes containing 600 images each (500 training + 100 test). The default
+classiﬁcation benchmark can be translated into a Class-Incremental scenario (denoted as iCIFAR-100
+by [38]) by splitting the 100 classes into groups. In this paper, we consider groups of 10 classes thus
+obtaining 10 incremental experiences.
+Figure 3: Accuracy on iCIFAR-100 with 10 experiences (10 classes per experience). Results are averaged on
+10 runs: for all the strategies hyperparameters have been tuned on run 1 and kept ﬁxed in the other runs. The
+experiment on the right, consistently with the CORe50 test protocol, considers a ﬁxed test set including all the
+100 classes, while on the left we include in the test set only the classes encountered so far (analogously to results
+reported in [38]). Colored areas represent the standard deviation of each curve. Better viewed in color. [30]
+The CNN model used for this experiment is the same used by [44] for experiments on CIFAR-10/100
+Split [30]. It consists of 4 convolutional + 2 fully connected layers; details are available in Appendix
+A of [44]. The model was pre-trained on CIFAR-10 [18]. Figure 3 compares the accuracy of the
+different approaches on iCIFAR-100. The results suggest that:
+• Unlike the Naïve approach, Learning without Forgetting (LWF) [21] and Elastic Weights
+Consolidation (EWC) provide some robustness against forgetting, even if in this incremental
+scenario their performance is not satisfactory. SI, when used in isolation, is quite unstable
+and performs worse than LWF and EWC.
+• The accuracy improvement of CWR+ over CWR is here very small because the experiences are
+balanced (so weight normalization is not required) and the CNN initialization for the last
+level weights was already very close to 0 (we used the authors’ default setting of a Gaussian
+with std = 0.005).
+• ARR (λ=4.0e5) consistently outperforms all the other approaches.
+It is worth noting that both the experiments reported in Figure 3 (i.e., an expanding (left) and ﬁxed
+(right) test set, from left to right) lead to the same conclusions in terms of relative ranking among
+approaches. However, we believe that a ﬁxed test set allows to better appreciate the incremental
+learning trend and its peculiarities (saturation, forgetting, etc.) because the classiﬁcation complexity
+(which is proportional to the number of classes) remains constant across the experiences. For example,
+in the right graph it can be noted that SI, EWC and LWF learning capacities tend to saturate after 6-7
+experiences while CWR, CWR+ and ARR continue to grow; the same information is not evident on the
+left because of the underlying negative trend due to the increasing problem complexity.
+7
+
+Figure 4: Accuracy results on the CORe50 NICv2 – 391 benchmark of ARR(α=pool6), ARR(λ=0.0003),
+DSLDA, iCaRL, ARR(RMsize=1500, α=conv5_4), ARR(RMsize=1500, α=pool6). Results are averaged
+across 10 runs in which the order of the experiences is randomly shufﬂed. Colored areas indicate the standard
+deviation of each curve. As an exception, iCaRL was trained only on a single run given its extensive run time
+(∼14 days).
+Finally note that absolute accuracy on iCIFAR-100 cannot be directly compared with [38] because
+the CNN model used in [38] is a ResNet-32, which is much more accurate than the model here used:
+on the full training set the model here used achieves about 51% accuracy while ResNet-32 about
+68.1%.
+5.2
+CORe50
+While the accuracy improvement of the proposed approach w.r.t. the state-of-the-art rehearsal-free
+techniques have been already discussed in the previous section, further comparison with other state-
+of-the-art continual learning techniques on CORe50 may be beneﬁcial for better appreciating its
+practical impact and advantages in real-world continual learning scenarios and longer sequences of
+experiences. In particular, while ARR and ARR(α=pool6) have been already proven to be substantially
+better than LWF and EWC on the NICv2 - 391 benchmark [26], a comparison with iCaRL[39], one of
+the best know rehearsal-based techniques, is worth to be considered.
+Unfortunately, iCaRL was conceived for Class-Incremental scenarios and its porting to Class-
+Incremental with Repetition (whose experiences also include examples of know classes) is not
+trivial. To avoid subjective modiﬁcations, the authors of [26] started from the code shared by its
+original authors and emulated a Class-Incremental with Repetition setting by: (i) always creating
+new virtual classes from examples in the coming experiences; (ii) fusing virtual classes together
+when evaluating accuracies. For example, let us suppose to encounter 300 examples of class 5 in
+experience 2 and other 300 examples of the same class in experience 7; while two virtual classes
+are created by iCaRL during training, when evaluating accuracy both classes point to the real class
+5. Such iCaRL implementation, with an external memory of 8000 examples (much more than the
+1500 used by the proposed latent replay, but in line with the settings proposed in the original paper
+[38]), was run on NICv2 - 391, but we were not able to obtain satisfactory results. In Figure 4
+we report the iCaRL accuracy over time and compare it with ARR(RMsize=1500, α=conv5_4/dw),
+ARR(RMsize=1500, α=pool6) as well as the top three performing rehearsal-free strategies introduced
+before: ARR(α=pool6), ARR(λ=0.0003) and DSLDA. While iCaRL exhibits better performance than
+LWF and EWC (as reported in [25]), it is far from DSLDA, ARR(α=pool6) and ARR(λ=0.0003).
+Furthermore, when the algorithm has to deal with a so large number of classes (including virtual ones)
+and training experiences its efﬁciency becomes very low (as also reported in [30]). In Table 1 of [26]
+the total run time (training and testing), memory overhead and accuracy difference with respect to the
+cumulative upper bound are reported. We believe ARR(RMsize=1500, α=conv5_4/dw) represents a
+8
+
+Method
+Final Accuracy
+Fine Tuning (Naive)
+27.4
+EWC-E [17]
+28.4
+RWalk [5]
+24.9
+LwM [9]
+17.7
+LwF [20]
+19.8
+iCaRL [39]
+30.2
+EEIL [3]
+25.1
+LUCIR [14]
+20.1
+IL2M [1]
+29.7
+BiC [43]
+32.4
+ARR [30]
+33.1
+Table 1: Final accuracy on ImageNet-1000 following the benchmark of [32] with 25 experiences composed
+of 40 classes each. For each method, a replay memory of 20,000 examples is used (20 per class at the end of
+training). Results for other methods reported from [32].
+good trade-off in terms of efﬁciency-efﬁcacy with a limited computational-memory overhead and
+only a ∼13% accuracy gap from the cumulative upper bound. For iCaRL the total training time was
+∼14 days compared to a training time of less than ∼1 hour for the other learning algorithms on a
+single GPU.
+5.3
+ImageNet-1000
+In order to further validate the ARR algorithm scalability the authors of [11] performed a test on
+a competitive benchmark such as ImageNet-1000, following the Class-Incremental benchmark
+proposed by [32], which is composed of 25 experiences, each of them containing 40 classes. The
+benchmark is particularly challenging due to the large number of classes (1,000), the incremental
+nature of the task (with 25 experiences), and the data dimensionality of 224 × 224 (as with ImageNet
+protocol).
+In this experiment, [11] tested ARR against both regularization-based methods [8, 17, 21] and replay-
+based approaches [1, 3, 4, 14, 39, 43]. They used the same classiﬁer (ResNet-18) and the same
+memory size for all the tested methods (20,000 examples, 20 per class); for the regularization-based
+approaches, the replay is added as an additional mechanism.
+For ARR, they trained the model with an SGD optimizer. For the ﬁrst experience, the algorithm was
+tuned with an aggressive learning rate of 0.1 with momentum of 0.9 and weight decay of 10−4. Then,
+the initial learning rate was multiplied by 0.1 every 15 epochs. The model was trained for a total of
+45 epochs, using a batch size of 128. For all the subsequent experiences SGD with a learning rate of
+5 · 10−3 for the feature extractor’s parameters φ and 5 · 10−2 for the classiﬁer’s parameters ψ were
+used. The model was trained for 32 epochs for each experience, employing a learning rate scheduler
+that decreases the learning rate as the number of experiences progresses. This was done to protect old
+knowledge against new knowledge when the former is more abundant than the latter. As in the ﬁrst
+experience, the batch size was set to 128, composed of 92 examples from the current experience and
+36 randomly sampled (without replacement) from the replay memory.
+The results are shown in Table 1. Replay-based methods exhibit the best performance, with iCaRL
+and BiC exceeding a ﬁnal accuracy of 30%. ARR(RMsize=1500, α=pool6) outperforms all the
+baselines (33.1%) achieving state-of-the-art performance on this challenging benchmark, and proving
+the advantage of ﬂexible hybrid continual learning approaches. However, considering that top-1
+ImageNet accuracy for a ResNet-18 when trained on the entire dataset is 69.76%3, even for the best
+methods the accuracy gap in the continual learning setup is very large. This suggests that continual
+learning, especially in complex scenarios with a large number of classes and high dimensional data,
+is far to be solved, and further research should be devoted to this ﬁeld.
+3Accuracy taken from the torchvision ofﬁcial page: https://pytorch.org/vision/stable/models.
+html
+9
+
+5.4
+Replay Layer Selection
+Figure 5: ARR with latent replay (RMsize=1500) for different choices of the latent replay layer. Setting the
+replay layer at the “images” layer corresponds to native rehearsal. The saturation effect which characterizes the
+last training experiences is due to the data distribution in NICv2 – 391 (see [25]): in particular, the lack of new
+instances for some classes (that already introduced all their data) slows down the accuracy trend and intensiﬁes
+the effect of activations aging.
+In Figure 5 we report the accuracy of ARR(RMsize=1500, α=. . . ) for different choices of the rehearsal
+layer α for the CORe50 experiment. As expected, when the replay layer is pushed down the
+corresponding accuracy increases, proving that a continual tuning of the representation layers is
+important. However, after conv5_4/dw there is a sort of saturation and the model accuracy is no
+longer improving. The residual gap (∼4%) with respect to native rehearsal is not due to the weights
+freezing of the lower part of the network but to the aging effect introduced above. This can be simply
+proved by implementing an “intermediate” approach that always feeds the replay pattern from the
+input and stops the backward at conv5_4: such an intermediate approach achieved an accuracy at the
+end of the training very close to the native rehearsal (from raw data). We believe that the accuracy
+drop due to the aging effect can be further reduced with better tuning of Batch Re-Normalization
+(BRN) hyper-parameters and/or with the introduction of a scheduling policy making the global
+moment mobile windows wider as the continual learning progresses (i.e., more plasticity in the early
+stages and more stability later); however, such ﬁne optimization is application speciﬁc and beyond
+the scope of this study.
+To better evaluate the latent replay with respect to the native rehearsal we report in Table 2 the
+relevant dimensions: (i) computation refers to the percentage cost in terms of ops of a partial forward
+(from the latent replay layer on) relative to a full forward step from the input layer; (ii) pattern size
+is the dimensionality of the pattern to be stored in the external memory (considering that we are
+using a MobileNetV1 with 128×128×3 inputs to match CORe50 image size); (iii) accuracy and
+∆accuracy quantify the absolute accuracy at the end of the training and the gap with respect to a
+native rehearsal, respectively. For example, conv5_4/dw exhibits an interesting trade-off because the
+computation is about 32% of the native rehearsal one, the storage is reduced to 66% (more on this
+point in subsection 5.5) and the accuracy drop is mild (5.07%). ARR(RMsize=1500, α=pool6) has a
+really negligible computational cost (0.027%) with respect to native rehearsal and still provides an
+accuracy improvement of ∼4% w.r.t. the non-rehearsal case (∼60% vs ∼56% as it is possible to see
+from Figure 5 and Figure 6, respectively).
+5.5
+Replay Memory Size Selection
+To understand the inﬂuence of the external memory size we repeated the experiment with different
+RMsize values: 500, 1,000, 1,500, 3,000. The results are shown in Figure 6: it is worth noting that
+increasing the rehearsal memory leads to better accuracy for all the algorithms, but the gap between
+1500 and 3000 is not large and we believe 1500 is a good trade-off for this dataset. ARR(RMsize=
+10
+
+Table 2: Computation, storage, and accuracy trade-off with Latent Replay at different layers of a MobileNetV1
+ConvNet trained continually on NICv2 – 391 with RMsize=1500.
+Layer
+Computation %
+vs Native Rehearsal Example Size Final Accuracy %
+∆Accuracy %
+vs Native Rehearsal
+Images
+100.00%
+49152
+77.30%
+0.00%
+conv5_1/dw
+59.261%
+32768
+72.82%
+-4.49%
+conv5_2/dw
+50.101%
+32768
+73.21%
+-4.10%
+conv5_3/dw
+40.941%
+32768
+73.22%
+-4.09%
+conv5_4/dw
+31.781%
+32768
+72.24%
+-5.07%
+conv5_5/dw
+22.621%
+32768
+68.59%
+-8.71%
+conv5_6/dw
+13.592%
+8192
+65.24%
+-12.06%
+conv6/dw
+9.012%
+16384
+59.89%
+-17.42%
+pool6
+0.027%
+1024
+59.76%
+-17.55%
+. . . ) works slightly better than ARR(RMsize=. . . , λ=0.003) when a sufﬁcient number of rehearsal
+examples are provided but, as expected, accuracy is worse with light (i.e. RMsize=500) or no
+rehearsal.
+It is worth noting that the best ARR conﬁguration in Figure 6, i.e. ARR(RMsize=3000), is only 5%
+worse than the cumulative upper bound and a better parametrization and exploitation of the rehearsal
+memory could further reduce this gap.
+Figure 6: Comparison of main ARR conﬁgurations on CORe50 NICv2 – 391 with different external memory
+sizes (RMsize=500, 1000, 1500 and 3000 examples).
+6
+ARR Implementation in Avalanche
+The Architect, Regularize and Replay (ARR) method we proposed in this paper is the result of a
+comprehensive re-formalization of different variants and improvements proposed over the last few
+years starting from [24, 30]. Original implementations of such methods (CWR, CWR+, CWR*, AR1, AR1*
+and AR1* with Latent Replay) exist in Caffe and PyTorch. However, given their diversity, it is quite
+difﬁcult to move from one implementation to the other and apply them to settings and scenarios even
+slightly different from the ones on which they have been proposed.
+In order to exploit the general applicability and ﬂexibility of the ARR method, we decided to re-
+implement it directly in Avalanche [27]. Avalanche, an open-source (MIT licensed) end-to-end library
+for continual learning based on PyTorch, was devised to provide a shared and collaborative codebase
+for fast prototyping, training, and evaluation of continual learning algorithms.
+Thanks to the Avalanche portable implementation (soon to be integrated into the next stable version
+of the library), ARR can be conﬁgured to reproduce the experiments presented in this paper (Fig. 7,
+conform to the previously proposed strategies (e.g. AR1*, CWR*, etc.) as well as being ready to be
+11
+
+Figure 7: ARR implementation in Avalanche. Given a set of hyper-parameters ARR can be instantiated and
+properly conﬁgured to be tested on a large set of benchmarks already available in Avalanche.
+tested on a large set of benchmarks already available in Avalanche or that can be easily added to the
+library.
+7
+Conclusion
+In this paper we showed that ARR is a ﬂexible, effective and efﬁcient technique to continually learn
+new classes and new instances of known classes even from small and non i.i.d. experiences. ARR,
+instantiated with latent replay, is indeed able to learn efﬁciently and, at the same time, the achieved
+accuracy is not far from the cumulative upper bound (about 5% in some cases). The computation-
+storage-accuracy trade-off can be deﬁned according to both the target application and the available
+resources so that even edge devices with no GPUs can learn continually. Moreover, ARR can be
+easily extended to support more sophisticated replay memory management strategies (also to contrast
+the aging effect) and even be coupled with a generative model trained in the loop and capable of
+providing pseudo-activations volumes on demand as initially showed in [11].

@@ -1,0 +1,819 @@
+Mining Adverse Drug Reactions from
+Unstructured Mediums at Scale
+Hasham Ul Haq, Veysel Kocaman, David Talby
+John Snow Labs Inc.
+16192 Coastal Highway
+Lewes, DE , USA 19958
+
+Abstract
+Adverse drug reactions / events (ADR/ADE) have a major
+impact on patient health and health care costs. Detecting
+ADR’s as early as possible and sharing them with regula-
+tors, pharma companies, and healthcare providers can pre-
+vent morbidity and save many lives. While most ADR’s are
+not reported via formal channels, they are often documented
+in a variety of unstructured conversations such as social
+media posts by patients, customer support call transcripts,
+or CRM notes of meetings between healthcare providers
+and pharma sales reps. In this paper, we propose a natural
+language processing (NLP) solution that detects ADR’s in
+such unstructured free-text conversations, which improves
+on previous work in three ways. First, a new Named En-
+tity Recognition (NER) model obtains new state-of-the-
+art accuracy for ADR and Drug entity extraction on the
+ADE, CADEC, and SMM4H benchmark datasets (91.75%,
+78.76%, and 83.41% F1 scores respectively). Second, two
+new Relation Extraction (RE) models are introduced - one
+based on BioBERT while the other utilizing crafted fea-
+tures over a Fully Connected Neural Network (FCNN) - are
+shown to perform on par with existing state-of-the-art mod-
+els, and outperform them when trained with a supplementary
+clinician-annotated RE dataset. Third, a new text classiﬁca-
+tion model, for deciding if a conversation includes an ADR,
+obtains new state-of-the-art accuracy on the CADEC dataset
+(86.69% F1 score). The complete solution is implemented
+as a uniﬁed NLP pipeline in a production-grade library built
+on top of Apache Spark, making it natively scalable and able
+to process millions of batch or streaming records on com-
+modity clusters.
+Introduction
+Adverse drug events are harmful side effects of drugs, com-
+prising of allergic reactions, overdose response, and general
+unpleasant side effects. Approximately 2 million patients in
+the United States are affected each year by serious ADR’s,
+resulting in roughly 100,000 fatalities (Leaman et al. 2010),
+and making ADR’s the fourth leading cause of death in the
+United States (Giacomini et al. 2007). Treatment related to
+Copyright © 2022, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+ADR’s has been estimated to cost $136 billion each year in
+the United States alone (van Der Hooft et al. 2006).
+Finding all ADR’s of a drug before it is marketed is not
+practical for several reasons. First, The number of human
+subjects going through clinical trials is often too small to
+detect rare ADR’s. Second, many clinical trials are short-
+lasting while some ADR’s take time to manifest. Third,
+some ADR’s only show when a drug is taken together with
+other drugs, and not all drug-drug combinations can be
+tested during clinical trials. Fourth, drug repurposing or off-
+label usage can lead to unforeseen ADR’s. As a result, de-
+tecting ADR’s in drugs which are already being marketed is
+critical - a discipline known as postmarketing pharmacovig-
+ilance (Mamm`ı et al. 2013).
+Schemes which allow hospitals, clinicians, and patients to
+report ADR’s have existed for many years, but only a frac-
+tion of events get reported through them. A meta-analysis of
+37 studies from 12 countries found that the median rate of
+under-reporting was 94% (Hazell and Shakir 2006). This led
+to work on mining ADR’s from alternative sources, such as
+social media posts by patients or healthcare providers (Bol-
+legala et al. 2018). Outbreak of the COVID-19 pandemic has
+precipitated this trend of sharing such information (Cinelli
+et al. 2020); The size, variety, and instantaneous nature of
+social media provides opportunities for real-time monitor-
+ing of ADRs (Sloane et al. 2015). Compared to traditional
+data source like research publications, this data is more chal-
+lenging to process, as it is unstructured and contains noise in
+the form of jargon, abbreviations, misspellings, and complex
+sentence structures.
+Recent advancements in Natural Language Processing
+(NLP) in the form of Transformers (Vaswani et al. 2017)
+based architectures like BERT (Devlin et al. 2018), have sig-
+niﬁcantly pushed the boundaries of NLP capabilities. There
+is an increasing trend of training large models on domain-
+speciﬁc data like BioBERT (Lee et al. 2019), and these
+methods have proven to achieve state-of-the-art (SOTA) re-
+sults for document understanding and named entity recog-
+nition (NER). However, since these methods require signiﬁ-
+cant computational resources during both training and infer-
+ring, it becomes impractical to apply them over large quan-
+tities of records in compute-restricted production environ-
+ments.
+Despite the growing interest and opportunities to process
+arXiv:2201.01405v2  [cs.CL]  6 Jan 2022
+
+large quantities of data, models and software frameworks
+that can scale to leverage compute clusters are scarce. This
+restricts the ability to utilize available data from social media
+and other mediums - such as transcripts of customer service
+calls with patients, or CRM notes about sales and support
+discussions with clinicians - to their true potential. The avail-
+ability of high volume, variety, and velocity of data presents
+the opportunity to develop NLP solutions that outperform
+the existing SOTA accuracy, while also being easily scalable
+and computationally efﬁcient.
+The purpose of this study is to illustrate how an end-
+to-end system, based on the Apache Spark ecosystem and
+comprising of novel NLP techniques, can be used to pro-
+cess large quantities of unstructured text to mine ADRs.
+This system has been implemented on a production-ready,
+widely deployed, and natively scalable library, thus capable
+of processing millions of records, in either batch or stream-
+ing modes. The uniﬁed NLP pipeline includes new models
+for the three required sub-tasks: classifying text to decide if
+it is an indication of an ADR, recognizing named entities for
+reactions and drugs, and linking adverse events with drugs.
+Following are the novel contributions of this paper:
+• The ﬁrst scalable end-to-end system for mining ADR’s
+from unstructured text, including Document Classiﬁca-
+tion, Named Entity Recognition, and Relation Extraction
+Models within a uniﬁed NLP pipeline.
+• New NER model for extracting reactions and drugs,
+whose accuracy outperforms previous SOTA models on
+public datasets for this task.
+• New Relation Extraction models for linking reactions
+and drugs, which outperform previous SOTA models
+when trained with additional data that was annotated by
+clinicians as part of this effort.
+• New text classiﬁcation model for deciding if a piece of
+text reports an ADR, whose accuracy outperforms previ-
+ous SOTA models.
+• Studying the utility of using non-contextual lightweight
+embeddings (Mikolov et al. 2013) like GloVe (Penning-
+ton, Socher, and Manning 2014) instead of memory-
+intensive contextual embeddings like BioBERT for these
+tasks, by comparing training times and accuracy im-
+provements.
+• Detailed analysis of all the solution components and
+datasets, explaining how its modular structure can be cus-
+tomized to different data sources and runtimes.
+Related Work
+The extraction of ADRs from unstructured text has received
+growing attention in the past few years due to wide-spread
+adoption of Electronic Medical Records (EMR), and ever-
+increasing number of users on social media who share their
+experiences. Existing work comprises of signiﬁcant contri-
+butions in both, novelty in information extraction method-
+ologies, as well as availability of relevant pre-annotated
+datasets containing annotations for a variety of subtasks.
+The problem of ADR extraction gained visibility with
+the introduction of challenges like Social Media Mining
+for Healthcare (SMM4H) (Weissenbacher and Gonzalez-
+Hernandez 2019) and National Clinical NLP Challenges
+(n2c2) (Henry et al. 2020), which provide pre-annotated
+datasets for researchers to compete on. Other signiﬁcant
+contributions for data collection include (Gurulingappa et al.
+2012) which used the Pubmed corpus to develop the ADE
+corpus benchmark dataset, covering Classiﬁcation, NER,
+and RE annotations for extracting and relating ADRs and
+drugs respectively. Another work (Karimi et al. 2015) pro-
+duced an NER dataset (CADEC) by collecting and annotat-
+ing reviews and comments from forums.
+Identiﬁcation of text containing ADRs is formulated as
+a text classiﬁcation problem for which different techniques
+have been applied. (Huynh et al. 2016) used different varia-
+tions of Convolutional Neural Network (CNN) (e.g., CNN,
+CRNN, CNNA) to identify tweets containing ADRs on the
+twitter dataset. More elaborate techniques like ﬁne-tuning
+of BERT models have been applied for text classiﬁcation as
+well (Kayastha, Gupta, and Bhattacharyya 2021).
+A standard method of formulating the extraction of drugs
+and ADR mentions is NER, for which, a number of archi-
+tectures have been proposed. One of the classical approach
+is to use a BiLSTM (Graves and Schmidhuber 2005) ar-
+chitecture with Conditional Random Fields (CRF) as used
+by (Stanovsky, Gruhl, and Mendes 2017). This method is a
+shallow network that relies on word embeddings and part
+of speech tags to classify each token to extract ADR men-
+tions. (Ge et al. 2020) also added character level embed-
+dings to the same architecture to incorporate spelling fea-
+tures, and enriched the training dataset by annotating addi-
+tional data from DBpedia to achieve SOTA results on the
+CADEC dataset, demonstrating the beneﬁts of using addi-
+tional data. Similar to our approach, they also built an exten-
+sive training framework over multiple nodes.
+Relating ADR mentions with the drugs is formulated as
+a relation extraction (RE) task, which comprises of creation
+and classiﬁcation of relations between entities (Haq, Koca-
+man, and Talby 2021). Classical RE methods like (Fundel,
+K¨uffner, and Zimmer 2006) use lexical rules based on de-
+pendency parsing tree of the document. The introduction of
+transformer allowed for more context-aware solutions like
+feeding entity spans and document to transformers to pre-
+dict relations (Soares et al. 2019). Recently, more elaborate
+approaches like joint learning of both NER and RE have
+proved to be more beneﬁcial. For example, (Crone 2020)
+used a single base network to generate joint features, while
+using separate BiRNN layers for both NER and RE, and cre-
+ating skip connections between the NER and RE BiRNN
+layers to achieve SOTA performance on RE.
+While existing work has focused on pushing the bound-
+aries for accuracy, little work is done to build a frame-
+work that can process large quantities of data from social
+media with accuracy. To achieve this, we develop separate
+architectures for all three tasks, and place them in a sin-
+gle pipeline, allowing us to maintain a modular structure
+to develop and test each component separately, while shar-
+ing common components (e.g., tokenization and embedding
+generation) for scalability.
+
+Approach
+We divide the problem into three main tasks; Document
+Classiﬁcation, Named Entity Recognition and Relation Ex-
+traction, and draw distinct solutions for each one of them
+for scalability. Since NER plays the most important role of
+identifying entity spans, we place all components in a single
+pipeline for an end-to-end solution. Figure 1 explains the
+complete pipeline using Apache Spark framework.
+Figure 1: Overview of the complete architecture. All the
+components are sequentially placed in a single pipeline. Ar-
+rows represent output of one stage as input to the next stage.
+As illustrated in the system diagram in Figure 1, Rela-
+tion Extraction is heavily dependent on the NER model,
+as the latter provides relevant entity chunks which form
+basic inputs of the RE model. Since NER requires token
+level embeddings, we test with different types of embed-
+dings; namely GLoVe (Pennington, Socher, and Manning
+2014) and BERT (Devlin et al. 2018) based embeddings.
+This modular approach helps us keep the NER and RE ar-
+chitecture static while experimenting with different embed-
+ding types to analyse accuracy and performance differences.
+Given the nature of the data, we trained 200-dimension
+GLoVe embeddings on Pubmed and MIMIC datasets. For
+BERT embeddings we utilize the work by (Lee et al. 2019),
+namely BioBERT. In general, BERT embeddings provide
+more useful information due to being context-aware and bet-
+ter handling of out of vocabulary (OOV) tokens.
+Classiﬁcation
+To be able to process large volume of data, the text classiﬁ-
+cation model needs to be scalable, and accurate, as it is used
+to ﬁlter out documents, reviews, and tweets that do not con-
+tain any indication of adverse event. To achieve this, we use
+a FCNN model that does not require hand-crafted features,
+and relies on a single embedding vector for classiﬁcation.
+Given the conversational nature of social media text, we can
+utilise the entire document to get efﬁcient embeddings (with
+little text clipping in case of BioBERT embeddings) that we
+directly feed to the classiﬁer model. Since there is only a
+single feature vector as input to the model, we test multiple
+embedding techniques to analyse performance.
+Named Entity Recognition
+To extract ADR and other entities from text, we use our
+class-leading NER architecture, called BiLSTM-CNN-Char.
+We build our NER model by taking the work of (Chiu and
+Nichols 2015) as the base model, and made a few changes
+in the architecture according to our testing; removing lex-
+ical features like POS tags, and introducing new character
+level features. We used 1D convolution layer comprising of
+25 ﬁlters having kernel size 3 to generate token feature maps
+that encapsulate information like spelling and casing. These
+additional features proved highly useful while dealing with
+spelling mistakes, as well as out-of-vocabulary tokens. We
+also updated the architecture by using BlockFused-LSTM
+cells in our implementation for increased speed. Figure 2
+explains the architecture of our NER model.
+Figure 2: Proposed NER architecture, as explained in (Ko-
+caman and Talby 2020).
+Relation Extraction
+We treat Relation Extraction (RE) as a binary classiﬁcation
+problem where each example is a pair of drug and ADR
+mentions in a given context, and develop two novel solu-
+tions; the ﬁrst one comprising of a simpler FCNN architec-
+ture for speed, and the second one based on the BioBERT
+architecture for accuracy. We experiment both approaches
+and compare their results.
+For our ﬁrst RE solution we rely on entity spans and types
+identiﬁed by the NER model to develop distinct features to
+feed to an FCNN for classiﬁcation. At ﬁrst we generate pairs
+of adverse event and drug entities, and then generate cus-
+tom features for each pair. These features include semantic
+similarity of the entities, syntactic distance of the two enti-
+ties, dependency structure of the entire document, embed-
+ding vectors of the entity spans, as well as embedding vec-
+tors for 100 tokens within the vicinity of each entity. Figure
+3 explains our model architecture in detail. We then concate-
+nate these features and feed them to fully connected layers
+with leaky relu activation. We also use batch normalisation
+after each afﬁne transformation before feeding to the ﬁnal
+softmax layer with cross-entropy loss function. We use soft-
+max cross-entropy instead of binary cross-entropy loss to
+keep the architecture ﬂexible for scaling on datasets having
+multiple relation types.
+Our second solution focuses on a higher accuracy, as well
+as exploration of relations across long documents, and is
+based on (Soares et al. 2019). In our experiment we take
+checkpoints from the BioBERT model and train an end-to-
+end model for relation extraction. Similar to our ﬁrst solu-
+tion, we rely on entity spans and use the entire document as
+context string while training the model. The original paper
+used sequence length of 128 tokens for the context string,
+
+Figure 3: Overview of the ﬁrst Relation Extraction model.
+All the features are vertically stacked in a single feature
+vector. The feature vector is kept dynamic with additional
+padding for compatibility across different embedding sizes,
+and complex dependency structures.
+which we keep constant, and instead experiment with the
+context string, additional data, and ﬁne-tuning techniques.
+Experimental Setup
+Datasets
+We test our models on three benchmark datasets; SMM4H
+NER challenge (Weissenbacher and Gonzalez-Hernandez
+2019), ADE Corpus (Gurulingappa et al. 2012) and CADEC
+(Karimi et al. 2015). The SMM4H NER challenge is a yearly
+challenge based on annotated twitter data. As this dataset is
+entirely based on tweets, it forms an ideal testing bed to test
+our model’s performance on real world data. The ADE Cor-
+pus dataset is a benchmark dataset for classiﬁcation, NER
+and RE tasks, while the CADEC dataset is primarily used
+for classiﬁcation and NER benchmarks only. Keeping con-
+sistency with existing work, as well as aligning with our pri-
+mary goal of extracting ADRs and related drugs, we keep
+two entities in all datasets; ADE and Drug. Details of the
+NER datasets can be found in Table 1
+Dataset
+# Sentence
+# Token
+# Entity tags
+ADE Corpus
+4272
+86865
+ADE: 12264
+Drug: 5544
+CADEC
+7597
+121656
+ADE: 15903
+Drug: 2032
+SMM4H
+2253
+42175
+ADE: 3575
+Drug: 1586
+Table 1: Statistics of the benchmark NER datasets.
+Since we treat the RE problem as binary classiﬁcation,
+we need positive relations as well as negative relations to
+train the model. Positive relations are deﬁned if the drug and
+reaction entities are related in the context, while negative re-
+lations comprise of drugs that are not responsible for a par-
+ticular reaction. This relation can be formulated as below:
+P(Drug|ADE)
+From the ADE dataset, we can sample negative relations
+by subtracting annotated drug-reaction pairs from all drug-
+reaction pairs in the same document. Table 2 shows data dis-
+tribution of the standard and enriched RE datasets.
+Dataset
+# Positive Rel.
+# Negative Rel.
+ADE Corpus
+6821
+183
+ADE with n2c2
+12929
+8935
+Table 2: Statistics of the RE datasets used to train and vali-
+date the models. ADE Corpus is the standard dataset, which
+is then enriched with n2c2 data for more robust performance.
+The standard ADE Corpus does not have sufﬁcient neg-
+ative relations, raising the issue of class imbalance. To ad-
+dress this, we sampled and annotated
+2000 notes from
+2018 n2c2 shared task on ADE and medication extraction
+in EHRs dataset (Henry et al. 2020), to create a supplemen-
+tary dataset for relations. We keep the same entities (i.e.,
+Drug and ADE) while annotating to align with our bench-
+mark datasets. Also, to keep human bias at a minimum, we
+don’t annotate entity spans; rather we use existing NER an-
+notations to generate a dataset comprising of Drug and ADE
+pairs, and only classify each relation based on their context.
+Following previous work, we evaluate the models using
+10-fold cross validation, and report macro and micro av-
+eraged precision, recall, and F1 scores. Exact experimental
+and evaluation settings for each stage are described below.
+Experiments
+• Keeping the Classiﬁcation model architecture constant,
+we test two methods of embedding generation; For the
+ﬁrst experiment we generated token level GLoVe and
+BioBERT embeddings for each token and averaged them
+to generate document embedding. This method did not
+produce accurate embeddings, resulting in lower F1
+scores. Our second experiment utilised Sentence Bert
+Embeddings (Reimers and Gurevych 2019) trained on
+the Pubmed dataset, namely Sentence BioBERT, which
+we further pretrained on the MedNLI dataset (Shivade
+2019) for better performance. We thoroughly test the per-
+formance of each embedding generation approach, and
+report the ﬁndings in Table 3.
+• For the NER model we align all the datasets in the
+standard CoNLL format and use IOB (Inside, Outside,
+Beginning) tagging scheme. We tested other tagging
+schemes as well, like BIOES, and found IOB to be the
+simplest and best performing scheme. Since our NER
+architecture requires word embeddings, we experiment
+with two types of embeddings. For the GLoVe embed-
+dings, we use our 200-dimension embeddings, and lever-
+age BioBERT embeddings for contextual embeddings.
+For thorough analysis of the NER model, we evaluate the
+results using both strict and relax approach. Under strict
+
+Dataset
+GLoVe (Avg.) Embeddings
+BERT (Avg.) Embeddings
+BERT Sentence Embeddings
+SOTA
+Precision
+Recall
+F1
+Precision
+Recall
+F1
+Precision
+Recall
+F1
+F1
+ADE
+75.96
+79.53
+76.86
+76.91
+84.96
+79.37
+87.41
+84.72
+85.96
+87.0
+86.84
+81.22
+83.43
+88.13
+84.38
+85.38
+90.97
+91.20
+91.03
+CADEC
+85.29
+84.24
+84.71
+86.50
+86.11
+86.30
+87.13
+86.32
+86.69
+81.5
+85.99
+86.10
+86.0
+87.38
+87.43
+87.40
+87.78
+87.86
+87.79
+Table 3: Classiﬁcation Metrics on benchmark datasets. For each dataset, Macro and Micro averaged scores are displayed on ﬁrst
+and second row respectively. SOTA metrics for ADE and CADEC datasets are obtained from (Huynh et al. 2016) and (Alimova
+and Tutubalina 2019) respectively.
+Dataset
+GLoVe Embeddings
+BERT Embeddings
+SOTA
+Precision
+Recall
+F1
+Precision
+Recall
+F1
+F1
+strict
+relax
+strict
+relax
+strict
+relax
+strict
+relax
+strict
+relax
+strict
+relax
+ADE
+88.32
+93.77
+89.26
+94.80
+88.78
+94.27
+90.0
+94.47
+93.56
+98.22
+91.75
+96.31
+91.3
+87.81
+93.59
+88.81
+94.66
+88.30
+94.12
+89.6
+94.37
+93.18
+98.13
+91.36
+96.21
+CADEC
+78.14
+89.04
+77.14
+88.01
+77.62
+88.50
+78.53
+88.63
+79.03
+89.32
+78.76
+88.95
+71.9
+71.87
+86.36
+71.67
+86.13
+71.75
+86.23
+72.38
+86.14
+73.64
+87.66
+72.99
+86.88
+SMM4H
+81.43
+90.33
+72.17
+78.51
+76.01
+83.41
+78.5
+86.76
+75.23
+82.42
+76.73
+84.41
+67.81
+83.66
+91.34
+71.31
+77.86
+76.99
+84.06
+79.13
+87.09
+74.33
+81.81
+76.65
+84.36
+Table 4: NER metrics on benchmark datasets. For each dataset, macro and micro averaged scores are displayed on ﬁrst and
+second row respectively. SOTA metrics for ADE, CADEC, and SMM4H are obtained from (Yan et al. 2021), (Stanovsky, Gruhl,
+and Mendes 2017), and (Ge et al. 2020) respectively, and are macro-averaged.
+Dataset
+BERT
+GLoVe
+Train
+Infer
+F1
+Train
+Infer
+F1
+ADE
+1980s
+329s
+91.75
+1417s
+22s
+88.78
+CADEC
+2475s
+351s
+78.76
+1929s
+26s
+77.62
+SMM4H
+860s
+136s
+76.73
+635s
+11s
+76.01
+Table 5: Training and inference time (in seconds) taken by
+the NER model on each dataset using different token embed-
+dings with respect to overal performance on test set. Epoch
+count was kept constant for all datasets while training. The
+experiment was performed on an 8-core machine having
+64gb memory.
+evaluation a label is considered as correct if the start-
+ing and ending tags exactly match with the gold labels,
+while under relax evaluation only an overlap between an-
+notations is considered. Consequently, the ‘O’ tag is not
+included in the calculation. Hyperparameter values, and
+training code is explained in Appendix A & B.
+• For training RE models, we use standard NER spans
+and binary labels. For our base RE model we use 200-
+dimensional token-level GLoVe embeddings - the same
+embeddings we use for our base NER model.
+For our BERT based RE model, we don’t use any explicit
+embeddings as the BERT model is trained in an end-to-
+end fashion. We do specify details of entity spans like
+starting, ending indices, entity types, and the context in
+between. The context is generally the entire document,
+but since the model architecture has a 128 token limit, we
+create context text by taking text in between the entities,
+and found this method to be more accurate.
+We also test a hypothesis that ﬁne-tuning BioBERT
+model on similar Relation Extraction tasks would
+increase the overall performance on the benchmark
+datasets. To test this hypothesis, we train an end-to-end
+RE model on Disease and Drug datasets like the 2010
+i2b2 challenge (Uzuner et al. 2011) and saved it. We then
+use the same weights while discarding the ﬁnal layers,
+and retrain the model on the benchmark dataset. Since
+the base model is trained on a similar taxonomy, the con-
+vergence was much faster, while being less prone to over-
+ﬁtting.
+For Hyperparameter tuning we utilize the development
+set and use random search. Exact hyperparameter values,
+and the search space for all the models can be found in
+Appendix A.
+Results
+Despite using a shallow architecture for classiﬁcation, we
+achieved metrics that are on-par with SOTA metrics by using
+more accurate Sentence Bert Embeddings, as shown in Ta-
+ble 3. While the performance difference between BioBERT
+and GLoVe embeddings is minor on the CADEC dataset,
+the difference is more prominent on the ADE dataset. This is
+primarily because of the complex intrinsic nature of biomed-
+
+Dataset
+Base (FCNN) RE
+BERT RE
+SOTA
+Precision
+Recall
+F1
+Precision
+Recall
+F1
+F1
+ADE Corpus
+69.11
+86.22
+74.70
+81.31
+79.03
+80.10
+83.74
+ADE Enriched with n2c2
+89.01
+89.44
+89.22
+89.19
+90.93
+90.02
+Table 6: Relation Extraction performance on the ADE benchmark dataset. The test set was kept standard for a fair comparison,
+and all scores are macro-averaged due to high class imbalance. SOTA metrics for RE on ADE corpus as reported by (Crone
+2020)
+Document
+Class
+ADE Entity
+Drug Entity
+relation
+I feel a bit drowsy & have a little blurred vision after taking insulin.
+ADE
+drowsy
+insulin
+Positive
+blurred vision
+insulin
+Positive
+
+ADE
+cramps
+ﬂuvastatin
+Positive
+cramps
+lipitor
+Negative
+I just took advil and haven’t had any gastric problems so far.
+NEG
+-
+-
+-
+Table 7: Full pipeline results on sample texts. Documents having indication for ADR are classiﬁed as ADE, while positive
+relations represent causality between two entities (Drug and ADE). The last example is classiﬁed as negative - meaning it does
+not contain any ADE indication, so we don’t process it further.
+ical text, where averaging token (GLoVe) embeddings does
+not efﬁciently capture the context of complex sentence struc-
+tures.
+Our NER architecture acheives new SOTA metrics on
+SMM4H, ADE, and CADEC NER datasets using contex-
+tual BioBERT embeddings as shown in Table 4. Since the
+NER model was kept constant during the experiment, and
+we tuned the hyper parameters for each experiment, the per-
+formance difference between embedding types can be at-
+tributed to the word embeddings alone. Being able to in-
+corporate contextual information with attention mechanism,
+BioBERT embeddings peformed better than non-contextual
+GLoVe embeddings. However, it is worth noticing that the
+performance difference between the two is in a margin of 1-
+2%, proving that domain speciﬁc GLoVe embeddings can
+provide comparable performance while requiring signiﬁ-
+cantly less memory and computational resources. Table 5
+provides side-by-side comparison of time and accuracy dif-
+ferences while using different embedding types. On aver-
+age, the GLoVe embeddings are 30% faster compared to
+BioBERT embeddings during training, and more than 5x
+faster during inference, while being on-par in terms of f1
+score.
+Our RE solutions perform on-par with existing SOTA sys-
+tems, while being scalable and requiring less memory to
+train and test. The introduction of the extra data greatly
+improved results, enabling us to achieve SOTA on bench-
+mark datasets as shown in Table 6. While the more heavy
+BioBERT model outperformed our proposed RE model on
+the limited and imbalanced ADE dataset, the performance
+difference becomes diminutive when more data is added to
+the training data.
+Sample output and visualization of NER and RE results
+can be seen in Table 7 and Figure 4.
+Conclusion
+Despite the growing need and explosion of useful data
+for pharmacovigilance, there is a severe deﬁciency of
+production-ready NLP systems that can process millions of
+records while being accurate and versatile.
+In this study we address the problem by introducing novel
+solutions for Classiﬁcation, NER, and RE while leverag-
+ing the Spark ecosystem and contemplating on accuracy,
+scalability, and versatility. For which we explain how we
+build a modular structure comprising of different embedding
+types, a classiﬁcation and NER model, and two approaches
+for RE. We trained custom GLoVe embeddings model on
+domain-speciﬁc dataset, and compare its performance to
+SOTA BioBERT embeddings. We show through extensive
+testing that our text classiﬁcation model, for deciding if a
+conversation includes an ADR, obtains new state-of-the-art
+accuracy on the CADEC dataset (86.69% F1 score). Our
+proposed NER architecture achieves SOTA results on mul-
+tiple benchmark datasets. Namely, our proposed NER mod-
+els obtain new state-of-the-art accuracy for ADR and Drug
+entity extraction on the ADE, CADEC, and SMM4H bench-
+mark datasets (91.75%, 78.76%, and 83.41% F1 scores re-
+spectively). Then we explain two different architectures for
+RE, one based on BioBERT while the other utilizing crafted
+features over a FCNN, test them individually, and show that
+a simpler RE architecture with bespoke features performed
+on-par with more sophisticated BERT solution. To improve
+our RE model, we built a new dataset by manual annotations,
+and achieved higher metrics on the RE test datasets.
+Furthermore, we performed speed benchmarks to com-
+pare efﬁciency of two distinct embedding generation mod-
+els to determine the ideal choice for deploying such solu-
+tions to process large quantities of data. In general, most
+pharmaceutical companies run on-premise servers which are
+geared towards general computation and do not utilise hard-
+ware acceleration like GPUs for running heavy models; In
+such cases where infrastructure is not mature enough to
+
+Figure 4: Visualization of Entity Recognition and Relation Extraction results on a sample text. 1 denotes positive relation and
+0 denotes negative relation (not related).
+handle heavy models, lightweight glove-based models are
+a compelling alternative to BERT-based models, as they of-
+fer comparable performance while being memory and CPU
+efﬁcient.
+Finally, we implement all these algorithms in Apache
+Spark ecosystem for scalability, and shipped in a production
+grade NLP library: Spark NLP.
+A. Hyperparameter Settings
+The following parameters provided best results on the classi-
+ﬁcation development set (values within the parenthesis rep-
+resent the parameter ranges tested):
+• Dropout rate: 0.2 (0.2, 0.7)
+• Batch size: 8 (4, 256)
+• Learning rate: 0.0003 (0.01, 0.0003)
+• Epoch: 25-30 (10, 100)
+• Optimizer: Adam
+• Learning rate decay coefﬁcient (po) (real learning rate =
+lr / (1 + po * epoch) : 0.005 (0.001, 0.01))
+The following parameters provided best results on the
+NER development set (Values within the parenthesis rep-
+resent the parameter ranges tested):
+• LSTM state size: 200 (200, 250)
+• Dropout rate: 0.5 (0.3, 0.7)
+• Batch size: 8 (4, 256)
+• Learning rate: 0.001 (0.01, 0.0003)
+• Epoch: 25-35 (10, 100)
+• Optimizer: Adam
+• Learning rate decay coefﬁcient (po) (real learning rate =
+lr / (1 + po * epoch) Smith [2018] : 0.005 (0.001, 0.01))
+The following parameters provided best results on the RE
+development set (Values within the parenthesis represent the
+parameter ranges tested):
+• Dropout rate: 0.5 (0.3, 0.7)
+• Batch size: 8 (4, 256)
+• Learning rate: 0.0001 (0.01, 0.0003)
+• Epoch: 4-BERT (1-10), 50-FCNN (10-100)
+B. Training Code
+Code for training an RE model is provided as a google colab
+notebook (JSL 2021).

@@ -1,0 +1,1042 @@
+Scalable Anytime Planning for Multi-Agent MDPs
+Shushman Choudhury∗,
+Jayesh K. Gupta∗
+Stanford University
+
+Peter Morales
+Microsoft
+
+Mykel J. Kochenderfer
+Stanford University
+
+ABSTRACT
+We present a scalable tree search planning algorithm for large
+multi-agent sequential decision problems that require dynamic col-
+laboration. Teams of agents need to coordinate decisions in many
+domains, but naive approaches fail due to the exponential growth
+of the joint action space with the number of agents. We circumvent
+this complexity through an anytime approach that allows us to
+trade computation for approximation quality and also dynamically
+coordinate actions. Our algorithm comprises three elements: online
+planning with Monte Carlo Tree Search (MCTS), factored represen-
+tations of local agent interactions with coordination graphs, and the
+iterative Max-Plus method for joint action selection. We evaluate
+our approach on the benchmark SysAdmin domain with static co-
+ordination graphs and achieve comparable performance with much
+lower computation cost than our MCTS baselines. We also introduce
+a multi-drone delivery domain with dynamic, i.e., state-dependent
+coordination graphs, and demonstrate how our approach scales to
+large problems on this domain that are intractable for other MCTS
+methods. We provide an open-source implementation of our algo-
+rithm at https://github.com/JuliaPOMDP/FactoredValueMCTS.jl.
+ACM Reference Format:
+Shushman Choudhury∗, Jayesh K. Gupta∗, Peter Morales, and Mykel J.
+Kochenderfer. 2021. Scalable Anytime Planning for Multi-Agent MDPs.
+In Proc. of the 20th International Conference on Autonomous Agents and
+Multiagent Systems (AAMAS 2021), London, UK, May 3–7, 2021, IFAAMAS,
+11 pages.
+1
+INTRODUCTION
+Coordination is crucial for effective decision-making in cooperative
+multi-agent systems with a shared objective. Various real-world
+problems like formation control [29], package delivery [11], and
+firefighting [30] require a team of autonomous agents to perform a
+common task. Such cooperative sequential decision-making prob-
+lems can be modeled as a multi-agent Markov decision process
+(MMDP) [7], an extension of the Markov decision process (MDP)
+[18]. MMDPs can be reduced to centralized single-agent MDPs with
+a joint action space for all agents. Such reductions often make large
+problems intractable because the action space grows exponentially
+with the number of agents. Solving independent MDPs for all agents
+yields suboptimal behavior in problems where reasoning about the
+effects of joint actions is necessary for better performance [26].
+Many previous MMDP approaches have tried to balance these
+extremes of optimality and efficiency. In the offline setting, these
+∗Equal contribution.
+Proc. of the 20th International Conference on Autonomous Agents and Multiagent Systems
+(AAMAS 2021), U. Endriss, A. Nowé, F. Dignum, A. Lomuscio (eds.), May 3–7, 2021, London,
+UK. © 2021 International Foundation for Autonomous Agents and Multiagent Systems
+(www.ifaamas.org). All rights reserved.
+include ad hoc function decomposition approaches, such as Value
+Decomposition Networks [37] and QMIX [34], or parameter shar-
+ing in decentralized policy optimization [17]. Guestrin et al. [15]
+introduced the concept of a coordination graph to reason about
+joint value estimates from a factored representation, while Kok and
+Vlassis [21] used approximations to scale these ideas to larger prob-
+lems. Monte Carlo Tree Search (MCTS) [8], a common approach
+to online planning, has been combined with coordination graphs
+in Factored Value MCTS [1]. However, Factored Value MCTS co-
+ordinates actions with an exact Variable Elimination (Var-El) step,
+which negates the anytime nature of MCTS planning.
+The key idea of this paper is to recover the anytime nature of
+MCTS planning for MMDPs requiring coordination and also scale to
+larger teams of agents. To that end, we propose combining Max-Plus
+action selection, introduced by Vlassis et al. [39], with the factored
+value MCTS of Amato and Oliehoek [1]. We do so for many reasons.
+Unlike Var-El, which is exact, Max-Plus is an iterative procedure
+and allows for truly anytime behavior that can trade computation
+for approximation quality. The representation of Max-Plus is much
+more efficient than that of Var-El for using dynamic, i.e., state-
+dependent, coordination graphs (state-dependent data-structures
+are a key benefit of online planning for MDPs). Finally, Max-Plus
+can scale to much larger and denser coordination graphs than Var-
+El, and it can be distributed for additional scalability [22].
+We present a scalable anytime MMDP planning algorithm called
+Factored Value MCTS with Max-Plus. On the standard SysAdmin
+benchmark domain [15], with static coordination graphs, we demon-
+strate that our approach performs as well as or better than Factored
+Value MCTS with Var-El [1] and is much faster for the same tree
+search hyperparameters. We also introduce a new MMDP domain,
+Multi-Drone Delivery, with dynamic coordination graphs. On the
+second domain, we show how our approach scales to problem sizes
+that are entirely intractable for other MCTS variants, while also
+achieving better performance on smaller problem sizes.
+2
+BACKGROUND AND RELATED WORK
+We first review Markov decision processes (MDPs) and their multi-
+agent formulation. We then describe how coordination graphs can
+efficiently exploit locality of interactions in multi-agent problems.
+Finally, we discuss how to use coordination graphs to solve multi-
+agent MDPs.
+2.1
+Multi-Agent Markov Decision Processes
+An MDP is defined by the tuple (S, A,𝑇, 𝑅), where S is the state
+space, A is the action space,𝑇: S×A×S →[0, 1] is the transition
+function, and 𝑅: S × A →R is the reward function. The objective
+for solving an MDP is to obtain a policy, 𝜋: S × A →[0, 1] that
+specifies a probability distribution over actions for the agent to
+arXiv:2101.04788v1  [cs.AI]  12 Jan 2021
+
+take from its current state to maximize its value, i.e. its expected
+cumulative reward. An action-value function 𝑄(𝑠,𝑎) defines the
+expected cumulative reward after taking action 𝑎in state 𝑠before
+following the specified policy.
+We focus on decision-making settings where multiple agents
+cooperate to achieve a shared objective [7]. Such problems are multi-
+agent Markov decision processes (MMDPs), where each agent takes
+an individual action and the controller policy observes the states of
+all agents. In principle, we can solve an MMDP as a standard MDP
+with a joint action space A = Î
+𝑖A𝑖[33]. There exist both offline
+and online methods for computing such MDP policies [3].
+Offline methods pre-compute a policy over the entire state space
+(exactly or approximately) and query the policy during execution.
+Various exact offline methods exist, but reinforcement learning has
+emerged as an attractive solution technique due to the complexity of
+planning in large MMDPs [38]. Reinforcement Learning approaches
+attempt to compute an effective value function 𝑄(𝑠,𝑎) or a policy
+𝜋(𝑎| 𝑠) through repeated interaction with the environment model.
+They still have difficulty with the size of the joint action space,
+which is exponential in the number of agents. A common strategy
+is to decentralize the policy or value function, such that each only
+depends on the actions of a single agent [17, 34, 37]. Unfortunately,
+such decentralization approaches are often suboptimal for coordi-
+nation and encounter exploration bottlenecks due to uncooperative
+random actions from the agents [6].
+Online methods use an alternative strategy to deal with the
+complexity of multi-agent planning; they interleave planning and
+execution by focusing only on states that are reachable for the
+current state, while computing the next action to take. Monte Carlo
+Tree Search (MCTS) is the predominant framework for online plan-
+ning and has succeeded in a variety of domains [8], including in
+multi-player contexts [28, 42]. The anytime nature of MCTS (search
+depth and number of simulations) allows us to trade computation
+time for approximation quality. However, the exponentially large
+action space of MMDPs can still be a bottleneck for the naive ap-
+plication of MCTS techniques [9]. Dec-MCTS tries to work around
+this bottleneck but does not apply to action-dependent stochastic
+transitions of an MDP, as it directly chooses the next state [4].
+2.2
+Coordination Graphs and Variable
+Elimination
+Several real-world multi-agent systems demonstrate locality of in-
+teraction, i.e. the outcome of an agent’s action depends only on the
+actions of a subset of other agents. The coordination graph (CG)
+structure is often used to encode such interactions [15, 16]. A CG
+for a multi-agent system has one node per agent, and edges connect
+agents if their payoffs depend on each other. For now, we assume
+a stateless or single-shot decision setting (rather than sequential).
+The CG structure induces a set of payoff components, where each
+component is associated with a clique, i.e., a subset of agents that are
+all mutually connected.
+For CGs in multi-agent settings, we assume that we can factor
+the global payoff for a joint action as the sum of local component
+payoffs, i.e. 𝑄(𝑎) = Í
+𝑐𝑄𝑐(𝑎𝑐), where 𝑎is the global joint action,
+and 𝑎𝑐is the local component action (the projection of 𝑎corre-
+sponding to component 𝑐). Given this factored representation and
+Q23
+1
+2
+3
+4
+e2(a1, a3)
+Q12
+Q34
+(a)
+Q2
+1
+2
+3
+4
+μ12(a2)
+μ21(a1)
+Q1
+Q3
+Q4
+μ23(a3)
+μ34(a4)
+(b)
+Figure 1: A coordination graph for a 4-agent MMDP with 4
+agents. (a) Eliminating agent 2 in Var-El introduces an edge
+between nodes (agents) 1 and 3 and a new payoff function
+𝑒2 (b) In Max-Plus, agents passes messages along the graph
+edges; the messages are functions of the actions of the re-
+ceiving agent, e.g., agent 1 sends 𝜇12(𝑎2) to agent 2.
+the local component payoffs, we can compute exactly the best joint
+action, argmax𝑎𝑄(𝑎), with the Variable Elimination (Var-El) algo-
+rithm originating from the probabilistic inference literature [16].
+Computing the optimal joint action in a CG is equivalent to ob-
+taining the maximum a posteriori configuration in an undirected
+probabilistic graphical model [39].
+Consider the 4-agent CG in Figure 1a. Here, 𝑄(𝑎) = 𝑄12(𝑎1,𝑎2)+
+𝑄23(𝑎2,𝑎3) +𝑄34(𝑎3,𝑎4), where 𝑎𝑖is the action variable for agent 𝑖.
+In Var-El, we eliminate, i.e., maximize over variables one at a time
+by collecting the local payoffs that depend on them. For instance, if
+we start with agent 2, then
+max
+𝑎1,𝑎3,𝑎4 𝑄34(𝑎3,𝑎4) + max
+𝑎2 [𝑄12(𝑎1,𝑎2) + 𝑄23(𝑎2,𝑎3)]
+(1)
+is the first elimination. The optimal choice for agent 4 depends
+on 𝑎2 and 𝑎3. The internal max expression is summarized by a
+new intermediate payoff function 𝑒2(𝑎1,𝑎3) = max𝑎2 [𝑄12(𝑎1,𝑎2) +
+𝑄23(𝑎2,𝑎3)] and a new edge between 1 and 3, after which the
+algorithm continues with 𝑄34 and 𝑒2. After all eliminations, we
+recover the action for each agent by maximizing the conditional
+functions in reverse, finally obtaining the optimal joint action. Var-
+El is exponential in the induced width of the CG, which depends
+on the elimination order [12].
+Although most works in the literature assume a domain-dependent
+static coordination graph structure, some incorporate state-dependent
+or dynamic CGs [41], including learning the CG structures [20, 25].
+2.3
+Scalable MMDP Methods with
+Coordination Graphs
+In the offline context of tabular RL methods, Kok and Vlassis [21] ex-
+plored action inference with predefined static coordination graphs
+over factorized value functions; Böhmer et al. [6] extended these
+ideas to the neural network function approximation regime. We
+focus on anytime online planning approaches to solving MMDPs.
+Amato and Oliehoek [1] provide an online planning solution by
+combining the idea of coordination graphs and factored values with
+MCTS. Although they apply their algorithm to partially observed
+MDPs, the key ideas are the same for the fully observed case. Monte
+
+Carlo planning estimates quantities by exploring from the current
+state and gathering relevant statistics through interactions with
+a simulated generative model of the environment [36]. These sta-
+tistics typically track the average simulated reward obtained for
+trying an (individual or joint) action, the frequency of action at-
+tempts (for Upper Confidence Bound or UCB exploration [19]), and
+the number of occurences of the (individual or joint) state.
+Amato and Oliehoek [1] maintain local component statistics, i.e.
+the mean payoff of a local component action 𝑎𝑒and the number of
+times it was attempted in that component (they call this mixture
+of experts optimization, albeit with a simple maximum likelihood
+estimator expert). For instance, during tree search from the current
+joint state 𝑠≡{𝑠𝑖} (where 𝑠𝑖is the state of agent 𝑖), suppose the sys-
+tem simulates a joint action 𝑎and obtains a reward vector 𝑟. Then,
+in a particular CG component 𝑒and the corresponding local subset
+of the joint action 𝑎𝑒, they augment the local component action
+frequency statistic 𝑁(𝑠,𝑎𝑒) by 1 and update the local component
+payoff statistic 𝑄𝑒(𝑠,𝑎𝑒) as
+𝑄𝑒(𝑠,𝑎𝑒)  𝑄𝑒(𝑠,𝑎𝑒) + 𝑟𝑒−𝑄𝑒(𝑠,𝑎𝑒)
+𝑁(𝑠,𝑎𝑒)
+,
+(2)
+which is a standard running average update. The UCB exploration
+step uses the current statistics to select joint actions, i.e.,
+max
+𝑎
+∑︁
+𝑒
+𝑈𝑒(𝑠,𝑎𝑒) = max
+𝑎
+∑︁
+𝑒
+𝑄𝑒(𝑠,𝑎𝑒) + 𝑐·
+√︄
+log 𝑁(𝑠)
+𝑁(𝑠,𝑎𝑒) ,
+(3)
+where 𝑁(𝑠) is the visit frequency for state 𝑠. Given these local
+component payoffs, i.e., the 𝑄𝑒functions, their method computes
+the best joint action at the next time-step through Variable Elim-
+ination over the CG, as in Section 2.2. Consequently, it loses the
+anytime property of MCTS because exact variable elimination can-
+not be stopped at an intermediate step. Although Vlassis et al. [39]
+explored various anytime algorithms for action selection with co-
+ordination graphs, they did not investigate their interaction with
+online planning algorithms like MCTS.
+3
+ANYTIME FACTORED-VALUE MONTE
+CARLO TREE SEARCH
+We now discuss our method for anytime multi-agent MDP planning
+with coordination graphs, Factored-Value Monte Carlo Tree Search
+with Max-Plus. To apply the mixture of experts optimization to
+each node of the search tree, we must define the factored statistics
+to maintain for each node. Given a potentially state-dependent
+undirected coordination graph (CG), G = ⟨V, E⟩, we factor the
+CG-induced global payoff at the current state, 𝑠, as follows:
+𝑄(𝑎) =
+∑︁
+𝑖∈V
+𝑄𝑖(𝑎𝑖) +
+∑︁
+(𝑖,𝑗) ∈E
+𝑄𝑖𝑗(𝑎𝑖,𝑎𝑗).
+(4)
+Here, 𝑄𝑖𝑗is a local payoff function for agents 𝑖and 𝑗connected
+by edge (𝑖, 𝑗), while 𝑄𝑖is an individual utility function for agent 𝑖
+(if applicable to the domain). All state-dependent quantities in this
+section’s equations are implicitly for the current joint state 𝑠.
+Exploiting the duality between computing the maximum a pos-
+teriori configuration in a probabilistic graphical model and the
+optimal joint action in a CG, Vlassis et al. [39] introduced the Max-
+Plus algorithm for computing the joint action via message passing.
+Each node, i.e., agent, iteratively dispatches messages to its neigh-
+bours 𝑗∈Γ(𝑖) in the CG (Figure 1b). A message from agent 𝑖is a
+scalar-valued function of the action space of receiving agent 𝑗, i.e.,
+𝜇𝑖𝑗(𝑎𝑗) = max
+𝑎𝑖
+n
+𝑄𝑖(𝑎𝑖) + 𝑄𝑖𝑗(𝑎𝑖,𝑎𝑗) +
+∑︁
+𝑘∈Γ(𝑖)\{𝑗}
+𝜇𝑘𝑖(𝑎𝑖)
+o
+,
+(5)
+where Γ(𝑖) is the set of neighbors of 𝑖. Agents exchange messages
+until convergence or for a maximum number of rounds. Finally,
+each agent computes its optimal action individually, i.e.,
+𝑎∗
+𝑖= argmax
+𝑎𝑖
+n
+𝑄𝑖(𝑎𝑖) +
+∑︁
+𝑗∈Γ(𝑖)
+𝜇𝑗𝑖(𝑎𝑖)
+o
+(6)
+Max-Plus is equivalent to belief propagation in graphical models
+[31] and its time complexity scales linearly with the CG size (the
+number of edges); it is more suitable for real-time systems and more
+tractable for large numbers of agents than Var-El.
+Similar to Factored Value MCTS with Var-El, our method with
+Max-Plus (that we illustrate in Figure 2) is more efficient than a
+naive application of MCTS with the joint action space, since it
+retains fewer statistics and performs efficient action selection. For
+the rest of this section, we will discuss the key differences from the
+prior work of Amato and Oliehoek [1], which underscore how our
+approach is more suitable than it for large MMDPs.
+3.1
+UCB Exploration with Max-Plus
+The key implementation issue for extending MCTS to factored value
+functions and coordination graphs is that of action exploration as
+per the Upper Confidence Bound (UCB) strategy. In the Var-El
+case, Amato and Oliehoek [1] added the exploration bonus using
+component-wise statistics during each elimination step in Equa-
+tion (3). We cannot apply this strategy with Max-Plus as it does not
+use components. In contrast, it has two distinct phases of computa-
+tion. The first is message passing per edge in Equation (5), followed
+by action selection per node in Equation (4). We use these two
+phases to define how our algorithm explores.
+Edge Exploration: Analogous to the edge payoff statistics 𝑄𝑖𝑗,
+we keep track of corresponding frequency statistics 𝑁𝑎𝑖,𝑎𝑗(for
+pairwise actions). The natural exploration strategy over edges is to
+add the bonus to Equation (5) as follows:
+𝜇𝑖𝑗(𝑎𝑗) = max
+𝑎𝑖
+(
+𝑄𝑖(𝑎𝑖) + 𝑄𝑖𝑗(𝑎𝑖,𝑎𝑗)+
+∑︁
+𝑘∈Γ(𝑖)\{𝑗}
+𝜇𝑘𝑖(𝑎𝑖) + 𝑐
+√︄
+log(𝑁+ 1)
+𝑁𝑎𝑖,𝑎𝑗
+)
+.
+(7)
+Adding this bonus during the message passing rounds can cause
+divergence for cyclic graphs with any cycle of length less than the
+number of rounds. Figure 3 illustrates intuition for this divergent
+behavior with a simple triangle graph. The bonuses accumulate in
+successive rounds for messages in either direction along the cycle,
+making the effective bonus proportional to the total number of
+rounds (divided by cycle length). Therefore, we only augment each
+message once after the final round of message passing.
+Node Exploration: We maintain individual action frequency
+statistics 𝑁𝑎𝑖and modify Equation (4) to add a node exploration
+
+Tree 
+Search
+a1
+UCB
+a2
+UCB
+s
+s′ 
+s′ ′ 
+Update 
+Statistics
+r = −1
+r = + 2
+ROLLOUT
+ROLLOUT
+s
+a*
+Final Action 
+Coordination
+Figure 2: Our anytime MMDP planning algorithm, Factored Value MCTS with Max-Plus, computes the best joint action 𝑎∗for
+the current joint state 𝑠. The tree search uses an Upper Confidence Bound (UCB) exploration bonus during action selection,
+while the final action coordination does not.
+bonus during the action selection:
+𝑎∗
+𝑖= argmax
+𝑎𝑖
+(
+𝑄𝑖(𝑎𝑖) +
+∑︁
+𝑗∈Γ(𝑖)
+𝜇𝑗𝑖(𝑎𝑖) + 𝑐
+√︄
+log(𝑁+ 1)
+𝑁𝑎𝑖
+)
+(8)
+Note that the joint-action payoff 𝑄(𝑎) can be factorized over the CG
+nodes and edges as in Equation (4), but the joint-action exploration
+bonus 𝑐
+√︃
+log 𝑁(𝑠)
+𝑁(𝑠,𝑎) cannot. Therefore, the node and edge exploration
+strategies we have defined here are heuristic choices that we make
+and will evaluate empirically through an ablation, rather than strate-
+gies we derive analytically by factorizing the exploration bonus.
+The same was true even in the exact action selection case of Var-El,
+where the analysis was restricted to the approximation quality of
+the factored value function, not the exploration itself. Quoting Am-
+ato and Oliehoek [1], “it is not possible to demonstrate that the UCB
+exploration policy is component-wise”, where, as from Section 2.2,
+the components refer to the cliques in the CG.
+We outline our approach in Algorithm 1 as well as the Max-Plus
+routine in Algorithm 2.
+3.2
+Other differences from FV-MCTS with
+Variable Elimination
+Convergence: For graphs without cycles, Max-Plus converges to a
+fixed point in finitely many iterations [31]. For cyclic graphs, there
+are no such guarantees in general [40]. However, cyclic message
+passing can work well in practice [27].
+Agent Utilities: The Max-Plus global payoff in Equation (4) in-
+cludes a utility function 𝑄𝑖for each individual agent. The FV-MCTS
+with Var-El has no such individual utility (unless a node has degree
+0 in the CG). If such agent utilities were known or learned inde-
+pendent of the payoffs, we would naturally use them during action
+coordination. However, in FV-MCTS we estimate all statistics from
+Round 1
+ 
+: … +
+k
+N12
+Round 2
+ 
+ 
+             
+         
+: … +
+k
+N12
++
+k
+N23
+Round 3
+ 
+ 
+ 
+: … +
+k
+N12
++
+k
+N23
++
+k
+N31
+Round 4
+ 
+ 
+           
+ 
+: … +2 ⋅
+k
+N12
++
+k
+N23
++
+k
+N31
+1
+2
+3
+Figure 3: For coordination graphs with cycles, adding an
+edge exploration bonus to the messages at every round can
+lead to divergent behavior. The exploration bonuses accu-
+mulate over rounds from one node to the next (clockwise or
+anti-clockwise along the cycle). If the number of rounds is
+greater than the length of a cycle (usually true), the effective
+relevant exploration bonus for each edge gets compounded
+each time the messages loop back around. We abuse some
+notation for convenience, i.e., 𝑁𝑖𝑗is a counting function for
+the pairwise actions of agents 𝑖and 𝑗.
+the rewards obtained during tree search with a simulated environ-
+ment model; the environment model returns precisely one reward
+vector for each joint state-action pair.
+We already account for the simulated rewards in tree search
+through the 𝑄𝑖𝑗local payoff statistics in Equation (2). We do not re-
+ceive independent per-agent rewards, so utility statistics would be
+derived from the same information we use for the payoff statistics.
+Our experiments compare the benefit of these derived individual
+
+Algorithm 1 Factored Value MCTS with Max-Plus
+Require: time limit, depth, exploration constant 𝑐, state 𝑠
+1: Initialize 𝑁𝑖,𝑄𝑖
+⊲Node statistics
+2: Initialize 𝑁𝑖𝑗,𝑄𝑖𝑗
+⊲Edge statistics
+3:
+4: function FV-MCTS-MP(𝑠, depth)
+5:
+while time limit not reached
+6:
+Simulate(𝑠, depth)
+7:
+𝑎∗←MaxPlus(0)
+⊲No exploration here
+8:
+return 𝑎∗
+⊲Best joint action
+9: function Simulate(𝑠, depth)
+10:
+if depth = 0
+11:
+return 0
+12:
+𝑎←MaxPlus(𝑐)
+13:
+𝑠′,𝑟∼𝑇(𝑠,𝑎), 𝑅(𝑠,𝑎)
+⊲Generative model
+14:
+𝑞←𝑟+ 𝛾· Simulate(𝑠′, depth −1)
+15:
+UpdateStats(𝑠,𝑎,𝑞)
+16: function UpdateStats(𝑠,𝑎,𝑞)
+17:
+for every agent 𝑖
+18:
+𝑁𝑖(𝑠,𝑎𝑖) += 1
+19:
+𝑄𝑖(𝑠,𝑎𝑖) += 𝑞𝑖−𝑄𝑖(𝑠,𝑎𝑖)
+𝑁𝑖(𝑠,𝑎𝑖)
+20:
+for every edge (𝑖, 𝑗) ∈G(𝑠)
+21:
+𝑁𝑖𝑗(𝑠,𝑎𝑖,𝑎𝑗) += 1
+22:
+𝑞𝑒←𝑞𝑖+ 𝑞𝑗
+23:
+𝑄𝑖𝑗(𝑠,𝑎𝑖,𝑎𝑗) += 𝑞𝑒−𝑄𝑖𝑗(𝑠,𝑎𝑖,𝑎𝑗)
+𝑁𝑖𝑗(𝑠,𝑎𝑖,𝑎𝑗)
+agent (node) utilities, in addition to local edge payoffs. We maintain
+separate statistics 𝑁𝑖and 𝑄𝑖for the per-agent frequencies and util-
+ities respectively and estimate them from the joint rewards during
+tree search; the corresponding updates are 𝑁𝑖(𝑠,𝑎𝑖) = 𝑁𝑖(𝑠,𝑎𝑖) + 1
+and 𝑄𝑖(𝑠,𝑎𝑖) = 𝑄𝑖(𝑠,𝑎𝑖) + 𝑟𝑖−𝑄𝑖(𝑠,𝑎𝑖)
+𝑁𝑎𝑖
+for an agent 𝑖. The results
+in Section 4.1 demonstrate how including derived node utilities en-
+ables better empirical performance.
+Dynamic Coordination Graphs: Recall that MCTS (and online
+MDP planning in general) can use computational structures that
+vary with the current state. For FV-MCTS with Var-El, state-dependent
+or dynamic CGs are not feasible because eliminating an agent can
+change the intermediate CG topology during action coordination
+(by adding edges). It is not tractable to maintain statistics for the set
+of all possible CG components, the size of which is exponential in
+the number of agents [43]. On the other hand, Max-Plus only main-
+tains statistics for at most all CG edges, over which the messages
+are sent. Therefore, dynamic CGs can be used seamlessly [41].
+Memory Complexity of Statistics: Factored Value MCTS collects
+a set of frequency and payoff statistics for each unique joint state
+encountered during tree search. Assume an MMDP with the same
+action set A for each agent, and a CG with |V| nodes (agents), |E|
+edges, and 𝐶local components or cliques. Then, the memory com-
+plexity of per-state statistics for Max-Plus is O(|V||A| + |E||A|2)
+(the first term only applies if we track per-node utilities). In con-
+trast, the per-state memory for Var-El statistics is O(Í
+𝑐∈𝐶|A||V |𝑐·
+|V|𝑐), where |V|𝑐is the size of local component 𝑐. For a CG that is
+Algorithm 2 MaxPlus Action Selection
+Require: Coordination Graph G(𝑠) = ⟨V, E⟩; state node statistics
+𝑁,𝑄; max iterations 𝑀; flags (exploration; normalization)
+1: function MaxPlus(c)
+2:
+for 𝑡←1 to 𝑀
+3:
+𝜇𝑖𝑗(𝑎𝑗) = 𝜇𝑗𝑖= 0 for (𝑖, 𝑗) ∈E,𝑎𝑖∈A𝑖,𝑎𝑗∈A𝑗
+4:
+for every agent 𝑖
+5:
+for all neighbors 𝑗∈Γ(𝑖)
+6:
+Compute 𝜇𝑖𝑗(𝑎𝑗) via Equation (5)
+7:
+if message normalization
+8:
+𝜇𝑖𝑗(𝑎𝑗) −=
+1
+|A𝑗|
+Í
+𝑎𝑗∈A| 𝜇𝑖𝑗(𝑎𝑗)
+9:
+send message 𝜇𝑖𝑗(𝑎𝑗) to agent 𝑗
+10:
+if 𝜇𝑖𝑗(𝑎𝑗) close to previous message
+11:
+break
+12:
+for every agent 𝑖
+13:
+if edge exploration
+14:
+for all neighbors 𝑗∈Γ(𝑖)
+15:
+Compute 𝜇𝑖𝑗(𝑎𝑗) via Equation (7)
+16:
+𝑞𝑖(𝑎𝑖) = 𝑄𝑖(𝑎𝑖) + Í
+𝑗∈Γ(𝑖) 𝜇𝑗𝑖(𝑎𝑖)
+17:
+if node exploration
+18:
+𝑞𝑖(𝑎𝑖) += 𝑐
+√︃
+log(𝑁+1)
+𝑁𝑖(𝑎𝑖)
+19:
+𝑎′
+𝑖= arg max𝑎𝑖𝑞𝑖(𝑎𝑖)
+20:
+if time limit reached
+21:
+break
+22:
+return 𝑎′
+connected (typically the case), the memory complexity for Var-El
+is at least O(|E||A|2), which is the dominant term for Max-Plus,
+and more generally is exponential in the largest clique. Therefore,
+Max-Plus is more memory-efficient than Var-El. The experiments
+in Section 4.2 empirically support this claim by showing how our
+algorithm can solve problems that cause out-of-memory issues for
+the Var-El baseline.
+Distributed Implementation: Unlike with Var-El, we can execute
+Max-Plus in a distributed manner by sending messages in parallel,
+albeit incurring additional communication complexity. Such an im-
+plementation can allow further scalability with available compute.
+Note that this is distinct from full decentralization wherein the
+agent actions can be computed independently.
+4
+EXPERIMENTS AND RESULTS
+We used cumulative discounted return as the primary metric to
+evaluate our approach, Factored Value MCTS with Max-Plus (FV-
+MCTS-MP). Our most relevant baseline is Factored Value MCTS
+with Variable Elimination (FV-MCTS-Var-El). We also compared
+against standard MCTS (with no factorization), independent Q-
+learning (IQL), and a random policy. Besides measuring perfor-
+mance, we examined the effect of different exploration schemes on
+the performance of FV-MCTS-MP (as we discussed in Section 3.2)
+and the problem size on MCTS computation time. The appen-
+dix provides performance results for FV-MCTS (both variants)
+with different hyperparameters. Both of our experimental domains
+
+0
+1
+2
+3
+4
+5
+6
+(a)
+1
+2
+3
+4
+(b)
+Figure 4: Our two experimental domains: (a) SysAdmin (star topology) and (b) Multi-Drone Delivery, where dotted lines illus-
+trate a subset of the Coordination Graph edges for the current state (for clarity, we omit some edges between drones of the
+same color, i.e., assigned to the same goal).
+represent a range of MMDP problems and underlying coordina-
+tion graphs (CGs). The source-code for experiments is available at
+https://sites.google.com/stanford.edu/fvmcts/. All implementations
+and simulations are in Julia [5].
+We will show qualitatively how our approach recovers the true
+anytime nature of MCTS by using Max-Plus rather than Var-El.
+However, there are many confounds for quantitatively evaluating the
+anytime property. Our metric is the average discounted return over
+the episode, where the Max-Plus routine is called several times;
+typical anytime evaluation reports improving solution quality with
+more compute time for a single call to a method. MCTS itself has
+several parameters that affect the computation-vs-quality tradeoff,
+such as tree depth, exploration constant, and number of trials. With
+dynamic CGs as in our multi-drone delivery domain, the same Max-
+Plus parameters leads to different computation times. Note that
+our reference for Max-Plus does evaluate its anytime property in
+a one-shot decision-making domain that does not have any of the
+above confounds [39].
+4.1
+SysAdmin Domain
+Our first domain is a standard MMDP benchmark: SysAdmin [16].
+Each agent 𝑖represents a machine in a network with two state
+variables: Status 𝑆𝑖∈{good, faulty, dead}, and Load 𝐿𝑖∈{idle,
+loaded, success}. A dead machine increases the probability that
+its neighbor also dies. The system gets a reward of 1 if a process ter-
+minates successfully, processes take longer when status is faulty,
+and a dead machine loses the process. Each agent must decide
+whether to reboot its machine, in which case the Status becomes
+good and any running process is lost. The discount factor, 𝛾used
+in all the experiments is 0.9. All evaluations have been averaged
+over 40 runs. Error bars indicate standard deviations. Figure 4a
+illustrates the star network topology for SysAdmin; we also use the
+ring topology as well as the ring-of-rings topology.
+Exploration Schemes for FV-MCTS-MP: The three knobs affect-
+ing exploration in FV-MCTS-MP are per-agent utility, node bonus,
+and edge bonus. We compared the discounted return of variants
+that either use or ignore per-agent utilities, and use either or both
+bonuses. Figure 5 demonstrates that the combination of agent utili-
+ties and only node exploration (TTF) is enough; including the edge
+bonus as well (TTT) does not have much effect. All other schemes
+are significantly poorer. Therefore, we used the TTF variant of
+FV-MCTS-MP to compare against the other baselines. Lack of sig-
+nificant difference between some of the exploration strategies has
+more to do with the small action space of the SysAdmin domain.
+FV-MCTS-MP compared to baselines: For all three SysAdmin
+topologies (and corresponding fixed CGs), we varied the number of
+machines (agents) and compared the performance of all methods
+in Figure 6. With fewer agents, all MCTS methods perform simi-
+larly to each other and better than Q-Learning. However, with more
+agents, standard MCTS runs out of memory even on our 128GB
+RAM machine, as expected for large joint action spaces. Both Fac-
+tored Value MCTS variants perform comparably on larger problems
+(on ring-of-rings our Max-Plus variant was better). However, as
+we discuss subsequently, FV-MCTS-Var-El is much slower than
+FV-MCTS-MP, e.g., taking approximately 35 s versus 16 s for 32
+agents on a single-threaded implementation in the Ring topology.
+Therefore our approach strictly dominates the Var-El baseline on the
+performance-time tradeoff.
+Effect of Hyperparameters: We performed ablation experiments,
+varying one of exploration constant 𝑐, tree search exploration depth
+𝑑and number of Monte Carlo rollouts 𝑛, while keeping the rest
+of the hyperparameters constant. Low values of 𝑛adversely ef-
+fected the performance a little for both FV-MCTS-Var-El and FV-
+MCTS-MP, while low values of 𝑐vastly degraded the performance of
+FV-MCTS-Var-El only. The difference in performance was not sig-
+nificant over a range of values of 𝑑. Figure 9 in the appendix, shows
+results for 32 agents. Similar results hold for the other domains as
+well as different numbers of agents.
+Computation Time: For the same tree search hyperparameters
+with number of iterations fixed as 16000, exploration constant as 20
+and tree search depth as 20, we compared the average time taken
+for each action for different number of agents in the coordination
+
+TTT
+TTF
+TFT
+FTT
+FTF
+FFT
+0
+2
+4
+6
+8
+Discounted return
+TTT
+TTF
+TFT
+FTT
+FTF
+FFT
+0
+2
+4
+6
+8
+Discounted return
+Figure 5: The performance of FV-MCTS-MP varies with different combinations of exploration strategies for the 4-agent Sysad-
+min on Ring (left) and Star (right) topologies. The True/False (T/F) labels correspond to Agent Utilities, Node Exploration and
+Edge Exploration in order, e.g. TTF implies agent utilities and only node (but not edge) exploration.
+5
+10
+15
+20
+25
+30
+Number of agents
+0
+10
+20
+30
+40
+50
+Discounted return
+NaN
+Random
+IQL
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+5
+10
+15
+20
+25
+30
+Number of agents
+0
+20
+40
+60
+80
+Discounted return
+NaN
+Random
+IQL
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+10
+15
+20
+25
+30
+Number of agents
+5
+0
+5
+10
+15
+20
+25
+Discounted return
+NaN
+Random
+IQL
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+Figure 6: On SysAdmin topologies: Ring (left), Star (middle), and Ring-of-Rings (right), FV-MCTS with MaxPlus performs as
+well as or slightly better than Var-El, while being much more efficient for larger problems as in Figure 7. NaN indicates that
+the algorithm ran out of memory.
+graphs. For a fair comparison, we used a single threaded imple-
+mentation. As demonstrated in Figure 7, we found FV-MCTS-MP
+to be consistently faster than FV-MCTS-Var-El. Although MCTS
+was faster when there were small number of agents, it ran out of
+memory as the number of agents increased.
+4.2
+Multi-Drone Delivery Domain
+Besides the SysAdmin domain, previous multi-agent decision-making
+work has also used the Firefighter [1] and Traffic Control [23] do-
+mains for benchmarking. Underneath the differing high-level de-
+scriptions, however, the MMDP details of all three domains are very
+similar: a small state space and binary action space, the degrees of
+most nodes in the coordination graph are independent of the total
+number of agents (except the hub node for Star SysAdmin), and
+there is no scope in any of them for dynamic CGs.
+We introduce and use a truly distinct domain for our second set
+of experiments. It simulates a team of delivery drones navigating a
+shared operation space to reach their assigned goal regions. We are
+motivated by recent advances in drone delivery technology, from
+high-level routing to low-level control [13, 24]; in particular, drones
+using ground vehicles as temporary modes of transit to save energy
+and increase effective travel range [10, 11]. Our domain models a
+key component of such drone-transit coordination: multiple drones
+assigned to board transit vehicles in close proximity to each other
+(within the same time window).
+Domain details: Figure 4b illustrates our Multi-Drone Delivery
+domain; for convenience and consistency with MMDP benchmarks
+we discretize everything, but MCTS could accommodate a continu-
+ous state space. Each drone starts in a randomly sampled unique
+cell in a grid (we use larger grids for more drones in our simula-
+tions). There are four circular goal regions, one in each quadrant,
+that represent a transit vehicle; each goal region has a radius and
+maximum capacity of drones it can accommodate, since no two
+drones can occupy the same grid cell (we also vary goal radius with
+grid size). We allocate the drones to the goal regions at random
+such that at least two drones target every region.
+Each drone has 10 actions in total: one for moving to each of
+the 8-connected grid neighbors, a no-op action for staying in place,
+and a board action that is only valid when the drone is inside its
+assigned goal region. The MMDP is episodic and terminates only
+when all drones have reached their goals and executed Board inside
+them, thus boarding the transit vehicle and receiving a reward of
+1000. Drones also receive an intermediate positive reward if they
+get closer to their assigned goals. Besides drone movement, the
+other sources of negative reward, i.e., cost, are penalties for two or
+more drones being too close to each other, attempting to enter the
+same cell (which makes them both stay in place), and attempting
+to board in the same goal region at the same time.
+Unlike the typical MMDP domains used in prior work, Multi-
+Drone Delivery motivates dynamic or state-dependent coordination
+graphs; any two drones benefit from coordination only when they
+are close to each other. Therefore, at the current joint state, we
+
+8
+16
+24
+32
+Number of agents
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Average time for action (s)
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+8
+16
+24
+32
+Number of agents
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Average time for action (s)
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+Figure 7: Runtime comparisons (lower is better) for the same tree search hyperparameters on SysAdmin with Ring (left) and
+Star (right) topologies. The NaiveMCTS baseline ran out of memory with more than 8 agents.
+10
+15
+20
+25
+30
+Number of agents
+1000
+500
+0
+500
+Discounted return
+NaN
+Random
+IQL
+NaiveMCTS
+FV-MCTS-Var-El
+FV-MCTS-MP
+Figure 8: For Multi-Drone Delivery, FV-MCTS-MP vastly out-
+performs the baselines while effectively using dynamic CGs
+without any memory issues. NaN indicates that the algo-
+rithm ran out of memory.
+Agents
+XY axis res.
+Noise
+Expl. const.
+Expl. depth
+Iter
+8
+0.20
+0.10
+5
+10
+4000
+16
+0.10
+0.05
+10
+10
+8000
+32
+0.08
+0.05
+20
+10
+16000
+48
+0.05
+0.02
+30
+10
+24000
+Table 1: Multi-Drone Delivery hyperparameters.
+assign a CG edge between any two drones whose mutual distance is
+lower than a resolution-dependent threshold (depicted in Figure 4b).
+We also add edges apriori between all drones assigned to the same
+goal region, as they need to coordinate while boarding.
+For all experiments, we set the discount factor 𝛾to 1, the goal
+reaching reward to 1000.0 units, and the collision penalty to 10.0
+units. Table 1 describes the full set of varying problem resolutions
+and MCTS hyperparameters. The average degree of the dynamic
+coordination graphs ranged from 2.4 for 8 agents to 11.8 for 48
+agents. We averaged all evaluations over 20 runs; error bars indicate
+standard deviations.
+Performance of FV-MCTS-MP against Baselines: As with SysAd-
+min, we varied the number of drones (agents), discretizing the grid
+appropriately, and compared against all baselines (except Random)
+in Figure 8. We observed that FV-MCTS-Var-El and MCTS quickly
+ran out of memory, which is expected given the large action space
+per agent. Even on the problems where Var-El runs, its restriction
+to static CGs leads to slightly worse performance. On the other
+hand, FV-MCTS-MP can solve tasks even with 48 agents success-
+fully. Moreover, even on the eight agent problem, FV-MCTS-MP
+is much faster, taking on average approximately 1 s instead of 40 s
+for FV-MCTS-Var-El for the same tree search hyperparameters.
+FV-MCTS-MP scales to MMDP problem sizes that FV-MCTS-Var-El
+cannot even accommodate.
+5
+CONCLUSION
+We introduced a scalable online planning algorithm for multi-agent
+MDPs with dynamic coordination graphs. Our approach, FV-MCTS-
+MP, uses Max-Plus for action coordination, in contrast to the pre-
+viously introduced FV-MCTS with Variable Elimination. Over the
+standard SysAdmin and the custom Multi-Drone Delivery domains,
+we demonstrated that FV-MCTS-MP performs as well as Var-El on
+static CGs, outperforms it significantly on dynamic CGs, and is far
+more computationally efficient (enabling online MMDP planning
+on previously intractable problems).
+In the appendix, we discuss how our approach can easily ex-
+tend to multi-agent POMDPs. However, we still require a domain
+expert to pre-define the appropriate coordination graph for the
+problem. A predetermined CG can be particularly difficult with
+highly dynamic domains where the CG depends on the state. More
+work is required towards learning the dynamic coordination graph
+itself via interaction with the model. Similarly, extending ideas
+from Alpha-Zero [2, 35] would be particularly relevant for distilling
+the coordinated individual actions for the agents into decentralized
+policies [32] with FV-MCTS acting as a scalable policy improvement
+operator [14].

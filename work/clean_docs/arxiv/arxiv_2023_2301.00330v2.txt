@@ -1,0 +1,1331 @@
+Efﬁcient On-device Training via Gradient Filtering
+Yuedong Yang
+Guihong Li
+Radu Marculescu
+The University of Texas at Austin
+
+Abstract
+Despite its importance for federated learning, continu-
+ous learning and many other applications, on-device train-
+ing remains an open problem for EdgeAI. The problem
+stems from the large number of operations (e.g., ﬂoating
+point multiplications and additions) and memory consump-
+tion required during training by the back-propagation al-
+gorithm. Consequently, in this paper, we propose a new
+gradient ﬁltering approach which enables on-device CNN
+model training.
+More precisely, our approach creates a
+special structure with fewer unique elements in the gradi-
+ent map, thus signiﬁcantly reducing the computational com-
+plexity and memory consumption of back propagation dur-
+ing training. Extensive experiments on image classiﬁcation
+and semantic segmentation with multiple CNN models (e.g.,
+MobileNet, DeepLabV3, UPerNet) and devices (e.g., Rasp-
+berry Pi and Jetson Nano) demonstrate the effectiveness
+and wide applicability of our approach. For example, com-
+pared to SOTA, we achieve up to 19× speedup and 77.1%
+memory savings on ImageNet classiﬁcation with only 0.1%
+accuracy loss. Finally, our method is easy to implement and
+deploy; over 20× speedup and 90% energy savings have
+been observed compared to highly optimized baselines in
+MKLDNN and CUDNN on NVIDIA Jetson Nano. Conse-
+quently, our approach opens up a new direction of research
+with a huge potential for on-device training.1
+1. Introduction
+Existing approaches for on-device training are neither
+efﬁcient nor practical enough to satisfy the resource con-
+straints of edge devices (Figure 1). This is because these
+methods do not properly address a fundamental problem in
+on-device training, namely the computational and memory
+complexity of the back-propagation (BP) algorithm. More
+precisely, although the architecture modiﬁcation [6] and
+layer freezing [18, 20] can help skipping the BP for some
+layers, for other layers, the complexity remains high. Gra-
+1Code: https://github.com/SLDGroup/GradientFilter-CVPR23
+dient quantization [4, 7] can reduce the cost of arithmetic
+operations but cannot reduce the number of operations (e.g.,
+multiplications); thus, the speedup in training remains lim-
+ited.
+Moreover, gradient quantization is not supported
+by existing deep-learning frameworks (e.g., CUDNN [9],
+MKLDNN [1], PyTorch [25] and Tensorﬂow [2]). To en-
+able on-device training, there are two important questions
+must be addressed:
+• How can we reduce the computational complexity of
+back propagation through the convolution layers?
+• How can we reduce the data required by the gradient
+computation during back propagation?
+In this paper, we propose gradient ﬁltering, a new research
+direction, to address both questions. By addressing the ﬁrst
+question, we reduce the computational complexity of train-
+ing; by addressing the second question, we reduce the mem-
+ory consumption.
+In general, the gradient propagation through a convolu-
+tion layer involves multiplying the gradient of the output
+variable with a Jacobian matrix constructed with data from
+either the input feature map or the convolution kernel. We
+aim at simplifying this process with the new gradient ﬁlter-
+ing approach proposed in Section 3. Intuitively, if the gradi-
+ent map w.r.t. the output has the same value for all entries,
+then the computation-intensive matrix multiplication can be
+greatly simpliﬁed, and the data required to construct the Ja-
+cobian matrix can be signiﬁcantly reduced. Thus, our gra-
+dient ﬁltering can approximate the gradient w.r.t. the output
+by creating a new gradient map with a special (i.e., spatial)
+structure and fewer unique elements. By doing so, the gra-
+dient propagation through the convolution layers reduces to
+cheaper operations, while the data required (hence memory)
+for the forward propagation also lessens. Through this ﬁl-
+tering process, we trade off the gradient precision against
+the computation complexity during BP. We note that gradi-
+ent ﬁltering does not necessarily lead to a worse precision,
+i.e., models sometimes perform better with ﬁltered gradi-
+ents when compared against models trained with vanilla BP.
+In summary, our contributions are as follows:
+1
+arXiv:2301.00330v2  [cs.CV]  25 Mar 2023
+
+• We propose gradient ﬁltering, which reduces the com-
+putation and memory required for BP by more than
+two orders of magnitude compared to the exact gradi-
+ent calculation.
+• We provide a rigorous error analysis which shows that
+the errors introduced by the gradient ﬁltering have only
+a limited inﬂuence on model accuracy.
+• Our experiments with multiple CNN models and com-
+puter vision tasks show that we can train a neural net-
+work with signiﬁcantly less computation and memory
+costs, with only a marginal accuracy loss compared to
+baseline methods. Side-by-side comparisons against
+other training acceleration techniques also suggest the
+effectiveness of our method.
+• Our method is easy to deploy with highly optimized
+deep learning frameworks (e.g., MKLDNN [1] and
+CUDNN [9]).
+Evaluations on resource-constrained
+edge (Raspberry Pi and Jetson Nano) and high-
+performance devices (CPU/GPU) show that our
+method is highly suitable for real life deployment.
+The paper is organized as follows. Section 2 reviews rel-
+evant work. Section 3 presents our method in detail. Sec-
+tion 4 discusses error analysis, computation and memory
+consumption. Experimental results are presented in Section
+5. Finally, Section 6 summarizes our main contributions.
+2. Related Work
+Architecture Modiﬁcation: Authors of [6] propose to at-
+tach small branches to the original neural network. Dur-
+ing training, the attached branches and biases in the orig-
+inal model are updated. Though memory consumption is
+reduced, updating these branches still needs gradient prop-
+agation through the entire network; moreover, a large com-
+putational overhead for inference is introduced.
+Layer Freezing: Authors of [18, 20] propose to only train
+parts of the model. [18] makes layer selection based on layer
+importance metrics, while [20] uses evolutionary search.
+However, the layers selected by all these methods are typ-
+ically computationally heavy layers (e.g., the last few lay-
+ers in ResNet [14]) which consume most of the resources.
+Thus, the speedup achieved by these approaches is limited.
+Gradient Quantization: [3,5] quantize gradient after back-
+propagation, which means these methods cannot accelerate
+the training on a single device. Work in [4, 7, 15, 17, 28,
+29, 33] accelerates training by reducing the cost for every
+arithmetic operation. However, these methods do not re-
+duce the number of operations, which is typically huge for
+SOTA CNNs, so their achievable speedup is limited. Also,
+all these methods are not supported by the popular deep
+learning frameworks [1,2,9,25].
+Arch. Modification
+Example: [6]
+Drawbacks:
+Large overhead
+Limited to specific model
+Layer/Channel Freezing
+Example: [18, 20]
+Drawbacks:
+High search cost
+Limited to simple models
+Gradient Quantization
+Example: [4, 7, 17]
+Drawbacks:
+Not supported by 
+existing DL frameworks
+Gradient Filtering [Ours]
+Advantages:
+Very fast and accurate
+Well supported by 
+existing DL frameworks
+Efficiency
+Applicability
+Orthogonal Research Directions for On-device Training
+Figure 1. Matrix of orthogonal directions for on-device training.
+“Arch” is short for “architecture”. Our approach opens up a new
+direction of research for on-device training for EdgeAI.
+In contrast to the prior work, our method opens up a new
+research direction. More precisely, we reduce the number of
+computations and memory consumption required for train-
+ing a single layer via gradient ﬁltering. Thus, our method
+can be combined with any of the methods mentioned above.
+For example, in Section H in the Supplementary, we illus-
+trate how our method can work together with the gradient
+quantization methods to enable a higher speedup.
+3. Proposed Method
+In this section, we introduce our gradient ﬁltering ap-
+proach to accelerate BP. To this end, we target the most
+computation and memory heavy operation, i.e., convolution
+(Figure 2(a)). Table 1 lists some symbols we use.
+Cx
+Number of channels of x
+Wx, Hx
+Width and height of x
+θ
+Convolution kernel
+θ′
+Rotated θ, i.e., θ′ = rot180(θ)
+r
+Patch size (r × r )
+gx, gy, gθ
+Gradients w.r.t. x, y, θ
+˜gy
+Approximated gradient gy
+˜x, ˜θ′
+Sum of x and θ′ over
+spatial dimensions (height and width)
+x[n, ci, h, w]
+Element for feature map x
+at batch n, channel ci, pixel (h, w)
+θ[co, ci, u, v]
+Element for convolution kernel θ
+at output channel co, input channel ci,
+position (u, v)
+Table 1. Table of symbols we use.
+2
+
+Loss
+Loss
+Gradient Filter
+1.0 -1.0 -0.2 0.0
+0.0 4.0 2.0 3.0
+0.2 0.4 2.0 -1.0
+0.5 4.1 -1.4 -4.0
+4.0
+4.8
+5.2
+-4.4
+0.1 0.1 -0.2 0.5
+0.0 0.2 0.1 0.4
+0.5 0.2 0.2 -0.9
+0.4 0.1 -0.1 0.4
+0.1
+0.2
+0.3
+-0.1
+3.36
+𝑥𝑥
+෤𝑥𝑥
+𝑔𝑔𝑦𝑦
+෤𝑔𝑔𝑦𝑦
+෤𝑔𝑔𝜃𝜃
+0.1
+0.3
+0.4
+0.1
+0.2
+0.1
+-0.4
+-0.2
+-0.5
+𝜃𝜃𝜃
+0.1
+෨𝜃𝜃′
+0.01
+0.02
+0.03
+-0.01
+෤𝑔𝑔𝑥𝑥
+Ⓕ
+⊙
+𝜃𝜃
+𝑔𝑔𝑥𝑥
+𝜃𝜃𝜃
+⊛
+𝑥𝑥
+𝑔𝑔𝜃𝜃
+Memory
+Ⓕ
+𝑥𝑥
+෤𝑔𝑔𝜃𝜃
+Memory
+෤𝑥𝑥
+Ⓕ
+𝜃𝜃
+෤𝑔𝑔𝑥𝑥
+𝜃𝜃𝜃
+෨𝜃𝜃′ ⊙
+𝑦𝑦
+𝑙𝑙
+෤𝑔𝑔𝑦𝑦
+𝑔𝑔𝑦𝑦
+⊛
+𝑦𝑦
+𝑙𝑙
+𝑔𝑔𝑦𝑦
+⊛
+Vanilla Conv.
+Our Conv.
+Ⓐ
+(a)
+(b)
+Ⓐ
+Spatial Sum
+=
+𝟒𝟒. 𝟎𝟎× 𝟎𝟎. 𝟏𝟏+ 𝟒𝟒. 𝟖𝟖× 𝟎𝟎. 𝟐𝟐+
+𝟓𝟓. 𝟐𝟐× 𝟎𝟎. 𝟑𝟑+ −𝟒𝟒. 𝟒𝟒× (−𝟎𝟎. 𝟏𝟏)
+Patch size 𝑟𝑟× 𝑟𝑟= 2 × 2
+Forward Propagation
+Backward Propagation
+Average Filter
+Ⓐ
+𝚺𝚺Spatial Sum
+⊛Convolution
+ⒻFrobenius Inner Product
+⊙Element-wise Product
+𝚺𝚺
+𝚺𝚺
+𝚺𝚺
+𝚺𝚺
+Average Value
+Other Layers
+Other Layers
+Height
+Width
+Figure 2. (a) Computation procedures for vanilla training method (upper) and our method (lower). (b) Example of gradient propagation
+with gradient ﬁltering. Numbers in this example are chosen randomly for illustration purposes. In this case, the patch size selected for the
+gradient ﬁlter is 2 × 2. Thus, the 4 × 4 gradient map gy is approximated by ˜gy, which has four 2 × 2 patches with one unique value for
+each patch. Also, input feature map x and mirrored convolution kernel θ′ are spatial summed to ˜x and ˜θ′. Since ˜x has fewer unique values
+than x, memory consumption is reduced. Finally, with ˜gy, ˜x and ˜θ, we compute the gradient w.r.t. kernel and input feature map with much
+fewer operations than the standard back propagation method.
+3.1. Problem Setup
+The computations for both forward and backward paths
+are shown in Figure 2(a). For the standard (vanilla) ap-
+proach (upper Figure 2(a)), starting with input x, the for-
+ward propagation convolves the input feature map x with
+kernel θ and returns output y, which is further processed
+by the other layers in the neural network (dotted arrow) un-
+til the loss value l is calculated. As shown in Figure 2(a),
+the BP of the convolution layer starts with the gradient map
+w.r.t. output y (gy). The gradient w.r.t. input (gx) is calcu-
+lated by convolving gy with the rotated convolution kernel
+θ′, i.e., gx = gy ⊛rot180(θ) = gy ⊛θ′. The gradient w.r.t.
+convolution kernel, namely gθ, is calculated with the Frobe-
+nius inner product [16] between x and gy, i.e., gθ = gy
+F x.
+The lower half of Figure 2(a) shows our method, where
+several changes are made: We introduce the gradient ﬁlter
+“ A ” after gy to generate the approximate gradient for BP.
+Also, instead of using the accurate x and θ′ values for gra-
+dient computation, we sum over spatial dimensions (height
+and width dimensions), i.e., ˜x and ˜θ′, respectively. Finally,
+the convolution layer now multiplies the approximate gra-
+dient ˜gy with spatial kernel ˜θ′ instead of convolving with it
+to calculate ˜gx. Figure 2(b) shows an example of gradient
+propagation with our gradient ﬁlter.
+3.2. Preliminary Analysis
+Consider the vanilla BP for convolution in Figure 2(a).
+Equation (1) shows the number of computations (#FLOPs)
+required to calculate gx given gy:
+#FLOPs = 2CxCy · WyHy · WθHθ
+(1)
+The computation requirements in Equation (1) belong to
+three categories: number of channels, number of unique el-
+ements per channel in the gradient map, and kernel size. Our
+method focuses on the last two categories.
+i. Unique elements: (WyHy) represents the number of
+unique elements per channel in the gradient w.r.t. output
+variable y (gy). Given the high-resolution images we use,
+this term is huge, so if we manage to reduce the number
+of unique elements in the spatial dimensions (height and
+width), the computations required are greatly reduced too.
+ii.
+Kernel size: (WθHθ) represents the number of
+unique elements in the convolution kernel. If the gradient gy
+has some special structure, for example gy = 1Hy×Wy · v
+(i.e., every element in gy has the same value v), then the
+convolution can be simpliﬁed to (P θ′)v1Hy×Wy (with
+boundary elements ignored). With such a special structure,
+only one multiplication and (WθHθ −1) additions are re-
+quired. Moreover, P θ′ is independent of data so the result
+can be shared across multiple images until θ gets updated.
+3.3. Gradient Filtering
+To reduce the number of unique elements and create the
+special structure in the gradient map, we apply the gradi-
+ent ﬁlter after the gradient w.r.t. output (gy) is provided.
+During the backward propagation, the gradient ﬁlter A ap-
+proximates the gradient gy by spatially cutting the gradient
+map into r×r-pixel patches and then replacing all elements
+in each patch with their average value (Figure 2(b)):
+˜gy[n, co, h, w] = 1
+r2
+⌈h/r⌉r
+X
+i=⌊h/r⌋r
+⌈w/r⌉r
+X
+j=⌊w/r⌋r
+gy[n, co, i, j]
+(2)
+3
+
+For instance in Figure 2(b), we replace the 16 distinct values
+in the gradient map gy with 4 average values in ˜gy. So given
+a gradient map gy with N images per batch, C channels,
+and H × W pixels per channel, the gradient ﬁlter returns
+a structured approximation of the gradient map containing
+only N × C × ⌈H
+r ⌉× ⌈W
+r ⌉blocks, with one unique value
+per patch. We use this matrix of unique values to represent
+the approximate gradient map ˜gy, as shown in Figure 2(b).
+3.4. Back Propagation with Gradient Filtering
+We describe now the computation procedure used after
+applying the gradient ﬁlter. Detailed derivations are pro-
+vided in Supplementary Section B.
+Gradient w.r.t. input: The gradient w.r.t. input is cal-
+culated by convolving θ′ with gy (Figure 2(a)). With the
+approximate gradient ˜gy, this convolution simpliﬁes to:
+˜gx[n, ci, h, w] =
+X
+co
+˜gy[n, co, h, w] ⊙˜θ′[co, ci]
+(3)
+where ˜θ′[co, ci] = P
+u,v θ′[co, ci, u, v] is the spatial sum of
+convolution kernel θ, as shown in Figure 2(b).
+Gradient w.r.t. kernel: The gradient w.r.t. the kernel is
+calculated by taking the Frobenius inner product between x
+and gy, i.e., gθ[co, ci, u, v] = x F gy, namely:
+gθ[co, ci, u, v] =
+X
+n,i,j
+x[n, ci, i+u, j +v]gy[n, co, i, j] (4)
+With the approximate gradient ˜gy, the operation can be sim-
+pliﬁed to:
+˜gθ[co, ci, u, v] =
+X
+n,i,j
+˜x[n, ci, i, j]˜gy[n, co, i, j]
+(5)
+with ˜x[n, ci, i, j] = P⌈i/r⌉r
+h=⌊i/r⌋r
+P⌈j/r⌉r
+w=⌊j/r⌋r x[n, ci, h, w].
+As shown in Figure 2(b), ˜x[n, ci, i, j] is the spatial sum of
+x elements in the same patch containing pixel (i, j).
+4. Analyses of Proposed Approach
+In this section, we analyze our method from three per-
+spectives: gradient ﬁltering approximation error, computa-
+tion reduction, and memory cost reduction.
+4.1. Error Analysis of Gradient Filtering
+We prove that the approximation error introduced by our
+gradient ﬁltering is bounded during the gradient propaga-
+tion. Without losing generality, we consider that all vari-
+ables have only one channel, i.e., Cx0 = Cx1 = 1.
+Proposition 1: For any input-output channel pair (co, ci)
+in the convolution kernel θ, assuming the DC component
+has the largest energy value compared to all components in
+the spectrum2, then the signal-to-noise-ratio (SNR) of ˜gx is
+greater than SNR of ˜gy.
+Proof:
+We use Gx, Gy and Θ to denote the gradients
+gx, gy and the convolution kernel θ in the frequency domain;
+Gx[u, v] is the spectrum value at frequency (u, v) and δ is
+the 2D discrete Dirichlet function. To simplify the discus-
+sion, we consider only one patch of size r × r.
+The gradient returned by the gradient ﬁltering can be
+written as:
+˜gy = 1
+r2 1r×r ⊛gy
+(6)
+where ⊛denotes convolution.
+By applying the discrete
+Fourier transformation, Equation (6) can be rewritten in the
+frequency domain as:
+˜Gy[u, v] = 1
+r2 δ[u, v]Gy[u, v]
+(7)
+˜gy is the approximation of gy (i.e., the ground truth for ˜gy
+is gy), and the SNR of ˜gy equals to:
+SNR˜gy =
+P
+(u,v) G2
+y[u, v]
+P
+(u,v)(Gy[u, v] −1
+r2 δ[u, v]Gy[u, v])2
+= (1 −2r2 −1
+r4
+G2
+y[0, 0]
+P
+(u,v) G2y[u, v])−1
+(8)
+For the convolution layer, the gradient w.r.t. the approxi-
+mate variable ˜x in the frequency domain is3:
+˜Gx[u, v] = Θ[−u, −v] ˜Gy[u, v]
+= 1
+r2 Θ[−u, −v]δ[u, v]Gy[u, v]
+(9)
+and its ground truth is:
+Gx[u, v] = Θ[−u, −v]Gy[u, v]
+(10)
+Similar to Equation (8), the SNR of g˜x is:
+SNR˜gx = (1 −2r2 −1
+r4
+(Θ[0, 0]Gy[0, 0])2
+P
+(u,v) (Θ[u, v]Gy[u, v])2 )−1
+(11)
+Equation (11) can be rewritten as:
+r4(1 −SNR−1
+˜gx )
+2r2 −1
+=
+(Θ[0, 0]Gy[0, 0])2
+P
+(u,v)(Θ[−u, −v]Gy[u, v])2
+=
+G2
+y[0, 0]
+P
+(u,v)( Θ[−u,−v]
+Θ[0,0] Gy[u, v])2
+(12)
+Furthermore, the main assumption (i.e., the DC component
+dominates the frequency spectrum of Θ) can be written as:
+Θ2[0, 0]/max(u,v)̸=(0,0)Θ2[u, v] ≥1
+(13)
+2As a reminder, the energy of a signal is the sum of energy of the DC
+component and the energy of its AC components.
+3Because gy is convolved with the rotated kernel θ′, in the frequency
+domain, we use Θ[−u, −v] instead of Θ[u, v].
+4
+
+1 × 1
+10 × 10
+20 × 20
+30 × 30
+Patch Size r × r
+1M
+10M
+100M
+1G
+#FLOPs
+Baseline
+Reduced
+Unique
+Elements
+Reduced
+Unique
+Elements
++Structured
+Gradient
+Actual
+Minimum
+Achievable Computation
+Figure 3. Computation analysis for a speciﬁc convolution layer4.
+Minimum achievable computation is given in Equation (16). By
+reducing the number of unique elements, computations required
+by our approach drop to about 1/r2 compared with the standard
+BP method. By combining it with structured gradient map, com-
+putations required by our approach drop further, getting very close
+to the theoretical limit.
+that is, ∀(u, v), Θ2[−u,−v]
+Θ2[0,0]
+≤1; thus, by combining Equa-
+tion (12) and Equation (13), we have:
+G2
+y[0, 0]
+P
+(u,v)( Θ[−u,−v]
+Θ[0,0] Gy[u, v])2 ≥
+G2
+y[0, 0]
+P
+(u,v)(Gy[u, v])2
+⇔
+r4(1 −SNR−1
+˜gx )
+2r2 −1
+≥
+r4(1 −SNR−1
+˜gy )
+2r2 −1
+(14)
+which means that: SNR˜gx ≥SNR˜gy. This completes our
+proof for error analysis. ■
+In conclusion, as the gradient propagates through the net-
+work, the noise introduced by our gradient ﬁlter becomes
+weaker compared to the real gradient signal. This property
+ensures that the error in gradient has only a limited inﬂu-
+ence on the quality of BP. We validate Proposition 1 later in
+the experimental section.
+4.2. Computation and Overhead Analysis
+In this section, we analyse the computation required to
+compute gx, the gradient w.r.t. input x. Figure 3 compares
+the computation required to propagate the gradient through
+this convolution layer under different patch sizes r × r. A
+patch size 1 × 1 means the vanilla BP algorithm which we
+use as the baseline. As discussed in the preliminary analysis
+section (Section 3.2), two terms contribute to the computa-
+tion savings: fewer unique elements in the gradient map and
+the structured gradient map.
+Fewer unique elements: In vanilla BP, there are HyWy
+unique elements in the gradient map. After applying gradi-
+ent ﬁltering with a patch size r × r, the number of unique
+4The layer is from U-Net [26]. The size of the input is assumed to be
+120 × 160 pixels with 192 channels; the output has the same resolution,
+but with only 64 channels. The kernel size of the convolution layer is 3×3.
+Analysis for ResNet is included in the supplementary material.
+elements reduces to only ⌈Hy
+r ⌉⌈Wy
+r ⌉. This reduction con-
+tributes the most to the savings in computation (orange line
+in Figure 3).
+Structured Gradient Map: By creating the structured gra-
+dient map, the convolution over the gradient map ˜gy is sim-
+pliﬁed to the element-wise multiplication and channel-wise
+addition. Computation is thus reduced to (HθWθ)−1 of its
+original value. For instance, the example convolution layer
+in Figure 3 uses a 3 × 3 convolution kernel so around 89%
+computations are removed. The blue line in Figure 3 shows
+the #FLOPs after combining both methods. Greater reduc-
+tion is expected when applying our method with larger con-
+volution kernels. For instance, FastDepth [30] uses 5 × 5
+convolution kernel so as much as 96% reduction in compu-
+tation can be achieved, in principle.
+Minimum Achievable Computation: With the two reduc-
+tions mentioned above, the computation required to propa-
+gate the gradient through the convolution layer is:
+#FLOPs(r) = ⌈Hy
+r ⌉⌈Wy
+r ⌉Cx(2Cy −1)+o(HyWy) (15)
+where o(HyWy) is a constant term which is independent of
+r and negligible compared to HyWy. When the patch is as
+large as the feature map, our method reaches the minimum
+achievable computation (blue dashed line in Figure 3):
+minr #FLOPs(r) = 2CxCy −Cx + o(HyWy)
+(16)
+In this case, each channel of the gradient map is represented
+with a single value, so the computation is controlled by the
+number of input and output channels.
+Overhead: The overhead of our approach comes from ap-
+proximating the feature map x, gradient gy, and kernel θ.
+As the lower part of Figure 2(a) shows, the approximation
+for x is considered as part of forward propagation, while
+the other two as back propagation. Indeed, with the patch
+size r, the ratio of forward propagation overhead is about
+1/(2CoWθHθ), while the ratio of backward propagation
+overhead is about (r2 −1)/(2Cx).
+Given the large number of channels and spatial dimen-
+sions in typical neural networks, both overhead values take
+less than 1% computation in the U-Net example above.
+4.3. Memory Analysis
+As Figure 2(a) shows, the standard back propagation for
+a convolution layer relies on the input feature map x, which
+needs to be stored in memory during forward propagation.
+Since every convolution layer requiring gradient for its ker-
+nel needs to save a copy of feature map x, the memory
+consumption for storing x is huge. With our method, we
+simplify the feature map x to approximated ˜x, which has
+only ⌈Hx
+r ⌉⌈Wx
+r ⌉unique elements for every channel. Thus,
+by saving only these unique values, our method achieves
+around (1 −1
+r2 ) memory savings, overall.
+5
+
+MobileNetV2 [27]
+#Layers
+Accuracy
+FLOPs
+Mem
+ResNet-18 [14]
+#Layers
+Accuracy
+FLOPs
+Mem
+No Finetuning
+0
+4.2
+0
+0
+No Finetuning
+0
+4.7
+0
+0
+Vanilla
+BP
+All
+75.1
+1.13G
+24.33MB
+Vanilla
+BP
+All
+73.1
+5.42G
+8.33MB
+2
+63.1
+113.68M
+245.00KB
+2
+70.4
+489.20M
+196.00KB
+4
+62.2
+160.00M
+459.38KB
+4
+72.3
+1.14G
+490.00KB
+TinyTL [6]
+N/A
+60.2
+663.51M
+683.00KB
+TinyTL [6]
+N/A
+69.2
+3.88G
+1.76MB
+Ours
+2
+63.1
+39.27M
+80.00KB
+Ours
+2
+68.6
+28.32M
+64.00KB
+4
+63.4
+53.96M
+150.00KB
+4
+68.5
+61.53M
+112.00KB
+MCUNet [19]
+#Layers
+Accuracy
+FLOPs
+Mem
+ResNet-34 [14]
+#Layers
+Accuracy
+FLOPs
+Mem
+No Finetune
+0
+4.1
+0
+0
+No Finetune
+0
+0
+0
+Vanilla
+BP
+All
+68.5
+231.67M
+9.17MB
+Vanilla
+BP
+All
+70.8
+11.17G
+13.11MB
+2
+62.1
+18.80M
+220.50KB
+2
+69.6
+489.20M
+196.00KB
+4
+64.9
+33.71M
+312.38KB
+4
+72.3
+1.21G
+392.00KB
+TinyTL [6]
+N/A
+53.1
+148.01M
+571.5KB
+TinyTL [6]
+N/A
+72.9
+8.03G
+2.95MB
+Ours
+2
+61.8
+6.34M
+72.00KB
+Ours
+2
+68.6
+28.32M
+64.00KB
+4
+64.4
+11.01M
+102.00KB
+4
+70.6
+64.07M
+128.00KB
+Table 2. Experimental results for ImageNet classiﬁcation with four neural networks (MobileNet-V2, ResNet18/34, MCUNet). “#Layers”
+is short for “the number of active convolutional layers”. For example, #Layers equals to 2 means that only the last two convolutional layers
+are trained. For memory consumption, we only consider the memory for input feature x. Strategy “No Finetuning” shows the accuracy on
+new datasets without ﬁnetuning the pretrained model. Since TinyTL [6] changes the architecture, “#Layers” is not applicable (N/A).
+PSPNet [32]
+#Layers
+GFLOPs
+mIoU
+mAcc
+PSPNet-M [32]
+#Layers
+GFLOPs
+mIoU
+mAcc
+FCN [21]
+#Layers
+GFLOPs
+mIoU
+mAcc
+Calibration
+0
+0
+12.86
+19.74
+Calibration
+0
+0
+14.20
+20.46
+Calibration
+0
+0
+10.95
+15.69
+Vanilla
+BP
+All
+166.5
+55.01
+68.02
+Vanilla
+BP
+All
+42.4
+48.48
+61.48
+Vanilla
+BP
+All
+170.3
+45.22
+58.80
+5
+15.0
+39.54
+51.86
+5
+12.22
+36.35
+47.09
+5
+59.5
+27.41
+37.90
+10
+110.6
+53.15
+67.10
+10
+22.46
+46.01
+58.70
+10
+100.9
+43.87
+57.58
+Ours
+5
+0.14
+39.34
+51.86
+Ours
+5
+0.11
+36.14
+46.86
+Ours
+5
+0.58
+27.42
+37.88
+10
+0.79
+50.88
+64.73
+10
+0.76
+44.90
+57.50
+10
+0.96
+36.30
+48.82
+DLV3 [8]
+#Layers
+GFLOPs
+mIoU
+mAcc
+DLV3-M [8]
+#Layers
+GFLOPs
+mIoU
+mAcc
+UPerNet [31]
+#Layers
+GFLOPs
+mIoU
+mAcc
+Calibration
+0
+0
+13.95
+20.62
+Calibration
+0
+0
+21.96
+36.15
+Calibration
+0
+0
+14.71
+21.82
+Vanilla
+BP
+All
+151.2
+58.32
+71.72
+Vanilla
+BP
+All
+54.4
+55.66
+68.95
+Vanilla
+BP
+All
+541.0
+64.88
+77.13
+5
+18.0
+40.85
+53.16
+5
+14.8
+38.21
+49.35
+5
+503.9
+47.93
+61.67
+10
+102.0
+54.65
+68.64
+10
+33.1
+47.95
+61.49
+10
+507.6
+48.83
+63.02
+Ours
+5
+0.31
+33.09
+44.33
+Ours
+5
+0.26
+35.47
+46.35
+Ours
+5
+1.97
+47.04
+60.44
+10
+2.96
+47.11
+60.28
+10
+1.40
+45.53
+58.99
+10
+2.22
+48.00
+62.07
+Table 3. Experimental results for semantic segmentation task on augmented Pascal VOC12 dataset [8]. Model name with postﬁx “M”
+means the model uses MobileNetV2 as backbone, otherwise ResNet18 is used. “#Layers” is short for “the number of active convolutional
+layers” that are trained. All models are pretrained on Cityscapes dataset [11]. Strategy “Calibration” shows the accuracy when only the
+classiﬁer and normalization statistics are updated to adapt different numbers of classes between augmented Pascal VOC12 and Cityscapes.
+5. Experiments
+Our experimental section consists of theoretical and
+practical evaluations. Sections 5.2-5.4 show the theoreti-
+cal advantages of our method on image classiﬁcation and
+semantic segmentation tasks with implementation-agnostic
+metrics (e.g., accuracy, FLOPs). Then, in Section 5.5, we
+show how these theoretical advantages translate into practi-
+cal advantages (i.e., speedup and memory savings) on real
+edge devices.
+5.1. Experimental Setup
+Classiﬁcation: Following [24], we split every dataset into
+two highly non-i.i.d. partitions with the same size. Then,
+we pretrain our models on the ﬁrst partition with a vanilla
+training strategy, and ﬁnetune the model on the other par-
+tition with different conﬁgurations for the training strat-
+egy (i.e., with/without gradient ﬁltering, hyper-parameters,
+number of convolution layers to be trained). More details
+(e.g., hyper-parameters) are in the Supplementary.
+Segmentation: Models are pretrained on Cityscapes [11]
+by MMSegmentation [10]. Then, we calibrate and ﬁnetune
+these models with different training strategies on the aug-
+mented Pascal-VOC12 dataset following [8], which is the
+combination of Pascal-VOC12 [12] and SBD [13]. More
+details are included in the supplementary material.
+On-device Performance Evaluation:
+For CPU per-
+formance evaluation, we implement our method with
+MKLDNN [1] (a.k.a. OneDNN) v2.6.0 and compare it with
+the convolution BP method provided by MKLDNN. We test
+on three CPUs, namely Intel 11900KF, Quad-core Cortex-
+A72 (Jetson Nano) and Quad-core Cortex-A53 (Raspberry
+Pi-3b). For GPU performance evaluation, we implement
+our method on CUDNN v8.2 [9] and compare with the BP
+6
+
+method provided by CUDNN. We test on two GPUs, RTX
+3090Ti and the edge GPU on Jetson Nano.
+Since both
+MKLDNN and CUDNN only support ﬂoat32 BP, we test
+ﬂoat32 BP only. Additionally, for the experiments on Jet-
+son Nano, we record the energy consumption for CPU and
+GPU with the embedded power meter. More details (e.g.,
+frequency) are included in the supplementary material.
+5.2. ImageNet Classiﬁcation
+Table 2 shows our evaluation results on the ImageNet
+classiﬁcation task. As shown, our method signiﬁcantly re-
+duces the FLOPs and memory required for BP, with very
+little accuracy loss. For example, for ResNet34, our method
+achieves 18.9× speedup with 1.7% accuracy loss when
+training four layers; for MobileNetV2, we get a 1.2% bet-
+ter accuracy with 3.0× speedup and 3.1× memory savings.
+These results illustrate the effectiveness of our method. On
+most networks, TinyTL has a lower accuracy while consum-
+ing more resources compared to the baselines methods.
+5.3. Semantic Segmentation
+Table 3 shows our evaluation results on the augmented
+Pascal-VOC12 dataset.
+On a wide range of networks,
+our method constantly achieves signiﬁcant speedup with
+marginal accuracy loss. For the large network UPerNet, our
+method achieves 229× speedup with only 1% mIoU loss.
+For the small network PSPNet, our method speedups train-
+ing by 140× with only 2.27% mIoU loss. This shows the
+effectiveness of our method on a dense prediction task.
+5.4. Hyper-Parameter Selection
+Figure 4 shows our experimental results for ResNets un-
+der different hyper-parameter selection, i.e. number of con-
+volution layers and patch size of gradient ﬁlter r × r. Of
+note, the y-axis (MFLOPs) in Figure 4 is log scale. More
+results are included in Supplementary Section G. We high-
+light three qualitative ﬁndings in Figure 4:
+a. For a similar accuracy, our method greatly reduces
+the number of operations (1 to 2 orders of magni-
+tude), while for a similar number of computations, our
+method achieves a higher accuracy (2% to 5% better).
+This ﬁnding proves the effectiveness of our method.
+b. Given the number of convolution layers to be trained,
+the more accurate method returns a better accuracy.
+Baseline (i.e., standard BP) uses the most accurate gra-
+dient, Ours-R4 (BP with gradient ﬁlter with patch size
+4 × 4) uses the least accurate gradient; thus, Baseline
+> Ours-R2 > Ours-R4.
+This ﬁnding is intuitive since the more accurate method
+should introduce smaller noise to the BP, e.g., the gradi-
+ent ﬁltering with patch size 2 × 2 (Ours-R2) introduces less
+92
+93
+94
+Accuracy [%]
+ResNet18-CIFAR10
+101
+102
+103
+#MFLOPs
+14.1x OPs
+2.1x OPs
+2.2% Acc
+68.3x
+OPs
+Baseline
+Ours-R2
+Ours-R4
+78
+80
+82
+Accuracy [%]
+ResNet34-CIFAR100
+101
+102
+103
+18.8x OPs
+1% Acc
+7.6x OPs
+2.0x OPs
+5.1% Acc
+63.6x OPs
+Baseline
+Ours-R2
+Ours-R4
+Figure 4. Computation (#MFLOPs, log scale) and model accuracy
+[%] under different hyper-parameter selection. “Baseline” means
+vanilla BP; “Ours-R2/4” uses gradient ﬁltering with patch size 2×
+2/4 × 4 during BP.
+noise than with patch size 4 × 4 (Ours-R4). In Figure 5, we
+evaluate the relationship between accuracy and noise level
+introduced by gradient ﬁltering. With a higher SNR (i.e., a
+lower noise level), a better accuracy is achieved.
+0.050
+0.075
+0.100
+0.125
+0.150
+0.175
+0.200
+0.225
+SNR [db]
+71.6
+71.8
+Top 1 Accuracy [%]
+Figure 5. Relationship between accuracy and noise level intro-
+duced by the gradient ﬁltering. As shown, accuracy increases as
+the SNR increases, i.e., noise level decreases.
+c. Given the number of computations, the less accurate
+method returns the better accuracy by training more
+layers, i.e., Ours-R4 > Ours-R2 > baseline.
+This ﬁnding suggests that for neural network training with
+relatively low computational resources, training more layers
+with less accurate gradients is preferable than training fewer
+layers with more accurate gradients.
+5.5. On-device Performance Evaluation
+Figure 6 and Table 4 show our evaluation results on real
+devices. More results are included in the Supplementary
+Section I. As Figure 6 shows, on CPU, most convolution
+layers achieve speedups over 20× with less than 50% mem-
+ory consumption for gradient ﬁltering with patch sizes 2×2;
+for gradient ﬁltering with patch size 4 × 4, the speedups are
+much higher, namely over 60×. On GPU, the speedup is
+a little bit lower, but still over 10× and 25×, respectively.
+Furthermore, as Table 4 shows, our method saves over 95%
+7
+
+0
+1
+2
+3
+4
+5
+6
+0×
+20×
+40×
+60×
+80×
+100×
+Speedup (×times)
+114×
+CPU Speedup
+Jetson-R2
+Jetson-R4
+11900KF-R2
+11900KF-R4
+RPi3-R2
+RPi3-R4
+0
+1
+2
+3
+4
+5
+6
+0×
+10×
+20×
+30×
+40×
+50×
+60×
+GPU Speedup
+Jetson-R2
+Jetson-R4
+RTX3090Ti-R2
+RTX3090Ti-R4
+0
+1
+2
+3
+4
+5
+6
+Test Case - Baseline: MKLDNN
+0
+20
+40
+60
+80
+100
+Percentage [%]
+Baseline: MKLDNN
+50% Memory Cost
+Normalized CPU Memory Cost
+Jetson-R2
+Jetson-R4
+11900KF-R2
+11900KF-R4
+RPi3-R2
+RPi3-R4
+0
+1
+2
+3
+4
+5
+6
+Test Case - Baseline: CUDNN
+0
+20
+40
+60
+80
+100
+Baseline: CUDNN
+50% Memory Cost
+Normalized GPU Memory Cost
+Jetson-R2
+Jetson-R4
+RTX3090Ti-R2
+RTX3090Ti-R4
+Figure 6. Speedup and normalized memory consumption results on multiple CPUs and GPUs under different test cases (i.e. different
+input sizes, numbers of channels, etc.) Detailed conﬁguration of these test cases are included in the supplementary material. “R2”, “R4”
+mean using gradient ﬁltering with 2 × 2 and 4 × 4 patch sizes, respectively. Our method achieves signiﬁcant speedup with low memory
+consumption compared to all baseline methods. For example, on Jetson CPU with patch size 4 × 4 (“Jetson-R4” in left top ﬁgure), our
+method achieves 114× speedup with only 33% memory consumption for most test cases.
+Device
+Patch Size
+Normalized Energy Cost [STD]
+Edge
+CPU
+2 × 2
+4.13% [0.61%]
+4 × 4
+1.15% [0.18%]
+Edge
+GPU
+2 × 2
+3.80% [0.73%]
+4 × 4
+1.22% [1.10%]
+Table 4. Normalized energy consumption for BP with gradient
+ﬁltering for different patch sizes. Results are normalized w.r.t. the
+energy cost of standard BP methods. For instance, for edge CPU
+with a 4 × 4 patch, only 1.15% of energy in standard BP is used.
+Standard deviations are shown within brackets.
+energy for both CPU and GPU scenarios, which largely re-
+solves one of the most important constraints on edge de-
+vices. All these experiments on real devices show that our
+method is practical for the real deployment of both high-
+performance and IoT applications.
+Model
+Ratio
+Model
+Ratio
+(Wide)ResNet18-152
+1.462
+VGG(bn)11-19
+1.497
+DenseNet121-201
+2.278
+EfﬁcientNet b0-b7
+1.240
+Table 5. Evaluation of energy ratio deﬁned in Equation (13) on
+models published on Torchvision. The ratio greater than 1 empiri-
+cally veriﬁes our assumption.
+5.6. Main Assumption Veriﬁcation
+We now empirically verify the assumption that the DC
+component dominates the frequency spectrum of the convo-
+lution kernel (Section 4.1). To this end, we collect the en-
+ergy ratio shown in Equation (13) from trained models pub-
+lished in Torchvision [23]. As Table 5 shows, for the con-
+volution kernels in all these networks, we get a ratio greater
+than one, which means that the energy of DC components
+is larger than energy of all AC components. Thus, our as-
+sumption in Section 4.1 empirically holds true in practice.
+6. Conclusions
+In this paper, we have addressed the on-device model
+training for resource-constrained edge devices. To this end,
+a new gradient ﬁltering method has been proposed to sys-
+tematically reduce the computation and memory consump-
+tion for the back-propagation algorithm, which is the key
+bottleneck for efﬁcient model training.
+In Section 3, a new gradient ﬁltering approach has been
+proposed to reduce the computation required for propagat-
+ing gradients through the convolutional layers. The gradient
+ﬁltering creates an approximate gradient feature map with
+fewer unique elements and a special structure; this reduces
+the computation by more than two orders of magnitude.
+Furthermore, we proved that the error introduced during
+back-propagation by our gradient ﬁlter is bounded so the
+inﬂuence of gradient approximation is limited.
+Extensive experiments in Section 5 have demonstrated
+the efﬁciency and wide applicability of our method. Indeed,
+models can be ﬁnetuned with orders of magnitudes fewer
+computations, while having only a marginal accuracy loss
+compared to popular baseline methods.
+Acknowledgements: This work was supported in part by
+the US National Science Foundation (NSF) grant CNS-
+2007284.
+8

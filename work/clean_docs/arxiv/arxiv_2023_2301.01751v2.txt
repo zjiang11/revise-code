@@ -1,0 +1,1049 @@
+ITERATED DECOMPOSITION: IMPROVING SCIENCE Q&A
+BY SUPERVISING REASONING PROCESSES
+Justin Reppert∗, Ben Rachbach, Charlie George, Luke Stebbing,
+Jungwon Byun, Maggie Appleton, Andreas Stuhlmüller
+Ought
+ABSTRACT
+Language models (LMs) can perform complex reasoning either end-to-end, with hidden latent state, or
+compositionally, with transparent intermediate state. Composition offers beneﬁts for interpretability
+and safety, but may need workﬂow support and infrastructure to remain competitive. We describe
+iterated decomposition, a human-in-the-loop workﬂow for developing and reﬁning compositional
+LM programs. We improve the performance of compositions by zooming in on failing components
+and reﬁning them through decomposition, additional context, chain of thought, etc. To support
+this workﬂow, we develop ICE, an open-source tool for visualizing the execution traces of LM
+programs. We apply iterated decomposition to three real-world tasks and improve the accuracy
+of LM programs over less compositional baselines on held-out test sets: describing the placebo
+used in a randomized controlled trial (25% →65%), evaluating participant adherence to a medical
+intervention (53% →70%), and answering NLP questions on the QASPER dataset (38% →69%).
+These applications serve as case studies for a workﬂow that, if automated, could keep ML systems
+interpretable and safe even as they scale to increasingly complex tasks.
+1
+Introduction
+Language models are often trained using feedback on outcomes, leveraging reward models that imitate human
+evaluations provided as pairwise comparisons (Christiano et al., 2017; Ziegler et al., 2020). This works well for basic
+question-answering, summarization, simple code generation, and general short-form instruction-following (Stiennon
+et al., 2020; Wu et al., 2021; Ouyang et al., 2022). For these tasks, good outputs can readily be distinguished from
+bad ones, especially with model-supported evaluation (Saunders et al., 2022). And with rare exceptions like WebGPT
+(Nakano et al., 2021), there is no difference between the model’s output and the relevant outcomes, so evaluations
+relatively directly inform the model’s behavior.
+However, as model capabilities and task complexities scale up, outcome-based evaluation may run into alignment
+problems:
+First, for some important applications the process used to generate the output matters as much as the output itself.
+Consider long-range forecasting, and policy decisions informed by such forecasts: The quality of a forecast or decision
+depends on the assumptions, evidence, and reasoning used to produce it. If feedback doesn’t inform the process used to
+generate outputs, we may get results that look good (because they are optimized for favorable evaluation), and may
+even look systematic, but are worse in exactly the ways that can’t easily be measured (Stuhlmüller and Byun, 2022).
+Second, outcome-based feedback may create incentives for language models to deceive or manipulate their users by
+exploiting gaps or biases in the feedback signal (Amodei et al., 2016). In extreme cases, this could lead to models
+behaving as intended during training, hiding their true intentions and capabilities, but defecting at deployment (Cotra,
+2022; Ngo et al., 2022).
+
+arXiv:2301.01751v2  [cs.CL]  5 Jan 2023
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Supervise outcomes
+?
+Input
+Did this study on 
+drowning use a 
+placebo?
+output
+Yes, a video 
+about dog bites
+Supervise process
+Find sections 
+about trial 
+arms
+Extract trial 
+arms from 
+sections
+Classify & 
+name 
+placebo
+5 paragraphs 
+found
+Drowning video, 
+dog bite video
+Input
+Did this study on 
+drowning use a 
+placebo?
+output
+Yes, a video 
+about dog bites
+observable Interim outputs
+Figure 1: Process supervision breaks black-box language model computation into human-understandable reasoning
+steps without end-to-end optimization. This increases transparency and trust because it allows inspection of intermediate
+results and reduces risks from imperfect feedback signals and deceptive alignment.
+Process supervision is an alternative to outcome-based training that uses language models to execute human-
+understandable task decompositions, either by imitating human steps or by rewarding human-endorsed steps (Christiano,
+2016; Stuhlmüller and Byun, 2022; Uesato et al., 2022). This paradigm promises increased interpretability, trust, and
+alignment by reducing the reliance on black-box computation and enabling users to inspect and intervene in the model’s
+reasoning process.
+Right now, process supervision is ahead of outcome-based training: Language model capabilities are weak, so complex
+tasks require a composition of multiple calls. Indeed, engineered multi-step pipelines have been a staple of NLP for a
+long time. However, without scalable infrastructure to support it, we expect that outcome-based training will eventually
+crush process supervision performance-wise, leading to the alignment problems above.
+This paper describes our experience applying process supervision to academic question-answering in the context of
+Elicit2, the AI research assistant developed by Ought. Our contributions are:
+1. A review of the literature on process supervision, highlighting gaps in workﬂows and tooling that contribute to
+making real-world use cases rare
+2. Iterated decomposition, a human-in-the-loop workﬂow for developing compositional language model programs
+3. ICE, an open-source visualizer for language model execution traces
+4. Case studies that use this workﬂow to improve performance over baselines on three real-world tasks:
+(a) extracting placebo information from randomized controlled trials (RCTs),
+(b) analyzing participant ﬂow in RCTs, and
+(c) answering questions about natural language processing papers.
+As models advance and become more reliable at completing component tasks, we expect that process supervision
+will become more feasible, and that eventually the iterated decomposition process will be automated. By sharing
+our workﬂow and tooling now when even basic tasks are still challenging, we hope to accelerate a future where LM
+deployments are controllable and interpretable.
+2
+Process Supervision
+Process supervision refers to approaches to LM training and deployment that rely on human-understandable intermediate
+steps. We review the literature and highlight gaps, then explain the iterated decomposition workﬂow and ICE visualizer.
+2.1
+Prior work on process supervision
+Over the past year, there have been signiﬁcant advances in techniques for process supervision as well as frameworks,
+interfaces, and libraries for implementing it. At the same time, real-world use cases are still rare. We review prior work
+and highlight gaps in the literature that may be contributing to this. This is a rapidly growing ﬁeld, so we are only able
+to review a sample of the work (Table 1).
+2https://elicit.org
+2
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Authors
+Title
+Decomposition
+Training
+Workﬂow
+Survey
+Tool
+Theory
+Saha et al. (2022)
+Summarization Programs: Interpretable Abstractive Summarization [..]
+✓
+✓
+✓
+Wu et al. (2021)
+Recursively Summarizing Books with Human Feedback
+✓
+✓
+✓
+Yao et al. (2022)
+ReAct: Synergizing Reasoning and Acting in Language Models
+✓
+✓
+Kumar and Talukdar (2020)
+NILE : Natural Language Inference with Faithful Natural Language Explanations
+✓
+✓
+Nakano et al. (2021)
+WebGPT: Browser-assisted question-answering with human feedback
+✓
+✓
+Creswell et al. (2022)
+Selection-Inference: Exploiting LLMs for Interpretable Logical Reasoning
+✓
+✓
+Jung et al. (2022)
+Maieutic Prompting: Logically Consistent Reasoning with Recursive Explanations
+✓
+✓
+Sanyal et al. (2022)
+FaiRR: Faithful and Robust Deductive Reasoning over Natural Language
+✓
+✓
+Creswell and Shanahan (2022)
+Faithful Reasoning Using Large Language Models
+✓
+✓
+Bostrom et al. (2022)
+Natural Language Deduction through Search over Statement Compositions
+✓
+✓
+Wang et al. (2022)
+Locate Then Ask: Interpretable Stepwise Reasoning for Multi-hop Question Answering
+✓
+✓
+Fu et al. (2021)
+Decomposing Complex Questions Makes Multi-Hop QA Easier and More Interpretable
+✓
+✓
+Dua et al. (2022)
+Successive Prompting for Decomposing Complex Questions
+✓
+✓
+Guo et al. (2022)
+Complex Reading Comprehension Through Question Decomposition
+✓
+✓
+Shridhar et al. (2022)
+Distilling Multi-Step Reasoning Capabilities of LLMs into Smaller Models [..]
+✓
+✓
+Zhou et al. (2022)
+Learning to Decompose: Hypothetical Question Decomposition [..]
+✓
+✓
+Khattab et al. (2022)
+Demonstrate-Search-Predict: Composing retrieval and language models [..]
+✓
+✓
+✓
+Press et al. (2022)
+Measuring and narrowing the compositionality gap in language models
+✓
+✓
+Khot et al. (2022)
+Decomposed Prompting: A Modular Approach for Solving Complex Tasks
+✓
+Ozturkler et al. (2022)
+ThinkSum: Probabilistic reasoning over sets using large language models
+✓
+Yang et al. (2022)
+Re3: Generating Longer Stories With Recursive Reprompting and Revision
+✓
+Gao et al. (2022)
+PAL: Program-aided Language Models
+✓
+Drozdov et al. (2022)
+Compositional Semantic Parsing with Large Language Models
+✓
+Trivedi et al. (2022)
+Interleaving Retrieval with Chain-of-Thought Reasoning for [..] Multi-Step Questions
+✓
+Kazemi et al. (2022)
+LAMBADA: Backward Chaining for Automated Reasoning in Natural Language
+✓
+Zelikman et al. (2022)
+STaR: Bootstrapping Reasoning With Reasoning
+✓
+✓
+Xie et al. (2022)
+Calibrating Trust of Multi-Hop Question Answering Systems with Decompositional Probes
+✓
+✓
+Uesato et al. (2022)
+Solving math word problems with process- and outcome-based feedback
+✓
+Dohan et al. (2022)
+Language Model Cascades
+✓
+✓
+✓
+Stuhlmüller et al. (2022)
+Factored Cognition Primer
+✓
+✓
+Wu et al. (2022a)
+PromptChainer: Chaining Large Language Model Prompts through Visual Programming
+✓
+✓
+Wu et al. (2022b)
+AI Chains: Transparent and Controllable Human-AI Interaction by Chaining LLM Prompts
+✓
+✓
+Chase (2022)
+LangChain
+✓
+✓
+Polu (2022)
+Dust
+✓
+Wies et al. (2022)
+Sub-Task Decomposition Enables Learning in Sequence to Sequence Tasks
+✓
+Table 1: A sample of prior work on process supervision, categorized into work that primarily contributes (1) new task
+decompositions, (2) training and ﬁnetuning techniques, (3) workﬂows and tutorials, (4) surveys and frameworks for
+organizing prior work, (5) tools, and (6) theory. While work on decompositions and training techniques is rapidly
+growing, there is little investigation of workﬂows, tooling, and theory.
+Task decompositions
+There is a quickly growing literature on how to compose multiple language model calls to improve performance or
+accomplish more difﬁcult tasks:
+• Creswell et al. (2022) and Creswell and Shanahan (2022) generate reasoning steps by alternating between
+selection and inference. They show that their approach outperforms other prompting methods on multi-step
+logical deduction and scientiﬁc QA tasks, and generates interpretable reasoning traces.
+• Kazemi et al. (2022) apply backward-chaining to simple logic tasks, starting with a goal proposition and
+recursively decomposing it into sub-goals until the sub-goals can be proved or disproved.
+• Wu et al. (2021) and Saha et al. (2022) apply recursive summarization to generate summaries of long texts, such
+as books or articles. They use LMs to summarize small sections of the text and then recursively summarize
+these summaries to produce a summary of the entire text. They show that recursive summarization improves
+the quality and coherence of the summaries, and enables human feedback and evaluation.
+• Yang et al. (2022) generate long stories by ﬁrst creating a story plan, generating passages b yprompting a
+model with contextual information from the plan and the current story state, and then revising the passages by
+reranking and editing them.
+• ReAct (Yao et al., 2022) interleaves generating chain-of-thought reasoning and actions pertaining to a task
+(e.g., search, lookup).
+• WebGPT (Nakano et al., 2021) ﬁnetunes LMs to answer long-form questions using a text-based web-browsing
+environment.
+3
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+• Gao et al. (2022) ofﬂoad computation to Python interpreters.
+• Trivedi et al. (2022) and Khattab et al. (2022) interleave chain-of-thought with knowledge retrieval steps.
+• Khot et al. (2022) study decomposition in general, letting the language model push subtasks to task-speciﬁc
+handlers.
+• Ozturkler et al. (2022) aggregate language model probabilities using mathematical combinators like sum and
+product.
+• Jung et al. (2022) recursively generate a tree of explanations for a statement, then determine the truth of the
+statement by treating the inference as a satisﬁability problem over these explanations and their logical relations.
+• Various works, including Fu et al. (2021), Dua et al. (2022), Guo et al. (2022), and Zhou et al. (2022), explore
+decomposition of questions into subquestions, often under the name multi-hop question-answering.
+Training and ﬁnetuning techniques
+The most relevant work is Uesato et al. (2022) who directly compare process-based and outcome-based feedback
+for solving math word problems with LMs. They ﬁnd that process-based feedback improves the correctness and
+interpretability of reasoning steps, but requires more label supervision than outcome-based feedback.
+Wu et al. (2021) ﬁnetune GPT-3 using behavioral cloning and reward modeling to do summarization recursively. Zhou
+et al. (2022) train a decomposition model based on a parallel news corpus. Nakano et al. (2021) compare behavior
+cloning, RL and rejection sampling for training a web browsing model, and ﬁnd that a combination of behavior
+cloning and rejection sampling against a reward model worked best. Zelikman et al. (2022) generate chains-of-thought,
+ﬁnetuning on the ones that lead to correct answers.
+Most other work under “training” in Table 1 trains small models from scratch for particular composition steps.
+Theory and conceptual advances
+Wies et al. (2022) show some beneﬁts of process supervision: When concatenating intermediate supervision to the
+input and training a sequence-to-sequence model on this modiﬁed input, unlearnable composite problems can become
+learnable.
+Press et al. (2022) coin the name “compositionality gap” for the fraction of questions that the model answers incorrectly
+out of the questions for which the model answers all of the sub-questions correctly. They ﬁnd this number to be around
+40%. They show that chain of thought can narrow the gap, and that generating and answering follow-up questions
+further narrows it.
+Workﬂows, tutorials, and tools
+Dohan et al. (2022) introduce language model cascades, which are probabilistic programs that compose LMs with
+random variables and control ﬂow. They formalize several existing techniques, such as scratchpads, veriﬁers, STaR,
+selection-inference, and tool use, as instances of language model cascades. They provide an open-source probabilistic
+programming system. The Factored Cognition Primer (Stuhlmüller et al., 2022) is a tutorial that explains how to write
+compositional LM programs, including recursive question-answering, debate, search, and veriﬁcation. Xie et al. (2022)
+show in human participant studies that letting users probe a language model with subquestions helps them calibrate
+when the model is correct. Wu et al. (2022a) and Wu et al. (2022b) describe a closed-source visual programming
+interfaces for making compositional language model programs. Dust (Polu, 2022) is a web service and Rust library for
+designing and deploying LM apps. LangChain (Chase, 2022) is a Python library that assists in the development of LM
+applications that involve chaining LMs with each other or with other experts.
+Relation to this work
+While there is a quickly growing literature on task decompositions, there is effectively no work on theory and only a
+few tools, tutorials, and workﬂows for building real-world process-based systems. We see this paper as demonstrating a
+real-world application (science Q&A) as well as a description of the workﬂow (iterated decomposition) and tooling
+(ICE) used.
+The prior work above varies in what exactly is meant by “process” and “supervision”. We provide a taxonomy in
+Appendix 9.3. Brieﬂy, in this work, we focus on decompositions designed by a human developer, with occasional
+choices made by the language model. We balance pragmatic decompositions that improve task performance with
+decompositions that reﬂect ideal reasoning and facilitate better supervision. Our decompositions mostly improve
+performance by helping the model use long context more effectively, although some also apply multiple lines of
+4
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Task
+decompose into Subtasks
+Papers
+Results
+1
+Decompose the task into subtasks
+Subtasks should be independently meaningful so 
+that they can be evaluated on their own
+2
+Run the decomposition 
+across multiple inputs
+For example, research papers for 
+which gold-standard results are 
+available
+Gold standards
+VS.
+3
+Evaluate the results
+Either manually or 
+automatically using 
+metrics such as accuracy 
+and F1-score
+inputs
+outputs
+evaluate failed Subtasks
+4
+Inspect failing subtasks
+Zoom in on failures using the ICE  
+trace visualizer to inspect the inputs 
+and outputs of each subtask
+custom 
+code edits
+decomposition
+5
+Improve failing subtasks
+Using further decomposition 
+(e.g. adding chain-of-thought, 
+retrieval steps) or custom code 
+(e.g. prompt edits)
+Repeat
+Figure 2: Iterated decomposition is a workﬂow for human-in-the-loop language model programming. We start with a
+trivial decomposition, evaluate it against gold standards, diagnose the source of failures using the ICE visualizer, reﬁne
+the failing subtasks through further decomposition or other adjustments, and repeat.
+reasoning to subtasks. When we talk about “supervision“, we mean checking the outputs or behavior of individual steps
+in the composition. We supervise the process to improve the LM program, the supervisor is the human developer, and
+we always have access to the correct answer.
+2.2
+Iterated decomposition
+We study process supervision via iterated decomposition, a human-in-the-loop workﬂow that incrementally improves a
+task decomposition through error diagnosis and amendment (illustrated in Figure 2):
+1. Start with a minimal decomposition, breaking the task into subtasks that can be performed by a LM. For
+example, the task of extracting the placebo used in academic studies can be decomposed into ﬁrst ﬁnding the
+most relevant section, then generating the placebo (if any) given that section.
+2. Apply the decomposition to multiple test inputs with gold standard answers. For example, this could be a
+dataset of academic papers from various domains, such as medicine, psychology, and economics, and their
+corresponding placebo descriptions, if applicable.
+5
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Figure 3: The Interactive Composition Explorer (ICE) is an open-source debugger for language model execution traces.
+It visualizes task decompositions and supports zooming in on failing subcomponents. The top left pane in the screenshot
+shows the trace of function calls in the original execution hierarchy. The bottom pane supports sorting and ﬁltering
+of calls, with each row showing values that were recorded at execution time. The right pane shows function inputs,
+outputs, recorded intermediate values, and source code of the call selected in the main pane.
+3. Evaluate the results automatically (using LM) or manually, using metrics such as accuracy, F1-score, or other
+metrics. For example, the result of the placebo extraction task can be compared to a gold standard dataset of
+placebo descriptions from academic papers.
+4. Identify failures using the ICE trace visualizer or other tools to inspect the intermediate inputs and outputs
+of each subtask. For example, given that the generated placebo is incorrect, one can determine whether the
+wrong section was found or the right section was found but the wrong answer was extracted.
+5. Improve failing components using further decomposition (e.g., semantic decomposition into subtasks, chain-
+of-thought, retrieval), or by making custom edits (e.g. prompt tweaks, language model inference parameters).
+For example, the task can be split into ﬁrst ﬁnding each experiment mentioned in the paper, then asking for
+each experiment whether it used a placebo or not.
+The process repeats steps 2-5 until it achieves good performance or exhausts the relevant resources (time, compute
+budget for experiments).
+2.3
+Interactive Composition Explorer
+To support the error identiﬁcation step in iterated decomposition, we have developed the Interactive Composition
+Explorer (ICE), an open-source3 debugger and execution trace visualizer for language model programs.
+ICE records and visualizes the execution of all async functions in a Python program, including all inputs (prompts,
+parameters) and outputs (language model responses, intermediate values), in a way that is suitable even for executions
+3https://github.com/oughtinc/ice
+6
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Placebo classification 
+and description
+EXAMPLE input
+Did Shen et al. 2015 use a 
+placebo in their experiment on 
+using testimonial videos about 
+drowning to reduce drowning 
+risk? If so, what was it?
+Participant flow
+Example input
+What were the experiments, trial 
+arms, and adherence for each 
+arm in Bloom et al. 2016?
+Qasper NLP Q&A
+Example input
+Which retrieval system was used 
+for the baselines?
+Figure 4: We apply iterated decomposition to three real-world case studies: Extracting placebos from academic papers
+about randomized controlled trials, extracting participant ﬂow, and NLP question-answering. The tasks are part of our
+work on automated literature review for the AI Research Assistant Elicit.
+with hundreds to thousands of LM calls. ICE provides a decorator that can be applied to any async function that should
+be recorded, as well as utilities for recording all top-level async functions deﬁned in a given module, any custom values
+of interest within a function, and the structure of each interpolated string. This data can then be visualized in a browser
+for interactive exploration, as shown in Figure 3.
+ICE provides three views into this data:
+1. An expandable tree of function calls shown in order of execution
+2. A sortable, ﬁlterable table of function calls and their custom values
+3. A function call detail pane containing inputs, custom values, outputs, and source code
+The tree can be browsed to a particular function call which can then be inspected in the detail pane. Often, it is helpful to
+compare many calls to the same function, so ICE provides a dropdown menu of all recorded functions in the execution
+trace and their respective call counts. If a function is selected, all calls to it will be shown in the table and highlighted in
+the tree.
+Since prompts are of particular interest in LM programs, the detail pane includes special support for rendering
+interpolated strings (f-strings). Each interpolated value is shown in an alternating color, and the interpolating source
+code is shown in a tooltip.
+These functions all serve the purpose of understanding, analyzing, and debugging task decompositions, going from the
+high-level structure of the call tree to seeing all functions of a particular type in the table, to seeing what exactly the
+prompt was when a particular instance of that type generated an unexpected result.
+3
+Real-World Context of Case Studies
+We used iterated decomposition and ICE to improve performance over simple baselines on three real-world case studies
+we encountered in our work on Elicit (Figure 4).
+A primary use case for Elicit is to ﬁnd out what the academic literature knows about a research question. Many of
+Elicit’s users work in biomedicine, psychology, experimental economics, and other ﬁelds where randomized controlled
+trials (RCTs) are an important source of evidence. When these users do literature review or metanalyses, they often
+roughly follow this process:
+1. What are the RCTs that are potentially most relevant to answering my research question?
+2. For each RCT:
+(a) Does this study actually address my research question?
+(b) What is the risk of bias? Can I take the ﬁndings at face value, or do I need to discount it or ignore it?
+3. What does the aggregate of RCTs, weighted by evidence quality, say about my research question?
+7
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+input
+Did Shen et al. 2015 use a 
+placebo in their experiment on 
+using testimonial videos about 
+drowning to reduce drowning 
+risk? If so, what was it?
+methods
+Baseline: Select-and-generate 
+like Elicit
+Trial arm classification
+Paragraph-wise aggregation
+Rank & answer for description
+output
+Yes, a testimonial video about dog 
+bites
+Figure 5: In the placebo case study, the goal is to determine if a randomized controlled trial used a placebo, and if so,
+what it was. We start with the select-and-generate baseline used in Elicit and improve it by ensembling classiﬁcation
+based on trial arms and paragraphs.
+The Placebo Classiﬁcation & Description task is designed to help researchers evaluate risk of bias. Information about
+the placebo helps researchers assess the risk of bias in the study and decide how much to trust the results – comparing
+an intervention to a placebo control is usually stronger evidence than comparing to a no-treatment control, especially if
+the placebo successfully blinded the participants.
+The ﬁrst step of the Participant Flow in RCTs task is to identify the trials and trial arms within each study. This helps
+the user understand what the researchers did in the study, to determine whether it addresses their research question.
+The second step, evaluating participant adherence to an intervention, helps the researcher assess risk of bias and
+contextualize the study’s ﬁndings: Was a small effect driven by poor adherence to the treatment?
+These tasks represent a much broader class of tasks in Elicit: answering questions about papers. Elicit currently supports
+about 20 pre-speciﬁed questions, but also allows users to enter their own questions. Ultimately, we want to ﬁnd highly
+generalizable strategies to improve performance. The QASPER NLP Q&A task tests this by generalizing the participant
+ﬂow decomposition to a different domain.
+4
+Case Study: Placebo Classiﬁcation & Description
+In this case study, we focus on domain-speciﬁc decompositions. Through iteration on the classiﬁcation and description
+steps, accuracy of the generated placebo description improved from 25% to 65% on a held-out test set.
+4.1
+Setup
+Given the full text of an RCT, the task is to answer “Did this RCT use a placebo?” (classiﬁcation) and “If so, what was
+it?” (description). For both classiﬁcation and description we ﬁnd strong agreement among human raters.
+Appendix 9.5.1 has a detailed description of the task. Table 9.5.2 in the Appendix shows examples of the most relevant
+quotations from two papers with corresponding classiﬁcations and descriptions.
+4.2
+Iterations
+4.2.1
+Baseline: Select-and-generate like Elicit
+The baseline is the “select-then-generate” algorithm currently deployed for paper question-answering in Elicit. Elicit
+uses monoT54 to rank paragraphs from the paper against the question (Lin et al., 2021). The top-ranking paragraph is
+fed to text-davinci-002 with the following prompt:
+Answer the question "{{ question}} " based on the excerpt from a research paper.
+Try to answer, but say "The answer to the question is not mentioned in the excerpt" if you
+don't know how to answer.
+Include everything that the paper excerpt has to say about the answer. Make sure everything you
+say is supported by the excerpt.
+The excerpt may cite other papers; answer about the paper you're reading the excerpt from, not
+the papers that it cites.
+Answer in one phrase or sentence:
+4https://huggingface.co/castorini/monot5-base-msmarco-10k
+8
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Paper title: {{ title}}
+Paper excerpt: {{ paragraph}}
+Question: {{ question}}
+Answer:
+On a held-out test set, this approach has 71% accuracy for classiﬁcation, 25% for description (Table 2).
+4.2.2
+Improving classiﬁcation
+Diagnosis
+For each of the 14 trials that the baseline classiﬁed incorrectly, there was in fact a placebo. In all cases, the selection
+step failed to ﬁnd the part of the paper that most clearly stated that there was a placebo. For 10/14 trials, selection found
+no evidence that there was a placebo. For the remaining 4/14 trials, selection found some mention of the placebo but
+not a full description, then generation failed to conclude that there was a placebo (see Appendix 9.5.3 for examples).
+To improve classiﬁcation, we needed a way to more robustly ﬁnd evidence that there was a placebo without introducing
+false positives.
+Solution
+We created a decomposition that mirrors our own reasoning process for determining placebo classiﬁcation and
+description. When we read the papers in our validation set, we noticed two things: First, almost all papers clearly
+describe their trial arms. Then, if there was a placebo in the study, one of the arms will usually be clearly identiﬁed as
+the placebo arm. So, we identify and describe each trial arm and classify whether any of the arms is a placebo. Second,
+often many paragraphs in the paper provide evidence about whether the paper used a placebo, and sometimes this
+evidence is contradictory. So, we could check what each paragraph tells us about whether the paper used a placebo,
+then aggregate those answers.
+In outline, the decomposition looks like this:
+1. Classify based on trial arms
+(a) What were the trial arms?
+i. Rank paragraphs by relevance to this question through pairwise comparisons
+ii. Answer based on the most relevant paragraphs
+(b) Describe each trial arm: Rank and Answer
+(c) Do any of the arms look like placebos?
+(d) If so, could participants tell which arm they were in? (If so, there’s not really a placebo.)
+2. Classify based on each paragraph
+(a) Was there a placebo, according to each paragraph?
+(b) Aggregate answers from paragraphs
+3. Ensemble the classiﬁcation based on trial arms and paragraphs
+Appendix 9.5.4 shows the full decomposition.
+Results
+This approach substantially improves on the baseline (71% correct →98%; p=0.0004), achieving near-perfect perfor-
+mance (Table 2).
+Reviewing the execution traces in ICE showed that the improved performance is almost entirely due to answering
+based on each paragraph, not due to answering based on trial arms. Whenever the arms-based classiﬁcation tentatively
+classiﬁed one of the trial arms as a placebo, it also found that participants might be able to tell which arm they were in,
+and so it ultimately said that it was unclear whether there was a placebo.
+4.2.3
+Improving description
+Diagnosis
+14 of the 15 trials where the baseline failed to describe the placebo correctly are ones that it failed to classify correctly.
+The baseline does not even attempt to describe the placebo if the classiﬁcation is “no placebo”, so it fails all of these by
+9
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Method
+Classiﬁcation (n=48)
+Description (n=20)
+Elicit select-then-generate baseline
+71%
+25%
+Select-then-generate with “not mentioned" perplexity selection
+65%
+10%
+Stuff paper in prompt
+69%
+30%
+Final decomposition
+98%
+65%
+Keyword decision tree
+94%
+10%
+Table 2: Through iteration on the task decomposition, accuracy of the placebo classiﬁcation improved from 71% to
+98% and description accuracy improved from 25% to 65%, both on a held-out test set.
+construction. However, in each of these cases selection failed to ﬁnd the excerpts needed for description, so any attempt
+at description would have failed.
+Solution
+We noticed that the information required to describe the placebo is often dispersed throughout the paper. So, we rank the
+most relevant paragraphs in the paper and then use them to generate an answer. We re-use the same Rank and Answer
+technique that we used for classiﬁcation. This generalizable subtask decomposition works well for both purposes.
+Results
+This approach results in a big improvement on the Elicit baseline (25% correct →65%; p = 0.025—see Table 2).
+4.2.4
+A keyword baseline
+The strong paragraph-based classiﬁcation results raise the question whether can we encode our understanding of how to
+ﬁgure out whether a trial used a placebo in a much simpler algorithm.
+We created a simple regex keyword-matching algorithm:
+1. Classify as no placebo if the paper contains words like "open-label"
+2. Then classify as placebo is the paper contains words like "placebo", and take the ﬁrst matching sentence as a
+description
+3. Then classify as no placebo if none of these words are present
+This algorithm does about as well as our task decomposition on classiﬁcation. However, a regex keyword approach
+doesn’t generalize to harder and more ambiguous tasks—for example, adherence is discussed using a variety of
+wordings, so keywords don’t help as much to select relevant passages (Appendix 9.6.2).
+5
+Case Study: Participant Flow in Randomized Controlled Trials
+In this case study, we mostly focused on simple generalizable decompositions for long-form question-answering.
+Through iteration on the selection and generation steps, accuracy on all subtasks improved substantially on a held-out
+test set: Extracting experiments improved from 40% to 70%, trial arms from 55% to 86%, and adherence from 53% to
+70%.
+5.1
+Setup
+Randomized controlled trials often include a standardized diagram that helps the reader understand what happened in
+a given trial: How did participants journey through the study, from enrollment to ﬁnal analysis? These diagrams are
+called CONSORT diagrams (see Appendix 9.6.1 for an example). In our experience, they appear in about half of recent
+RCTs are very often incomplete. If we could generate complete CONSORT diagrams for all RCTs, we could provide
+valuable information to readers.
+In this case study we consider a limited version of this task: We name the trials in the paper, the arms in each trial, and
+describe the participant adherence rate for each arm. Figure 6 shows an example.
+10
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+input
+What were the experiments, trial 
+arms, and adherence for each 
+arm in Bloom et al. 2016?
+methods
+Baseline: Select-and-generate like 
+Elicit
+Improving selection
+Fine-tuned classifiers
+Task-specific prompting
+Zero-shot perplexity classifier
+Pruning
+Improving generation
+Decontextualization
+Auto-few-shot demonstrations
+output
+Experiments
+Fall experiment
+Arms
+Park walking
+Adherence: 72% of the 
+participants in the 
+intervention groups 
+engaged in relaxation or 
+park walking during their 
+lunch break at least 8 times. 
+On average, they engaged 
+in relaxation/park walking 
+8.6 out of 10 times during 
+the intervention period.
+Relaxation exercises
+Adherence: same as for 
+park walking
+Control
+Adherence: not mentioned
+Spring experiment
+Arms
+Park walking
+Adherence: 76% of the 
+participants in the 
+intervention groups 
+engaged in relaxation or 
+park walking during their 
+lunch break at least 8 times. 
+On average, they engaged 
+in relaxation/park walking 
+8.5 out of 10 times during 
+the intervention period.
+Relaxation exercises
+Adherence: same as for 
+park walking
+Control
+Adherence: not mentioned
+Figure 6: In the participant ﬂow case study, the goal is to analyze a randomized controlled trial and extract the
+experiments, the arms for each experiment, and the adherence rate for each arm. Starting again from the Elicit
+select-and-generate baseline, we implemented domain-agnostic improvements to both selection and generation.
+5.2
+Evaluation
+Experiments and arms are relatively easy to evaluate—we can check whether each experiment/arm from the gold
+standard is represented and whether there are any additional ones that should not be there.
+Adherence tends to require a narrative answer, and to be more subjective. This means that it may beneﬁt more from a
+nuanced decomposition, and approaches that work well for adherence may generalize better to other fuzzy tasks.
+Each arm has an adherence answer, so there are a total of 135 adherence answers in our test set. Often, no information
+about adherence is available in the text of the paper—information about adherence is only available for 56/135 arms
+(41%) in our test set. So the adherence task is substantially a classiﬁcation task (adherence mentioned vs. not mentioned).
+5.3
+Iterations
+5.3.1
+Baseline: Select-and-generate like Elicit
+The baseline is the same “select-then-generate” approach used for general paper question-answering in Elicit as
+described above in Section 4.2.1. This is a reasonably strong baseline, scoring 53% on the adherence subtask.
+Diagnosis
+For adherence, 80% of errors were false negatives, i.e. saying that adherence was not mentioned when it in fact was
+(see Table 5). Further, all (51/51) of these false negatives resulted from errors at the selection stage—the answer really
+was not mentioned in the top-1 paragraph from the monoT5 ranker. By using an oracle for selection with the same
+generation approach, accuracy on the adherence task rose to 77%. So, the baseline fails primarily by failing to make
+good use of the long context of the paper. For this reason, we started by iterating on selection.
+5.3.2
+Improving selection
+Finetuned classiﬁers
+Because our research is aimed at generalizable approaches, we restricted any ﬁnetuning to approaches that were either
+very sample-efﬁcient (so little labeling effort would be needed to adapt the approach to new tasks) or very general. We
+11
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+evaluated small dataset and machine-in-the-loop labeling approaches, favoring approaches using at most a few hours of
+subject matter expert labeling effort.
+We adapted the approach from Liu et al. (2022) to ﬁne tune classiﬁers for text classiﬁcation subtasks. This approach
+combines low-rank adaptation (scaling selected activations by learned vectors) with additional regularization terms in
+the loss and hyperparameters the authors found to generalize well. This combination enables (a) a very small set of
+ﬁnetuned weights, enabling multiple ﬁnetuned tasks to share a single model backbone at inference time, and (b) true
+low-data ﬁnetuning, since the approach prescribes hyperparameters, thus obviating the need for separate training and
+validation sets.
+Liu et al. (2022) suggest that their approach works well with as few as 20 examples. bootstrapped to a larger number of
+positive examples and more than 20 "hard negative" examples using weak models: For our tasks, most paragraphs are
+not relevant to answering a given question, and it is time-consuming and expensive to collect even a moderate amount
+of positive examples by hand. We ensembled multiple weak classiﬁers such as monoT5, BART-based classiﬁers, and
+T0-3B to identify positive examples from thousands of papers, then had experts moderate the examples identiﬁed by
+all the weak classiﬁers as answering the question, leaving in any negatives from this approach as “hard negatives”.
+Intuitively, we would expect that this would provide an outsized number of “easy positives” (from the ensemble
+consensus) and “hard negatives” (false positives from the ensemble consensus, as corrected by experts). Although we
+would expect this approach to have a difﬁcult time identifying “hard positives”, in practice it created a dataset that
+worked very well in concert with T-few ﬁnetuning, bringing performance on a holdout set on the selection subtask for
+adherence from 72% before ﬁnetuning to 94% accuracy after.
+Using T0-3B and T0pp (11B parameters) as base models, we ﬁnetuned using the T-Few approach. We found that the
+models generalized better when we left zero-shot prompts in our ﬁnetuning data, which can be interpreted as a form of
+regularization (in this example, the decoder answer choices are yes and no):
+Context: {{ paragraph}}
+Section: {{ section}}
+Answer yes if the following sentence is about how many participants in the study complied with
+the study's protocol, had to drop out, or withdrew; answer no if it is about something else,
+such as the study's design, sampling strategy, or results.
+Sentence: {{ sentence}}
+Answer:
+Many failures to get the right answer using ﬁnetuned classiﬁers at the selection stage were rooted in false negatives
+from the classiﬁer (for 67% of failures in the development set with n = 9, the classiﬁer missed the gold standard
+excerpts), and the generation stage was somewhat robust to “distractors” caused by lower precision. We therefore
+explored variations on this technique to favor recall. For instance, we explored classifying sentences (while including the
+paragraph as context), then, at inference time, classifying a paragraph as positive if any of its sentences were classiﬁed
+as positive. We also tried ﬁnetuning with multiple zero-shot prompt templates, then, at inference time, classifying a
+paragraph as positive if it was classiﬁed as positive via any of the prompt templates.
+On the adherence subtask, the ﬁnetuned classiﬁer signiﬁcantly outperformed the base monoT5 classiﬁer (paragraph
+classiﬁcation F1 = 0.10 for Elicit top-1 approach versus F1 = 0.77 via T-Few ﬁnetuning of T0-3B).
+Overall, while this approach led to signiﬁcant performance improvement, it also had downsides: It requires data and
+training, and is less interpretable than some of the classiﬁcation approaches we explored later. In the future, we would
+consider data-efﬁcient ﬁnetuning of classiﬁers where (a) the task was hard to specify but data was easy to collect or (b)
+where the inference-time computational advantage of a smaller ﬁnetuned classiﬁer was needed.
+Task-speciﬁc prompting
+An alternative to ﬁnetuning is crafting prompts for speciﬁc subtasks. This reduces the data collection burden of
+ﬁnetuning, requiring just a few examples, at the cost of involving a different sort of expertise in the craft of writing
+effective prompts.
+With text-davinci-002, we found that we could get considerable performance gains on speciﬁc subtasks by prompt
+engineering. Naive zero-shot or few-shot instructions performed performed worse than “simulation” approaches where
+the prompt emulated a genre of text that had certain desirable properties, such as containing correct mathematical
+12
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+reasoning. Appendix 9.6.4 shows an example of a prompt that frames a task as excerpts from a (nonexistent) textbook
+on evaluating scientiﬁc papers. Appendix 9.6.5 shows a prompt that simulates a StatsExchange post.
+Because we wanted to focus on general-purpose decompositions in this case study, and because we expect simulation-
+based approaches to be less necessary with future instruction-tuned models, we did not evaluate this line of approaches
+systematically.
+Zero-shot perplexity classiﬁer
+Ideally, we could improve selection performance over the baseline monoT5 classiﬁer with an approach that requires
+neither substantial data collection nor task-speciﬁc prompt engineering.
+Inspired by the relative strength of the “generation” stage of the baseline approach, we implemented a zero-shot
+perplexity-based cross-encoder using text-davinci-002 that performed remarkably well across many questions,
+outperforming the monoT5 classiﬁer and competitive with the T-Few low-rank ﬁnetuning.
+In this paragraph classiﬁcation approach, we used the following prompt with text-davinci-002, echoing the log
+probs back from the OpenAI API in order to measure perplexity:
+Answer the question "{{ question}} " based on the excerpt from a research paper. Try to answer,
+but say "The answer to the question is not mentioned in the excerpt" if you don't know how to
+answer. Include everything that the paper excerpt has to say about the answer. Make sure
+everything you say is supported by the excerpt. The excerpt may cite other papers; answer about
+the paper you're reading the excerpt from, not the papers that it cites. Answer in one phrase
+or sentence:
+Paper excerpt: {{ paragraph}}
+Question: {{ question}}
+Answer: The answer to the question is not mentioned in the excerpt
+We then scored paragraphs by the inverse perplexity of the tokens X : {(xi=1, . . . , xt)} in the sequence “The answer to
+the question is not mentioned in the excerpt”:
+exp
+ 
+1
+t
+t
+X
+i=1
+log pθ(xi|x<i)
+!
+(1)
+We studied different uses of these scores. In the simplest approach using this perplexity-based method, we also generated
+the answer using this prompt, based on the paragraph with the highest perplexity for the “not mentioned” completion.
+This closely mimics the structure of the question-answering method used in Elicit, with the text-davinci-002
+perplexity-based ranker replacing the monoT5 ranker.
+The text-davinci-002 perplexity approach seemed more robust to subtle but important semantic differences than the
+monoT5 ranker. For example, on the adherence task, the monoT5 top-1 paragraph was often some paragraph discussing
+adherence but not with respect to the speciﬁc trial arm in question. In many cases, the text-davinci-002 perplexity
+approach correctly scored these “about adherence but not the right trial arm” paragraphs below results paragraphs about
+the correct trial arm that did not discuss adherence rates as explicitly but alluded to information about adherence for
+that arm.
+Further, we found that it was generally better to include multiple paragraphs at the answering stage, in the order of the
+original paper. We adapted the perplexity top-1 approach into a classiﬁcation approach by choosing a classiﬁcation
+threshold empirically, slightly favoring recall over precision; the perplexity threshold adapted reasonably well across
+different questions, so we used the same threshold across all tasks. As expected, including multiple paragraphs above a
+threshold helped compensate for remaining weaknesses in the ranker, and, in some cases, multiple paragraphs were
+required to generate a complete answer. Including multiple paragraphs instead of one paragraph mostly addressed cases
+where the top-1 approach incorrectly answered “not mentioned”.
+This zero-shot classiﬁcation approach was remarkably strong for the “select” stage of our “select-then-generate”
+approaches, improving paragraph classiﬁcation recall over the top-1 monoT5 Elicit baseline from 0.09 to 0.76 on the
+adherence task. It is zero-shot and requires no additional data (with the exception of needing data to set a classiﬁcation
+threshold once across all tasks). The approach also offers a built-in interpretability beneﬁt, in that we can look at the
+most likely completion that is not “The answer to the question is not mentioned in the excerpt” to understand what the
+model found relevant in each paragraph.
+13
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Method
+Experiments
+(n=50)
+Arms
+(n=50)
+Adherence
+(n=135)
+Elicit select-then-generate baseline
+40%
+55%
+53%
++ “not mentioned" perplexity selection
+55%
+78%
+61%
++ “not mentioned" perplexity selection + prune
+60%
+70%
+54%
++ “not mentioned" perplexity selection + auto-few-shot selection
+65%
+72%
+55%
++ “not mentioned" perplexity selection + auto-few-shot selection + prune
+55%
+56%
+58%
++ “not mentioned" perplexity selection + auto-few-shot generation
+70%
+86%
+70%
++ “not mentioned" perplexity selection + decontextualize
+65%
+75%
+54%
+Table 3: Through iteration on the participant ﬂow decomposition, accuracy at extracting experiments improved from
+40% to 70%, trial arms from 55% to 86%, and adherence from 53% to 70%, all on a held-out test set.
+This approach also offers both classiﬁcation and ranking via a natural interpretation and approach, where the ranks
+are reasonably well-calibrated; this means that, for instance, if we ﬁnd that we have too many paragraphs to ﬁt into
+the model’s context window at the answering stage, we can with reasonable conﬁdence simply remove lower-ranked
+paragraphs, without additional work.
+Pruning
+Many implementations of the “select” stage both look at each paragraph independently and are tuned to slightly favor
+recall over precision. Conceptually, this may lead to a situation where we select redundant information or where, once
+we see all selected candidates together, it becomes clearer which ones contain the answer. Therefore, we tested a
+“pruning” step that looked at all paragraphs selected by the previous selection stage, in paper order, then reselected the
+paragraphs needed to answer the question.
+Despite testing chain-of-thought and few-shot variants of this stage, our results here were only moderately promising.
+We were unable to substantially improve bottom line accuracy by adding this stage, and we were unable to improve
+paragraph classiﬁcation precision without substantially hurting recall. For the experiments task, pruning improved
+precision from 0.14 to 0.29 while reducing recall from 0.77 to 0.54, increasing paragraph classiﬁcation F1 from 0.24 to
+0.38. This led to an improvement in ﬁnal answer accuracy from 0.55 to 0.6. Further iteration on the implementation of
+this stage may yield better results.
+5.3.3
+Improving generation
+Improving the “select” stage of the “select-then-generate” approach boosted performance on the participant ﬂow tasks.
+However, the ICE traces revealed that the “generate” stage, which answers the question given the most relevant excerpts,
+also made interesting errors: Even with an oracle for selection, the baseline generation step only achieved 77% accuracy
+on the adherence task.
+Error analysis
+We identiﬁed some common errors in the generation stage when the selection stage had high recall.
+Some errors came from lack of context in the selected paragraphs. They answered the question, but without the
+surrounding text, the answer was unclear. This happened often on the arms task: the selected paragraphs mentioned the
+trial arms, but not the corresponding trial or the experimental methodology, and so it was difﬁcult to correctly describe
+the trial arms.
+More often, the desired answer style and detail were unclear, especially for the adherence task. For example, some
+papers said “adherence was generally good” and gave numerical details, but the generation stage only included the
+former, not realizing the latter were also important.
+Below we discuss two approaches we tried to reduce these errors.
+14
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Decontextualization
+The select-then-generate pipeline may struggle to fully answer questions that require resolving coreferences or under-
+standing context from surrounding text. To address this, we experimented with a decontextualization stage, inspired by
+Choi et al. (2021), that operates on the paper and adds context from previous paragraphs in square brackets. The goal is
+to make paragraphs more self-contained and easier to use for generation. We used an autoregressive model with a ﬁxed
+few-shot prompt (see Appendix 9.6.6) based on Eisenstein et al. (2022) to perform decontextualization. We did not
+systematically evaluate the accuracy or relevance of the added context, but we spot-checked some examples using ICE.
+Decontextualization improved generation performance on some tasks, but not all. It helped the model identify the
+experiments and arms of the trials, as the added context clariﬁed the methodology and the relevance of the selection.
+However, it did not help much with the adherence task, as most adherence information was already self-contained
+and the added context introduced more noise and confusion. The performance using decontextualized paragraphs as
+inputs to the generation stage was 0.65 for experiments and 0.75 for arms, compared to 0.40 and 0.55 for the baselines,
+respectively. For adherence, it was 0.54, barely above the baseline of 0.53.
+Auto-generated “demonstrations”
+We studied the use of demonstrations to address a failure mode of the generation stage: producing answers with
+insufﬁcient detail or inappropriate style. Demonstrations are examples of question-answering tasks with the same shape:
+(a) a question, (b) a text, (c) excerpts from that text that support an answer, and (d) an answer. Unlike other methods
+that encode expert knowledge, such as the placebo decomposition or the placebo keyword decision tree algorithm,
+demonstrations do not require any algorithm-speciﬁc or language-model-speciﬁc work from the expert. The expert
+simply gives examples of applying their expertise.
+We generated few-shot prompts from expert demonstrations (gold standards) by prepending the existing perplexity
+selection prompt with multiple ﬁlled examples. We either used only positive demonstrations, which included a
+supporting paragraph and an expert’s handwritten answer based on that paragraph, or mixed positive and negative
+demonstrations, which assumed that unmarked paragraphs did not answer the question. This assumption was often
+false, so we found it better to use only positive examples in the few-shot demonstration prompts.
+Across all tasks, the few-shot prompts derived from demonstrations improved the accuracy of generation over the
+zero-shot approach, even with randomly sampled examples from the development set. The improvement was larger
+for harder tasks or tasks that beneﬁted from implicit background knowledge. The demonstrations often helped by
+showing the expected types of answers for the task, such as including numerical detail where available. For example,
+for the adherence task, the zero-shot approach produced an incorrect answer like “The paper says that both groups had
+good compliance with all products in each nursing home”, while the few-shot approach via demonstrations produced a
+correct answer like “Compliance with oral supplementation was good, and daily intake averaged about 400 kcal”. The
+few-shot approach via demonstrations increased the ﬁnal answer accuracy from 0.53 to 0.70 overall for this task.
+5.3.4
+Combined improvements
+The zero-shot perplexity classiﬁer and few-shot answering via “demonstrations” add up to substantial improvements
+over the Elicit baseline (e.g. 53% correct →70% for adherence, p=0.0065; see Table 3). These techniques vastly reduce
+the number of false negatives for the adherence task (error analysis in Appendix 9.6.3).
+6
+Case Study: QASPER NLP question answering
+We primarily iterated on decompositions using the tasks above. However, we also wanted to explore how well these
+task decompositions generalized to other domains and questions, so we tested them on a subset of the QASPER dataset,
+a question-answering dataset of 5,049 questions and answers written by NLP practitioners, covering 1,585 NLP papers
+(Dasigi et al., 2021). By using the ﬁnal decomposition for participant ﬂow, accuracy at answering NLP questions on the
+QASPER dataset improved from 38% to 69%.
+6.1
+Setup
+Answers to QASPER questions are in one of three formats: yes/no, excerpts from the text, or freeform answers. In the
+original QASPER paper and benchmark, the authors measured F1 scores of generated answers versus the expert answers.
+5Fisher’s exact test, considering each adherence answer to be independent. In reality the answers are clustered by trial and paper,
+so the true p-value is somewhat higher.
+15
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+input
+Which retrieval system was used 
+for the baselines?
+methods
+Baseline: Select-and-generate like 
+Elicit
+Improving selection
+Zero-shot perplexity classifier
+Pruning
+Improving generation
+Auto-few-shot demonstrations
+output
+The dataset comes with a ranked set of relevant 
+documents. Hence the baselines do not use a 
+retrieval system.
+Figure 7: In the QASPER case study, the goal is to answer questions about NLP papers. QASPER is a dataset of 5049
+information-seeking questions asked by regular readers of NLP papers and answered by separate NLP experts. Apart
+from ﬁnetuning we explored the same methods as for participant ﬂow to learn how they generalize.
+Method
+Accuracy
+F1
+Elicit select-then-generate baseline
+38%
+15%
++ “not mentioned” perplexity selection
+55%
+21%
++ “not mentioned” perplexity selection + prune
+53%
+20%
++ “not mentioned” perplexity selection + auto-few-shot generation
+69%
+32%
+Table 4: Results for the QASPER NLP question-answering task (n=100). The ordering of methods by performance is
+the same as for the participant ﬂow case study, providing some evidence of generality for decompositions.
+Because we care about correctness of answers, not whether they literally match expert wording, we focused instead on
+a binary assessment of whether the generated answer was semantically equivalent to the expert answers. For example, a
+yes-no answer of “yes” versus a generated answer of “true” would have F1 = 0, but we would rate it as correct. For
+completeness, we also measure and report F1 scores, but we did not adapt decompositions to maximize F1.
+To keep the task and assessments manageable but meaningful, we sampled 100 questions from QASPER to test both
+baselines and decompositions that performed substantially better than baselines on the participant ﬂow tasks. We
+performed light data cleaning before testing, removing special tokens indicating cross-references with natural language
+equivalents (e.g., converting ‘BIBREF0’ to ‘[1]’) and, as in the original QASPER paper, omitting questions that required
+tables or ﬁgures to answer.
+6.2
+Iterations
+We tested both our select-then-generate baselines and our best-performing decompositions (perplexity selection, with
+and without few-shot examples from demonstrations) on a sample of QASPER questions. Table 4 shows the results.
+We found that, of the approaches we tested, the best approach on the participant ﬂow questions was also the best
+approach on QASPER. This approach is using a perplexity classiﬁer followed by a few-shot prompt generated from
+demonstrations (in this case just other, randomly selected QASPER question-supporting paragraph-answer tuples) and
+scored 69% accuracy on our sample. This approach signiﬁcantly outperformed both the baseline approach of using only
+the top-1 paragraph from the classiﬁer, then generating the answer (38%) and using the Elicit-like perplexity classiﬁer
+then generating without few-shot demonstrations (55%). These ﬁndings provide evidence that this decomposition is
+somewhat robust to domain transfer.
+7
+Conclusion
+We have described iterated decomposition, a human-in-the-loop workﬂow for process supervision. We are using
+this workﬂow as part of our work on Elicit, the AI Research Assistant. To support this workﬂow, we built ICE, an
+open-source debugger for language model programs.
+16
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+Over time, we expect that similar workﬂows will be run in a mostly or fully automated fashion, with LMs creating the
+decompositions, doing error analysis, and adapting the programs. Based on our experience with the case studies, the
+work needed to get there looks like this:
+1. Increased iteration speed. Before full automation, we expect to be in the world where human programmers can
+automate novel complex tasks by improving a task decomposition with many iterations per day.
+2. Complex decompositions. Essentially all decompositions in prior work and to some extent also in our case
+studies are fairly simple, even when they make hundreds of language model calls.
+3. To accomplish 1 and 2, more sophisticated developer tools that make it faster to go from overall result to the
+sources of errors, to proposals for how to address them.
+4. Making the dev tools in 3 machine-accessible so that the diagnosis and improvement steps can be learned by
+LMs.
+5. Reducing the boundary between task design and execution, so that decomposition, debugging, and iteration
+can happen at runtime as models execute complex tasks.
+6. Distillation and other ways to reduce cost of complex decompositions, so that decompositions are more
+cost-competitive with end-to-end execution.
+Our hope is that we can develop sufﬁcient infrastructure for scalable process supervision so that humans can always in-
+principle understand how models are solving complex tasks even if eventually almost all decomposition and supervision
+is done by machines.
+17
+
+Iterated Decomposition: Improving Science Q&A by Supervising Reasoning Processes
+8

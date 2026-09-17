@@ -1,0 +1,1316 @@
+DeepNAT: Deep Convolutional Neural Network for Segmenting Neuroanatomy
+Christian Wachingera∗, Martin Reuterb,c, Tassilo Kleind
+aDepartment of Child and Adolescent Psychiatry, Psychosomatic and Psychotherapy, Ludwig-Maximilian-University, Munich, Germany
+bAthinoula A. Martinos Center for Biomedical Imaging, Massachusetts General Hospital, Harvard Medical School, Boston, MA, USA
+cComputer Science and Artiﬁcial Intelligence Laboratory, Massachusetts Institute of Technology, Cambridge, MA, USA
+dSAP SE, Berlin, Germany
+Abstract
+We introduce DeepNAT, a 3D Deep convolutional neural network for the automatic segmentation of NeuroAnaTomy in
+T1-weighted magnetic resonance images. DeepNAT is an end-to-end learning-based approach to brain segmentation that
+jointly learns an abstract feature representation and a multi-class classiﬁcation. We propose a 3D patch-based approach,
+where we do not only predict the center voxel of the patch but also neighbors, which is formulated as multi-task learning.
+To address a class imbalance problem, we arrange two networks hierarchically, where the ﬁrst one separates foreground
+from background, and the second one identiﬁes 25 brain structures on the foreground.
+Since patches lack spatial
+context, we augment them with coordinates. To this end, we introduce a novel intrinsic parameterization of the brain
+volume, formed by eigenfunctions of the Laplace-Beltrami operator. As network architecture, we use three convolutional
+layers with pooling, batch normalization, and non-linearities, followed by fully connected layers with dropout. The ﬁnal
+segmentation is inferred from the probabilistic output of the network with a 3D fully connected conditional random ﬁeld,
+which ensures label agreement between close voxels. The roughly 2.7 million parameters in the network are learned with
+stochastic gradient descent. Our results show that DeepNAT compares favorably to state-of-the-art methods. Finally,
+the purely learning-based method may have a high potential for the adaptation to young, old, or diseased brains by
+ﬁne-tuning the pre-trained network with a small training sample on the target application, where the availability of
+larger datasets with manual annotations may boost the overall segmentation accuracy in the future.
+Keywords:
+Brain segmentation, deep learning, convolutional neural networks, multi-task learning, conditional random
+ﬁeld
+1. Introduction
+The accurate segmentation of neuroanatomy forms the
+basis for volume, thickness, and shape measurements from
+magnetic resonance imaging (MRI). Such quantitative
+measurements are widely studied in neuroscience to track
+structural brain changes associated with aging and dis-
+ease. Additionally, they provide a vast phenotypic char-
+acterization of an individual and can serve as endophe-
+notypes for disease.
+Since the manual segmentation of
+brain MRI scans is time consuming, computational tools
+have been developed to automatically reconstruct neu-
+roanatomy, which is particularly important for the vastly
+growing number of large-scale brain studies. One of the
+most commonly used software tools for whole brain seg-
+mentation is FreeSurfer (Fischl et al., 2002), which applies
+an atlas-based segmentation strategy with deformable reg-
+istration. This seminal work encouraged research in atlas-
+based segmentation, with a focus on multi-atlas techniques
+and label fusion strategies (Ashburner and Friston, 2005;
+∗Corresponding
+Author.
+Address:
+Waltherstr.
+23,
+
+muenchen.de
+Pohl et al., 2006; Heckemann et al., 2006; Rohlﬁng et al.,
+2004, 2005; Svarer et al., 2005; Sabuncu et al., 2010; As-
+man and Landman, 2012; Wang et al., 2013b; Wachinger
+and Golland, 2014). A potential drawback of atlas-based
+segmentation approaches is the computation of a deforma-
+tion ﬁeld between subjects, which involves regularization
+constraints to solve an ill-conditioned optimization prob-
+lem. Typically smoothness constraints are enforced, which
+may impede the correct spatial alignment of inter-subject
+scans. Interestingly, the deformation ﬁeld is only used for
+propagating the segmentation and not of interest by itself.
+Learning-based approaches without deformable registra-
+tion present an alternative avenue for image segmenta-
+tion, where the atlas with manual segmentations serves
+as training set for predicting the segmentation of a new
+scan. Directly predicting the segmentation of the entire
+image is challenging because of the high dimensionality,
+i.e., the number of voxels, and the limited number of train-
+ing scans with manual segmentations. Instead, the prob-
+lem is reduced to predicting the label for small image re-
+gions, known as patches. Good segmentation performance
+was reported for patch-based approaches following a non-
+local means strategy (Coup´e et al., 2011; Rousseau et al.,
+Preprint submitted to NeuroImage
+arXiv:1702.08192v1  [cs.CV]  27 Feb 2017
+
+2011), which is similar to a nearest neighbor search in
+patch space. Alternative patch classiﬁcation schemes have
+been proposed, e.g., random forests (Zikic et al., 2013).
+A potentially limiting factor of patch-based approaches is
+that they operate on image intensities, where previous re-
+sults in pattern recognition suggest that it is less the clas-
+siﬁer but rather the representation that primarily impacts
+the performance of a predictive model (Dickinson, 2009).
+In a recent study, a wide range of image features for image
+segmentation was compared and a signiﬁcant improvement
+for augmenting intensity patches with features was mea-
+sured (Wachinger et al., 2016).
+While image features improve the segmentation, they
+are handcrafted and may therefore not be optimal for the
+application.
+In contrast, neural networks autonomously
+learn representations that are optimal for the given task,
+without the need for manually deﬁning features.
+Neu-
+ral nets therefore break the common paradigm of patch-
+based segmentation, which separates feature extraction
+and classiﬁcation, and replaces it with an end-to-end learn-
+ing framework that starts with the image data and pre-
+dicts the anatomical label. Deep convolutional neural net-
+works (DCNN) have had ample success in computer vi-
+sion (Krizhevsky et al., 2012) and increasingly in medical
+imaging (Brosch et al., 2014; Cire¸san et al., 2013; Pra-
+soon et al., 2013; Roth et al., 2014; Zheng et al., 2015;
+Brosch et al., 2015; Zhang et al., 2015; Pereira et al., 2015).
+Applications in computer vision are typically on 2D im-
+ages, where 2D+t DCNNs were proposed for human action
+recognition (Ji et al., 2013). In medical applications, 2.5D
+techniques have been proposed (Prasoon et al., 2013; Roth
+et al., 2014). The three orthogonal planes are integrated in
+existing DCNNs frameworks by setting the planes in the
+RGB channels. Diﬃculties in training 3D DCNNs have
+been reported (Prasoon et al., 2013; Roth et al., 2014),
+due to the increase in complexity by adding an additional
+dimension. Yet, several articles describe successful appli-
+cations of 3D networks on medical images. Brosch et al.
+(2015) propose a 3D deep convolutional encoder for lesion
+segmentation. Zheng et al. (2015) use a multi-layer percep-
+tron for landmark detection. Most related to our work is
+the application of 3D convolutional neural networks, which
+is currently limited to few layers and small input patches.
+Li et al. (2014) use a 3D CNN with one convolutional and
+one fully connected layer for the prediction of PET from
+MRI on patches of 153. Brebisson and Montana (2015) use
+a combination of 2D and 3D inputs for whole brain seg-
+mentation. The network uses one convolutional layer and
+3D sub-volumes of size 133. The foreground mask, i.e., the
+region that contains the labels of interest, is assumed to
+be given, which is not the case for scans without manual
+segmentation.
+We propose a 3D deep convolutional network for brain
+segmentation that has more layers and operates on larger
+patches than existing 3D DCNNs, giving it the potential to
+model more complex relationships necessary for identifying
+ﬁne-grained brain structures. We use latest advances in
+deep learning to initialize weights, to correct for internal
+covariate shift, and to limit overﬁtting for training such
+complex models. The main contributions in DeepNAT are:
+• Multi-task learning: our network does not only pre-
+dict the center label of the patch but also the labels
+in a small neighborhood, formulated in the DCNN as
+the simultaneous training of multiple tasks
+• Hierarchical segmentation: we propose a hierarchical
+learning approach that ﬁrst separates foreground from
+background and then subdivides the foreground into
+25 brain structures to account for the class imbalance
+stemming from the large background class
+• Spectral coordinates:
+we introduce spectral coordi-
+nates as an intrinsic brain parameterization by com-
+puting eigenfunctions of the Laplace-Beltrami opera-
+tor on the brain mask, retaining context information
+in patches
+The output of DeepNAT is a probabilistic label map that
+needs to be discretized to obtain the ﬁnal segmentation.
+Performing the discretization independently for each voxel
+can result in spurious segmentation artifacts. Formulating
+constraints among voxels, e.g., with pairwise potentials in
+a random ﬁeld can improve the ﬁnal segmentation. Tra-
+ditionally, such constraints have only been imposed in a
+small neighborhood due to computational concerns (Wang
+et al., 2013a). We use the eﬃcient implementation of a
+fully connected conditional random ﬁeld (CRF) that es-
+tablishes pairwise potentials on all voxel pairs (Kr¨ahenb¨uhl
+and Koltun, 2011), which was shown to substantially im-
+prove the segmentation. The fully connected CRF is used
+in combination with DCNNs for natural image segmen-
+tation in DeepLab (Chen et al., 2015, 2016).
+It is also
+employed for the segmentation of 2D medical images: Fu
+et al. (2016) segment vessels in 2D retinal images and Gao
+et al. (2016) segment the lung in 2D CT slices. In con-
+trast to these approaches, we perform MAP inference of
+the CRF in 3D on the entire image domain to obtain the
+ﬁnal brain segmentation.
+2. Method
+Given a novel image I, we aim to infer its segmenta-
+tion S based on training images I = {I1, . . . , In} with
+segmentations S = {S1, . . . , Sn}.
+A probabilistic label
+map L = {L1, . . . , Lη} speciﬁes the likelihood for each
+brain label l ∈{1, . . . , η}
+Ll(x) = p(S(x) = l|I; I, S).
+(1)
+Let I(Nx) denote an image patch centered at location x,
+the likelihood in a patch-based segmentation approach is
+Ll(x) = p(S(x) = l|I(Nx); I, S).
+(2)
+2
+
+MRI
+Foreground-­‐
+Background
+Multi-­‐task	
+  CNN
+Segmentation
+Multi-­‐task	
+  CNN
+Figure 1:
+Overview of the hierarchical segmentation with spectral coordinates.
+The ﬁrst multi-task DCNN separates foreground from
+background on skull-stripped images; the second one identiﬁes 25 brain structures on the foreground.
+3D Multi-Task Network Architecture
+Layers
+Speciﬁcation
+Layers
+Speciﬁcation
+1. Convolution
+7 × 7 × 7 × 32
+10. Inner Product
+Neurons: 1024
+2. ReLU
+11. ReLU
+3. Max-Pooling
+Size: 2, Stride: 2
+12. Dropout
+Rate: 0.5
+4. Convolution
+5 × 5 × 5 × 64
+13. Concatenation
+w/ coordinates
+5. Batch normalization
+14. Inner Product
+Neurons: 512
+6. ReLU
+15. Batch normalization
+7. Convolution
+3 × 3 × 3 × 64
+16. ReLU
+8. Batch normalization
+17. Dropout
+Rate: 0.5
+9. ReLU
+Output: 1728
+18. Inner Product (× tasks)
+Neurons: 2 / 25
+Table 1: DeepNAT network architecture with convolutional (left) and fully connected (right) parts. The size of the input patch is 233. The
+last layer is replicated for multi-task learning according to the number of tasks. The cascaded networks are identical except for the number
+of neurons in the last layer.
+We estimate the likelihood by training a deep convolu-
+tional neural network, where the patch inference corre-
+sponds to multi-class classiﬁcation. We skull strip the im-
+ages to focus the prediction on the brain mask; a brain
+scan from which the skull and other non-brain tissue like
+dura and eyes are removed.
+2.1. Hierarchical Segmentation
+Figure 1 illustrates the hierarchical approach for whole
+brain segmentation in DeepNAT. In the ﬁrst cascade, brain
+regions are classiﬁed into foreground and background. The
+foreground consists of 25 major brain structures that are il-
+lustrated in Figure 7. The background is the region within
+the brain mask that is not part of the foreground. Data
+that is classiﬁed as foreground undergoes the next cas-
+caded step to identify separate brain structures.
+Given
+the inherent class imbalance, the hierarchical segmenta-
+tion has the potential to perform better than a single-
+step classiﬁcation, which classiﬁes into brain regions as
+well as background.
+Problems with a large background
+class have previously been noted for atlas-based segmen-
+tation (Wachinger and Golland, 2014). The background is
+typically represented by a large pool of data, while small
+brain structures are prone to being underrepresented. On
+our data, we measured a foreground to background vol-
+ume ratio of about 2 to 1. The background is therefore
+substantially larger than any of the individual brain struc-
+tures on the foreground. As data augmentation allows only
+for crude and poor compensation, the cascaded approach
+presents a viable alternative.
+2.2. Network Architecture
+Multi-layer convolutional neural networks pioneered
+by LeCun et al. (1989) have led to breakthrough results,
+constituting the state-of-the art technology for many chal-
+lenges such as ImageNet (Krizhevsky et al., 2012). The
+underlying idea is to create a deep hierarchical feature
+representation that shares ﬁlter weights across the input
+domain. This allows for the robust modeling of complex
+relationships while requiring a reduced number of param-
+eters, for which solutions can be obtained by stochastic
+gradient descent.
+Table 1 lists the details of the DeepNAT network archi-
+tecture, where both networks (for each cascade) are iden-
+tical except for the number of neurons in the last layer (2
+and 25, respectively). The network consists of three con-
+volutional layers, where in each layer the ﬁlter masks are
+to be learned. A ﬁlter mask is speciﬁed by the spatial di-
+
+3
+
+Layer
+Parameter calculation
+# Parameters
+Input Dimensionality
+Output Dimensionality
+Convolution I
+7 × 7 × 7 × 1 × 32
+10,976
+23 × 23 × 23 × 1
+17 × 17 × 17 × 32
+Convolution II
+5 × 5 × 5 × 32 × 64
+256,000
+9 × 9 × 9 × 32
+5 × 5 × 5 × 64
+Convolution III
+3 × 3 × 3 × 64 × 64
+110,592
+5 × 5 × 5 × 64
+3 × 3 × 3 × 64
+Inner Product I
+3 × 3 × 3 × 64 × 1024
+1,769,472
+3 × 3 × 3 × 64
+1024
+Inner Product II
+(1024 + 6) × 512
+527,360
+1030
+512
+Inner Product III
+512 × 25
+12,800
+512
+25
+Table 2: The number of parameters to be learned at each of the convolutional and inner product layers of the network. The total number of
+parameters is 2,687,200. We also state the input and output dimensionality of each of the layers, which provides insights about the internal
+representation. Note that max-pooling operates before convolution II and that spatial coordinates are concatenated before inner product II.
+The list does not include bias parameters, which are negligible in size.
+
+extends to all of the input channels. As an example, the
+ﬁlters are of size 5 × 5 × 5 × 32 in the second convolution.
+The total number of free parameters to be estimated is the
+ﬁlter size times the number of ﬁlters, so 5×5×5×32×64
+for the second convolution. Table 2 states the number of
+parameters together with the input and output dimension-
+ality for each layer. Note that for 2D DCNNs the ﬁlters
+have 3 dimensions, whereas for 3D DCNNs the ﬁlters have
+4 dimensions.
+Each convolution is followed by a rectiﬁed linear unit
+(ReLU) (Hahnloser et al., 2003; Glorot et al., 2011), which
+supports the eﬃcient training of the network with re-
+duced risk for vanishing gradient compared to other non-
+linearities. The aim of the convolutional part of the net-
+work is to reduce the dimensionality from the initial patch
+size of 23 × 23 × 23 before entering the fully connected
+stage. Although each convolution reduces the size, we use
+an additional max-pooling layer with stride two to arrive
+at a 33 block of neurons at the end of the convolutional
+stage. The 33 block is an explicit design choice. A smaller
+23 block would cause a lack of localization, with the patch
+center being split into exterior blocks. A larger 43 block
+would dramatically increase the number of parameters at
+the end of the convolutional stage, where most free param-
+eters occur at the intersection between convolutional and
+fully connected layers, see Table 2.
+We use batch normalization at several layers in the
+network to reduce the internal covariate shift (Ioﬀe and
+Szegedy, 2015). It accounts for the problem that the dis-
+tribution of each layer’s inputs changes during training, as
+the parameters of the previous layers change, which is more
+pronounced in 3D networks. We further use two dropout
+layers, which randomly disable neurons in the network.
+This helps with the generalizability of the network by act-
+ing as a regularizer and mitigating overﬁtting. To resolve
+potential location ambiguity, coordinates of the patches
+are given to the network, see Sec. 2.4. This is achieved by
+concatenating the image content after the ﬁrst fully con-
+nected layer with the location information in layer 13. In
+the training stage, we compute the multinomial logistic
+loss as last layer, where the probability distribution over
+classes is inferred from the last inner product layer with a
+softmax.
+For the initialization of the weights, we use the Xavier
+algorithm that automatically determines the scale of ini-
+tialization based on the number of input and output neu-
+rons (Glorot and Bengio, 2010). This initialization sup-
+ports training deep networks without requiring per-layer
+pre-training because signals can reach deep into the net-
+work without shrinking or growing too much.
+2.3. Multi-task Learning
+In Eq.(2), we use an image patch to predict the tissue
+label of the center voxel.
+Performing this inference on
+the entire image results in a single vote per voxel. Pre-
+vious results in patch-based segmentation have, however,
+demonstrated the advantage of propagating not only the
+center label but also neighboring labels (Rousseau et al.,
+2011). With such an approach, the voxel label is not only
+inferred from a single patch, but also from neighboring
+patches. Rousseau et al. (2011) refer to this as the multi-
+point method in the context of non-local means segmen-
+tation. We propose to replicate the multi-point method
+for DCNN segmentation by employing multi-task learning.
+Instead of learning a single task, which predicts the center
+label, we simultaneously learn multiple tasks, which pre-
+dict the center and surrounding neighborhood. The neigh-
+borhood size determines the number of tasks. While there
+have been applications for deep multi-task learning (Yim
+et al., 2015; Luong et al., 2015), we are not aware of pre-
+vious applications for image segmentation.
+We implement multi-task learning in the CDNN archi-
+tecture by replicating the last inner product layer (#18)
+according to the number of tasks. The increase in the num-
+ber of parameters to be learned is limited by this setup be-
+cause all tasks share the same network, except for last in-
+ner product layer that specializes on the task. Each task t
+predicts the likelihood pt(S(xt) = l|I(Nx); I, S) for loca-
+tions xt in the neighborhood Mx centered around x. We
+compute the multi-task likelihood for the label by averag-
+ing likelihoods across tasks
+Ll(x) =
+1
+|Mx|
+X
+xt∈Mx
+p(S(x) = l|I(Nxt); I, S).
+(3)
+4
+
+We experiment with 7 and 27 neighborhood systems M for
+the prediction, where the 7 neighborhood consists of the 6
+direct neighbors and the 27 neighborhood consists of the
+full 33 region. From a diﬀerent perspective, this approach
+of averaging among multiple predictions per voxel can also
+be seen as an ensemble method.
+2.4. Spectral Brain Coordinates
+A downside of patch-based segmentation techniques is
+the loss of spatial context (Wachinger et al., 2016). Con-
+sidering the symmetry of the brain, it is easy to confuse
+patches across hemispheres. In addition, context provides
+valuable information for structures with low tissue con-
+trast.
+To increase the spatial information, we augment
+patches with location information. Previous approaches
+have, for instance, used Cartesian coordinates (Wachinger
+et al., 2014) or distances to centroids (Brebisson and Mon-
+tana, 2015). We propose spectral brain coordinates as an
+alternative parameterization of the brain volume, which
+we obtain by computing eigenfunctions of the Laplace-
+Beltrami operator inside the 3D brain mask. Eigenfunc-
+tions of the cortex surface have previously been used for
+brain matching (Lombaert et al., 2013b,a) and eigenvalues
+as shape descriptors (Wachinger et al., 2015b). In contrast,
+we compute spectral coordinates on the solid (volume) and
+use it as an intrinsic coordinate system for learning. On
+the brain mask, we solve the Laplacian eigenvalue problem
+∆f = −λf
+(4)
+with the Laplace-Beltrami operator ∆, eigenvalues λ and
+eigenfunctions f. We approximate the Laplace-Beltrami
+operator with the graph Laplacian (Chung, 1997).
+The
+weights in the adjacency matrix W between two points i
+and j are set to 1 if both points are neighbors and within
+the brain mask, otherwise they are set to 0. This yields a
+sparse matrix W. The Laplacian operator on a graph is
+L = D −W
+Dii =
+X
+j
+Wij
+(5)
+with the node degree matrix D.
+We compute the ﬁrst three non-constant eigenvectors of
+the Laplacian, where each eigenvector corresponds to a 3D
+image and the ensemble of eigenvectors forms the spectral
+brain coordinates. Fig. 2 illustrates the ﬁrst three eigen-
+vectors, which roughly represent vibrations along primary
+coordinate axes. The consistency of the coloring across the
+four subjects highlights the potential for an accordant en-
+coding of location information. Note that the eigenvectors
+are isometry invariant to the object, meaning that they
+do not change with rotations or translations. Hence they
+present an intrinsic parameterization independent of the
+brain orientation or location. This independence can be
+seen from the graph construction encoded in the adjacency
+matrix. The adjacency structure only depends on neigh-
+borhood relationships, which do not change with image
+translation or rotation.
+Subject	
+  1
+Subject	
+  2
+Subject	
+  3
+Subject	
+  4
+First	
+  EF
+Sagittal
+Second	
+  EF
+Coronal
+Third	
+  EF
+Axial
+Figure 2: Illustration of ﬁrst three eigenfunctions (EF) for four sub-
+jects.
+Each function is shown on the anatomical view that best
+highlights the gradient.
+Depending on the object to parameterize and the num-
+ber of eigenfunctions, ﬂipping due to sign ambiguity or
+swapping of eigenfunctions may hinder a direct compar-
+ison. Lombaert et al. (2013a) proposed an approach for
+spectrum ordering. In our application, with only comput-
+ing the ﬁrst three eigenfunctions of the brain mask, no
+correction was required. Note that we could also compute
+more than three eigenfunctions to increase the amount of
+spatial information in the DCNN, which may require a re-
+ordering strategy. To the best of our knowledge, this is
+the ﬁrst application of eigenfunctions of the 3D solid for
+deﬁning an intrinsic brain coordinate system.
+Following the idea of providing the neural net with all
+the data and letting it pick the relevant information, we
+input next to the three spectral coordinates also the three
+Cartesian coordinates. We normalized the Cartesian co-
+ordinates, by subtracting the center of mass of the brain
+mask to make them more comparable across scans.
+2.5. Fully Connected Conditional Random Field
+The DCNN prediction results in a probabilistic brain
+segmentation. To obtain the ﬁnal segmentation, we use
+maximum a posteriori inference on a conditional ran-
+dom ﬁeld (CRF). The CRF allows for formulating po-
+tentials that ensure label agreement between close vox-
+els with smoothness terms and follow the image content
+with appearance terms. Traditionally, short-range CRFs
+with connections between neighboring locations have been
+used (Wang et al., 2013a), which can however yield exces-
+sive smoothing of organ boundaries. In contrast, the fully
+connected CRF deﬁnes pairwise potentials on all pairs of
+image locations. The vast number of pairwise potentials to
+be deﬁned makes conventional inference impractical. We
+use the highly eﬃcient approximate inference algorithm
+proposed by Kr¨ahenb¨uhl and Koltun (2011) to infer a fully
+connected CRF model on the entire 3D brain. Key for the
+eﬃcient computation is the deﬁnition of pairwise edge po-
+tentials by a linear combination of Gaussian kernels.
+5
+
+Epoch
+0
+2
+4
+6
+8 10 12 14 16 18 20 22 24
+Accuracy
+0
+0.2
+0.4
+0.6
+0.8
+1
+Center
+Left
+Right
+Top
+Bottom
+Front
+Back
+Epoch
+0
+2
+4
+6
+8 10 12 14 16 18 20 22 24
+Loss
+0
+1
+2
+3
+4
+Figure 3: Accuracy and loss for DeepNAT during training for 25 epochs. The accuracy is shown for all seven tasks, which predict the label
+of the center voxel and neighbors.
+The inference algorithm uses mean ﬁeld approximation
+that is iteratively optimized with a series of message pass-
+ing steps. Importantly, the message passing updates for
+a fully decomposable mean ﬁeld approximation is identi-
+cal to Gaussian ﬁltering in bilateral space. With the help
+of eﬃcient approximate high-dimensional ﬁltering (Adams
+et al., 2010), the computational complexity of message
+passing is reduced from quadratic to linear in the num-
+ber of variables.
+The Gibbs energy of the CRF model is
+E(y) =
+X
+i
+ψu(yi) +
+X
+i≤j
+ψp(yi, yj),
+(6)
+with the label assignment y and i, j ranging from 1 to
+the number of voxels.
+The unary potential ψu(yi) =
+−log P(yi) is deﬁned as the negative log likelihood of the
+label assignment probability from the multi-task DCNN in
+Eq.(3). We use the pairwise potential from (Kr¨ahenb¨uhl
+and Koltun, 2011), which allows for eﬃcient inference on
+fully connected graphs. Given image intensities Ii and Ij
+with locations pi and pj, the pairwise potential is
+ψp(yi, yj) = µij
+"
+v1e
+−
+∥pi−pj ∥2
+2σ2α
+−
+(Ii−Ij )2
+2σ2
+β
++ v2e
+−
+∥pi−pj ∥2
+2σ2γ
+#
+.
+(7)
+The ﬁrst exponential term models the appearance where
+nearby voxels with similar intensity are likely to show the
+same structure, controlled by spatial σα and intensity σβ
+parameters; this corresponds to a bilateral kernel.
+The
+second exponential term models the smoothness by con-
+sidering spatial proximity, controlled by σγ. The appear-
+ance and smoothness terms are weighted by parameters,
+v1 and v2, respectively.
+For the label compatibility the
+Potts model is used, µij = [yi ̸= yj].
+3. Results
+We evaluate the segmentation on the dataset of the
+MICCAI Multi-Atlas Labeling challenge1 (Landman and
+Warﬁeld, 2012), which consists of T1-weighted MRI scans
+from 30 subjects of OASIS (Marcus et al., 2007). Man-
+ual segmentations were provided by Neuromorphometrics,
+Inc.2 under academic subscription. The images are 1 mm
+isotropic with a slice size of 256 × 256 pixels and the num-
+ber of slices varying above 256. To improve the estimation
+of the roughly 2.7 million parameters in the network, we
+increase the number of training scans from 15 in the chal-
+lenge to 20. The remaining 10 scans are used for testing.
+We compare our results to PICSL (Wang et al., 2012),
+the winner of the MICCAI labeling challenge that uses
+deformable registration, label fusion, and corrective learn-
+ing. In addition, we compare to spatial STAPLE (Asman
+and Landman, 2012), which is an extension of the popu-
+lar simultaneous truth and performance level estimation
+(STAPLE) method (Warﬁeld et al., 2004).
+It is among
+the best performing methods in the challenge and allows
+for a spatially varying performance of raters, i.e., regis-
+tered atlas. Finally, we compare to the segmentation with
+FreeSurfer v5.3 (Dale and Sereno, 1993; Dale et al., 1999;
+Fischl et al., 1999a,b, 2002). In contrast to the other meth-
+ods, FreeSurfer comes with its own atlas and does not
+use the training data. We measure the segmentation ac-
+curacy with the Dice volume overlap score (Dice, 1945)
+between the automatic segmentation S and manual seg-
+mentations ¯S
+D(S, ¯S) = 2 |S ∩¯S|
+|S| + | ¯S|.
+(8)
+We select a patch size of 23 × 23 × 23 as a trade-oﬀ
+between a large enough image region for the label clas-
+siﬁcation and memory consumption as well as processing
+1https://masi.vuse.vanderbilt.edu/workshop2012
+2http://Neuromorphometrics.com/
+6
+
+DeepNAT
+Only Spectral
+Only Cartesian
+No Coordinates
+One Step
+27 Tasks
+1 Task
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Method
+Median Dice
+DeepNAT
+0.897
+Only Spectral
+0.895
+Only Cartesian
+0.892
+No Coordinates
+0.878
+One Step
+0.879
+27 Tasks
+0.885
+1 Task
+0.820
+Figure 4: Segmentation results in Dice for diﬀerent conﬁgurations
+of DeepNAT. In the ﬁgure, red line indicates the median, the boxes
+extend to the 25th and 75th percentiles, and the whiskers reach to
+the most extreme values not considered outliers (crosses). The table
+lists the median Dice for the diﬀerent variations in the DeepNAT
+conﬁguration.
+speed.
+DeepNAT is based on the Caﬀe framework (Jia
+et al., 2014).
+Gradients are computed on minibatches,
+where each gradient update is the average of the individ-
+ual gradients of the patches in the minibatch. The size of
+the minibatch is constrained by the memory of the GPU,
+where a size of 2,048 ﬁlls up most of the 12GB GPU mem-
+ory on the NVIDIA Tesla K40 and TITAN X used in the
+experiments. Large batch sizes are advisable as they bet-
+ter approximate the true gradient.
+We train the network with stochastic gradient descent
+and the “poly” scheme (also applied by Chen et al. (2016))
+using a base learning rate of 0.01.
+The actual learning
+rate at each iteration is the base learning rate multiplied
+by (1−iteration/max iteration)0.9, promoting larger steps
+at the beginning of the training period and smaller steps
+towards the end. For the ﬁrst network, we randomly sam-
+ple 30,000 patches from the foreground and background in
+DeepNAT
+DeepNATcrf
+FreeSurfer
+Spatial Staple
+PICSL
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Method
+Median Dice
+DeepNAT
+0.910
+DeepNATcrf
+0.920
+FreeSurfer
+0.819
+Spatial STAPLE
+0.897
+PICSL
+0.912
+Figure 5:
+Segmentation results in Dice for DeepNAT and Deep-
+NATcrf together with alternative segmentation methods: FreeSurfer,
+spatial STAPLE, and PICSL. In the ﬁgure, red lines indicate the
+median, the boxes extend to the 25th and 75th percentiles, and the
+whiskers reach to the most extreme values not considered outliers
+(crosses).
+The table lists the median Dice for the diﬀerent ap-
+proaches. Note that the results for DeepNAT vary from Fig. 4 due
+to longer training.
+each training image, yielding 1.2 million training patches.
+For the second network, we randomly sample at most 3,000
+patches per structure, where we double the number of
+patches for the white matter and gray matter to account
+for the higher variability in these classes, yielding a total
+of about 1.1 million training patches. We apply inhomo-
+geneity correction and intensity normalization from the
+FreeSurfer pipeline to the MRI scans. In light of a small
+number of training images with manual segmentations, the
+standardization yields higher homogeneity in the dataset
+and should therefore facilitate the inference task. We set
+the CRF parameter to standard settings v1 = v2 = 3,
+σα = σγ = 3, and σβ = 10 (Chen et al., 2016).
+Fig-
+ure 3 shows the accuracy and loss during training for the
+second network.
+For the accuracy, we have a diﬀerent
+line for each of the seven tasks. Notably, the center task
+achieves the highest accuracy, where the remaining tasks
+which predict labels for neighboring voxels show compa-
+rable results. This is insofar surprising that all tasks have
+7
+
+DeepNAT
+DeepNATcrf
+FreeSurfer
+Spatial Staple
+PICSL
+0.75
+0.80
+0.85
+0.90
+Dice
+Method
+Mean Dice
+DeepNAT
+0.894
+DeepNATcrf
+0.906
+FreeSurfer
+0.790
+Spatial STAPLE
+0.890
+PICSL
+0.904
+Figure 6:
+Segmentation results in Dice for DeepNAT and Deep-
+NATcrf together with alternative segmentation methods: FreeSurfer,
+spatial STAPLE, and PICSL. The bars show the mean Dice score and
+the lines show the standard error. The table lists the mean Dice for
+the diﬀerent approaches.
+the same weight in the network and it suggests that it
+is intrinsically easier for the network to predict the patch
+center. Overall, we observe a fast convergence to a rela-
+tively high classiﬁcation results, where prolonged training
+yields a small but steady improvement of the accuracy.
+First, we evaluate the impact of the proposed contribu-
+tions in DeepNAT on the segmentation accuracy: (i) coor-
+dinates, (ii) hierarchical architecture, and (iii) multi-task
+learning. We perform the comparison by using the Deep-
+NAT network, which uses seven tasks and combines spec-
+tral and Cartesian coordinates.
+We modify one of the
+network settings while keeping the remaining conﬁgura-
+tion. Figure 4 shows the segmentation results, where the
+statistics are computed across all of the 25 brain struc-
+tures. Each setting is trained for 8 epochs, which takes
+about 1 day. The segmentation of a new scan at test time
+takes about 1 hour. With respect to coordinates, we ob-
+serve a clear drop when using no coordinates.
+Spectral
+coordinates perform slightly better than Cartesian coordi-
+nates, where the combination of both in DeepNAT yields
+the highest accuracy. Next we compare the hierarchical
+approach to directly segmenting the 25 structures in one
+step, where the one step approach yields a lower accuracy.
+Finally, we evaluate the importance of multi-task learning.
+We compare with single task prediction, which only pre-
+dicts the center voxel of the patch, and with the prediction
+of a larger number of tasks, 27. The results show in com-
+parison to the seven tasks in DeepNAT a strong decrease
+in accuracy for the single task and a small decrease in ac-
+curacy for 27 tasks. We test the signiﬁcance of DeepNAT
+to each of the variants with the pairwise non-parametric
+Wilcoxon signed-rank test (two-sided). The improvement
+of DeepNAT over only spectral is signiﬁcant with p < 0.05
+and the improvement over all other variants is signiﬁcant
+with p < 0.001.
+We further evaluated diﬀerent parameters for the opti-
+mization of the network. The reduction of the base learn-
+ing rate to 0.005 leads to a median Dice score of 0.888.
+The usage of a minibatch size of 512 yields a median Dice
+score of 0.895. The application of the ADAGRAD (Duchi
+et al., 2011) stochastic optimization results in a median
+Dice score of 0.881, compared to 0.897 in DeepNAT.
+For the second evaluation, we train DeepNAT for 25
+epchos, which took about 3 days and compare it to alter-
+native segmentation approaches: FreeSurfer, spatial STA-
+PLE, and PICSL. Figures 5 shows the results over all 25
+brain structures with the median and percentiles and Fig-
+ure 6 shows the mean and standard error. DeepNATcrf
+denotes the estimation of the ﬁnal segmentation with the
+fully connected CRF, where for DeepNAT we infer the seg-
+mentation independently for each voxel with weighted ma-
+jority voting. The mean and median Dice for DeepNAT is
+higher than for FreeSurfer or spatial STAPLE. The CRF
+yields an increase in Dice by about 0.01 and the overall
+highest segmentation accuracy. Figure 7 shows detailed
+results for all of the 25 brain structures.
+Across all structures, DeepNATcrf yields signiﬁcantly
+higher Dice scores in comparison to DeepNAT (p < 0.001),
+FreeSurfer (p < 0.001), and STAPLE (p < 0.001). The
+diﬀerence to PICSL (p = 0.27) is not signiﬁcant.
+We
+further explore the diﬀerence between PICSL and Deep-
+NATcrf on a per structure basis. Here DeepNATcrf yields
+signiﬁcantly higher values for left cerebral gray matter
+(p < 0.005), right cerebral gray matter (p < 0.005), right
+cerebral white matter (p < 0.05), right cerebellar white
+matter (p < 0.05), and left caudate (p < 0.05) while
+PICSL yields signiﬁcantly higher values for left amygdala
+(p < 0.01), right caudate (p < 0.05), and left hippocampus
+(p < 0.01). The diﬀerent results for the left and right cau-
+date are due to variations in median Dice in PICSL (left:
+0.903, right 0.910) compared to more consistent results
+across hemispheres for DeepNATcrf (left:
+0.906, right:
+0.908).
+We note a lower Dice score for the amygdala in
+comparison to other brain structures across all methods.
+While the amygdala is a challenging structure to segment,
+also the small size can entail a lower Dice score.
+Figure 8 shows example segmentations for FreeSurfer,
+PICSL, and DeepNATcrf together with the manual seg-
+mentation. The results for PICSL and DeepNATcrf are
+very similar to the manual segmentation, while FreeSurer
+8
+
+Cerebral
+Gray	
+  Matter
+DeepNAT
+DeepNATcrf
+FreeSurfer
+Spatial	
+  Staple
+PICSL	
+  
+Figure 7: Segmentation results in Dice for DeepNAT, DeepNATcrf, FreeSurfer, spatial STAPLE, and PICSL for 25 brain structures. Centerline
+indicates the median, the boxes extend to the 25th and 75th percentiles, and the whiskers reach to the most extreme values not considered
+outliers (crosses). We are grateful to Bennett Landmann for 3D renderings of brain structures.
+shows stronger variations, consistent with the quantitative
+results. Figures 9 and 10 illustrate zoomed in brain seg-
+mentations for structures with signiﬁcant diﬀerences be-
+tween PICSL and DeepNATcrf. In Figure 9, segmenta-
+tions of the cerebral white and gray matter as well as the
+cerebellar white and gray matter are more accurate with
+DeepNATcrf, whereas segmentations of the hippocampus
+and amygdala are more accurate with PICSL. Figure 10
+illustrates the segmentation of the caudate. The segmen-
+tation is illustrated by means of a segmentation map that
+highlights agreement and disagreement with the manual
+segmentation.
+Overall, DeepNATcrf is more consistent
+with the manual segmentation.
+The convolutional layers in the DCNN can be inter-
+preted as feature extractor from the image patch and the
+fully connected layers as classiﬁer.
+To get a better un-
+derstanding of the feature extraction, we show the learned
+convolutional ﬁlters of the ﬁrst layer in Figure 11. The ﬁrst
+layer consists of 32 ﬁlters of size 7 × 7 × 7. The learned
+features are similar to 3D Gabor ﬁlters and 3D blobs. This
+is consistent with previous results on 2D DCNNs that re-
+port 2D Gabor ﬁlters and 2D color blobs on the ﬁrst layer
+(Krizhevsky et al., 2012; Yosinski et al., 2014). We do not
+include visualizations of ﬁlters from the second and third
+convolutional layers as they are less comprehensible due to
+the smaller ﬁlter size and the more abstract representation.
+Finally, we reduce the training set from 20 to 15 and
+increase the testing set from 10 to 15 to have the identical
+setup to the labeling challenge. We employ data augmen-
+tation with jittering to counter the reduction in training
+data and increase the training time to 50 epochs.
+Fig-
+ures 12 shows the results over all 25 brain structures with
+the median and percentiles and Figure 13 shows the mean
+9
+
+Figure 8: Example segmentations for FreeSurfer, PICSL, and DeepNATcrf together with the corresponding manual segmentation. FreeSurfer
+shows the largest variations with respect to the manual segmentation, particularly in cortical structures and the brainstem. The results of
+PICSL and DeepNATcrf are highly similar to the manual segmentation.
+and standard error. We note a slight overall decrease in
+accuracy across all methods, compared to Figures 5 and 6,
+as a result of modifying the testing data. For 15 train-
+ing and 15 test images, DeepNATcrf yields signiﬁcantly
+higher Dice scores in comparison to DeepNAT (p < 0.001),
+FreeSurfer (p < 0.001), and STAPLE (p < 0.001), whereas
+the diﬀerence to PICSL (p = 0.06) is not signiﬁcant. The
+median of DeepNATcrf is 0.007 Dice points higher than
+PICSL, whereas the mean Dice points are the same. The
+decreasing gap between DeepNATcrf and PICSL in testing
+accuracy is likely associated with the the reduction of the
+training set for learning the network.
+4. Discussion
+DeepNAT architecture:
+One of the biggest chal-
+lenges when working with deep convolutional neural net-
+works is the vast number of decisions to take for the spec-
+iﬁcation of the architecture. Many of the decisions are a
+trade-oﬀbetween additional discriminative power of the
+network and training complexity as well as memory re-
+quirements. For instance, we do not use a batch normal-
+ization after the ﬁrst convolution to avoid the high memory
+consumption. An alternative design for the convolutional
+stage would have been to work with smaller kernels of size 3
+and to build a deeper hierarchy, similar to VGG (Simonyan
+and Zisserman, 2014). We have not fully explored this di-
+rection, also due to long training times, but initial results
+did not look very promising.
+In this work, we used 3D convolutional neural networks
+for brain segmentation. 3D DCNNs have been used for
+medical applications before (Li et al., 2014; Brebisson and
+Montana, 2015), however, the majority of work is on 2D
+or 2.5D applications.
+Given that we deal with the seg-
+mentation of 3D MRI scans, it seems natural to work with
+a 3D network for the classiﬁcation. Yet, working with a
+3D network yields an increase in complexity because the
+convolutional ﬁlters and the internal representations have
+an additional dimension. By employing batch normaliza-
+tion, dropout, and the Xavier initialization, we are able
+to train 3D networks with more layers than previous 3D
+DCNNs, where deeper networks can model more complex
+relationships between input and output data.
+In many image segmentation tasks, we are facing the
+challenge of dealing with a large background class that
+surrounds the structures of interest. The background typ-
+ically consists of multiple structures that are of no fur-
+ther interest to the application and merged into the back-
+ground class. For multi-atlas segmentation, we have re-
+ported that the dominant background class can cause an
+under-segmentation of the target structure, because it in-
+troduces a bias in the label estimation (Wachinger and
+Golland, 2014).
+Here, we address the class imbalance
+problem with a hierarchical approach by ﬁrst separating
+foreground from background and then identifying the in-
+dividual brain structures on the foreground. Our results
+show the beneﬁt of this cascaded approach in comparison
+to directly segmenting brain structures.
+Location information: A drawback of patch-based
+segmentation methods is the loss of the larger image con-
+text, given that brain scans from diﬀerent subjects are
+overall fairly similar. Context information can be crucial
+for diﬀerentiating small image regions across the brain that
+can appear very similar due to symmetries. To retain con-
+text information, we include location information in the
+network. The results demonstrate that the addition of co-
+ordinates leads to a substantial increase in segmentation
+accuracy. In this work, we introduced spectral brain coor-
+dinates, a parameterization of the brain solid with Laplace
+eigenfunctions, which yielded an improvement over Carte-
+sian coordinates. Interestingly, the combination of spectral
+and Cartesian coordinates resulted in a further increase in
+segmentation accuracy, indicating that they contain com-
+plementary information.
+10
+
+DeepNATcrf
+PICSL
+Manual
+Hippocampus
+Amygdala
+Figure 9: Example segmentations for PICSL and DeepNATcrf to-
+gether with the corresponding manual segmentation.
+Overall, the
+segmentation quality of PICSL and DeepNATcrf is high, as already
+indicated by the quantitative results. First row: Segmentation of
+the left cerebral white and gray matter region.
+DeepNATcrf bet-
+ter matches the manual segmentation in the center of the image,
+where PICSL produces an isolated region, see arrows. PICSL and
+DeepNATcrf produce an error at the bottom left part of the image,
+however the error is consistent among both approaches and the ﬁne
+white matter region may have been skipped by the manual rater.
+Second row:
+Segmentation of the right cerebellar white and gray
+matter. DeepNATcrf produces a more accurate segmentation of the
+gray matter region in the center of the image and better captures the
+thin white matter region at the bottom, as indicated by the arrows.
+Third row: Segmentation of the hippocampus and amygdala. PICSL
+produces a slightly more accurate segmentation of both structures.
+Multi-task learning: Multi-task learning has several
+applications in machine learning, but we have not yet seen
+its application for image segmentation.
+Instead of only
+predicting the label of the center voxel, we simultaneously
+learn and predict also the labels of the neighboring voxels.
+Our results show that multi-task learning yields a signif-
+icant improvement over single-task segmentation for all
+brain structures. This is consistent with results from non-
+local means segmentation, where results from the multi-
+point method showed improvements over the single-point
+approach (Rousseau et al., 2011).
+Multi-task learning
+leads to several predictions per voxel, which can generate
+more robust segmentations by overruling incorrect predic-
+tions. The tasks are learned by sharing the same network,
+with only the last layer specializing on a single task. This
+causes only a small increase in the overall number of pa-
+rameters. We have experienced a faster convergence of the
+multi-task network compared to the single-task network,
+which may be attributed to the enforcement of promis-
+ing gradient directions from all simultaneous tasks. This
+is consistent with previous observations from multi-task
+PICSL
+Segmentation
+DeepNATcrf
+Figure 10: Example labeling of the left caudate, shown in dark blue
+on the segmentation mask. Segmentation masks on the middle and
+right panel show correct segmentations in white and segmentation
+errors in gray. DeepNATcrf shows a more accurate segmentation on
+the top left, center left, and bottom of the caudate.
+learning for sequence to sequence modeling (Luong et al.,
+2015).
+We observe that the center task has a slightly but consis-
+tently higher accuracy than the surrounding tasks. This is
+surprising because no priority or higher weighting was as-
+signed to the center task. One possible explanation could
+be that the center location has a larger context but when
+considering that a patch size of 23 was used, this should
+not have a strong impact. It rather seems that the convo-
+lutional stage of the network with convolution ﬁlters and
+max-pooling better captures the information for predicting
+the center label.
+Comparison to state-of-the-art: In our results, we
+compare to FreeSurfer and two methods from the MICCAI
+labeling challenge, PICSL and spatial STAPLE. FreeSurfer
+is one of the most commonly used tools for brain anatomy
+reconstruction in practice. It performed worse than the
+other methods in the comparison, however, all other meth-
+ods used the provided training dataset, whereas FreeSurfer
+uses its own atlas. Dataset bias may therefore play a role.
+In addition, the protocol for the manual labeling of the
+scans may not be entirely consistent. PICSL was the win-
+ner of the segmentation challenge and spatial STAPLE
+was among the best performing methods. Both of these
+approaches are based on a multi-atlas approach, where all
+atlas images are registered to the test image.
+A single
+registration takes about 2 hours of runtime, so that the
+registration of all 15 training images takes about 30 hours.
+The registration can be time-consuming for many image
+pairs, consequently scaling such methods to larger atlases
+seems challenging. In contrast, the inclusion of additional
+training data does not aﬀect testing time for DeepNAT,
+which is about 1 hour.
+We trained the ﬁnal DeepNAT
+model for about three days on the GPU, but also PICSL
+is based on an extensive training of the corrective classiﬁer,
+which was reported with 330 CPU hours. The runtime of
+DeepNAT could be further improved by using cuDNN and
+accounting for overlapping patches.
+The results of DeepNAT resulted in statistically signif-
+icant improvements over FreeSurfer and spatial STAPLE.
+DeepNAT in combination with the CRF yielded the over-
+11
+
+Figure 11: The ﬁgure shows 3D ﬁlters that were learned by the network in the ﬁrst convolutional layer. The ﬁrst conv layer consists of 32
+ﬁlters of size 7 × 7 × 7, as described in the architecture in Table 1. We show all slices from the 7 × 7 × 7 ﬁlter kernel vertically, so seven times
+a 7 × 7 patch. A number of these ﬁlter kernels resemble Gabor ﬁlters. The kernel patters further resemble 3D blob ﬁlters but also express
+more complex image patterns.
+all highest median Dice score, but the improvement over
+PICSL is not statistically signiﬁcant. Performing tests on
+the per structure level resulted in advantages for Deep-
+NAT for cortical structures, which may be explained by
+the diﬃculty in registering complex folding patterns. For
+subcortical structures, the results were not as clear. The
+variation in signiﬁcance for the left and right caudate is
+driven by varying results of PICSL, but the source of the
+diﬀerence is not clear as no preference to one of the hemi-
+spheres seems to be given in PICSL.
+Conditional Random Field:
+Our results demon-
+strate the beneﬁt of inferring the ﬁnal, discrete segmenta-
+tion from the probabilistic network outcome with the fully
+connected conditional random ﬁeld. Previous applications
+of the fully connected CRF have been for 2D applications.
+The pairwise constraints formulated in the CRF ensure
+label agreement between close voxels. In the appearance
+term of the pairwise potential, we use the diﬀerence of
+voxel intensities as a measure of similarity. Such similarity
+terms have been extensively studied in spectral clustering
+for image segmentation (Shi and Malik, 2000), where the
+concept of the intervening contour was proposed (Fowlkes
+et al., 2003) and adapted for medical image segmenta-
+tion (Wachinger et al., 2015a).
+Integrating the concept
+of intervening contours into the pairwise potentials of the
+CRF seems promising to further improve segmentation ac-
+curacy. Note that we do not train the CRF, so while Deep-
+NAT is an end-to-end learning system, DeepNATcrf is not.
+Training Data: One of the big issues when using deep
+learning in the medical domain is the access to a large
+enough training dataset. The training set used in our ex-
+periments seems small for training a deep convolutional
+neural network with millions of parameters compared to
+the millions of images from ImageNet typically used in
+computer vision.
+However, DeepNAT does not directly
+predict the segmentation of the entire image but only of
+image patches. Working with patches makes the training
+feasible as each scan contains millions of patches that can
+be extracted for learning. In the future, it would be inter-
+esting to further explore ideas about directly estimating
+the segmentation of the entire image without the reduc-
+tion to patches. This can lead to a drastic speed-up, due
+to the computational overhead when working with over-
+lapping patches. Yet, such an approach would require a
+12
+
+DeepNAT
+DeepNATcrf
+FreeSurfer
+Spatial Staple
+PICSL
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+Method
+Median Dice
+DeepNAT
+0.906
+DeepNATcrf
+0.913
+FreeSurfer
+0.817
+Spatial STAPLE
+0.892
+PICSL
+0.906
+Figure 12: Segmentation results similar to Fig. 5 for decreasing the
+training set in DeepNAT from 20 to 15 images and increasing the
+testing data for all methods from 10 to 15. In the ﬁgure, red lines in-
+dicate the median, the boxes extend to the 25th and 75th percentiles,
+and the whiskers reach to the most extreme values not considered
+outliers (crosses). The table lists the median Dice for the diﬀerent
+approaches.
+much larger number of images with manual segmentations
+for training, which are very time consuming to create.
+Due to the limited size of the dataset, we have not
+split between validation and testing set. We have directly
+compared the diﬀerent contributions in DeepNAT (coor-
+dinates, hierarchy, multi-task) on the testing set, see Fig-
+ure 4. Consequently, there is a risk of overﬁtting on the
+testing data. However, these comparisons involved con-
+ceptual design decisions and not a detailed parameter ﬁne-
+tuning, so we consider the risk of overﬁtting to be limited.
+Further, the good performance of DeepNAT persisted af-
+ter reducing the training dataset to 15 scans and increasing
+the testing dataset to 15 scans.
+DeepNAT may be speciﬁcally adapted for segmenting
+young, old, or diseased brains by ﬁne-tuning. The large
+potential of ﬁne-tuning pre-trained models for deep learn-
+ing has been shown previously. In the medical imaging
+domain, Gao et al. (2016) ﬁne-tuned weights trained on
+ImageNet to detect lung disease in CT images. Yosinski
+et al. (2014) show that transferability of features, e.g., con-
+DeepNAT
+DeepNATcrf
+FreeSurfer
+Spatial Staple
+PICSL
+0.75
+0.80
+0.85
+0.90
+Dice
+Method
+Mean Dice
+DeepNAT
+0.891
+DeepNATcrf
+0.897
+FreeSurfer
+0.788
+Spatial STAPLE
+0.878
+PICSL
+0.897
+Figure 13: Segmentation results in Dice for DeepNAT and Deep-
+NATcrf together with alternative segmentation methods: FreeSurfer,
+spatial STAPLE, and PICSL. The bars show the mean Dice score and
+the lines show the standard error. The table lists the mean Dice for
+the diﬀerent approaches.
+vnets trained on ImageNet and then ﬁne-tuned to other
+tasks, depends on how general those features are; the
+transferability gap increases as the distance between tasks
+increases and features become less general. Notably, these
+studies operate on 2D images and we are not aware of work
+that ﬁne-tunes networks with volumetric input, where the
+pre-trained models of DeepNAT can provide a ﬁrst step in
+this direction.
+5. Conclusion
+We presented DeepNAT, a 3D deep convolutional neu-
+ral network for brain segmentation of structural MRI
+scans. The main contributions were (i) multi-task learn-
+ing, (ii) hierarchical segmentation, (iii) spectral coordi-
+nates, and (iv) a 3D fully connected conditional random
+ﬁeld. Multi-task learning simultaneously learns the label
+prediction in a small neighborhood. Spectral coordinates
+form an intrinsic parameterization of the brain volume
+and provide context information to patches. The hierar-
+chical approach accounts for the class imbalance between
+the background class and separate brain structures. And
+ﬁnally, the conditional random ﬁeld ensures label agree-
+13
+
+ment between close voxels. We train the 3D network by
+integrating latest advances in deep learning to initialize
+weights, to correct for internal covariate shift, and to limit
+overﬁtting for training such complex models. Our results
+demonstrated the high potential of convolutional neural
+networks for segmenting neuroanatomy.
+All in all, image segmentation is a well-suited task
+for convolutional neural nets, which are arguably at the
+forefront of the the deep learning wave. The segmenta-
+tion accuracy of convolutional neural nets is likely to fur-
+ther improve in the future, given the increasing amount
+of training data, methodological advances for deep net-
+works, and progress in GPU hardware. We believe that
+the purely learning-based approach with neural networks
+oﬀers unique opportunities for tailoring segmentations to
+young, old, or diseased brains. While it may be diﬃcult to
+obtain enough training data on such speciﬁc applications,
+ﬁne-tuning a pre-trained network seems like a promising
+avenue.
+Our extensions to caﬀe, network deﬁnitions and trained
+networks are available for download:
+https://tjklein.github.io/DeepNAT/.
+6. Acknowledgement
+Support for this research was provided in part by
+the Humboldt foundation, SAP SE, F¨orderprogramm f¨ur
+Forschung und Lehre, the Bavarian State Ministry of Edu-
+cation, Science and the Arts in the framework of the Cen-
+tre Digitisation.Bavaria (ZD.B), the National Cancer Insti-
+tute (1K25CA181632-01), the Massachusetts Alzheimer’s
+Disease Research Center (5P50AG005134), the MGH Neu-
+rology Clinical Trials Unit, the Harvard NeuroDiscovery
+Center, Genentech (G-40819), and the NVIDIA Corpora-
+tion.
+7. References

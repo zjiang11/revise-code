@@ -1,0 +1,1028 @@
+arXiv:1401.5341v1  [cs.AI]  21 Jan 2014
+Domain Views for Constraint Programming
+P. Van Hentenryck1 and L. Michel2
+1 NICTA, Australia, RI 02912
+2 University of Connecticut, Storrs, CT 06269-2155
+Abstract. Views are a standard abstraction in constraint programming:
+They make it possible to implement a single version of each constraint,
+while avoiding to create new variables and constraints that would slow
+down propagation. Traditional constraint-programming systems provide
+the concept of variable views which implement a view of the type y =
+f(x) by delegating all (domain and constraint) operations on variable
+y to variable x. This paper proposes the alternative concept of domain
+views which only delegate domain operations. Domain views preserve the
+beneﬁts of variable views but simplify the implementation of value-based
+propagation. Domain views also support non-injective views composi-
+tionally, expanding the scope of views signiﬁcantly. Experimental results
+demonstrate the practical beneﬁts of domain views.
+1
+Introduction
+Constraint programming systems provide rich libraries of constraints, each of
+which models some speciﬁc structure useful across a wide range of applications.
+These constraints are important both from a modeling standpoint, as they make
+it possible to state problems at a high level of abstraction, and from an eﬃciency
+standpoint, as they allow dedicated algorithms to exploit the speciﬁc structure.
+The global constraint catalog [2] in fact lists about 354 global constraints at
+the time of writing. In addition, each of these constraints potentially come in
+many diﬀerent forms as they can be applied, not only on variables, but also on
+expressions involving variables.
+This large number of variants presents a challenge for system developers who
+must produce, validate, optimize, and maintain each version of each constraint.
+To avoid the proliferation of such variants, system developers often prefer to de-
+sign a unique variant over variables and introduce new variables and constraints
+to model the more complex cases. For instance, a constraint
+alldiﬀerent(x1 + 1, . . . , xn + n)
+can be modeled by a system of constraints
+{alldiﬀerent(y1, . . . , yn), y1 = x1 + 1, . . . , yn = xn + n}
+where the yi’s are new variables. This approach keeps the system core small
+but introduces an overhead in time and space. Indeed, the new constraints must
+
+be propagated through the constraint engine and the system must maintain
+additional domains and constraints, increasing the cost of propagation and the
+space requirements.
+Over the years, system designers have sought ways to mitigate this diﬃculty
+and proposed several solutions of varying complexity. Prolog-style languages
+oﬀered indexicals [5,3] while C++ libraries like Ilog Solver [6] introduces the
+concept of variable views. For an injective function f and a variable (or a view)
+x, a variable view y enforces the equivalent of the constraint y = f(x) but it
+does not introduce a new variable and a new constraint: Instead, it delegates all
+domain and constraint operations (the ability to wake constraints) on y to x,
+sometimes after applying f −1. These variable views remove the time and space
+overhead mentioned above and keep the solver kernel small, thus giving us a
+valuable abstraction for constraint programming. Recently, [8,9] demonstrated
+how variable views can be implemented in terms of C++ templates, providing
+further improvement in speed and memory usage. The idea is to use parametric
+polymorphism to allow for code reuse and compile-time optimizations based on
+code expansion and inlining. [9] demonstrates that variable views provide signif-
+icant software engineering beneﬁts as well as great computational improvements
+over the basic approach using new variables and constraints.
+This paper aims at expanding the scope of constraint-programming views
+with an extremely simple abstraction: The concept of domain views which only
+delegate domain operations. Domain views preserve the beneﬁts of variable views
+but simplify the implementation of value-based propagation, i.e., the propagation
+of events of the form ⟨c, x, v⟩, meaning that constraint c must be propagated
+because variable x has lost value v (e.g., [10,4]). The key beneﬁt of domain
+views is to support non-injective views elegantly and compositionalls. Domain
+views can also be implemented using parametric polymorphism and hence are
+fully compatible with the compilation techniques in [9].
+The rest of the paper is organized as follows. Sections 2, 3, and 4 present
+the preliminaries on constraint programming and on views. Section presents the
+implementation of variable views. Section 5 introduces the concept of domain
+views. Section 6 demonstrates how to generalize domain views to the case where
+the function f is not injective. Section 7 brieﬂy discusses how to exploit mono-
+tonicity and anti-monotonicity. Section 8 presents experimental results. Section
+9 discusses related work on advisors [7] and Section 10 concludes the paper.
+2
+Preliminaries
+A constraint-programming system is organized around a queue of events Q and
+its main component is an engine propagating constraints in the queue, i.e.,
+1 while ¬ empty (Q) do
+2
+propagate ( pop(Q ) ) ;
+For simplicity, we only consider two types of events: ⟨c, x⟩and ⟨c, x, v⟩. An event
+⟨c, x⟩means that constraint c must be propagated because the domain of variable
+
+1 i n t e r f a c e
+Variable
+2
+bool member(V v ) ;
+3
+bool remove (V v ) ;
+4
+void watch (C c ) ;
+5
+void watchValue (C c ) ;
+6
+void wake ;
+7
+void wakeValue (V v ) ;
+Fig. 1. The Variable Interface.
+x has been shrunk. An event ⟨c, x, v⟩means that constraint c must be propagated
+because the value v has been removed from the domain of variable x. Events of
+the form ⟨c, x⟩are sometimes called variable-based propagation, while those of
+the form ⟨c, x, v⟩are sometimes called value-based propagation. Note that some
+systems also implement what is called constraint-based propagation, where the
+event simply consists of constraint to propagate without additional information.
+We do not discuss constraint-based propagation here since it is easier to handle.
+The propagation of a constraint may change the domains of some variables
+and thus introduce new events in the queue. As a result, a variable x not only
+maintains its domain D(x) but also keeps track of the constraints it appears in
+so that the proper events can be inserted in the queue. As a result, a variable x
+is best viewed as a triple ⟨D, SC, SCv⟩, where D is the domain of the variable,
+SC is the set of constraints involving x that use variable-based propagation, and
+SCv is the set of constraints involving x that use value-based propagation. If x is
+a variable, we use D(x), SC(x) and SCv(x) to denote these three components.
+For simplicity, a variable in this paper implements the interface depicted in
+Figure 1, where V denotes the set of values considered (e.g., integers or reals)
+and C the set of constraints. For a variable x, method member(v) tests v ∈
+D(x), method remove(v) implements D(x) := D(x) \ {v} and returns true
+if the resulting domain is not empty, method watch(c) registers constraint c
+for variable-propagation, and method watchValue(c) registers constraint c for
+value-propagation. The wake methods are used for creating new events in the
+queue. Method wake must implement Q := Q ∪{⟨c, x⟩
+|
+c ∈SC(x)} while
+method wakeValue(v) must implement Q := Q ∪{⟨c, x, v⟩
+|
+c ∈SCv(x)}.
+With our conventions, a variable can be implemented as depicted in Figure 2.
+3
+Views
+The purpose of this paper is to deﬁne and implement abstractions for constraints
+of the form y = ψ(x). In a ﬁrst step, the paper focuses on injective views, i.e.,
+views in which function ψ is injective, which is the functionality provided by
+many constraint-programming solvers.
+Deﬁnition 1 (Injective Function) A function ψ : D →V is injective if
+∀v, v′ ∈D : ψ(v) = ψ(v′) ⇒v = v′.
+
+1 implementation
+DomainVariable
+2
+{V} D ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+6 DomainVariable({V} Do ) { D := Do ; SC := ∅; SCv := ∅;
+}
+7 bool member(V v) { return v ∈D ;}
+8 bool remove (V v) {
+9
+i f v ∈D
+10
+D := D \ {v} ;
+11
+wake ( ) ;
+12
+wakeValue (v ) ;
+13 }
+14 void watch (C c)
+{ SC := SC ∪{c} ;
+}
+15 void watchValue (C c) { SCv := SCv ∪{c} ;
+}
+16 void wake ()
+{ Q := Q ∪{⟨c, this⟩| c ∈SC} ;}
+17 void wakeValue (V v )
+{ Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;}
+Fig. 2. The Implementation of a Domain Variable
+The inverse ψ−1 : V →D⊥of injective function ψ is deﬁned as
+ψ−1(w) =
+v
+if v ∈D ∧ψ(v) = w
+⊥otherwise
+where D⊥= D ∪{⊥}.
+Note that the deﬁnition of ψ−1 is a speciﬁcation: An actual implementation uses
+a dedicated implementation of ψ−1 as the following two examples illustrate.
+Example 1 (Shift View) Consider the view y = x + c where c is an integer
+and x and y are integer variables. Function ψ : Z →Z can be speciﬁed (using
+lambda calculus notation [1]) as λk.k + c. Its inverse ψ−1 : Z →Z is deﬁned as
+λk.k −c.
+Example 2 (Aﬃne View) Consider the view y = ax + b where a, b ∈Z and
+x, y are integer variables. ψ : Z →Z is λk.ak + b. Its inverse ψ−1 : Z →Z is
+ψ−1 =
+λk.(k −b)/a if (k −b) mod a = 0
+λk.⊥
+otherwise.
+Views must be compositional and make it possible to state a view over a view.
+4
+Variable Views
+The fundamental idea of variable views, implemented in many systems, is to
+delegate all domain and constraint operations of variable y to variable x. A
+variable view thus implements an adapter pattern that stores neither domain
+
+1 implementation
+DomainVariable
+2
+{V} D ;
+3
+{⟨C, X ⟩} SC ;
+4
+{⟨C, X , F⟩} SCv ;
+5
+6 DomainVariable({V} Do ) { D := Do ; SC := ∅; SCv := ∅;}
+7 bool member(V v) { return v ∈D ;}
+8 bool remove (V v) {
+9
+i f v ∈D
+10
+D := D \ {v} ;
+11
+wake ( ) ;
+12
+wakeValue (v ) ;
+13 }
+14 void watch (C c, X y)
+{ SC := SC ∪{⟨c, y⟩} ;
+}
+15 void watchValue (C c, X y, F ψ) { SCv := SCv ∪{⟨c, y, ψ⟩};}
+16 void watch (C c)
+{ watch (c , t h i s ) ;
+}
+17 void watchValue (C c)
+{ watch (c , this , λk.k ) ;
+}
+18
+19 void wake ()
+{ Q := Q ∪{⟨c, x⟩| ⟨c, x⟩∈SC};}
+20 void wakeValue (V v){ Q := Q ∪{⟨c, x, ψ(v)⟩| ⟨c, x, ψ⟩∈SCv};}
+Fig. 3. The Domain Variable for Variable Views.
+nor sets of constraints. The variable view simply stores a reference to variable x
+and delegates all domain and constraint operations to x, possibly after applying
+function ψ or ψ−1 on the arguments. Informally speaking, the membership test
+w ∈D(y) becomes ψ−1(w) ∈D(x), the removal operation proceeds similarly
+and variable x also watches all the constraints of y.
+The only diﬃculty in variable views comes from the fact that variable x now
+needs to watch constraints on both x and y. For variable-based propagation, it is
+necessary to remember which variable is being watched for each constraint and
+the set SC now consists of pairs ⟨c, z⟩where c is a constraint and z is a variable.
+For value-based propagation, it is necessary to store the function ψ since it must
+be applied when method wakeValue is applied. Hence the set SCv now contains
+triples of the form ⟨c, z, ψ⟩. These generalizations are necessary, since when a
+value v is removed from the domain of x, the value-based events for variable y
+must be of the form ⟨c, y, ψ(v)⟩.
+The implementation of variables to support variable views is shown in Fig-
+ure 3 where X denotes the set of variables/views and F the set of ﬁrst-order
+functions. Observe the types of SC and SCv in lines 3–4, the new methods in
+lines 14–15 allow to watch a constraint c for a view y, the matching redeﬁnition
+of the watch methods, and the wake methods that store additional information
+in the queue by applying the stored function ψ on value v (line 20).
+Figure 4 depicts a template for variable views in terms of an injective function
+ψ. A shift view specialization is shown in Figure 5. Observe that variable views do
+not store a domain nor constraint sets. Methods member and remove apply ψ−1 as
+mentioned earlier with only the addition of a test for the ⊥case. Methods watch
+
+1 implementation
+VariableView<ψ>
+2
+X
+x ;
+3 VariableView (X
+x) { x :=
+x ;
+}
+4 bool member(V v) {
+5
+i f ψ−1(v) ̸= ⊥return x . member(ψ−1(v) ) ; else return
+f a l s e ;
+6 }
+7 bool remove (Z v) {
+8
+i f ψ−1(v) ̸= ⊥return x . remove (ψ−1(v) ) ; else return
+true ;
+9 }
+10 void watch (C c ,X y)
+{ x . watch (c, y ) ;
+}
+11 void watchValue (C c ,X y ,F φ) { x . watchValue (c ,y ,φ ◦ψ ) ; }
+12 void watch (C c)
+{ x . watch (c , t h i s ) ;
+}
+13 void watchValue (C c) { x . watchValue (c , this , ψ ) ;
+}
+Fig. 4. The Template for Variable Views.
+1 implementation
+VariableShiftView
+2
+X x ;
+3
+Z
+c ;
+4 VariableShiftView (X
+x ,Z
+c) { x :=
+x ; c :=
+c ;
+}
+5 bool member(Z v) { return x . member(v−c ) ;
+}
+6 bool remove (Z v) { return x . remove (v−c ) ;
+}
+7 void watch (C c ,X y) { x . watch (c, y ) ;
+}
+8 void watchValue (C c ,X y ,Z →Z φ) { x . watchValue (c ,y ,φ ◦(λk.k + c) ) ; }
+9 void watch (C c)
+{ x . watch (c , t h i s ) ;
+}
+10 void watchValue (C c) { x . watchValue (c , this , λk.k + c ) ;
+}
+Fig. 5. A Variable View for Shift Views.
+and watchValue (lines 10–11) state a view on the view itself. In particular, line
+11 illustrates the need for function composition in the case of value propagation.
+The instantiation for shift views in Figure 5 highlights some interesting
+points. First, there is no need for a ⊥test, since the inverse of ψ is always in
+the domain of ψ. Second, value-based propagation requires the use of ﬁrst-order
+functions (see lines 9 and 12) or objects implementing the same functionalities.
+In contrast, methods member and remove “inline” function φ−1 in the code,
+which is never stored or passed as a parameter.
+Optimization Variable views now stores tuples ⟨c, z, ψ⟩for value-based propa-
+gation. Observe however that z is an object so that it is possible to use it to
+compute function ψ. This only requires the view to provide a method map that
+maps the value v through ψ. Lines 15 and 20 in Figure 3 become
+1 void watchValue (C c, X y)
+{ SCv := SCv ∪{⟨c, y⟩};}
+2 void wakeValue (V v )
+{ Q := Q ∪{⟨c, x, x.map(v)⟩| ⟨c, x⟩∈SCv};}
+The map method on standard variables is deﬁned as
+1 V map(V v) { return v ;}
+and its deﬁnition on views (deﬁned over variable x with injective function ψ) is
+
+1 implementation
+DomainVariable
+2
+{V} D ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+{X } Views ;
+6
+7 DomainVariable({V} Do ) { D := Do ; SC := ∅; SCv := ∅; Views := ∅;}
+8 void addView(X x) { Views := Views ∪{x} ;
+}
+9 bool member(V v) { return v ∈D ;}
+10 bool remove (V v) {
+11
+i f v ∈D
+12
+D := D \ {v} ;
+13
+wake ( ) ;
+14
+wakeValue (v ) ;
+15
+f o r a l l
+y ∈Views
+16
+y . wake ( ) ;
+17
+y . wakeValue (v ) ;
+18 }
+19 void watch (C c)
+{ SC := SC ∪{c} ;}
+20 void watchValue (C c) { SCv := SCv ∪{c};}
+21 void wake ()
+{ Q := Q ∪{⟨c, this⟩| c ∈SC} ;}
+22 void wakeValue (V v )
+{ Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;}
+Fig. 6. The Domain Variable for Domain Views.
+1 V map(V v) { return ψ(x.map(v));}
+Observe the recursive call, since views can be posted on views. This optimization
+clutters a bit the API of variables and views but only minimally.
+Variable views are an important concept in constraint programming for injec-
+tive functions. For constraint-based and variable-based propagation, the imple-
+mentation is simple and eﬃcient, although it requires to upgrade slightly the data
+structure to watch constraints. For value-based propagation, the implementation
+is a bit more cumbersome. It requires a generalization of the constraint queue
+and the addition of a map method on variables and views to avoid manipulat-
+ing ﬁrst-order functions. Domain views provide an extremely simple alternative,
+which also has the beneﬁts of supporting non-injective functions elegantly.
+5
+Domain Views
+The key idea behind domain views is to delegate only domain operations from
+variable y to variable x: The view for y maintains its own constraints to watch.
+This removes the need to manipulate ﬁrst-order functions. To implement domain
+views, traditional variables (and views) must store which variables are viewing
+them. When their domains change, they must notify their views.
+Figure 6 depicts the revised implementation of domain variables to support
+domain views. The variable now keeps its views (line 5) and provides a method
+
+1 implementation DomainView<ψ>
+2
+X x ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+{X } Views ;
+6 DomainView(X
+x)
+{ SC := ∅; SCv := ∅; Views := ∅;}
+7 void addView(X x) { Views := Views ∪{x} ;
+}
+8 bool member(V v) {
+9
+i f ψ−1(v) ̸= ⊥return x . member(ψ−1(v) ) ; else return
+f a l s e ;
+10 }
+11 bool remove (Z v) {
+12
+i f ψ−1(v) ̸= ⊥return x . remove (ψ−1(v) ) ; else return
+true ;
+13 }
+14 void watch (C c)
+{ SC := SC ∪{c} ;
+}
+15 void watchValue (C c) { SCv := SCv ∪{c} ;
+}
+16 void wake ()
+{
+17
+Q := Q ∪{⟨c, this⟩| c ∈SC} ;
+18
+f o r a l l (y ∈Views ) y . wake ( ) ;
+19 }
+20 void wakeValue (V v ) {
+21
+Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;
+22
+f o r a l l (y ∈Views ) y . wakeValue (ψ(v) ) ;
+23 }
+Fig. 7. The Template for Domain Views.
+for adding a view (line 8). The only other change is in method remove in lines
+16–18: The domain variable calls method wake and wakeValue on its views to
+inform them of the loss of value v to let them schedule their own constraints.
+Figure 7 shows a template for domain views in terms of an injective function
+ψ. A specialization for shift views is shown in Figure 8. Observe ﬁrst how the
+domain view maintains its own set of constraints. It delegates its domain oper-
+ations in methods member and remove in the same way as variable views, but it
+does not delegate its watch methods, which are similar to those of a traditional
+domain variable. To implement views on views, the wake methods also wake
+the views (lines 16–20 and 21–25), using the function ψ to send the appropriate
+value since v is the value removed from D(x). D(x) may be explicit (traditional
+variable) or implicit (views). The shift view in Figure 8 does not manipulate
+ﬁrst-order functions and inlines ψ−1 in lines 9 and 12 and ψ in line 24.
+Domain views provide an elegant alternative to variable views. They remove
+the need to modify the data structure for watching constraint and alleviate the
+need for the map function, while preserving the beneﬁts of variable views and
+enabling more inlining for value-based propagation. They are based on a simple
+idea: Only delegating the domain operations. Instead of delegating constraint
+watching, constraints are watched locally. It is interesting to analyze the mem-
+ory requirements of both approaches. Variable views need to store variables in
+their constraint lists, which require space proportional to the length of these
+lists. In contrast, domain views only require a few pointers for their own lists,
+
+1 implementation
+DomainShiftView
+2
+X x ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+{X } Views ;
+6
+Z c ;
+7 DomainShiftView (X
+x ,Z
+c) {
+8
+SC := ∅; SCv := ∅; Views := ∅; c :=
+c ;
+9 }
+10 bool member(Z v) { return x . member(v−c ) ;
+}
+11 bool remove (Z v) { return x . remove (v−c ) ;
+}
+12 void watch (C c)
+{ SC := SC ∪{c} ;
+}
+13 void watchValue (C c) { SCv := SCv ∪{c} ;
+}
+14 void wake ()
+{
+15
+Q := Q ∪{⟨c, this⟩| c ∈SC} ;
+16
+f o r a l l (y ∈Views ) y . wake ( ) ;
+17 }
+18 void wakeValue (V v ) {
+19
+Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;
+20
+f o r a l l (y ∈Views ) y . wakeValue (v + c ) ;
+21 }
+Fig. 8. A Domain View for Shift Views.
+the constraints themselves being present in both approaches albeit in diﬀerent
+lists. The viewed variables must also maintain the list of its views, which is
+proportional to the number of views.
+6
+Non-injective Views
+We now generalize domain views to non-injective functions.
+Deﬁnition 2 (Inverse of a Non-Injective Function) The inverse ψ−1 : V →
+2D
+⊥of non-injective function ψ : D →V is deﬁned as
+ψ−1(w) =
+⊥if ̸ ∃v ∈D : ψ(v) = w
+{v ∈D | ψ(v) = w} otherwise.
+Figure 9 gives the template for non-injective views. There are only a few mod-
+iﬁcations compared to the template for injective views. The member function
+must now test membership for a set of values (line 12) and the remove function
+must remove a set of values (line 18). Finally, method wakeValue(w) must test
+membership of v = ψ(w), since there may be multiple supports for v in D(x).
+The key advantage of domain views is that they own their constraints. In the
+context of non-injective functions, this is critical since only the view “knows”
+whether its constraints must be scheduled for propagation.
+It is more diﬃcult and less elegant, but not impossible, to generalize vari-
+able views to support non-injective functions. Consider what should happen for
+
+1 implementation
+NonInjectiveDomainView <ψ>
+2
+X x ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+{X } Views ;
+6 NonInjectiveDomainView(X
+x) {
+7
+SC := ∅; SCv := ∅; Views := ∅;
+8 }
+9 void addView(X x) { Views := Views ∪{x} ;
+}
+10 bool member(V v) {
+11
+i f ψ−1(v) ̸= ⊥return ∃w ∈ψ−1(v) : x . member(w ) ;
+12
+else return
+f a l s e ;
+13 }
+14 bool remove (V v) {
+15
+i f ψ−1(v) ̸= ⊥
+16
+f o r a l l (w ∈ψ−1(v))
+i f ¬ x . remove (w) return
+f a l s e ;
+17
+return
+true ;
+18 }
+19 void watch (C c)
+{ SC := SC ∪{c} ;
+}
+20 void watchValue (C c) { SCv := SCv ∪{c} ;
+}
+21 void wake ()
+{
+22
+Q := Q ∪{⟨c, this⟩| c ∈SC} ;
+23
+f o r a l l (y ∈Views ) y . wake ( ) ;
+24 }
+25 void wakeValue (V w) {
+26
+v = ψ(w) ;
+27
+i f
+x . member(v)
+28
+Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;
+29
+f o r a l l (y ∈Views ) y . wakeValue (ψ(v) ) ;
+30 }
+Fig. 9. The Template for Non-Injective Domain Views.
+variable views. For a view y = f(x), when a value v is removed from the domain
+of x, it is no longer suﬃcient to just use the map function. The view must now
+decide whether the value f(v) is still supported for y. Moreover, if we have a view
+z = g(y) and variable x is trying to decide whether to schedule a constraint in-
+volving z, it must query z to ﬁnd out whether the value g(f(v)) is still supported,
+which depends on whether value f(v) is still supported in variable y. Hence, to
+implement non-injective functions in variable views, waking constraints up must
+be conditional. It is necessary to implement a method needToSchedule on views
+to determine if the original removal will actually remove a value on the views.
+Method wakeValue now becomes
+1 void wakeValue (V v ) {
+2
+Q := Q ∪{⟨c, x, x.map(v)⟩| ⟨c, x⟩∈SCv & x . needToSchedule (v)};}
+
+The implementation of needToSchedule must also be recursive (like the map
+function) to handle the case of views on views. For space reasons, we let readers
+ﬁgure out the details on how to do so correctly and only note the conceptual
+simplicity of domain views.3
+Literal Views Reiﬁed constraints are a fundamental abstraction in constraint
+programming. For instance, In a magic series s of length n, every si must satisfy
+si = Pn−1
+j=0 (sj = i), i.e., it states that si should be the number of occurrences of
+value i in s itself. To implement this behavior, one could rely on auxiliary boolean
+variables bij ⇔sj = i. for every i and j in 0..n−1 leading to a quadratic number
+of boolean variables and reiﬁed equality constraints. The reiﬁcation b ⇔x = i
+can be seen as a non-injective view and Figure 10 describes its implementation.
+The view uses two methods not described before: Method isBoundTo(i) on
+variable x holds if D(x) = {i}, while method bind(i) succeeds if i ∈D(x) and
+reduces the domain D(x) to {i}. With these two functions, the implementation
+is direct with the methods member, remove, and wakeValue carried out by case
+analysis on the value of the “reiﬁed variable”.
+Modulo Views We now show a view for a constraint y = x mod k with k ∈Z.
+The view implementation maintains the supports for each value v ∈D(y), i.e.,
+∀v ∈D(y) sv = {w | w ∈D(x) ∧w mod k = v}
+Figure 11 depicts a sketch of a simple implementation.
+7
+Monotone and Anti-Monotone Views
+We brieﬂy mention how to exploit monotone and anti-monotone properties to
+perform additional operations such as updateMin and updateMax. These tech-
+niques are well-known and are only reviewed here for completeness.
+Deﬁnition 3 (Monotone/AntiMonotone Function) An injective function
+ψ is monotone if ∀v, w : v ≤w →ψ(v) ≤ψ(w). It is anti-monotone if ∀v, w :
+v ≤w →ψ(v) ≥ψ(w).
+If ψ : Z →Z is a monotone function and y is a view on x, then the update
+operations on bounds becomes
+1 bool updateMin (Z v) { return x . updateMin (ψ−1(v) ) ;
+}
+2 bool updateMax (Z v) { return x . updateMax (ψ−1(v) ) ;
+}
+ignoring the case where ψ−1(v) is not well-deﬁned. When ψ is anti-monotone,
+they become
+1 bool updateMin (Z v) { return x . updateMax (ψ−1(v) ) ;
+}
+2 bool updateMax (Z v) { return x . updateMin (ψ−1(v) ) ;
+}
+3 Method needToSchedule must also update any internal state of the views. From a
+semantic standpoint, it would desirable to have another recursive method to notify
+the view that value v has been removed and to update the state.
+
+1 implementation
+ReifedDomainView
+2
+X x ;
+3
+{C} SC ;
+4
+{C} SCv ;
+5
+{X } Views ;
+6
+Z i ;
+7 DomainReifiedView(X
+x ,Z
+i) {
+8
+SC := ∅; SCv := ∅; Views := ∅; i :=
+i ;
+9 }
+10 bool member(Z v) {
+11
+i f v = 0 return ¬x . isBoundTo (i ) ;
+12
+else return x . member(i ) ;
+13 }
+14 bool remove (Z v) {
+15
+i f v = 0
+16
+return x . bind (i ) ;
+17
+else return x . remove (i ) ;
+18 }
+19 . . .
+20 void wakeValue (V v ) {
+21
+i f v = i
+22
+Q := Q ∪{⟨c, this, 1⟩| c ∈SCv} ;
+23
+f o r a l l (y ∈Views ) y . wakeValue (1 ) ;
+24
+else
+25
+i f
+¬member(0)
+26
+Q := Q ∪{⟨c, this, 0⟩| c ∈SCv} ;
+27
+f o r a l l (y ∈Views ) y . wakeValue (0 ) ;
+28 }
+Fig. 10. A Domain View for Reiﬁed Views.
+8
+Empirical Evaluation
+We now describe experimental results to demonstrate the eﬃciency of domain
+views. The experiments were run on MacOS X 10.8.3 running on a Core i7 at
+2.6Ghz, using the Objective-CP optimization system [11]. The complete im-
+plementation of the integer and boolean variables, along with their domain and
+their views (including literal views) is around 3,200 lines of code, which is simi-
+lar to the type of code reuse advertised for Gecode [9]. Objective-CP pushes
+the methodology advocated in [9] to the limit, only supporting core constraints
+and using views to obtain more complex versions. For instance, the CP solver
+in Objective-CP provides Pn
+i=0 xi ≤b but not Pn
+i=0 ai · xi ≤b. Note that
+cost-based propagation for COP would, of course, mandate global constraints
+retaining the ai. Objective-CP supports value-based propagation and non-
+injective views, which demonstrates the additional functionalities provided by
+domain views. Note that the experiments only aim at demonstrating the prac-
+ticability of domain views: See [9] for the beneﬁts of views.
+
+1 implementation ModuloDomainView
+2
+. . .
+3
+int
+k ;
+4
+{Z} [ ]
+S ;
+5 DomainReifiedView(X
+x ,Z
+k) { . . . }
+6 bool member(Z v) { return Sv ̸= ∅;
+}
+7 bool remove (Z v) {
+8
+f o r a l l (w ∈Sv )
+9
+i f ¬ x . remove (w) return
+f a l s e ;
+10
+return
+true ;
+11 }
+12 . . .
+13 void wakeValue (V w) {
+14
+v := w mod k ;
+15
+i f ¬ member(v)
+16
+Q := Q ∪{⟨c, this, v⟩| c ∈SCv} ;
+17
+f o r a l l (y ∈Views )
+18
+y . wakeValue (v ) ;
+19 }
+Fig. 11. A Domain View for a Modulo Function.
+Benchmarks The implementation was validated with on a variety of benchmarks
+relying on views. The experiments compare implementations with no views, with
+the optimized variable views (with subtype polymorphism), and domain views.
+When no-views are used, the implementation uses the constraints and auxiliary
+variables introduced during the ﬂattening of the model. The implementation
+uses the same models throughout and the search space and pruning are always
+identical. For bibd, we follow [9] and rewrite the boolean relations a ∧b as
+¬ (¬a ∨¬b) to ensure that the system uses negation views. Speciﬁcally, knapsack
+use linear equations P
+i∈S xi = b and introduce views for the coeﬃcients. The
+Steel Mill Slab problem relies on literal views for the color constraint on slab
+s : P
+c∈Colors ∨o∈Orders[c](xo = s) ≤2. Debruijn uses both linear equations as
+well as reiﬁcations. Langford uses aﬃne views to “shift” indices within element
+constraints. Magicseries clearly relies on reiﬁcations. Sport is the classic sport
+scheduling benchmark and uses global constraints.
+Measurements The benchmarks use a simple ﬁrst-fail heuristic as decomposi-
+tion may change the behavior of more advanced heuristics (e.g., WDEG) and
+these experiments are only interested in assessing view implementations, not in-
+herent speed. Table 1 oﬀers a comparative view of the results. It is based on
+50 execution of each benchmark to account for the inherent variability related
+to modern processor technology. Columns µ(Tcpu) and µ(Twc) give the average
+user-time or wall-clock times in milliseconds. Columns σ(Tcpu) and σ(Twc) re-
+port the standard deviations for those run times. Column |M| reports the peak
+memory consumption in kilobytes for the entire process. The measurement was
+taken at the level of the malloc C-runtime function and includes all memory
+
+Bench
+type
+µ(Tcpu)
+µ(Twc) σ(Tcpu) σ(Twc) |M|(KB) P.(×1000)
+bibd(6)
+No-View
+1,088.4
+1,130.5
+222.1
+227.9
+44,652
+1,984
+bibd(6)
+Domain-View
+729.8
+759.2
+107.6
+111.0
+29,197
+804
+bibd(6)
+Var-View
+644.7
+671.2
+59.4
+60.2
+28,082
+805
+knapsack(4)
+No-View
+8,857.5
+8,873.9
+180.9
+184.8
+987
+33,207
+knapsack(4)
+Domain-View
+6,768.0
+6,784.5
+166.8
+176.1
+812
+2,949
+knapsack(4)
+Var-View
+6,151.2
+6,164.5
+109.2
+111.0
+789
+3,062
+ais(30)
+No-View
+1,341.8
+1,348.9
+52.2
+57.6
+1,336
+2,734
+ais(30)
+Domain-View
+1,355.3
+1,361.5
+31.8
+32.4
+1,336
+2,734
+ais(30)
+Var-View
+1,354.9
+1,362.4
+26.1
+26.5
+1,337
+2,734
+sport
+No-View
+4,851.7
+4,864.2
+111.3
+116.0
+2,030
+3,361
+sport
+Domain-View
+4,850.9
+4,864.3
+179.4
+189.3
+2,029
+3,361
+sport
+Var-View
+4,936.1
+4,949.5
+231.8
+236.7
+2,029
+3,361
+langford(9/3)
+No-View
+6,060.5
+6,076.1
+298.8
+306.2
+1,375
+54,027
+langford(9/3)
+Domain-View
+7,008.3
+7,026.6
+316.8
+323.5
+1,368
+56,893
+langford(9/3)
+Var-View
+6,859.5
+6,877.9
+242.7
+248.5
+1,366
+56,887
+debruijn(2/12) No-View
+7,665.5
+8,437.3
+153.4
+169.2
+624,635
+2,558
+debruijn(2/12) Domain-View
+7,292.2
+8,014.2
+111.2
+144.1
+552,515
+946
+debruijn(2/12) Var-View
+6,935.2
+7,628.2
+384.9
+422.4
+550,792
+967
+slab
+No-View
+4,845.2
+4,919.4
+108.6
+115.4
+84,092
+4,403
+slab
+Domain-View
+2,243.5
+2,294.0
+128.7
+138.8
+51,725
+909
+slab
+Var-View
+4,509.8
+4,578.7
+94.7
+99.4
+73,929
+2,968
+magicserie(300) No-View
+17,951.2 18,164.7
+284.0
+300.8
+231,622
+30,771
+magicserie(300) Domain-View
+8,318.3
+8,443.6
+191.9
+201.4
+122,026
+257
+magicserie(300) Var-View
+14,879.9 15,088.0
+429.1
+441.1
+229,288
+20,745
+Table 1. Experimental Results on Variable and Domain Views.
+allocations done by the executable. Finally, column P. reports the number of
+propagation events recorded by the engine (in thousands).
+Without surprise, the results indicate that a minimalist kernel must use views
+to be competitive. The diﬀerences in memory consumptions and running times
+are often quite signiﬁcant when contrasted with view-based implementations.
+For all benchmarks involving only injective views, variable and domain views
+are essentially similar in time and space eﬃciency. Given the standard devia-
+tions, the diﬀerences in eﬃciency are not statistically signiﬁcant, although vari-
+able views are often slightly more eﬃcient. This is not always the case, as the
+sport-scheduling problem indicates. The main beneﬁt of domain views is to sup-
+port non-injective views simply and eﬃciently. This is particularly clear on the
+benchmarks relying on reiﬁcations, i.e, slab and magicserie. The beneﬁts are
+in terms of runtime and memory consumption. The runtime beneﬁts are quite
+substantial, as the running time is halved on the Steel Mill Slab problem. The
+dramatic drop in the number of propagations is easily explained by the absence
+of constraints of the form b ⇔(x = v), yet, the same work is still carried out by
+the view, albeit at a much lower overhead.
+In summary, the experimental results show that domain views do not add
+any measurable overhead on injective views and bring signiﬁcant beneﬁts on
+non-injective views, which they support elegantly.
+
+9
+Related Work
+It is important to contrast the variable and domain view implementations pro-
+posed here with another approach using delta-sets and advisors [7,9]. Advisors
+are another way of “simulate” value-based propagation.4 An advisor is associ-
+ated with a variable and a constraint and it modiﬁes the state of the constraint
+directly upon a domain modiﬁcation for its variables. Advisors do not go through
+the propagation queue but modify the state of their constraint directly. This has
+both an advantage (speed) and an inconvenience, since an advisor may be called
+while its constraint is propagating; Hence some care must be exercised to main-
+tain a consistent state. Advisors also receive the domain change (called a delta
+set) which they may query.
+Advisors can be associated with variable views. The view must now be up-
+graded to query, not only the domain, but also the delta sets. In other words, the
+queries on the delta must transform the domain delta, say {v1, . . . , vn}, through
+the view to obtain {φ(v1), . . . , φ(vn)}. Gecode [9] does not compute delta sets
+exactly but approximates them by intervals instead. A complete implementa-
+tion of value-based propagation would require the creation of these delta sets.
+Advisors and delta sets can be used in the case of non-injective functions but
+that solution would still go through the propagation queue and use a constraint.
+Indeed, by design, advisors do not propagate constraints.
+The key advantage of domain views in this context is their ability to imple-
+ment non-injective views without going through the propogation queue.
+10
+Conclusion
+This paper reconsidered the concept of views, an important abstraction provided
+by constraint-programming systems to avoid the proliferation of constraints,
+while preserving the eﬃciency of dedicated implementation. It proposed an
+alternative to the concept of variable views, typically featured in constraint-
+programming systems. Contrary to variable views, domain views only delegate
+domain operations and maintains their own set of constraints to watch. Domain
+views simplify the implementation of constraint-programming systems featur-
+ing value-based propagation as they avoid manipulating ﬁrst-order functions
+(or objects implementing a similar functionality). They also make it possible to
+implement, in simple ways, views featuring non-injective functions. These are
+particularly useful for reiﬁed constraints, which are also an important features
+of constraint-programming systems. Experimental results demonstrate that do-
+main views introduce a negligible overhead (if any) over variable views and that
+views over non-injective functions, which are elegantly supported by domain
+views, provide signiﬁcant beneﬁts.
+4 It is only a simulation since an advisor updates the constraint state but does not
+propagate a constraint itself. They are second-class citizens by choice in Gecode [7].

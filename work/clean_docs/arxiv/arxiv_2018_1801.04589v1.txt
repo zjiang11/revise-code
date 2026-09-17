@@ -1,0 +1,668 @@
+Deep Reinforcement Fuzzing
+Konstantin B¨ottinger1, Patrice Godefroid2, and Rishabh Singh2
+1Fraunhofer AISEC, 85748 Garching, Germany
+
+2Microsoft Research, 98052 Redmond, USA
+
+Abstract—Fuzzing is the process of ﬁnding security vulnera-
+bilities in input-processing code by repeatedly testing the code
+with modiﬁed inputs. In this paper, we formalize fuzzing as a
+reinforcement learning problem using the concept of Markov
+decision processes. This in turn allows us to apply state-of-the-
+art deep Q-learning algorithms that optimize rewards, which
+we deﬁne from runtime properties of the program under test.
+By observing the rewards caused by mutating with a speciﬁc
+set of actions performed on an initial program input, the
+fuzzing agent learns a policy that can next generate new higher-
+reward inputs. We have implemented this new approach, and
+preliminary empirical evidence shows that reinforcement fuzzing
+can outperform baseline random fuzzing.
+I. INTRODUCTION
+Fuzzing is the process of ﬁnding security vulnerabilities
+in input-processing code by repeatedly testing the code with
+modiﬁed, or fuzzed, inputs. Fuzzing is an effective way to
+ﬁnd security vulnerabilities in software [1], and is becoming
+standard in the commercial software development process [2].
+Existing fuzzing tools differ by how they fuzz program
+inputs, but none can explore exhaustively the entire input space
+for realistic programs in practice. Therefore, they typically
+use fuzzing heuristics to prioritize what (parts of) inputs to
+fuzz next. Such heuristics may be purely random, or they may
+attempt to optimize for a speciﬁc goal, such as maximizing
+code coverage.
+In this paper, we investigate how to formalize fuzzing as a
+reinforcement learning problem. Intuitively, choosing the next
+fuzzing action given an input to mutate can be viewed as
+choosing a next move in a game like Chess or Go: while an
+optimal strategy might exist, it is unknown to us and we are
+bound to play the game (many times) in the search for it. By
+reducing fuzzing to reinforcement learning, we can then try to
+apply the same neural-network-based learning techniques that
+have beaten world-champion human experts in Backgammon
+[3], [4], Atari games [5], and the game of Go [6].
+Speciﬁcally, fuzzing can be modeled as learning process
+with a feedback loop. Initially, the fuzzer generates new inputs,
+and then runs the target program with each of them. For each
+program execution, the fuzzer extracts runtime information
+(gathered for example by binary instrumentation) for evaluat-
+ing the quality (with respect to the deﬁned search heuristic) of
+the current input. For instance, this quality can be measured
+as the number of (unique or not) instructions executed, or
+the overall runtime of the execution. By taking this quality
+feedback into account, a feedback-driven fuzzer can learn from
+M
+I
+P
+r(x, a)
+x
+a
+Fig. 1. Modeling Fuzzing as a Markov decision process.
+past experiments, and then generate other new inputs hopefully
+of better quality. This process repeats until a speciﬁc goal
+is reached, or bugs are found in the program. Similarly, the
+reinforcement learning setting deﬁnes an agent that interacts
+with a system. Each performed action causes a state transition
+of the system. Upon each performed action the agent observes
+the next state and receives a reward. The goal of the agent is
+to maximize the total reward over time.
+Our mathematical model of fuzzing is captured in Figure 1.
+An input mutator engine M generates a new input I by
+performing a fuzzing action a, and subsequently observes
+a new state x directly derived from I as well as a reward
+r(x, a) that is measured by executing the target program P
+with input I. We reduce input fuzzing to a reinforcement
+learning problem by formalizing it using Markov decision
+processes [7]. Our formalization allows us to apply state-of-
+the-art machine learning methods. In particular, we experiment
+with deep Q-learning.
+In summary, we make the following contributions:
+• We formalize fuzzing as a reinforcement learning prob-
+lem using the concept of Markov decision processes.
+• We introduce a fuzzing algorithm based on deep Q-
+learning that learns to choose highly-rewarded fuzzing
+actions for any given propgram input.
+• We implement and evaluate a prototype of our approach.
+• We present empirical evidence that reinforcement fuzzing
+can outperform baseline random fuzzing.
+II. RELATED WORK
+Our work is inﬂuenced by three main streams of research:
+fuzzing, grammar reconstruction, and deep Q-learning.
+arXiv:1801.04589v1  [cs.AI]  14 Jan 2018
+
+A. Fuzzing
+There are three main types of fuzzing techniques in use
+today: (1) blackbox random fuzzing [1], [8], (2) white-
+box constraint-based fuzzing [9], and (3) grammar-based
+fuzzing [10], [1], which can be viewed as a variant of model-
+based testing [11]. Blackbox and whitebox fuzzing are fully
+automatic, and have historically proved to be very effective at
+ﬁnding security vulnerabilities in binary-format ﬁle parsers.
+In contrast, grammar-based fuzzing is not fully automatic:
+it requires an input grammar specifying the input format of
+the application under test. This grammar is typically written
+by hand, and this process is laborious, time consuming, and
+error-prone. Nevertheless, grammar-based fuzzing is the most
+effective fuzzing technique known today for fuzzing applica-
+tions with complex structured input formats, like web-browsers
+which must take as (untrusted) inputs web-pages including
+complex HTML documents and JavaScript code.
+State-of-art fuzzing tools like SAGE [9] or AFL [12]
+use coverage-based heuristics to guide their search for bugs
+towards less-covered code parts. But they do not use machine
+learning techniques as done in this paper.
+Combining statistical neural-network-based machine learn-
+ing with fuzzing is a novel approach and, to the best of
+our knowledge, there is just one prior paper on this topic:
+Godefroid et al. [13] use character-based language models to
+learn a generative model of fuzzing inputs, but they do not
+use reinforcement learning.
+B. Grammar Reconstruction
+Research on reconstructing grammars from sample inputs
+for testing purposes started in the early 1970’s [10], [14].
+More recently, Bastani et al. [15] proposed an algorithm for
+automatic synthesis of a context-free grammar given a set of
+seed inputs and a black-box target. Cui et al. [16] automatically
+detect record sequences and types in the input by identiﬁcation
+of chunks based on taint tracking input data in respective
+subroutine calls. Similarly, the authors of [17] apply dynamic
+tainting to identify failure-relevant inputs. Another recently
+proposed approach [18] mines input grammars from valid
+inputs based on feedback from dynamic instrumentation of
+the target by tracking input characters.
+C. Deep Q-Learning
+Reinforcement learning [19] emerged from trial and error
+learning and optimal control for dynamic programming [7].
+Especially the Q-learning approach introduced by Watkins
+[20], [21] was recently combined with deep neural networks
+[3], [4], [5], [6] to efﬁciently learn policies over large state
+spaces and has achieved impressive results in complex tasks.
+III. REINFORCEMENT LEARNING
+In this section we give the necessary background on rein-
+forcement learning. We ﬁrst introduce the concept of Markov
+decision processes [7], which provides the basis to formalize
+fuzzing as a reinforcement learning problem. Then we discuss
+the Q-learning approach to such problems and motivate the
+application of deep Q-networks.
+Reinforcement learning is the process of adapting an agent’s
+behavior during interaction with a system such that it learns
+to maximize the received rewards based on performed actions
+and system state transitions. The agent performs actions on
+a system it tries to control. For each action, the system
+undergoes a state transition. In turn, the agent observes the
+new state and receives a reward. The aim of the agent is to
+maximize its cumulative reward received during the overall
+time of system interaction. The following formal notation
+relates to the presentation given in [19].
+The interaction of the agent with the system can be seen as
+a stochastic process. In particular, a Markov decision process
+M is deﬁned as M = (X, A, P0), where X denotes a set
+of states, A a set of actions, and P0 the transition probability
+kernel. For each state-action pair (x, a) ∈X × A and each
+U ⊂X × R the kernel P0 gives the probability P0(U|x, a)
+such that performing action a in state x causes the system to
+transition into some state of X that yields some real-valued
+reward U. P0 directly provides the state transition probability
+kernel P for single transitions (x, a, y) ∈X × A × X
+P(x, a, y) = P0({y} × R|x, a).
+(1)
+This naturally gives rise to a stochastic process: An agent
+observing a certain state chooses an action to cause a state
+transition with the corresponding reward. By subsequently
+observing state transitions with corresponding rewards the
+agent aims to learn an optimal behavior that earns the maximal
+possible cumulative reward over time. Formally, with the
+stochastic variables (y(x, a), r(x, a)) distributed according to
+P0(·|x, a) the expected immediate reward for each choice
+of action is given by E[r(x, a)]. In the following, for a
+stochastic variable v the notation v ∼D indicates that v
+is distributed according to D. During the stochastic process
+(xt+1, rt+1) ∼P(·|xt, at) the aim of an agent is to maximize
+the total discounted sum of rewards
+R =
+∞
+X
+t=0
+γtrt+1,
+(2)
+where γ ∈(0, 1) indicates a discount factor that prioritizes
+rewards in the near future. The choice of action at an agent
+makes in reaction to observing state xt is determined by its
+policy at ∼π(·|xt). The policy π maps observed states to
+actions and therefore determines the behavior of the agent.
+Let
+Qπ(x, a) = E
+" ∞
+X
+t=0
+γtrt+1|x0 = x, a0 = a
+#
+(3)
+denote the expected cumulative reward for an agent that
+behaves according to policy π. Then we can reduce our
+problem of approximating the best policy to approximating
+
+the optimal Q function. One practical way to achieve this is
+adjusting Q after each received reward according to
+Q(xt, at) ←Q(xt, at)
+(4)
++ α
+
+rt + γ max
+a
+Q(xt+1, a) −Q(xt, at)
+
+,
+(5)
+where α ∈(0, 1] indicates the learning rate. The process
+in this setting works as follows: The agent observes a state
+xt, performs the action at
+=
+arg maxa Q(xt, a) (where
+arg maxa f(a) denotes the argument value a that maximizes
+f(a)) that maximizes the total expected future reward and
+thereby causes a state transition from xt to xt+1. Receiving
+reward rt and observing xt+1 the agent then considers the
+best possible action at+1 = arg maxa Q(xt+1, a). Based on
+this consideration, the agent updates the value Q(xt, at). If
+for example the decision of taking action at in state xt led to
+a state xt+1 that allows to choose a high reward action and
+additionally invoked a high reward rt, the Q value for this
+decision is adapted accordingly. Here, the factor α determines
+the rate of this Q function update.
+For small state and action spaces, Q can be represented as a
+table. However, for large state spaces we have to approximate
+Q with an appropriate function. An approximation using deep
+neural networks was recently introduced by Mnih et al. [5]. For
+such a representation, the update rule in Equation (4) directly
+translates to minimizing the loss function
+L =
+
+r + γ max
+a
+Q(xt+1, a) −Q(xt, at)
+2
+.
+(6)
+The learning rate α in Equation (4) then corresponds to the
+rate of stochastic gradient descent during backpropagation.
+Deep Q-networks have been shown to handle large state
+spaces efﬁciently. This allows us to deﬁne an end-to-end
+algorithm directly on raw program inputs, as we will see in
+the next section.
+IV. MODELING FUZZING AS A MARKOV DECISION
+PROCESS
+In this section we formalize fuzzing as a reinforcement
+learning problem using a Markov decision process by deﬁning
+states, actions, and rewards in the fuzzing context.
+A. States
+We consider the system that the agent learns to interact with
+to be a given “seed” program input. Further, we deﬁne the
+states that the agent observes to be substrings of consecutive
+symbols within such an input. Formally, let Σ denote a ﬁnite
+set of symbols. The set of possible program inputs I written
+in this alphabet is then deﬁned by the Kleene closure I := Σ∗.
+For an input string x = (x1, ..., xn) ∈I let
+S(x) := {(x1+i, ..., xm+i) | i ≥0, m + i ≤n)}
+(7)
+denote the set of all substrings of x. Clearly, ∪x∈IS(x) = I
+holds. We deﬁne the states of our Markov decision process to
+be I. In the following, x ∈I denotes an input for the target
+program and x′ ∈S(x) ⊂I a substring of this input.
+B. Actions
+We deﬁne the set of possible actions A of our Markov
+decision process to be random variables mapping substrings
+of an input to probabilistic rewriting rules
+A := {a : I →(I × I, F, P) | a ∼π(x′)} ,
+(8)
+where F = σ(I × I) denotes the σ-algebra of the sample
+space (I × I) and P gives the probability for a given rewrite
+rule. In our implementation (see Section VI) we deﬁne a small
+subset A ⊂A of probabilistic string rewrite rules that operate
+on a given seed input.
+C. Rewards
+We deﬁne rewards independently for both characteristics of:
+1) the next performed action a and 2) the program execution
+with the next generated input x, i.e., r(x, a) = E(x) + G(a).
+In our implementation in Section VI we experiment with E
+providing number of newly discovered basic blocks, execution
+path length, and execution time of the target that processes
+the input x. For example, we can deﬁne the number of newly
+discovered blocks as
+E1(x, I′) :=
+
+B(cx) \
+
+[
+χ∈I′
+B(cχ)
+
+
+
+.
+(9)
+where cx denotes the execution path the target program takes
+when processing input x, B(cx) is the set of unique basic
+blocks of this path, and I′ ⊂I is the set of previously
+processed inputs. Here, we deﬁne a basic block as a sequence
+of program instructions without branch instructions.
+V. REINFORCEMENT FUZZING ALGORITHM
+In this section we present the overall reinforcement fuzzing
+algorithm.
+A. Initialization
+We start with an initial seed input x ∈I. The choice of x
+is not constrained in any way, it may not even be valid with
+regard to the input format of the target program. Next, we
+initialize the Q function. For this, we apply a deep neural net
+that maps states to the estimated Q values of each action, i.e.,
+we simultaneously approximate the Q values for all actions A
+given a state x′ ∈S(x) as deﬁned in Equation (7). The x′ 7→
+Q(x′, a) representation provides the advantage that we only
+need one forward pass to simultaneously receive the Q values
+for all actions a ∈A instead of |A| forward passes. During
+Q function initialization we distribute the network weights
+randomly.
+B. State Extraction
+The state extraction step State() takes as input a seed x ∈I
+and outputs a substring of x′ ∈S(x). In Section IV we deﬁned
+the states of our Markov decision process to be I = Σ∗. For
+the given seed x ∈I we extract a strict substring x′ ∈S(x)
+at offset o ∈{0, ..., |x| −|x′|} of width |x′|. In other words,
+the seed x corresponds to the system as depicted in Figure 1
+
+and the reinforcement agent observes a fragment of the whole
+system via the substring x′. We experimented with controllable
+(via action) and predeﬁned choices of offsets and substring
+widths, as discussed in Section VI.
+C. Action Selection
+The action selection step takes as input the current Q
+function and an observed state x′ and outputs an action a ∈A
+as deﬁned in Equation (8). Actions are selected according to
+the policy π following an ϵ-greedy behavior: With probability
+1 −ϵ (for a small ϵ > 0) the agent selects an action
+a = arg maxa′ Q(x′, a′) that is currently estimated optimal
+by the Q-function, i.e., it exploits the best possible choice
+based on experience. With a probability ϵ it explores any other
+action, where the probability of choice is uniformly distributed
+within |A|.
+D. Mutation
+The mutation step takes as input a seed x and an action
+a. It outputs the string that is generated by applying action
+a on x. As indicated in Equation (8) we deﬁne actions to
+be mappings to probabilistic rewriting rules and not rewriting
+rules on their own. So applying action a on x means that we
+mutate x according to the rewrite rule mapped by a within the
+probability space (I × I, F, P). We make this separation to
+distinguish between the random nature of choice for the action
+a ∼π(·|x′) and the randomness within the rewrite rule.
+E. Reward Evaluation
+The reward evaluation step takes as input the target program
+P, an action a ∈A, and an input x ∈I that was generated
+by the application of a on a seed. It outputs a positive number
+r ∈R+. The stochastic reward variable r(x, a) = E(x)+G(a)
+sums up the rewards for both generated input and selected
+action. Function E rewards characteristics recorded during the
+program execution as deﬁned in Section IV-C.
+F. Q-Update
+The Q-update step takes as input the extracted substring
+x′ ∈S(x), the action a that generated x, the evaluated
+reward r ∈R+, and the Q function approximation, which
+in our case is a deep neural network. It outputs the updated
+Q approximation. As indicated above, the choice of applying
+a deep neural network Q is motivated by the requirement to
+learn on raw substrings x′ ∈S(x). The Q function predicts
+for a given state the expected rewards for all deﬁned actions
+of A simultaneously, i.e., it maps substrings according to
+x′ 7→Q(x′, a). We update Q in the sense that we adapt
+the predicted reward value Q(xt, at) according to the target
+r + γ maxa Q(xt+1, a). This yields the loss function L given
+by Equation (6) for action at. All other actions A \ {at} are
+updated with zero loss. The convergence rate of Q is primarily
+determined by the learning rate of stochastic gradient descent
+during backpropagation as well as the choice of γ.
+Input: Program P
+x  Seed()
+Q  Qnet()
+do:
+x0  State(x)
+a  Action(x0, Q)
+x  Mutate(x, a)
+r  Reward(P, x)
+Q  Update(Q, x0, a, r)
+x  Reset()
+while (true)
+Fig. 2. Reinforcement fuzzing algorithm.
+G. Joining the Pieces
+Now that we have presented all individual steps we can
+proceed with combining them to get the overall fuzzing
+algorithm as depicted in Figure 2.
+We start with an initialization phase that outputs a seed x
+as well as the initial version of Q. Then, the fuzzer enters
+the loop of state extraction, action selection, input mutation,
+reward evaluation, Q update, and test case reset. Starting with
+a seed x ∈I, the algorithm extracts a substring x′ ∈S(x) and
+based on the observed state x′ then chooses the next action
+according to its policy. The choice is made looking at the best
+possible reward predicted via x′ 7→Q(x′, a) and applying an
+ϵ-greedy exploitation-exploration strategy. To guarantee initial
+exploration we initially deﬁne a relatively high value for ϵ
+and monotonically decrease ϵ over time until it reaches a ﬁnal
+small threshold, from then on it remains constant. The selected
+action provides a string substitution as indicated in Equation
+(8) which is applied to x for mutation. The generated mutant
+input is fed into the target program P to evaluate the reward
+r. Together with Q, x, and a, this reward is taken into account
+for Q update. Finally, the Reset() function periodically resets
+input x to a valid seed. In our implementation we reset the
+seed after each mutation as described in Section VI. After
+reset, the algorithm continues the loop.
+We formulated the algorithm with just one single input seed.
+However, we could generalize this to a set of seed inputs by
+choosing another seed within this set for each iteration of the
+main loop.
+The algorithm above performs reinforcement fuzzing with
+activated policy learning. We show in our evaluation in Sec-
+tion VI that the Q-network generalizes on states. This allows
+us to switch to high-throughput mutant generation with a ﬁxed
+policy after a sufﬁciently long training phase.
+VI. IMPLEMENTATION AND EVALUATION
+In this section we present details regarding our implemen-
+tation together with an evaluation of the prototype.
+
+A. Target Programs
+As fuzzing targets we chose programs processing ﬁles in
+the Portable Document Format PDF. This format is complex
+enough to provide a realistic testbed for evaluation. From the
+1,300 pages long PDF speciﬁcation [22], we just need the fol-
+lowing basic understanding: each PDF document is a sequence
+of PDF bodies each of which includes three sections named
+objects, cross-reference table, and trailer. While our algorithm
+is deﬁned to be independent of the targeted input format, we
+used this structure to deﬁne fuzzing actions speciﬁcally crafted
+for PDF objects.
+Initially we tested different PDF processing programs in-
+cluding the PDF parser in the Microsoft Edge browser on
+Windows and several command line converters on Linux.
+All results in the following presentation refer to fuzzing the
+pdftotext program mutating a 168 kByte seed ﬁle with 101
+PDF objects including binary ﬁelds.
+B. Implementation
+In the following we present details regarding our imple-
+mentation of the proposed reinforcement fuzzing algorithm.
+We apply existing frameworks for binary instrumentation and
+neural network training and implement the core framework
+including the Q-learning module in Python 3.5.
+a) State Implementation: Our fuzzer observes and mu-
+tates input ﬁles represented as binary strings. With Σ = {0, 1}
+we can choose between state representations of different
+granularity, for example bit or byte representations. We encode
+the state of a substring x′ as the sequence of bytes of this
+string. Each byte is converted to its corresponding ﬂoat value
+when processed by the Q network. As introduced in Section
+V we denote o ∈{0, ..., |x| −|x′|} to be the offset of x′ and
+w = |x′| to be the width of the current state.
+b) Action Implementation: We implement each action as
+a function in a Python dictionary. As string rewriting rules we
+take both probabilistic and deterministic actions into account.
+In the following we list the action classes we experiment with.
+• Random Bit Flips. This type of action mutates the
+substring x′ with predeﬁned and dynamically adjustable
+mutation ratios.
+• Insert Dictionary Tokens. This action inserts tokens from
+a predeﬁned dictionary. The tokens in the dictionary
+consist of ASCII strings extracted from a set of selected
+seed ﬁles.
+• Shift Offset and Width. This type of action shifts the
+offset and width of the observed substring. Left and right
+shift take place at the PDF object level. Increasing and
+decreasing the width take place with byte granularity.
+• Shufﬂe. We deﬁne two actions for shufﬂing substrings.
+The ﬁrst action shufﬂes bytes within x′, the second action
+shufﬂes three segments of the PDF object that is located
+around offset o.
+• Copy Window. We deﬁne two actions that copy x′ to a
+random offset within x. The ﬁrst action inserts the bytes
+of x′, the second overwrites bytes.
+• Delete Window. This action deletes the observed substring
+x′.
+c) Reward Implementation: For evaluation of the reward
+R(x, a) we experimented with both coverage and execution
+time information.
+To measure E(x) = E1(x, I′) as deﬁned in Equation (9),
+we used existing instrumentation frameworks. We initially
+used the Microsoft Nirvana toolset for measuring code cover-
+age for the PDF parser included in Edge. However, to speed up
+training of the Q net we switched to smaller parser targets. On
+Linux we implemented a custom Intel PIN-tool plug-in that
+counts the number of unique basic blocks within the pdftotext
+program.
+d) Q Network Implementation: We implemented the Q
+learning module in Tensorﬂow [23] by constructing a feed for-
+ward neural network with four layers connected with nonlinear
+activation functions. The two hidden layers included between
+64 and 180 hidden units (depending on the state size) and we
+applied tanh as activation function. We initialize the weights
+randomly and uniformly distributed within wi ∈[0, 0.1]. The
+initial learning rate of the gradient descent optimizer is set to
+0.02.
+C. Evaluation
+In this section we evaluate our implemented prototype. We
+present improvements to a predeﬁned baseline and also discuss
+current limitations. All measurements were performed on a
+Xeon E5-2690 2.6 Ghz with 112 GB of RAM. The summary
+of the improvements obtained in accumulated rewards based
+on different reward functions, modifying state size, and gen-
+eralization to new inputs is shown in Table I. We now explain
+the results in more detail.
+1) Baseline: To show that our new reinforcement learning
+algorithm actually learns to perform high-reward actions given
+an input observation, we deﬁne a comparison baseline policy
+that randomly selects actions, where the choice is uniformly
+distributed among the action space A. Formally, actions in
+the baseline policy πB are distributed uniformly according to
+a ∼πB(·|x) and ∀a ∈A :
+πB(a|x) = |A|−1. After ng =
+1000 generations, we calculated the quotient of the most recent
+500 accumulated rewards by our algorithm and the baseline
+to measure the relative improvement.
+2) Replay Memory: We experimented with two types of
+agent memory: The recorded state-action-reward-state se-
+quences as well as the history of previously discovered basic
+blocks. The ﬁrst type of memory is established during the
+fuzzing process by storing sequences et := (xt, at, rt, xt+1)
+in order to regularly replay samples of them in the Q-update
+step. For each replay step at time t a random experience out
+of {e1, ..., et} is sampled to train the Q network. We could not
+measure any improvement compared to the baseline with this
+method. Second, comparing against the history of previously
+discovered basic blocks also did not result in any improvement.
+Only a memoryless choice of I′ = ∅yielded good results.
+Regarding our algorithm as depicted in Figure 2 we reset the
+basic block history after each step via the Reset() function.
+
+Improvement
+Reward functions
+Code coverage r1
+7.75%
+Execution time r2
+7%
+Combined r3
+11.3%
+State width w = |x′|
+r2 with w = 32 Bytes
+7%
+r2 with w = 80 Bytes
+3.1%
+Generalization to new inputs
+r2 for new input x
+4.7%
+TABLE I
+THE IMPROVEMENTS COMPARED TO THE BASELINE (AS DEFINED
+INVI-C1) IN THE MOST RECENT 500 ACCUMULATED REWARDS AFTER
+TRAINING THE MODELS FOR 1000 GENERATIONS.
+Since both types of agent memory did not yield any
+improvement, we switched them off for the following mea-
+surements. Further, we deactivated all actions that do not
+mutate the seed input, e.g. random bit ﬂip actions of adjusting
+the global mutation ratio or shifting offsets and state widths.
+Instead of active offset o and state width w = |x′| selection
+via an agent action, we set the offset for each iteration
+randomly, where the choice is uniformly distributed within
+{0, ..., |x| −|x′|} and ﬁxed w = 32 Bytes.
+3) Choices of Rewards: We experimented with three dif-
+ferent types of rewards: Maximization of code coverage
+r1(x, a) = E1(x, {}), execution time r2(x, a) = E2(x) =
+T(x), and a combined reward r3(x, a) = E1(x, {}) + T(x)
+with rescaled time for multi-goal fuzzing. While r1(x, a) is
+deterministic, r2(x, a) comes with minor noise in the time
+measurement. Measuring the execution time for different seeds
+and mutations revealed a variance that is two orders of
+magnitude smaller than the respective mean so that r2 is stable
+enough to serve as a reliable reward function. All three choices
+provided improvements with respect to the baseline.
+When rewarding execution time according to r2 our pro-
+posed fuzzing algorithm cumulates in average 7% higher
+execution time reward in comparison to the baseline.
+Since both time and coverage rewards yielded comparable
+improvements with regard to the baseline, we tested to what
+extend those two types of rewards correlate: We measured
+an average Pearson correlation coefﬁcient of 0.48 between
+coverage r1 and execution time r2. This correlation motivates
+the combined reward r3(x, a) = E1(x, {}) + T(x), where
+T(x) is a simple rescaling of execution time by a multiplicative
+factor 1 ∗106 so that the execution time contributes to the
+reward equitable to E1. Training the Q net with r3 yielded
+an improvement of 11.3% in execution time. This result is
+better that taking exclusively r1 or r2 into account. There are
+two likely explanations for this result. First, the noise of time
+measurement could introduce rewarding explorative behavior
+of the Q net. Second, deterministic coverage information could
+add stability to r2.
+4) Q-net Activation Functions: From all activation func-
+tions provided by the Tensorﬂow framework, we found the
+tanh function to yield the best results for our setting. The
+following list compares the different activation functions with
+respect to improvement in reward r1.
+tanh
+sigmoid
+elu
+softplus
+softsign
+relu
+7.75%
+6.56%
+5.3%
+2%
+6.4%
+1.3%
+5) State Width: Increasing the state width w = |x′| from
+32 Bytes to 80 Bytes decreased the improvement (measured in
+average reward r2(x, a) compared to the baseline) from 7% to
+3.1%. In other words, smaller substrings are better recognized
+than large ones. This indicates that our proposed algorithm
+actually takes the structure of the state into account and learns
+to perform best rewarded actions according to this speciﬁc
+structure.
+6) State
+Generalization:
+In
+order
+to
+achieve
+high-
+throughput fuzzing we tested if the already trained Q net
+generalizes to previously unseen inputs. This would allow
+us to switch off Q net training after a while and therefore
+avoid the high processing costs of evaluating the coverage
+reward. To measure generalization we restricted the offset
+o ∈{0, ..., |x| −|x′|} in the training phase to values in the
+ﬁrst half of the seed ﬁle. For testing, we omitted reward
+measurement in the Q update step as depicted in Figure 2
+to stop the training phase and only considered offsets in the
+second half of the seed ﬁle. This way, the Q net is confronted
+with previously unseen states. This resulted in an improvement
+in execution time of 4.7% compared to the baseline.
+VII. CONCLUSION
+Inspired by the similar nature of feedback-driven random
+testing and reinforcement learning, we introduce the ﬁrst
+fuzzer that uses reinforcement learning in order to learn high-
+reward mutations with respect to predeﬁned reward metrics.
+By automatically rewarding runtime characteristics of the
+target program to be tested, we obtain new inputs that likely
+drive program execution towards a predeﬁned goal, such as
+maximized code coverage or processing time. To achieve this,
+we formalize fuzzing as a reinforcement learning problem
+using Markov decision processes. This allows us to construct
+an reinforcement-learning fuzzing algorithm based on deep Q-
+learning that chooses high-reward actions given an input seed.
+The policy π as deﬁned in Section III can be viewed
+as a form of generalized grammar for the input structure.
+Given a speciﬁc state, it suggests a string replacement (i.e., a
+fuzzing action) based on experience. Especially if we reward
+execution path depth, we indirectly reward validity of inputs
+with regard to the input structure, as non-valid inputs are likely
+to be rejected early during parsing and result in small path
+depths. We presented preliminary empirical evidence that our
+reinforcement fuzzing algorithm can learn how to improve
+its effectiveness at generating new inputs based on successive
+feedback. Future research should investigate this further, with
+more setup variants, benchmarks, and experiments.

@@ -1,0 +1,544 @@
+Debate Dynamics for Human-comprehensible Fact-checking on Knowledge
+Graphs∗
+Marcel Hildebrandt†, Jorge Andres Quintero Serna†, Yunpu Ma,
+Martin Ringsquandl, Mitchell Joblin, Volker Tresp
+Siemens Corporate Technology, Munich, Germany
+
+Abstract
+We propose a novel method for fact-checking on knowledge
+graphs based on debate dynamics. The underlying idea is
+to frame the task of triple classiﬁcation as a debate game
+between two reinforcement learning agents which extract ar-
+guments – paths in the knowledge graph – with the goal to
+justify the fact being true (thesis) or the fact being false (an-
+tithesis), respectively. Based on these arguments, a binary
+classiﬁer, referred to as the judge, decides whether the fact
+is true or false. The two agents can be considered as sparse
+feature extractors that present interpretable evidence for either
+the thesis or the antithesis. In contrast to black-box methods,
+the arguments enable the user to gain an understanding for
+the decision of the judge. Moreover, our method allows for
+interactive reasoning on knowledge graphs where the users
+can raise additional arguments or evaluate the debate taking
+common sense reasoning and external information into ac-
+count. Such interactive systems can increase the acceptance of
+various AI applications based on knowledge graphs and can
+further lead to higher efﬁciency, robustness, and fairness.
+1
+Introduction
+Knowledge graphs (KG) are multi-relational,
+graph-
+structured databases which store facts about the real world.
+Thereby, entities correspond to vertices and binary relations
+to edge types that specify how the entities are related to each
+other. KGs are useful resources for various artiﬁcial intel-
+ligence (AI) tasks in different ﬁelds such as named entity
+disambiguation in NLP (Han and Zhao 2010) or visual re-
+lation detection in computer vision (Baier, Ma, and Tresp
+2017). Examples of large sized KGs include Freebase (Bol-
+lacker et al. 2008), YAGO (Suchanek, Kasneci, and Weikum
+2007), and WordNet (Miller 1995). In particular, the Google
+Knowledge Graph (Singhal 2012) is a well-known example
+of a commercial KG with more than 18 billion facts, used by
+the search engine to enhance results. One major issue, how-
+ever, is that most real-world KGs are incomplete (i.e., true
+facts are missing) or contain false facts. Machine learning
+algorithms designed to solve this problem try to infer missing
+∗This is a short workshop paper. The conference paper can be
+downloaded from https://arxiv.org/abs/2001.00461.
+†These authors contributed equally to this work.
+Copyright c⃝2019, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+triples or detect false facts based on observed connectivity
+patterns.
+Most machine learning approaches for reasoning on KGs
+embed both entities and predicates into low dimensional vec-
+tor spaces. Then a score for the plausibility of a triple can
+be computed based on these embeddings. Common to most
+of these methods is their black-box nature because what con-
+tributed to this score is hidden from the user. This lack of
+transparency constitutes a potential limitation when it comes
+to deploying KGs in real world settings. Explainability as
+a development focus for new machine learning models has
+gained attention in the last few years (see (Ribeiro, Singh,
+and Guestrin 2016), (Mahendran and Vedaldi 2015), or (Mon-
+tavon et al. 2017)) as the success of machine learning and AI
+continues, while the ability to understand and interpret the
+increasingly complex and powerful methods staggers behind.
+Laws that require explainable algorithms and models have
+been considered and implemented (Goodman and Flaxman
+2017). Additionally, in contrast to one-way black-box con-
+ﬁgurations, comprehensible machine learning methods allow
+to build systems where both machines and users interact and
+inﬂuence each other.
+In this work we describe a novel method for triple clas-
+siﬁcation based on reinforcement learning. Inspired by the
+concept outlined in (Irving, Christiano, and Amodei 2018)
+to increase AI safety via debates, we model the task of triple
+classiﬁcation as a debate between two agents each presenting
+arguments for the thesis (the triple is true) and the antithesis
+(the triple is false), respectively. Based on these arguments,
+a binary classiﬁer, referred to as the judge, decides whether
+the fact is true or false. In that sense the two agents act as
+feature extractors that present evidence for and against the
+validity of the fact. In contrast to most methods based on
+representation learning, the arguments can be displayed to the
+user such that he can audit the classiﬁcation of the judge and
+potentially overrule the decision. Further, our method can be
+used to create tools for knowledge graph curation or question
+answering where the users can interact with the system by
+inputting additional arguments or make a decision based on
+the agents’ arguments. Moreover, mining evidence for both
+the thesis and the antithesis can be considered as adversarial
+feature generation, making the classiﬁer more robust towards
+contradictory evidence or corrupted data. To the best of our
+knowledge, our method constitutes the ﬁrst model based on
+arXiv:2001.03436v1  [cs.LG]  9 Jan 2020
+
+Michael
+Jordan
+Washington
+Wizzards
+Chicago Bulls
+National
+Basketball
+Association
+(NBA)
+Chicago
+White Sox
+Major
+League
+Baseball
+(MLB)
+male
+Basketball
+player
+USA
+Space
+Jam
+Children’s
+Movie
+Query: (Michael Jordan, has_profession, basketball player)
+Agent 1: (Michael Jordan, plays_for, Chicago Bulls)
+∧(Chicago Bulls, team_of, NBA)
+Agent 2: (Michael Jordan, plays_role_in,Space Jam)
+∧(Space Jam, has_genre, Children’s Movie)
+Agent 1: (Michael Jordan, plays_for, Washington Wizzards)
+∧(Washington Wizzards, team_of, NBA)
+Agent 2: (Michael Jordan, plays_for, Chicago White Sox)
+∧(Chicago White Sox, team_of, MLB)
+Judge: Query is true.
+plays_
+for
+plays_
+for
+team_
+of
+team_
+of
+plays_
+for
+team_
+of
+has_
+gender
+plays_
+role_in
+has_
+nationality
+has_
+genre
+produced_
+in
+has_
+profession
+Figure 1: The agents debate whether Michael Jordan is a professional basketball player. While agent 1 extracts arguments from
+the KG promoting that the fact is true (green), agent 2 argues that it is false (red). Based on the arguments the judge decides that
+Michael Jordan is a professional basketball player.
+debate dynamics for triple classiﬁcation in KGs.
+2
+Background and Related Work
+In this section we provide a brief introduction to KGs in a
+formal setting and review the most relevant related work. Let
+E denote the set of entities and consider the set of binary
+relations R. A knowledge graph KG ⊂E × R × E is a
+collection of facts stored as triples of the form (s, p, o) – sub-
+ject, predicate, and object. To indicate whether a triple is
+true or false, we consider the binary characteristic function
+φ : E × R × E →{1, 0}. For all (s, p, o) ∈KG we assume
+φ(s, p, o) = 1 (i.e., a KG is a collection of true facts). How-
+ever, in case a triple is not contained in KG, it does not imply
+that the corresponding fact is false but rather unknown (open
+world assumption). Triple classiﬁcation (or fact-checking) is
+concerned with predicting the truth value φ(s, p, o).
+Representation learning is an effective and popular tech-
+nique underlying many KG reasoning methods. The basic
+idea is to project both entities and relations into a low dimen-
+sional vector space. Then the likelihood of triples is modelled
+in terms of a functional on the embedding spaces. Popular
+methods based on representation learning include the transla-
+tional embedding method TransE (Bordes et al. 2013), fac-
+torization approaches such ComplEx (Trouillon et al. 2016),
+or deep neural network methods including ConvE (Dettmers
+et al. 2018). While these methods efﬁciently encode the
+local neighborhood of entities, they cannot reason through
+more complex inference paths in KGs. Therefore, path-based
+reasoning methods have been studied. For instance, the Path-
+Ranking Algorithm (PRA) proposed in (Lao, Mitchell, and
+Cohen 2011) uses a combination of weighted random walks
+through the graph for inference. (Xiong, Hoang, and Wang
+2017) proposed the reinforcement learning based path search-
+ing approach called DeepPath, where an agents picks rela-
+tional paths between entity pairs. Recently, and more related
+to our work, (Das et al. 2018) proposed the multi-hop rea-
+soning method MINERVA. The basic idea is to display the
+query subject and predicate to the agent and let the agent
+perform a policy guided walk to the correct object entity. The
+paths that MINERVA produces also lead to some degree of
+explainability. However, we ﬁnd that only actively mining
+arguments for the thesis and the antithesis, thus exposing the
+user to both sides of a debate, allows to make a well-informed
+decision.
+Our method is inspired on the concept outlined in (Irving,
+Christiano, and Amodei 2018) where the authors propose
+the use of debate dynamics for the AI alignment task. Their
+concept is based on training agents to play a zero sum debate
+game where they raise arguments which are evaluated by a
+judge. More concretely, given a question or a proposed action,
+two or multiple agents take turns making short statements
+until a human can decide which of the agents gave the more
+convincing information. While a major part of their work
+consists of theoretical considerations, they also conduct an
+initial experiment on MNIST with an automated judge: First,
+an image is shown to two agents and each of them selects a
+digit. Then, the two agents sequentially select pixels of the
+image with the goal to convince a sparse classiﬁer that the
+pixels stem from an image that displays the digits to which
+they are committed. Thereby, the classiﬁer cannot observe
+the complete image but only the pixels revealed by the agents.
+The authors state that their eventual goal is to produce natural
+language debates, where humans judge dialogues between the
+agents. In that regard, our method can be seen as a ﬁrst step
+in that direction since paths in a knowledge graph correspond
+to factual statements that can be easily translated to natural
+language.
+3
+Our Method
+We formulate the task of fact prediction in terms of a debate
+between two opposing agents. Thereby, a query triple corre-
+sponds to the statement around which the debate is centered.
+The agents mine paths on the KG that serve as evidence for
+the thesis or the antithesis. More concretely, they traverse the
+graph sequentially and select the next hop based on a policy
+that takes previous transitions and the query triple into ac-
+count. The transitions are added to the current path extending
+the argument. All paths are processed by a binary classiﬁer
+called the judge that tries to distinguish between true and
+false triples. An exemplary debate is shown in Figure 1. The
+main steps of a debate can be summarized as follows:
+1. A query triple around which the debate is centered is pre-
+
+Figure 2: Sketch of the architecture of our method: The two agents extract arguments from the KG. Along with the query relation
+and the query object, these arguments are processed by the judge who classiﬁes whether the query is true or false.
+sented to both agents
+2. The two agents take turns extracting paths from the KG
+that serve as arguments for the thesis and the antithesis.
+3. The judge processes the arguments along with the query
+triple and estimates the truth value of the query triple.
+While the parameters of the judge are ﬁtted in a supervised
+fashion, both agents are trained to navigate through the graph
+using reinforcement learning. More concretely, their envi-
+ronments are modelled via the ﬁxed horizon, deterministic
+Markov decision processes outlined below.
+States
+The fully observable state space S for each agent
+is given by E2 × R × E. Intuitively, we want the state to
+encode the query triple q = (sq, pq, oq) and the location of
+exploration e(i)
+t
+(i.e., the current location) of agent i ∈{1, 2}
+at time t. Thus, a state S(i)
+t
+∈S for time t ∈N is represented
+by S(i)
+t
+=
+
+e(i)
+t , q
+
+.
+Actions
+The set of possible actions for agent i from
+a state S(i)
+t
+=
+
+e(i)
+t , q
+
+is denoted by AS(i)
+t .
+It con-
+sists of all outgoing edges from the entity e(i)
+t
+and the
+corresponding target entities.
+More formally, AS(i)
+t
+=
+n
+(r, e) ∈R × E : S(i)
+t
+=
+
+e(i)
+t , q
+
+∧
+
+e(i)
+t , r, e
+
+∈KG
+o
+.
+Moreover, we denote with A(i)
+t
+∈AS(i)
+t
+the action that agent
+i performed at time t. We include self-loops for each node
+such that the agent can stay at the current node.
+Environments
+The environments evolve deterministically
+by updating the state according to the agents’ actions (i.e., by
+changing the agents’ locations). The query fact remains the
+same. Formally, the transition function of agent i at time t is
+given by δ(i)
+t (S(i)
+t , A(i)
+t ) :=
+
+e(i)
+t+1, q
+
+with S(i)
+t
+=
+
+e(i)
+t , q
+
+and A(i)
+t
+=
+
+r, e(i)
+t+1
+
+.
+Policies
+We denote the history of agent i up to time t with
+the tuple H(i)
+t
+=
+
+H(i)
+t−1, A(i)
+t−1
+
+for t ≥1 and H(i)
+0
+= (q).
+The agents encode their histories via recurrent neural net-
+works. The output is mapped to a distribution over all ad-
+missible actions (i.e., transitions). This induces agent spe-
+ciﬁc policies π(i)
+θ
+: H(i)
+t
+7→(p1, p2, . . . , pm) ∈Rm
+≥0, where
+m = |AS(i)
+t | and θ denotes the set of all trainable parame-
+ters. Then, the next action of agent i is sampled according to
+A(i)
+t
+∼Categorical (p1, p2, . . . , pm).
+Debate Dynamics
+In a ﬁrst step, the query triple q with
+truth value φ(q) ∈{0, 1} is presented to both agents. Agent
+1 argues that the fact is true, while agent 2 argues that it is
+false. Similar to most formal debates, we consider a ﬁxed
+number of rounds N ∈N. In every round n = 1, 2, . . . , N
+the agents start graph traversals with ﬁxed length T ∈N from
+the subject entity of the query sq. More concretely, agent 1
+starts generating a sequence τ (1)
+n
+of length T −1 consisting
+of entities and relations followed by a mandatory end of argu-
+ment action. Then agent 2 proceeds by producing a similar
+sequence τ (2)
+n
+starting from sq ending with the stop action.
+After N rounds the debate terminates and concatenating all
+paths leads to the overall sequence of arguments τ. The judge
+processes τ and predicts the truth value of the triple. This
+induces a binary classiﬁer f(τ) ∈(0, 1). The parameters of
+the judge are trained in a supervised fashion to approximate
+the underlying truth value of the triple φ(q). An overview of
+the architecture of our method is depicted in Figure 2.
+Since agent 1 argues that the thesis is true, the rewards R(1)
+n
+after every round n ≤N are given by the classiﬁcation score
+R(1)
+n
+= f
+
+τ (1)
+n
+
+. Similarly, the rewards of agent 2 are given
+by R(2)
+n
+= −f
+
+τ (2)
+n
+
+. Intuitively, this means that the agents
+receive high rewards whenever they extract an argument that
+is considered by judge as strong evidence for their position.
+To ﬁnd the best set of parameters the agents maximize the
+expected cumulative rewards where standard methods such
+as REINFORCE (Williams 1992) can be employed.
+
+Query:
+Richard Feynman
+nationality
+−−−−−−−→USA?
+Nelson Mandela
+hasP rofession
+−−−−−−−−−−→Actor?
+Agent 1:
+Richard Feynman
+livedInLocation
+−−−−−−−−−−→Queens
+Nelson Mandela
+hasF riend
+−−−−−−−→Naomi Campbell
+∧Queens
+locatedIn
+−−−−−−→USA
+Naomi Campbell
+hasDated
+−−−−−−→Leonardo DiCaprio
+Agent 2:
+Richard Feynman
+hasEthnicity
+−−−−−−−−−→Russian people
+Nelson Mandela
+hasP rofession
+−−−−−−−−−−→Lawyer
+∧Russian people
+geographicDistribution
+−−−−−−−−−−−−−−−→Republic of Tajikistan
+∧Lawyer
+_specializationOf
+−−−−−−−−−−−−→Barrister
+Table 1: Two examples of debates generated by our method: While agent 1 argues that the query triple is true and agent 2 argues
+that it is false. The underscore indicates inverse relations.
+4
+Discussion
+In this section we present the results of a preliminary ex-
+periment and discuss applications and directions of future
+works. We implemented our method as outlined in Section 3
+where the policies of the agents consists of LSTM cells with
+a dense neural network stacked on top. The judge processes
+each argument individually by a feed forward neural network,
+sums the output for each argument up and processes the re-
+sulting sum by a linear, binary classiﬁer. Both agents and the
+judge have separate lookup tables that contain embeddings
+for the relations and entities. We run this ﬁrst experiment on
+the benchmark dataset FB15k-237 (Toutanova et al. 2015)
+which contains around 15,000 different entities mainly fo-
+cused around culture, sports, and politics. Following (Socher
+et al. 2013) we select the following relations for training and
+testing purposes: ’gender’, ’profession’, ’nationality’, ’eth-
+nicity’, and ’religion’. Thereby we found that 82.4% of the
+query triples in the balanced test set (i.e., equally many true
+and false facts) were classiﬁed correctly by the judge. While
+these results are promising for a ﬁrst experiment, we leave
+the majority of the empirical work including experimenting
+with different architectures to future research.
+By manually examining the quality of the extracted paths
+we found mostly reasonable arguments (e.g. when arguing
+that a person has a certain nationality, the agents frequently
+bring up that the fact the person is born in a city in this coun-
+try). However, there were also some arguments that do not
+make intuitive sense. We conjecture that this is partially due
+to the fact that the embeddings of entities encode their neigh-
+borhoods. While the judge has access to this information
+through the training process, it remains hidden to the user.
+For example, when arguing for the fact that Nelson Mandela
+was an actor (see Table 1) the argument of agent 1 requires the
+user to know that both Naomi Campbell as well as Leonardo
+DiCaprio are actors (which is encoded in FB15k-237). Then
+this argument serves as evidence that Nelson Mandela was
+also an actor since people tend to have friends that share their
+profession (social homophily). However, without this context
+information it is not intuitively clear why this is a reasonable
+argument. To asses whether the arguments are informative
+for users in an objective setting we plan to conduct a sur-
+vey where respondents take the role of the judge making a
+classiﬁcation decision based on the agents’ arguments.
+Many KGs, including DBpedia, Freebase, and Wikidata,
+are (among other techniques) semiautomatically built and
+maintained with the assistance of manual efforts to ensure
+that the knowledge keeps expanding and is kept up-to-date
+and accurate (Ge et al. 2016). While manually validating
+triples is laborious, most machine learning methods for this
+task are based on a numerical conﬁdence score which is hard
+to interpret. Our method can be employed for interactive
+KG curation and fact checking. More concretely, if there are
+doubts concerning the truthfulness of a triple, the user can
+examine the arguments to make an informed decision or input
+arguments that the agents might have missed. Suppose, for
+example, the triple (BarackObama, nationality, USA) is
+classiﬁed as false and the user observes that one agent brought
+up the argument that Barack Obama was born in Kenya – a
+fact most likely mined from an unreliable source from the
+web. The user can then enter the correct fact that Obama is
+born in Hawaii which results in the correct classiﬁcation. On
+a related note, (Nickel et al. 2015) raise the point that when
+applying statistical methods to incomplete KGs the results are
+likely to be affected by biases in the data generating process
+and should be interpreted accordingly. Otherwise, blindly
+following recommendations from KG reasoning methods can
+even strengthen these biases. While the judge in our method
+also exploits skews in the underlying data, the arguments of
+the agents can help to identify these biases and potentially ex-
+clude problematic arguments from the classiﬁcation decision.
+Moreover, our method can be integrated into QA systems. In-
+stead of simply providing an answer to a question, the system
+could then also display evidence for and against this answer
+allowing the user to trace back the decision. This added
+transparency can potentially increasing user acceptance.
+5
+Conclusion
+We have described a novel approach for triple classiﬁcation
+in KGs based on a debate game between two opposing rein-
+forcement learning agents that argue whether a fact is true or
+false. The two agents search the KG for arguments that shift
+the judge, a binary classiﬁer, towards their position. Since the
+judge bases its decision on the extracted arguments, the user
+can examine the arguments and trace back the classiﬁcation
+decision. This also allows for building tools where the user
+interacts with the system leading to higher acceptance of KG
+reasoning tools. While the ﬁrst experiments that we conduct
+in the scope of this work are promising, signiﬁcant further
+research, including experiments with different architectures
+for the agents and the judge, is required. Another directions
+for future work is a systematic, qualitative analysis of the
+arguments.
